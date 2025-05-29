@@ -20,7 +20,8 @@ export async function crawlPageWithPlaywright(startUrl, headers = {}) {
         title: '',
         content: '',
         links: [],
-        fields: []
+        fields: [],
+        screenshotPath: null
     };
 
     const screenshotDir = './screenshots';
@@ -38,7 +39,9 @@ export async function crawlPageWithPlaywright(startUrl, headers = {}) {
             const filePath = path.join(screenshotDir, `${fileHash}.png`);
             await page.screenshot({ path: filePath, fullPage: true });
 
+            result.screenshotPath = filePath;
             result.title = await page.title();
+            result.content = await page.evaluate(() => document.body.innerText || '');
             result.links = await page.$$eval('a', as => as.map(a => a.href));
 
             result.fields = await page.evaluate(() => {
