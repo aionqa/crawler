@@ -4,6 +4,7 @@ import { runActionsOnPage } from './action.js';
 import { crawlPageWithPlaywright } from './crawler.js';
 import fs from 'fs';
 import path from 'path';
+import { URL } from 'url';
 
 config();
 
@@ -30,21 +31,31 @@ try {
 const aiVarKeys = Object.keys(aiVars);
 
 const visited = new Set();
+const pagesLogPath = path.join('outcome', 'pages.txt');
+fs.mkdirSync(path.dirname(pagesLogPath), { recursive: true });
 
-async function crawlPage(url, headers = {}) {
-    if (visited.has(url)) {
-        if (APP_DEBUG) console.error(`🔁 Already visited: ${url}`);
+function logVisited(url) {
+    fs.appendFileSync(pagesLogPath, url + '\n');
+}
+
+async function crawlPage(url, headers = {}, domain = null) {
+    const normalizedUrl = new URL(url).toString();
+    if (visited.has(normalizedUrl)) {
+        if (APP_DEBUG) console.error(`🔁 Already visited: ${normalizedUrl}`);
         return;
     }
-    visited.add(url);
+    visited.add(normalizedUrl);
+    logVisited(normalizedUrl);
 
-    console.log(`🌐 Crawling: ${url}`);
+    if (!domain) domain = new URL(url).origin;
+
+    console.log(`🌐 Crawling: ${normalizedUrl}`);
     try {
-        const result = await crawlPageWithPlaywright(url, headers);
+        const result = await crawlPageWithPlaywright(normalizedUrl, headers);
         const { title, content, links, fields, screenshotPath } = result;
 
         if (!content || content.trim().length < 10) {
-            console.error(`⚠️ Skipping ${url} due to insufficient content.`);
+            console.error(`⚠️ Skipping ${normalizedUrl} due to insufficient content.`);
             return;
         }
 
@@ -90,6 +101,7 @@ Page Info:
 ${safeContent}
 `;
 
+
         const aiCode = await analyzePageWithActions(
             { ...result, content: result.content || '' },
             crawl_prompt
@@ -97,29 +109,27 @@ ${safeContent}
         if (APP_DEBUG) console.error(`🧠 AI-generated code:\n${aiCode}`);
         else console.log('🤖 AI Code received');
 
-        const actionResult = await runActionsOnPage(url, aiCode, aiVars, APP_DEBUG);
+        const actionResult = await runActionsOnPage(normalizedUrl, aiCode, aiVars, APP_DEBUG);
 
-        // Move screenshot into same folder
-        if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
-            const { protocol, hostname, pathname } = new URL(url);
+        if (screenshotPath && fs.existsSync(screenshotPath)) {
+            const { protocol, hostname, pathname } = new URL(normalizedUrl);
             const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
             const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
             fs.mkdirSync(folder, { recursive: true });
             const screenshotTarget = path.join(folder, 'screenshot.png');
-            fs.copyFileSync(result.screenshotPath, screenshotTarget);
+            fs.copyFileSync(screenshotPath, screenshotTarget);
         }
 
         const updatedHeaders = actionResult?.headers || headers;
 
         if (actionResult?.resultHTML) {
             const newPromptContext = {
-                url: actionResult.resultUrl || url,
+                url: actionResult.resultUrl || normalizedUrl,
                 title: '',
                 content: actionResult.resultHTML,
                 links: [],
                 fields: [],
             };
-
             const followUpPrompt = `
 The following HTML was returned after submitting a form on the page.
 Analyze this outcome and determine what action should be taken next, if any.
@@ -145,13 +155,18 @@ ${actionResult.resultHTML.slice(0, 2000)}...`;
             await runActionsOnPage(newPromptContext.url, newCode, aiVars, APP_DEBUG);
         }
 
-        const nextLinks = (links || []).slice(0, 3);
-        for (const link of nextLinks) {
-            if (APP_DEBUG) console.error(`🔗 Queueing next link: ${link}`);
-            await crawlPage(link, updatedHeaders);
+        for (const link of links || []) {
+            try {
+                const absoluteUrl = new URL(link, normalizedUrl);
+                if (absoluteUrl.origin === domain) {
+                    await crawlPage(absoluteUrl.toString(), updatedHeaders, domain);
+                }
+            } catch (e) {
+                if (APP_DEBUG) console.error(`❌ Invalid link skipped: ${link}`);
+            }
         }
     } catch (err) {
-        console.error(`❌ Error crawling ${url}:`, err.message);
+        console.error(`❌ Error crawling ${normalizedUrl}:`, err.message);
     }
 }
 

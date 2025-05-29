@@ -2,13 +2,12 @@
 import { PlaywrightCrawler, log } from 'crawlee';
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const APP_DEBUG = process.env.APP_DEBUG === 'true';
-log.setLevel(APP_DEBUG ? log.LEVELS.DEBUG : log.LEVELS.ERROR);
+const DEBUG_LEVEL = process.env.DEBUG_LEVEL;
+log.setLevel(DEBUG_LEVEL);
 
 export async function crawlPageWithPlaywright(startUrl, headers = {}) {
     if (typeof startUrl !== 'string' || !startUrl.startsWith('http')) {
@@ -24,9 +23,6 @@ export async function crawlPageWithPlaywright(startUrl, headers = {}) {
         screenshotPath: null
     };
 
-    const screenshotDir = './screenshots';
-    fs.mkdirSync(screenshotDir, { recursive: true });
-
     const crawler = new PlaywrightCrawler({
         async requestHandler({ page, request }) {
             if (headers && typeof headers === 'object') {
@@ -35,11 +31,16 @@ export async function crawlPageWithPlaywright(startUrl, headers = {}) {
 
             await page.goto(request.url, { waitUntil: 'domcontentloaded' });
 
-            const fileHash = crypto.createHash('sha1').update(request.url).digest('hex').slice(0, 10);
-            const filePath = path.join(screenshotDir, `${fileHash}.png`);
-            await page.screenshot({ path: filePath, fullPage: true });
+            const { protocol, hostname, pathname } = new URL(startUrl);
+            const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
+            const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
+            fs.mkdirSync(folder, { recursive: true });
 
-            result.screenshotPath = filePath;
+            const screenshotPath = path.join(folder, 'screenshot.png');
+            await page.screenshot({ path: screenshotPath, fullPage: true });
+
+            result.screenshotPath = screenshotPath;
+
             result.title = await page.title();
             result.content = await page.evaluate(() => document.body.innerText || '');
             result.links = await page.$$eval('a', as => as.map(a => a.href));
