@@ -15,24 +15,24 @@ try {
 }
 
 export async function analyzePageWithActions({ url, title, content, links, fields }) {
+    const aiVarKeys = Object.keys(aiVars);
     const prompt = `
 You are an intelligent automation agent using Playwright.
 
-Your task is to analyze a webpage and return **only executable JavaScript code** for Playwright that performs actions like filling in forms, clicking buttons, and waiting for navigation.
+Your task is to analyze a webpage and return only executable JavaScript code for Playwright that performs actions like filling in forms, clicking buttons, and waiting for results.
 
 ⚠️ You must:
-- Use only the fields provided.
-- Reference selectors like input#username, input[name='password'], etc.
-- Use vars.username / vars.password as values.
-- Track navigation using \`navigationOccurred = true\`.
-- Strictly DO NOT include markdown code blocks or any text like "javascript".
+- Do not use require(), import statements, or external modules.
+- Use selectors to interact with form elements and buttons.
+- Use provided variable keys if appropriate for field inputs.
+- After submitting the form, you must wait and observe what happens — the outcome is unknown.
+- You must detect or infer the result by analyzing page behavior, DOM changes, or network responses.
+- You must **collect the result** after submission (e.g. visible message, status text, navigation result) and store or log it clearly.
+- Handle multiple possible outcomes (e.g. success, error, redirect).
+- Do not use eval, unnecessary browser logs, or hardcoded content.
+- Output only valid, executable JavaScript code — no markdown, no explanations.
 
-✅ Example:
-await page.fill('input#username', vars.username);
-await page.fill('input#password', vars.password);
-
-⚠️ Output ONLY valid JavaScript. Do NOT return explanations or JSON.
-Only output raw JavaScript code.
+keys from object "vars" ${aiVarKeys.join(', ')}
 
 Page Info:
 - URL: ${url}
@@ -51,10 +51,14 @@ ${content.slice(0, 1500)}
 
     const message = completion.choices[0].message.content.trim();
 
-    if (message.includes('```')) {
-        // Remove any accidental code fences
-        return message.replace(/```(js)?/g, '').trim();
+    if (message.includes('```') || message.toLowerCase().startsWith('javascript')) {
+        // Remove code fences and any leading 'javascript' line
+        return message
+            .replace(/```(js|javascript)?/gi, '') // remove ```js or ```javascript
+            .replace(/^javascript\s*/i, '')       // remove 'javascript' if it's the first word
+            .trim();
     }
+
 
     return message;
 }

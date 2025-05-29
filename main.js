@@ -52,10 +52,32 @@ async function crawlPage(url, headers = {}) {
         const actionResult = await runActionsOnPage(url, aiCode, aiVars, APP_DEBUG);
         const updatedHeaders = actionResult?.headers || headers;
 
-        if (actionResult?.resultUrl) {
-            console.log(`🔁 Analyzing result page: ${actionResult.resultUrl}`);
-            await crawlPage(actionResult.resultUrl, updatedHeaders);
+// ✨ NEW: If resultHTML exists, run second-stage analysis
+        if (actionResult?.resultHTML) {
+            const newPromptContext = {
+                url: actionResult.resultUrl || url,
+                title: '', // Optional: could re-capture this
+                content: actionResult.resultHTML,
+                links: [],
+                fields: [],
+            };
+
+            const followUpPrompt = `
+The following HTML was returned after submitting a form on the page.
+Analyze this outcome and determine what action should be taken next, if any.
+Use valid Playwright code and refer to 'vars' if input is needed.
+
+Returned content:
+${actionResult.resultHTML.slice(0, 2000)}...`;
+
+            const newCode = await analyzePageWithActions({ ...newPromptContext, content: followUpPrompt });
+
+            if (APP_DEBUG) console.error(`🧠 Follow-up AI code:\n${newCode}`);
+            else console.log('🤖 Follow-up AI Code received');
+
+            await runActionsOnPage(newPromptContext.url, newCode, aiVars, APP_DEBUG);
         }
+
 
         const nextLinks = (result.links || []).slice(0, 3);
         for (const link of nextLinks) {
