@@ -99,6 +99,16 @@ ${safeContent}
 
         const actionResult = await runActionsOnPage(url, aiCode, aiVars, APP_DEBUG);
 
+        // Move screenshot into same folder
+        if (result.screenshotPath && fs.existsSync(result.screenshotPath)) {
+            const { protocol, hostname, pathname } = new URL(url);
+            const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
+            const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
+            fs.mkdirSync(folder, { recursive: true });
+            const screenshotTarget = path.join(folder, 'screenshot.png');
+            fs.copyFileSync(result.screenshotPath, screenshotTarget);
+        }
+
         const updatedHeaders = actionResult?.headers || headers;
 
         if (actionResult?.resultHTML) {
