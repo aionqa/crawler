@@ -74,8 +74,12 @@ Your task is to analyze a webpage and return only executable JavaScript code for
 
 ⚠️ You must:
 - Do not use require(), import statements, or external modules.
+- DO NOT include require(), browser launch, or context creation code.
+- Assume you have access to 'page' and 'vars'.
 - Use selectors to interact with form elements and buttons.
 - Use provided variable keys if appropriate for field inputs.
+- You must use the values in the 'vars' object to fill in any relevant form fields.
+- If a field name or placeholder matches a key in 'vars', use that value in a page.fill().
 - After submitting the form, you must wait and observe what happens — the outcome is unknown.
 - You must detect or infer the result by analyzing page behavior, DOM changes, or network responses.
 - You must **collect the result** after submission (e.g. visible message, status text, navigation result) and store or log it clearly.
