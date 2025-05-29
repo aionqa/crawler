@@ -1,8 +1,8 @@
 import { chromium } from 'playwright';
+import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import vm from 'vm';
 
 export async function runActionsOnPage(url, aiCode, vars = {}, debug = false) {
     if (!aiCode || typeof aiCode !== 'string') return null;
@@ -12,16 +12,6 @@ export async function runActionsOnPage(url, aiCode, vars = {}, debug = false) {
 
     const sessionId = crypto.randomUUID().slice(0, 8);
     const safeName = url.replace(/[^a-z0-9]/gi, '_').toLowerCase().slice(0, 100);
-
-    if (debug) {
-        const debugDir = './debug';
-        fs.mkdirSync(debugDir, { recursive: true });
-
-        const filePath = path.join(debugDir, `debug_${safeName}_${sessionId}.js`);
-        const content = generateDebugScript(url, aiCode, vars);
-        fs.writeFileSync(filePath, content, 'utf8');
-        console.log(`🐞 Debug script saved: ${filePath}`);
-    }
 
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({
@@ -34,11 +24,13 @@ export async function runActionsOnPage(url, aiCode, vars = {}, debug = false) {
     const page = await context.newPage();
     await page.goto(url, { waitUntil: 'domcontentloaded' });
 
+    let resultHTML = '';
     let navigationOccurred = false;
 
     try {
-        const result = await runAICodeSafely(aiCode, { page, vars });
+        const result = await runAICodeSafely(aiCode, { page, vars, url });
         navigationOccurred = result.navigationOccurred || false;
+        resultHTML = await page.content();
     } catch (err) {
         console.error('❌ Failed to execute AI actions:', err.message);
     }
@@ -65,38 +57,43 @@ export async function runActionsOnPage(url, aiCode, vars = {}, debug = false) {
 
     return {
         headers,
-        resultUrl: navigationOccurred ? finalUrl : null
+        resultUrl: navigationOccurred ? finalUrl : null,
+        resultHTML
     };
 }
 
-async function runAICodeSafely(aiCode, contextData) {
-    const sandbox = {
-        page: contextData.page,
-        vars: contextData.vars,
-        console,
-        navigationOccurred: false
-    };
 
-    const script = new vm.Script(`(async () => { ${aiCode} })()`);
-    const context = vm.createContext(sandbox);
+async function runAICodeSafely(aiCode, contextData) {
+    const tempDir = './debug';
+    fs.mkdirSync(tempDir, { recursive: true });
+
+    const scriptFileName = `exec_script_${crypto.randomUUID().slice(0, 8)}.cjs`;
+    const filePath = path.join(tempDir, scriptFileName);
+
+    if (!contextData.url) {
+        throw new Error('Missing URL for AI script execution.');
+    }
+
+    const filledScript = generateStandaloneScript(contextData.url, aiCode, contextData.vars);
+    fs.writeFileSync(filePath, filledScript, 'utf8');
 
     try {
-        await script.runInContext(context, { timeout: 15000 });
+        execSync(`node ${filePath}`, { stdio: 'inherit', timeout: 20000 });
     } catch (err) {
         throw new Error(`AI script error: ${err.message}`);
     }
 
-    return { navigationOccurred: context.navigationOccurred };
+    return { navigationOccurred: false }; // Optional enhancement
 }
 
-function generateDebugScript(url, aiCode, vars) {
-    return `// Auto-generated Playwright debug script
-import { chromium } from 'playwright';
+function generateStandaloneScript(url, aiCode, vars) {
+    return `// Auto-generated Playwright script
+const { chromium } = require('playwright');
 
 const vars = ${JSON.stringify(vars, null, 2)};
 
 (async () => {
-  const browser = await chromium.launch({ headless: false });
+  const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
   const page = await context.newPage();
   await page.goto('${url}', { waitUntil: 'domcontentloaded' });
