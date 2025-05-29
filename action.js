@@ -41,15 +41,10 @@ export async function runActionsOnPage(url, aiCode, vars = {}, debug = false) {
     // Move and rename video
     let finalVideoPath = null;
     try {
-        const videoDir = './tmp_videos';
-        const videoFile = fs.readdirSync(videoDir)
-            .map(f => path.join(videoDir, f))
-            .filter(f => f.endsWith('.webm'))
-            .sort((a, b) => fs.statSync(b).mtime - fs.statSync(a).mtime)[0];
-
-        if (videoFile) {
+        const expectedVideo = path.join(folder, 'playwright-video.webm');
+        if (fs.existsSync(expectedVideo)) {
             finalVideoPath = path.join(folder, `video_${timestamp}.webm`);
-            fs.renameSync(videoFile, finalVideoPath);
+            fs.renameSync(expectedVideo, finalVideoPath);
             console.log(`🎥 Video saved: ${finalVideoPath}`);
         }
     } catch (e) {
@@ -81,11 +76,13 @@ export async function runActionsOnPage(url, aiCode, vars = {}, debug = false) {
 }
 
 async function runAICodeSafely(aiCode, contextData) {
-    const tempDir = './tmp_exec';
-    fs.mkdirSync(tempDir, { recursive: true });
+    const { protocol, hostname, pathname } = new URL(contextData.url);
+    const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
+    const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
+    fs.mkdirSync(folder, { recursive: true });
 
     const scriptFileName = `exec_script_${crypto.randomUUID().slice(0, 8)}.cjs`;
-    const filePath = path.join(tempDir, scriptFileName);
+    const filePath = path.join(folder, scriptFileName);
 
     if (!contextData.url) {
         throw new Error('Missing URL for AI script execution.');
@@ -105,8 +102,9 @@ async function runAICodeSafely(aiCode, contextData) {
 
 function generateStandaloneScript(url, aiCode, vars) {
     const { protocol, hostname, pathname } = new URL(url);
+    const proto = protocol.replace(':', '');
     const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
-    const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
+    const folder = path.join('outcome', proto, hostname, safePath);
 
     return `// Auto-generated Playwright script
 const { chromium } = require('playwright');
@@ -130,11 +128,15 @@ const vars = ${JSON.stringify(vars, null, 2)};
 
   try {
     ${aiCode}
+    await new Promise(res => setTimeout(res, 4000)); // Let video finalize
   } catch (err) {
     console.error('❌ Error during AI script execution:', err.message);
   }
 
-  await new Promise(res => setTimeout(res, 2000)); // Let video finalize
+  const video = await page.video().path();
+    const targetVideoPath = path.join("${folder}", "playwright-video.webm");
+    fs.renameSync(video, targetVideoPath);
+
   await browser.close();
 })();
 `;
