@@ -102,7 +102,12 @@ function generateStandaloneScript(url, aiCode, vars) {
     const { protocol, hostname, pathname } = new URL(url);
     const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
     const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
-
+    if (!aiCode.includes('vars.')) {
+        console.warn('⚠️ AI code does not reference any vars. Form may not be filled properly.');
+    }
+    else {
+        console.log("🧪 Form variables:", vars);
+    }
     return `// Auto-generated Playwright script
 const { chromium } = require('playwright');
 const fs = require('fs');
