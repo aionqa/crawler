@@ -44,8 +44,33 @@ async function crawlPage(url, headers = {}) {
             console.error(`🔗 Links: ${result.links.length}`);
             console.error(`📦 Fields: ${result.fields.length}`);
         }
+        const crawl_prompt = `
+You are an intelligent automation agent using Playwright.
 
-        const aiCode = await analyzePageWithActions(result);
+Your task is to analyze a webpage and return only executable JavaScript code for Playwright that performs actions like filling in forms, clicking buttons, and waiting for results.
+
+⚠️ You must:
+- Do not use require(), import statements, or external modules.
+- Use selectors to interact with form elements and buttons.
+- Use provided variable keys if appropriate for field inputs.
+- After submitting the form, you must wait and observe what happens — the outcome is unknown.
+- You must detect or infer the result by analyzing page behavior, DOM changes, or network responses.
+- You must **collect the result** after submission (e.g. visible message, status text, navigation result) and store or log it clearly.
+- Handle multiple possible outcomes (e.g. success, error, redirect).
+- Do not use eval, unnecessary browser logs, or hardcoded content.
+- Output only valid, executable JavaScript code — no markdown, no explanations.
+
+keys from object "vars" ${aiVarKeys.join(', ')}
+
+Page Info:
+- URL: ${url}
+- Title: ${title}
+- Total Links: ${links.length}
+- Fields: ${JSON.stringify(fields.slice(0, 10), null, 2)}
+- Content Snippet:
+${content.slice(0, 1500)}
+`;
+        const aiCode = await analyzePageWithActions(result, crawl_prompt);
         if (APP_DEBUG) console.error(`🧠 AI-generated code:\n${aiCode}`);
         else console.log('🤖 AI Code received');
 
