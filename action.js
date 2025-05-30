@@ -16,6 +16,15 @@ export async function runActionsOnPage(url, aiCode, vars = {}, debug = false) {
     try {
         const result = await runAICodeSafely(aiCode, { vars, url });
         navigationOccurred = result.navigationOccurred || false;
+        // 🧁 Load cookies from file if they exist
+        const { protocol, hostname, pathname } = new URL(url);
+        const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
+        const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
+
+        const cookiePath = path.join(folder, 'cookies.json');
+        if (fs.existsSync(cookiePath)) {
+            cookies = JSON.parse(fs.readFileSync(cookiePath, 'utf8'));
+        }
     } catch (err) {
         console.error('❌ Failed to execute AI actions:', err.message);
     }
@@ -135,6 +144,9 @@ const vars = ${JSON.stringify(vars, null, 2)};
   }
 
   await new Promise(res => setTimeout(res, 10000)); // Let video finalize
+  const cookies = await context.cookies();
+  fs.writeFileSync(path.join("${folder}", 'cookies.json'), JSON.stringify(cookies, null, 2));
+
   await browser.close();
 })();
 `;

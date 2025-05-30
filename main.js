@@ -17,7 +17,7 @@ const urls = (process.env.TARGETS || '')
             new URL(u);
             return true;
         } catch {
-            if (APP_DEBUG) console.error(`❌ Invalid URL skipped: ${u}`);
+            console.error(`❌ Invalid URL skipped: ${u}`);
             return false;
         }
     });
@@ -92,9 +92,9 @@ After each \`page.fill()\` or \`page.click()\`, add a small delay using:
     await new Promise(res => setTimeout(res, 500));
 This ensures your actions are visible in recordings.
 
-on every page try to scroll down for in equivalent of at least two pagedowns.
+On every page try to scroll down for the equivalent of at least two pagedowns.
 
-keys from object "vars" ${aiVarKeys.join(', ')}
+Keys from object "vars": ${aiVarKeys.join(', ')}
 
 Page Info:
 - URL: ${url}
@@ -114,23 +114,24 @@ ${safeContent}
         else console.log('🤖 AI Code received');
 
         const actionResult = await runActionsOnPage(normalizedUrl, aiCode, aiVars, APP_DEBUG);
+        const updatedHeaders = actionResult?.headers || headers;
+        if (APP_DEBUG) console.log('🧾 Headers for next crawl:', updatedHeaders);
 
-        if (screenshotPath && fs.existsSync(screenshotPath)) {
-            const { protocol, hostname, pathname } = new URL(normalizedUrl);
+        if (actionResult?.resultHTML) {
+            const { resultHTML, resultUrl } = actionResult;
+
+            // Save result page
+            const { protocol, hostname, pathname } = new URL(resultUrl || normalizedUrl);
             const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
             const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
             fs.mkdirSync(folder, { recursive: true });
-            const screenshotTarget = path.join(folder, 'screenshot.png');
-            fs.copyFileSync(screenshotPath, screenshotTarget);
-        }
+            fs.writeFileSync(path.join(folder, 'post_login.html'), resultHTML, 'utf8');
 
-        const updatedHeaders = actionResult?.headers || headers;
-
-        if (actionResult?.resultHTML) {
+            // Analyze follow-up HTML
             const newPromptContext = {
-                url: actionResult.resultUrl || normalizedUrl,
+                url: resultUrl || normalizedUrl,
                 title: '',
-                content: actionResult.resultHTML,
+                content: resultHTML,
                 links: [],
                 fields: [],
             };
@@ -147,7 +148,7 @@ Use valid Playwright code and refer to 'vars' if input is needed.
 - Output only valid, executable JavaScript code — no markdown, no explanations.
 
 Returned content:
-${actionResult.resultHTML.slice(0, 2000)}...`;
+${resultHTML.slice(0, 2000)}...`;
 
             const newCode = await analyzePageWithActions(
                 { ...newPromptContext, content: newPromptContext.content || '' },
@@ -157,8 +158,35 @@ ${actionResult.resultHTML.slice(0, 2000)}...`;
             else console.log('🤖 Follow-up AI Code received');
 
             await runActionsOnPage(newPromptContext.url, newCode, aiVars, APP_DEBUG);
+
+            // Extract and crawl links
+            const dom = resultHTML.toLowerCase();
+            const foundLinks = Array.from(dom.matchAll(/href\s*=\s*["']([^"']+)["']/gi)).map(m => m[1]);
+            const baseUrl = new URL(resultUrl || normalizedUrl);
+
+            for (const link of foundLinks || []) {
+                try {
+                    const absoluteUrl = new URL(link, baseUrl).toString();
+                    if (absoluteUrl.startsWith(baseUrl.origin)) {
+                        await crawlPage(absoluteUrl, updatedHeaders, baseUrl.origin);
+                    }
+                } catch (e) {
+                    if (APP_DEBUG) console.error(`❌ Invalid link skipped: ${link}`);
+                }
+            }
         }
 
+        // Save screenshot if available
+        if (screenshotPath && fs.existsSync(screenshotPath)) {
+            const { protocol, hostname, pathname } = new URL(normalizedUrl);
+            const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
+            const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
+            fs.mkdirSync(folder, { recursive: true });
+            const screenshotTarget = path.join(folder, 'screenshot.png');
+            fs.copyFileSync(screenshotPath, screenshotTarget);
+        }
+
+        // Crawl raw links from original page too
         for (const link of links || []) {
             try {
                 const absoluteUrl = new URL(link, normalizedUrl);
@@ -169,17 +197,18 @@ ${actionResult.resultHTML.slice(0, 2000)}...`;
                 if (APP_DEBUG) console.error(`❌ Invalid link skipped: ${link}`);
             }
         }
+
     } catch (err) {
         console.error(`❌ Error crawling ${normalizedUrl}:`, err.message);
     }
 }
 
 async function main() {
-    if (APP_DEBUG) console.error(`🚀 Starting crawl for ${urls.length} URL(s)...`);
+    console.log(`🚀 Starting crawl for ${urls.length} URL(s)...`);
     for (const url of urls) {
         await crawlPage(url);
     }
-    if (APP_DEBUG) console.error(`✅ Crawling completed.`);
+    console.log(`✅ Crawling completed.`);
 }
 
 main();
