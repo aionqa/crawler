@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { URL } from 'url';
 
+
 config();
 
 const APP_DEBUG = process.env.APP_DEBUG === 'true';
@@ -38,6 +39,8 @@ function logVisited(url) {
     fs.appendFileSync(pagesLogPath, url + '\n');
 }
 
+// Updated main.js (only changes shown here; keep rest of the original script)
+
 async function crawlPage(url, headers = {}, domain = null) {
     const normalizedUrl = new URL(url).toString();
     if (visited.has(normalizedUrl)) {
@@ -59,11 +62,10 @@ async function crawlPage(url, headers = {}, domain = null) {
             return;
         }
 
-        if (APP_DEBUG) {
-            console.error(`📄 Title: ${title}`);
-            console.error(`🔗 Links: ${links.length}`);
-            console.error(`📦 Fields: ${fields.length}`);
-        }
+        console.error(`📄 Title: ${title}`);
+        console.error(`🔗 Links: ${links.length}`);
+        console.error(`📦 Fields: ${fields.length}`);
+
 
         const safeContent = content.slice(0, 2000);
 
@@ -105,36 +107,16 @@ Page Info:
 ${safeContent}
 `;
 
-
-        const aiCode = await analyzePageWithActions(
-            { ...result, content: result.content || '' },
-            crawl_prompt
-        );
+        const aiCode = await analyzePageWithActions(result, crawl_prompt);
         if (APP_DEBUG) console.error(`🧠 AI-generated code:\n${aiCode}`);
-        else console.log('🤖 AI Code received');
 
         const actionResult = await runActionsOnPage(normalizedUrl, aiCode, aiVars, APP_DEBUG);
         const updatedHeaders = actionResult?.headers || headers;
-        if (APP_DEBUG) console.log('🧾 Headers for next crawl:', updatedHeaders);
+        const finalUrl = actionResult?.resultUrl || normalizedUrl;
 
         if (actionResult?.resultHTML) {
-            const { resultHTML, resultUrl } = actionResult;
+            await crawlPage(finalUrl, updatedHeaders, domain); // <--- Always re-crawl finalUrl
 
-            // Save result page
-            const { protocol, hostname, pathname } = new URL(resultUrl || normalizedUrl);
-            const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
-            const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
-            fs.mkdirSync(folder, { recursive: true });
-            fs.writeFileSync(path.join(folder, 'post_login.html'), resultHTML, 'utf8');
-
-            // Analyze follow-up HTML
-            const newPromptContext = {
-                url: resultUrl || normalizedUrl,
-                title: '',
-                content: resultHTML,
-                links: [],
-                fields: [],
-            };
             const followUpPrompt = `
 The following HTML was returned after submitting a form on the page.
 Analyze this outcome and determine what action should be taken next, if any.
@@ -149,44 +131,21 @@ Use valid Playwright code and refer to 'vars' if input is needed.
 
 Returned content:
 ${resultHTML.slice(0, 2000)}...`;
-
             const newCode = await analyzePageWithActions(
-                { ...newPromptContext, content: newPromptContext.content || '' },
+                {
+                    url: finalUrl,
+                    title: '',
+                    content: actionResult.resultHTML,
+                    links: [],
+                    fields: [],
+                },
                 followUpPrompt
             );
-            if (APP_DEBUG) console.error(`🧠 Follow-up AI code:\n${newCode}`);
-            else console.log('🤖 Follow-up AI Code received');
 
-            await runActionsOnPage(newPromptContext.url, newCode, aiVars, APP_DEBUG);
-
-            // Extract and crawl links
-            const dom = resultHTML.toLowerCase();
-            const foundLinks = Array.from(dom.matchAll(/href\s*=\s*["']([^"']+)["']/gi)).map(m => m[1]);
-            const baseUrl = new URL(resultUrl || normalizedUrl);
-
-            for (const link of foundLinks || []) {
-                try {
-                    const absoluteUrl = new URL(link, baseUrl).toString();
-                    if (absoluteUrl.startsWith(baseUrl.origin)) {
-                        await crawlPage(absoluteUrl, updatedHeaders, baseUrl.origin);
-                    }
-                } catch (e) {
-                    if (APP_DEBUG) console.error(`❌ Invalid link skipped: ${link}`);
-                }
-            }
+            await runActionsOnPage(finalUrl, newCode, aiVars, APP_DEBUG);
         }
 
-        // Save screenshot if available
-        if (screenshotPath && fs.existsSync(screenshotPath)) {
-            const { protocol, hostname, pathname } = new URL(normalizedUrl);
-            const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
-            const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
-            fs.mkdirSync(folder, { recursive: true });
-            const screenshotTarget = path.join(folder, 'screenshot.png');
-            fs.copyFileSync(screenshotPath, screenshotTarget);
-        }
-
-        // Crawl raw links from original page too
+        // Continue with link crawling as before
         for (const link of links || []) {
             try {
                 const absoluteUrl = new URL(link, normalizedUrl);
@@ -197,11 +156,11 @@ ${resultHTML.slice(0, 2000)}...`;
                 if (APP_DEBUG) console.error(`❌ Invalid link skipped: ${link}`);
             }
         }
-
     } catch (err) {
         console.error(`❌ Error crawling ${normalizedUrl}:`, err.message);
     }
 }
+
 
 async function main() {
     console.log(`🚀 Starting crawl for ${urls.length} URL(s)...`);

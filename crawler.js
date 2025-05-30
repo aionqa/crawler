@@ -3,6 +3,7 @@ import { PlaywrightCrawler, log } from 'crawlee';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
+import { getSafeFolderPath } from './utils.js';
 
 dotenv.config();
 
@@ -33,7 +34,8 @@ export async function crawlPageWithPlaywright(startUrl, headers = {}) {
 
             const { protocol, hostname, pathname } = new URL(startUrl);
             const safePath = pathname.replace(/[^a-z0-9]/gi, '_').slice(0, 50) || 'root';
-            const folder = path.join('outcome', protocol.replace(':', ''), hostname, safePath);
+            const folder = getSafeFolderPath(startUrl);
+
             fs.mkdirSync(folder, { recursive: true });
 
             const screenshotPath = path.join(folder, 'screenshot.png');
