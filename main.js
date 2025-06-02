@@ -27,6 +27,7 @@ export async function gatherPageInfo(page, url, folder) {
     const videoPath = path.join(folder, "video.webm");
     context.on('page', async (pg) => {
         pg.on('video', vid => vid.saveAs(videoPath));
+        await fs.promises.unlink(videoPath); // delete the original
     });
 
     // Screenshot
