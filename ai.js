@@ -189,6 +189,7 @@ At the end, output a summary in this format:
         if (video) {
             await video.saveAs(path.join(folder, "ai_video.webm"));
             console.log(`🎥 Saved interaction video for: ${info.url}`);
+            await fs.promises.unlink(videoPath); // delete the original
         }
 
         await context.close();
