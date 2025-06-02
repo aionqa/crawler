@@ -22,8 +22,6 @@ function shortText(txt, maxLen = 500) {
     return t.length > maxLen ? t.slice(0, maxLen) + "..." : t;
 }
 
-// ---- MAIN FUNCTION ----
-
 /**
  * @param {Object} info - Page info from gatherPageInfo
  * @param {string} folder - Output folder for this interaction
@@ -74,7 +72,9 @@ ${JSON.stringify(info.links, null, 2)}
 Vars: ${Object.keys(aiVars).join(', ')}
 
 A screenshot is attached.
-Add messages with emojis of what is happening on every step
+
+Before every action (such as filling in a field, clicking a button, submitting a form, navigating, etc.), insert a line of code like:
+console.log("🔸 [Describe what is happening, with an emoji]");
 
 At the end, output a summary in this format:
 // SUMMARY: <one-line plain English description of what happened>
@@ -106,6 +106,7 @@ At the end, output a summary in this format:
     let aiSummary = "";
     let error = "";
     try {
+        console.log(`🤖 Sending prompt to OpenAI for: ${info.url}`);
         const completion = await openai.chat.completions.create({
             model: "gpt-4o",
             messages,
@@ -128,10 +129,12 @@ At the end, output a summary in this format:
         // Save AI code to file
         fs.writeFileSync(path.join(folder, "ai_code.js"), code, "utf8");
         fs.writeFileSync(path.join(folder, "ai_prompt.txt"), prompt, "utf8");
+        console.log(`📥 AI code received and saved for: ${info.url}`);
 
     } catch (err) {
         error = "OpenAI API error: " + err.message;
         fs.writeFileSync(path.join(folder, "ai_error.txt"), error, "utf8");
+        console.log(`❌ OpenAI API error for ${info.url}: ${err.message}`);
         return { summary: "", resultHtml: "", aiCode: "", outcome: "", error };
     }
 
@@ -139,6 +142,7 @@ At the end, output a summary in this format:
     let resultHtml = "";
     let outcome = "";
     try {
+        console.log(`🕹️ Running AI-generated code in browser for: ${info.url}`);
         const browser = await chromium.launch({ headless: true });
         const context = await browser.newContext({
             recordVideo: { dir: folder, size: { width: 1280, height: 720 } }
@@ -160,23 +164,30 @@ At the end, output a summary in this format:
         } catch (e) {
             error = "Execution error: " + e.message;
             fs.writeFileSync(path.join(folder, "ai_run_error.txt"), error, "utf8");
+            console.log(`❌ AI code execution error for ${info.url}: ${e.message}`);
             throw e;
         }
 
         // Get the HTML after AI interaction
         resultHtml = await page.content();
         fs.writeFileSync(path.join(folder, "result.html"), resultHtml, "utf8");
+        console.log(`📄 Saved result.html after AI interaction for: ${info.url}`);
 
         // Take another screenshot after interaction
         await page.screenshot({ path: path.join(folder, "after.png"), type: "png", fullPage: true });
+        console.log(`📸 Saved after-interaction screenshot for: ${info.url}`);
 
         // Save video
         const video = await page.video();
-        if (video) await video.saveAs(path.join(folder, "ai_video.webm"));
+        if (video) {
+            await video.saveAs(path.join(folder, "ai_video.webm"));
+            console.log(`🎥 Saved interaction video for: ${info.url}`);
+        }
 
         // Save cookies
         const cookies = await context.cookies();
         fs.writeFileSync(path.join(folder, "after_cookies.json"), JSON.stringify(cookies, null, 2));
+        console.log(`🍪 Saved after-interaction cookies for: ${info.url}`);
 
         await page.close();
         await context.close();
@@ -184,9 +195,11 @@ At the end, output a summary in this format:
 
         outcome = aiSummary || "Interaction complete.";
         fs.writeFileSync(path.join(folder, "summary.txt"), outcome, "utf8");
+        console.log(`📝 Saved summary for: ${info.url}`);
     } catch (err) {
         error = "Execution error: " + err.message;
         fs.writeFileSync(path.join(folder, "ai_run_error.txt"), error, "utf8");
+        console.log(`❌ AI code execution error for ${info.url}: ${err.message}`);
     }
 
     // Save summary and return outcome
