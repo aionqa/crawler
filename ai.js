@@ -149,6 +149,10 @@ At the end, output a summary in this format:
         });
         const page = await context.newPage();
         await page.goto(info.url, { waitUntil: "domcontentloaded" });
+        await page.waitForTimeout(1000); // let async UI settle
+        await page.waitForLoadState('domcontentloaded');
+        await page.waitForFunction(() => document.readyState === 'complete');
+
         await new Promise(res => setTimeout(res, 1000));
 
         // Inject vars and run code
@@ -159,8 +163,14 @@ At the end, output a summary in this format:
 
         // Run the AI code in Node's scope with 'page' and 'vars'
         try {
-            // eslint-disable-next-line no-eval
+            // Hook navigation promise first
+            const navigationPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => null);
+
+            // Execute AI-generated interaction code
             await eval(`(async () => { ${code} })()`);
+
+            // Wait for potential navigation to complete
+            await navigationPromise;
         } catch (e) {
             error = "Execution error: " + e.message;
             fs.writeFileSync(path.join(folder, "ai_run_error.txt"), error, "utf8");
@@ -169,7 +179,12 @@ At the end, output a summary in this format:
         }
 
         // Get the HTML after AI interaction
+        await page.waitForLoadState('domcontentloaded');
+        await page.waitForTimeout(1000);
+        await page.waitForFunction(() => document.readyState === 'complete');
+
         resultHtml = await page.content();
+
         fs.writeFileSync(path.join(folder, "result.html"), resultHtml, "utf8");
         console.log(`📄 Saved result.html after AI interaction for: ${info.url}`);
 
