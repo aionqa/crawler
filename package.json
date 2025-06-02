@@ -4,7 +4,11 @@
     "argparse": "^2.0.1",
     "crawlee": "^3.13.5",
     "dotenv": "^16.5.0",
+    "fs": "^0.0.1-security",
+    "jsdom": "^26.1.0",
     "openai": "^4.103.0",
-    "playwright": "^1.52.0"
+    "path": "^0.12.7",
+    "playwright": "^1.52.0",
+    "url": "^0.11.4"
   }
 }
