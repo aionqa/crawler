@@ -177,6 +177,13 @@ At the end, output a summary in this format:
         await page.screenshot({ path: path.join(folder, "after.png"), type: "png", fullPage: true });
         console.log(`📸 Saved after-interaction screenshot for: ${info.url}`);
 
+        // Save cookies
+        const cookies = await context.cookies();
+        fs.writeFileSync(path.join(folder, "after_cookies.json"), JSON.stringify(cookies, null, 2));
+        console.log(`🍪 Saved after-interaction cookies for: ${info.url}`);
+
+        await page.close();
+
         // Save video
         const video = await page.video();
         if (video) {
@@ -184,12 +191,6 @@ At the end, output a summary in this format:
             console.log(`🎥 Saved interaction video for: ${info.url}`);
         }
 
-        // Save cookies
-        const cookies = await context.cookies();
-        fs.writeFileSync(path.join(folder, "after_cookies.json"), JSON.stringify(cookies, null, 2));
-        console.log(`🍪 Saved after-interaction cookies for: ${info.url}`);
-
-        await page.close();
         await context.close();
         await browser.close();
 
