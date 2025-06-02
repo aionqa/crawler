@@ -161,7 +161,9 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
         const page = await context.newPage();
         try {
             await page.goto(url, { waitUntil: 'domcontentloaded' });
-            await page.waitForTimeout(1500);
+            await page.waitForTimeout(1000); // let async UI settle
+            await page.waitForLoadState('domcontentloaded');
+            await page.waitForFunction(() => document.readyState === 'complete');
 
             const pageData = await gatherPageInfo(page, url, folder);
 
