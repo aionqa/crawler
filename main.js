@@ -3,11 +3,18 @@ import path from 'path';
 import { URL } from 'url';
 import { chromium } from 'playwright';
 import { aiInteract } from './ai.js';
-import crypto from 'crypto'; // <-- existing
+import crypto from 'crypto';
 
 const DOMAIN = process.env.TARGETS || "https://practicetestautomation.com/practice-test-login/";
 const OUTPUT = process.env.OUTPUT_FOLDER || "./outcome";
 const MAX_DEPTH = Number(process.env.MAX_DEPTH) || 5;
+const TARGETS_IGNORE = process.env.TARGETS_IGNORE
+    ? process.env.TARGETS_IGNORE.split(',').map(s => s.trim()).filter(Boolean)
+    : [];
+
+function isUrlIgnored(url) {
+    return TARGETS_IGNORE.some(pattern => url.includes(pattern));
+}
 
 function ensureDir(dir) {
     if (!fs.existsSync(dir)) {
@@ -17,16 +24,14 @@ function ensureDir(dir) {
 }
 ensureDir(OUTPUT);
 
-// STORAGE STATE PATCH: set storage path globally
 const storagePath = path.join(OUTPUT, "storage.json");
 
-// Helper: log crawl info as JSON-per-line
-function logPage(info) {
+function logPage(info, type = "crawl") {
     const logFile = path.join(OUTPUT, "pages.txt");
-    fs.appendFileSync(logFile, JSON.stringify(info) + "\n");
+    const entry = { ...info, type };
+    fs.appendFileSync(logFile, JSON.stringify(entry) + "\n");
 }
 
-// --- gatherPageInfo is unchanged ---
 
 export async function gatherPageInfo(page, url, folder) {
     ensureDir(folder);
@@ -125,6 +130,21 @@ export async function gatherPageInfo(page, url, folder) {
     const cookies = await page.context().cookies();
     fs.writeFileSync(path.join(folder, "cookies.json"), JSON.stringify(cookies, null, 2));
     fs.writeFileSync(path.join(folder, "info.json"), JSON.stringify(info, null, 2));
+    // Inline same-origin iframe content before snapshot
+    await page.evaluate(() => {
+        document.querySelectorAll('iframe').forEach(iframe => {
+            try {
+                if (iframe.contentDocument && iframe.contentDocument.documentElement) {
+                    const div = document.createElement('div');
+                    div.innerHTML = iframe.contentDocument.documentElement.outerHTML;
+                    div.setAttribute('data-inlined-iframe', 'true');
+                    iframe.parentNode.replaceChild(div, iframe);
+                }
+            } catch (e) {
+                // Ignore cross-origin
+            }
+        });
+    });
     const currentHtml = await page.content();
     fs.writeFileSync(path.join(folder, `html_snapshot_${Date.now()}.html`), currentHtml, "utf8");
     const videoPath = path.join(folder, "video.webm");
@@ -132,14 +152,12 @@ export async function gatherPageInfo(page, url, folder) {
     return {
         url, screenshotPath, videoPath, cookies,
         ...info,
-        currentHtml // store for SPA analysis
+        currentHtml
     };
 }
 
-// Helper: quick HTML diff (could be improved with hashing for large pages)
 function htmlSignificantlyChanged(htmlA, htmlB) {
     if (!htmlA || !htmlB) return false;
-    // Compare first and last 1000 chars (catch big visible changes)
     return htmlA.slice(0, 1000) !== htmlB.slice(0, 1000) ||
         htmlA.slice(-1000) !== htmlB.slice(-1000);
 }
@@ -150,12 +168,13 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
     console.log(`🚀 Starting crawl at: ${startUrl}`);
 
-    // STORAGE STATE PATCH: check if storage exists before first crawl
-    let storageStateForContext = fs.existsSync(storagePath) ? storagePath : undefined;
-
     while (pagesToVisit.length) {
-        const { url, depth, cookies: queuedCookies } = pagesToVisit.shift();
+        const { url, depth } = pagesToVisit.shift();
         if (visited.has(url) || depth > maxDepth) continue;
+        if (isUrlIgnored(url)) {
+            console.log(`⏩ Skipping ignored URL: ${url}`);
+            continue;
+        }
         visited.add(url);
         console.log(`🌐 Crawling [depth ${depth}]: ${url}`);
 
@@ -163,24 +182,19 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
         const folder = path.join(OUTPUT, pageId);
         ensureDir(folder);
 
-        // --- PATCH: Use storageState for all contexts ---
+        // ---- Always load cookies/storage state if exists ----
+        let contextOptions = {};
+        if (fs.existsSync(storagePath)) {
+            contextOptions.storageState = storagePath;
+        }
+
         const browser = await chromium.launch();
-        const context = await browser.newContext(
-            storageStateForContext ? { storageState: storageStateForContext } : {}
-        );
-
-        // queuedCookies logic can be removed or kept for ultra-fine tuning,
-        // but storageState includes all cookies and storage!
-        // (Optional: you may want to add queuedCookies as well)
-        // if (queuedCookies && queuedCookies.length) {
-        //     await context.addCookies(queuedCookies);
-        // }
-
+        const context = await browser.newContext(contextOptions);
         const page = await context.newPage();
 
         try {
             await page.goto(url, { waitUntil: 'domcontentloaded' });
-            await page.waitForTimeout(1000);
+            await page.waitForTimeout(10000);
             await page.waitForLoadState('domcontentloaded');
 
             const pageData = await gatherPageInfo(page, url, folder);
@@ -217,7 +231,6 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         ensureDir(virtualFolder);
                         fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
 
-                        // Gather info for the new state (simulate SPA nav)
                         const browser2 = await chromium.launch();
                         const context2 = await browser2.newContext(
                             fs.existsSync(storagePath) ? { storageState: storagePath } : {}
@@ -226,6 +239,18 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         await page2.setContent(resultHtml, { waitUntil: 'domcontentloaded' });
 
                         const spaPageInfo = await gatherPageInfo(page2, afterActionUrl, virtualFolder);
+                        logPage({
+                            url: afterActionUrl,
+                            uuid: virtualPageId,
+                            summary: aiResult?.summary || "",
+                            title: spaPageInfo?.title || "",
+                            statistics: {
+                                forms: (spaPageInfo?.allForms || []).length,
+                                ai_interaction: true,
+                                interactives: (spaPageInfo?.interactives || []).length
+                            }
+                        }, "virtual");
+
                         const spaLinks = spaPageInfo.links?.filter(l => {
                             try {
                                 const absUrl = new URL(l, baseDomain);
@@ -238,7 +263,11 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         }) || [];
 
                         for (const l of spaLinks) {
-                            pagesToVisit.push({ url: l, depth: depth + 2 });
+                            if (!isUrlIgnored(l)) {
+                                pagesToVisit.push({ url: l, depth: depth + 2 });
+                            } else {
+                                console.log(`⏩ Skipping ignored virtual link: ${l}`);
+                            }
                         }
 
                         await page2.close();
@@ -251,7 +280,11 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         afterActionUrl !== url &&
                         !visited.has(afterActionUrl)
                     ) {
-                        pagesToVisit.push({ url: afterActionUrl, depth: depth + 1 });
+                        if (!isUrlIgnored(afterActionUrl)) {
+                            pagesToVisit.push({ url: afterActionUrl, depth: depth + 1 });
+                        } else {
+                            console.log(`⏩ Skipping ignored afterActionUrl: ${afterActionUrl}`);
+                        }
                     }
                 }
             } else {
@@ -272,7 +305,6 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                     ensureDir(virtualFolder);
                     fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
 
-                    // Gather info for the new state (simulate SPA nav)
                     const browser2 = await chromium.launch();
                     const context2 = await browser2.newContext(
                         fs.existsSync(storagePath) ? { storageState: storagePath } : {}
@@ -281,6 +313,18 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                     await page2.setContent(resultHtml, { waitUntil: 'domcontentloaded' });
 
                     const spaPageInfo = await gatherPageInfo(page2, afterActionUrl, virtualFolder);
+                    logPage({
+                        url: afterActionUrl,
+                        uuid: virtualPageId,
+                        summary: aiResult?.summary || "",
+                        title: spaPageInfo?.title || "",
+                        statistics: {
+                            forms: (spaPageInfo?.allForms || []).length,
+                            ai_interaction: true,
+                            interactives: (spaPageInfo?.interactives || []).length
+                        }
+                    }, "virtual");
+
                     const spaLinks = spaPageInfo.links?.filter(l => {
                         try {
                             const absUrl = new URL(l, baseDomain);
@@ -293,7 +337,11 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                     }) || [];
 
                     for (const l of spaLinks) {
-                        pagesToVisit.push({ url: l, depth: depth + 2 });
+                        if (!isUrlIgnored(l)) {
+                            pagesToVisit.push({ url: l, depth: depth + 2 });
+                        } else {
+                            console.log(`⏩ Skipping ignored virtual link: ${l}`);
+                        }
                     }
 
                     await page2.close();
@@ -333,16 +381,18 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
             for (const l of newLinks) {
                 console.log(`➕ Enqueueing new link: ${l}`);
-                pagesToVisit.push({ url: l, depth: depth + 1 });
+                if (!isUrlIgnored(l)) {
+                    pagesToVisit.push({ url: l, depth: depth + 1 });
+                } else {
+                    console.log(`⏩ Skipping ignored new link: ${l}`);
+                }
             }
 
-            // STORAGE STATE PATCH: Save state after *every* context completes
+            // ---- Always save storage/cookies after each context ----
             await context.storageState({ path: storagePath });
-            storageStateForContext = storagePath;
 
-            // --- LOGGING: Write one row per page (JSON) ---
             const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
-            const title = await page.title?.() || '';
+            const title = await page.title();
             const formsCount = (pageData.allForms || []).length;
             const aiDid = aiResult?.summary || '';
             const stats = {
@@ -361,7 +411,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
         } catch (err) {
             console.warn(`⚠️ Error crawling ${url}: ${err.message}`);
         } finally {
-            if (page && !page.isClosed()) await page.close();
+            if (page && !await page.isClosed()) await page.close();
             await context.close();
             await browser.close();
             console.log(`🛑 Closed browser for: ${url}`);
