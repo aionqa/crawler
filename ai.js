@@ -70,27 +70,28 @@ export async function aiInteract(info, folder) {
     const aiVars = loadAIVars();
     fs.mkdirSync(folder, { recursive: true });
 
+    // Compose the AI prompt (not specific to login, any page)
     const prompt = `
 You are an intelligent automation agent using Playwright.
 
-Your task is to analyze a webpage and return only executable JavaScript code for Playwright that performs actions like filling in forms, clicking buttons, and waiting for results.
+Your task is to analyze a webpage and return only executable JavaScript code for Playwright that performs actions like filling in forms, clicking buttons, following links, or waiting for results.
 
 ⚠️ You must:
 - Do not use require(), import statements, or external modules.
 - DO NOT include require(), browser launch, or context creation code.
 - strictly do not use networkidle to define if interaction completed
 - Assume you have access to 'page' and 'vars'.
-- Use selectors to interact with form elements and buttons.
+- Use selectors to interact with interactive elements as appropriate.
 - Use provided variable keys if appropriate for field inputs.
 - You must use the values in the 'vars' object to fill in any relevant form fields.
-- After submitting the form, you must wait and observe what happens — the outcome is unknown.
+- After submitting the form or clicking, you must wait and observe what happens — the outcome is unknown.
 - You must detect or infer the result by analyzing page behavior, DOM changes, or network responses.
 - You must **collect the result** after submission (e.g. visible message, status text, navigation result) and store or log it clearly.
 - Handle multiple possible outcomes (e.g. success, error, redirect).
 - Do not use eval, unnecessary browser logs, or hardcoded content.
 - Output only valid, executable JavaScript code — no markdown, no explanations.
 - do not set up any checks after submit, just let them finish whatever they do and stop on their finish, probably by dom loaded event
-- do not wait for neither successes not failures - assume all done when update or redirection is completed
+- do not wait for neither successes nor failures - assume all done when update or redirection is completed
 - do not add logic for finding an outcome
 
 After each \`
@@ -103,10 +104,8 @@ You receive a snapshot of a web page with the following info:
 - Main visible text: ${shortText(info.textSummary)}
 - Form details:
 ${JSON.stringify(info.form, null, 2)}
-
 Other page links:
 ${JSON.stringify(info.links, null, 2)}
-
 Vars: ${Object.keys(aiVars).join(', ')}
 
 A screenshot is attached.
@@ -172,6 +171,7 @@ At the end, output a summary in this format:
     let resultHtml = "";
     let outcome = "";
     let browser, context, page;
+    let afterActionUrl = "";
 
     try {
         console.log(`🕹️ Running AI-generated code in browser for: ${info.url}`);
@@ -183,9 +183,6 @@ At the end, output a summary in this format:
         await page.waitForTimeout(1000);
         await page.waitForLoadState('domcontentloaded');
 
-        await page.exposeFunction("getVars", () => aiVars);
-        const vars = aiVars;
-
         // Monitor for websocket presence
         let hasWebSocket = false;
         page.on("websocket", () => {
@@ -195,7 +192,11 @@ At the end, output a summary in this format:
 
         try {
             const navigationPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => null);
-            await eval(`(async () => { ${code} })()`);
+
+            // This is the *correct* way: run code with Playwright page object
+            const fn = new Function('page', 'vars', `"use strict"; return (async () => { ${code} })()`);
+            await fn(page, aiVars);
+
             await navigationPromise;
         } catch (e) {
             if (!e.message.includes("Execution context was destroyed")) throw e;
@@ -206,9 +207,15 @@ At the end, output a summary in this format:
         if (hasWebSocket) {
             await waitForHtmlStability(page);
         } else {
-            await page.waitForTimeout(2000); // simple pause if no WebSocket
+            await page.waitForTimeout(2000);
         }
 
+        // Always get the current visible URL after any action (SPA/redirect/etc)
+        afterActionUrl = await page.evaluate(() => window.location.href);
+        fs.writeFileSync(path.join(folder, "after_action_url.txt"), afterActionUrl, "utf8");
+        console.log(`🌍 Actual visible URL after action: ${afterActionUrl}`);
+
+        // Save resulting HTML and screenshot
         resultHtml = await page.content();
         fs.writeFileSync(path.join(folder, "result.html"), resultHtml, "utf8");
         console.log(`📄 Saved result.html after AI interaction for: ${info.url}`);
@@ -244,15 +251,15 @@ At the end, output a summary in this format:
         if (page && !page.isClosed()) await page.close();
         if (context) await context.close();
         if (browser) await browser.close();
-
     }
 
+    // Always return the content and real visible URL
     return {
         summary: aiSummary,
         resultHtml,
         aiCode: code,
         outcome,
-        error
+        error,
+        afterActionUrl
     };
 }
-
