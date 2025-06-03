@@ -178,20 +178,19 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
             if (
                 aiResult.afterActionUrl &&
-                aiResult.afterActionUrl !== pageDataForLogin.url
+                aiResult.afterActionUrl !== url &&
+                !visited.has(aiResult.afterActionUrl)
             ) {
-                // Prepare to crawl/analyze the new page with session cookies
-                const nextUrl = aiResult.afterActionUrl;
                 const cookiesPath = path.join(folder, "after_cookies.json");
                 let cookies = [];
                 if (fs.existsSync(cookiesPath)) {
                     cookies = JSON.parse(fs.readFileSync(cookiesPath, "utf8"));
                 }
-                // Now launch a browser/context with these cookies and visit nextUrl
-                await analyzeOrCrawlPageWithCookies(nextUrl, cookies);
+                pagesToVisit.push({ url: aiResult.afterActionUrl, depth: depth + 1, cookies });
             }
 
-/*
+
+
             let newLinks = pageData.links?.filter(l => {
                 try {
                     const absUrl = new URL(l, baseDomain);
@@ -217,7 +216,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                 console.log(`➕ Enqueueing new link: ${l}`);
                 pagesToVisit.push({ url: l, depth: depth + 1 });
             }
-*/
+
         } catch (err) {
             console.warn(`⚠️ Error crawling ${url}: ${err.message}`);
         } finally {
