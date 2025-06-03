@@ -1,8 +1,10 @@
+// main.js
 import fs from 'fs';
 import path from 'path';
 import { URL } from 'url';
 import { chromium } from 'playwright';
 import { aiInteract } from './ai.js';
+import { analyzeHtmlContent } from './htmlAnalyzer.js';
 import crypto from 'crypto';
 
 const DOMAIN = process.env.TARGETS || "https://practicetestautomation.com/practice-test-login/";
@@ -32,7 +34,6 @@ function logPage(info, type = "crawl") {
     fs.appendFileSync(logFile, JSON.stringify(entry) + "\n");
 }
 
-
 export async function gatherPageInfo(page, url, folder) {
     ensureDir(folder);
 
@@ -41,96 +42,6 @@ export async function gatherPageInfo(page, url, folder) {
     await page.screenshot({ path: screenshotPath, type: 'jpeg', quality: 60, fullPage: true });
 
     console.log(`🔍 Gathering DOM info for: ${url}`);
-    const info = await page.evaluate(() => {
-        const links = Array.from(document.querySelectorAll('a[href]'))
-            .map(a => a.href)
-            .filter(href => {
-                try {
-                    const u = new URL(href, location.href);
-                    return u.pathname !== location.pathname || !u.hash || u.href.replace(u.hash, '') !== location.href.replace(location.hash, '');
-                } catch { return false; }
-            });
-
-        function extractField(el) {
-            return {
-                tag: el.tagName.toLowerCase(),
-                id: el.id || "",
-                name: el.name || "",
-                type: el.type || el.tagName.toLowerCase(),
-                placeholder: el.placeholder || "",
-                ariaLabel: el.getAttribute("aria-label") || "",
-                value: el.value || "",
-                outerHTML: el.outerHTML
-            };
-        }
-
-        function extractButton(el) {
-            return {
-                tag: el.tagName.toLowerCase(),
-                id: el.id || "",
-                name: el.name || "",
-                type: el.type || "button",
-                text: el.innerText || el.value || "",
-                ariaLabel: el.getAttribute("aria-label") || "",
-                outerHTML: el.outerHTML
-            };
-        }
-
-        const forms = Array.from(document.querySelectorAll("form")).map(form => ({
-            type: "form",
-            id: form.id || "",
-            name: form.name || "",
-            outerHTML: form.outerHTML,
-            inputs: Array.from(form.querySelectorAll("input, textarea, select")).map(extractField),
-            buttons: Array.from(form.querySelectorAll("button, input[type='submit'], input[type='button']")).map(extractButton)
-        }));
-
-        const pseudoForms = Array.from(document.querySelectorAll("div, section"))
-            .filter(container => {
-                const hasFields = container.querySelectorAll("input, textarea, select").length > 0;
-                const hasButton = container.querySelectorAll("button, input[type='submit'], input[type='button']").length > 0;
-                if (!hasFields || !hasButton) return false;
-                for (const child of container.children) {
-                    if (child !== container && child.querySelectorAll &&
-                        child.querySelectorAll("input, textarea, select").length > 0 &&
-                        child.querySelectorAll("button, input[type='submit'], input[type='button']").length > 0) return false;
-                }
-                return true;
-            })
-            .map(container => ({
-                type: "pseudo-form",
-                id: container.id || "",
-                name: container.getAttribute("name") || "",
-                outerHTML: container.outerHTML,
-                inputs: Array.from(container.querySelectorAll("input, textarea, select")).map(extractField),
-                buttons: Array.from(container.querySelectorAll("button, input[type='submit'], input[type='button']")).map(extractButton)
-            }));
-
-        const allForms = [...forms, ...pseudoForms];
-
-        const interactives = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"]'))
-            .filter(el => !el.closest('form'))
-            .map(el => ({
-                tag: el.tagName.toLowerCase(),
-                id: el.id || null,
-                name: el.name || null,
-                type: el.type || 'button',
-                text: el.innerText || el.value || null,
-            }));
-
-        const h1 = document.querySelector('h1')?.innerText || '';
-        const h2 = document.querySelector('h2')?.innerText || '';
-        const ps = Array.from(document.querySelectorAll('p')).map(p => p.innerText).join(' ');
-        const text = [h1, h2, ps].join(' ').replace(/\s+/g, ' ').slice(0, 500);
-
-        return { links, allForms, interactives, textSummary: text };
-    });
-
-    console.log(`🍪 Saving cookies for: ${url}`);
-    const cookies = await page.context().cookies();
-    fs.writeFileSync(path.join(folder, "cookies.json"), JSON.stringify(cookies, null, 2));
-    fs.writeFileSync(path.join(folder, "info.json"), JSON.stringify(info, null, 2));
-    // Inline same-origin iframe content before snapshot
     await page.evaluate(() => {
         document.querySelectorAll('iframe').forEach(iframe => {
             try {
@@ -140,19 +51,23 @@ export async function gatherPageInfo(page, url, folder) {
                     div.setAttribute('data-inlined-iframe', 'true');
                     iframe.parentNode.replaceChild(div, iframe);
                 }
-            } catch (e) {
-                // Ignore cross-origin
-            }
+            } catch { }
         });
     });
+
     const currentHtml = await page.content();
+    const info = await analyzeHtmlContent(currentHtml, url);
+
     fs.writeFileSync(path.join(folder, `html_snapshot_${Date.now()}.html`), currentHtml, "utf8");
-    const videoPath = path.join(folder, "video.webm");
+
+    console.log(`🍪 Saving cookies for: ${url}`);
+    const cookies = await page.context().cookies();
+    fs.writeFileSync(path.join(folder, "cookies.json"), JSON.stringify(cookies, null, 2));
+    fs.writeFileSync(path.join(folder, "info.json"), JSON.stringify(info, null, 2));
 
     return {
-        url, screenshotPath, videoPath, cookies,
-        ...info,
-        currentHtml
+        url, screenshotPath, cookies, currentHtml,
+        ...info
     };
 }
 
@@ -182,7 +97,6 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
         const folder = path.join(OUTPUT, pageId);
         ensureDir(folder);
 
-        // ---- Always load cookies/storage state if exists ----
         let contextOptions = {};
         if (fs.existsSync(storagePath)) {
             contextOptions.storageState = storagePath;
@@ -213,13 +127,12 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                     aiResult = await aiInteract({ ...pageData, form }, folder);
                     if (aiResult.error) {
                         console.log(`❌ AI interaction error: ${aiResult.error}`);
-                    } else {
-                        console.log(`✅ AI interaction complete for form on: ${url}`);
+                        continue;
                     }
 
                     const resultHtml = aiResult.resultHtml || '';
                     const afterActionUrl = aiResult.afterActionUrl || url;
-                    const htmlHash = resultHtml ? crypto.createHash('md5').update(resultHtml).digest('hex') : '';
+                    const htmlHash = crypto.createHash('md5').update(resultHtml).digest('hex');
                     const stateKey = afterActionUrl + '#' + htmlHash;
 
                     if (!seenStates.has(stateKey) &&
@@ -231,14 +144,8 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         ensureDir(virtualFolder);
                         fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
 
-                        const browser2 = await chromium.launch();
-                        const context2 = await browser2.newContext(
-                            fs.existsSync(storagePath) ? { storageState: storagePath } : {}
-                        );
-                        const page2 = await context2.newPage();
-                        await page2.setContent(resultHtml, { waitUntil: 'domcontentloaded' });
+                        const spaPageInfo = await analyzeHtmlContent(resultHtml, afterActionUrl);
 
-                        const spaPageInfo = await gatherPageInfo(page2, afterActionUrl, virtualFolder);
                         logPage({
                             url: afterActionUrl,
                             uuid: virtualPageId,
@@ -251,49 +158,24 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                             }
                         }, "virtual");
 
-                        const spaLinks = spaPageInfo.links?.filter(l => {
-                            try {
-                                const absUrl = new URL(l, baseDomain);
-                                if (absUrl.origin !== baseDomain) return false;
-                                if (absUrl.href === afterActionUrl) return false;
-                                return !visited.has(absUrl.href);
-                            } catch {
-                                return false;
-                            }
-                        }) || [];
-
+                        const spaLinks = spaPageInfo.links || [];
                         for (const l of spaLinks) {
                             if (!isUrlIgnored(l)) {
                                 pagesToVisit.push({ url: l, depth: depth + 2 });
-                            } else {
-                                console.log(`⏩ Skipping ignored virtual link: ${l}`);
                             }
                         }
-
-                        await page2.close();
-                        await context2.close();
-                        await browser2.close();
                     }
 
-                    if (
-                        afterActionUrl &&
-                        afterActionUrl !== url &&
-                        !visited.has(afterActionUrl)
-                    ) {
-                        if (!isUrlIgnored(afterActionUrl)) {
-                            pagesToVisit.push({ url: afterActionUrl, depth: depth + 1 });
-                        } else {
-                            console.log(`⏩ Skipping ignored afterActionUrl: ${afterActionUrl}`);
-                        }
+                    if (afterActionUrl && afterActionUrl !== url && !visited.has(afterActionUrl)) {
+                        pagesToVisit.push({ url: afterActionUrl, depth: depth + 1 });
                     }
                 }
             } else {
                 console.log(`🤖 Passing non-form page to AI for: ${url}`);
                 aiResult = await aiInteract({ ...pageData, form: null }, folder);
-
                 const resultHtml = aiResult.resultHtml || '';
                 const afterActionUrl = aiResult.afterActionUrl || url;
-                const htmlHash = resultHtml ? crypto.createHash('md5').update(resultHtml).digest('hex') : '';
+                const htmlHash = crypto.createHash('md5').update(resultHtml).digest('hex');
                 const stateKey = afterActionUrl + '#' + htmlHash;
 
                 if (!seenStates.has(stateKey) &&
@@ -305,14 +187,8 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                     ensureDir(virtualFolder);
                     fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
 
-                    const browser2 = await chromium.launch();
-                    const context2 = await browser2.newContext(
-                        fs.existsSync(storagePath) ? { storageState: storagePath } : {}
-                    );
-                    const page2 = await context2.newPage();
-                    await page2.setContent(resultHtml, { waitUntil: 'domcontentloaded' });
+                    const spaPageInfo = await analyzeHtmlContent(resultHtml, afterActionUrl);
 
-                    const spaPageInfo = await gatherPageInfo(page2, afterActionUrl, virtualFolder);
                     logPage({
                         url: afterActionUrl,
                         uuid: virtualPageId,
@@ -325,36 +201,16 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         }
                     }, "virtual");
 
-                    const spaLinks = spaPageInfo.links?.filter(l => {
-                        try {
-                            const absUrl = new URL(l, baseDomain);
-                            if (absUrl.origin !== baseDomain) return false;
-                            if (absUrl.href === afterActionUrl) return false;
-                            return !visited.has(absUrl.href);
-                        } catch {
-                            return false;
-                        }
-                    }) || [];
-
+                    const spaLinks = spaPageInfo.links || [];
                     for (const l of spaLinks) {
                         if (!isUrlIgnored(l)) {
                             pagesToVisit.push({ url: l, depth: depth + 2 });
-                        } else {
-                            console.log(`⏩ Skipping ignored virtual link: ${l}`);
                         }
                     }
-
-                    await page2.close();
-                    await context2.close();
-                    await browser2.close();
                 }
 
-                if (
-                    aiResult.afterActionUrl &&
-                    aiResult.afterActionUrl !== url &&
-                    !visited.has(aiResult.afterActionUrl)
-                ) {
-                    pagesToVisit.push({ url: aiResult.afterActionUrl, depth: depth + 1 });
+                if (afterActionUrl && afterActionUrl !== url && !visited.has(afterActionUrl)) {
+                    pagesToVisit.push({ url: afterActionUrl, depth: depth + 1 });
                 }
             }
 
@@ -380,15 +236,11 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
             }
 
             for (const l of newLinks) {
-                console.log(`➕ Enqueueing new link: ${l}`);
                 if (!isUrlIgnored(l)) {
                     pagesToVisit.push({ url: l, depth: depth + 1 });
-                } else {
-                    console.log(`⏩ Skipping ignored new link: ${l}`);
                 }
             }
 
-            // ---- Always save storage/cookies after each context ----
             await context.storageState({ path: storagePath });
 
             const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
@@ -400,13 +252,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                 ai_interaction: Boolean(aiDid),
                 interactives: (pageData.interactives || []).length
             };
-            logPage({
-                url,
-                uuid,
-                summary: aiDid,
-                title,
-                statistics: stats
-            });
+            logPage({ url, uuid, summary: aiDid, title, statistics: stats });
 
         } catch (err) {
             console.warn(`⚠️ Error crawling ${url}: ${err.message}`);
@@ -417,6 +263,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
             console.log(`🛑 Closed browser for: ${url}`);
         }
     }
+
     console.log(`🏁 Crawling complete!`);
     process.exit(0);
 }
