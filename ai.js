@@ -22,16 +22,54 @@ function shortText(txt, maxLen = 500) {
     return t.length > maxLen ? t.slice(0, maxLen) + "..." : t;
 }
 
-/**
- * @param {Object} info - Page info from gatherPageInfo
- * @param {string} folder - Output folder for this interaction
- * @returns {Promise<{ summary: string, resultHtml: string, aiCode: string, outcome: string, error?: string }>}
- */
+async function waitForHtmlStability(page, maxWait = 10000, stableThreshold = 2000) {
+    console.log("🔍 Waiting for HTML stability...");
+
+    let lastHtml = "";
+    try {
+        lastHtml = await page.content();
+    } catch {
+        console.warn("⚠️ Initial page.content() failed, retrying...");
+        await page.waitForTimeout(1000);
+        try {
+            lastHtml = await page.content();
+        } catch {
+            console.warn("⚠️ Still unable to get initial HTML; proceeding with empty snapshot.");
+        }
+    }
+
+    let stableStart = Date.now();
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < maxWait) {
+        await page.waitForTimeout(2000);
+        let currentHtml = "";
+
+        try {
+            currentHtml = await page.content();
+        } catch {
+            console.warn("⚠️ Skipping unstable HTML snapshot (still navigating?)");
+            continue; // skip this loop iteration safely
+        }
+
+        if (currentHtml === lastHtml) {
+            if (Date.now() - stableStart >= stableThreshold) {
+                console.log("✅ HTML has stabilized");
+                return;
+            }
+        } else {
+            lastHtml = currentHtml;
+            stableStart = Date.now();
+        }
+    }
+
+    console.warn("⏱️ Timed out waiting for HTML stability");
+}
+
 export async function aiInteract(info, folder) {
     const aiVars = loadAIVars();
     fs.mkdirSync(folder, { recursive: true });
 
-    // Prepare prompt for the AI model
     const prompt = `
 You are an intelligent automation agent using Playwright.
 
@@ -80,7 +118,6 @@ At the end, output a summary in this format:
 // SUMMARY: <one-line plain English description of what happened>
 `;
 
-    // Load screenshot as base64 for OpenAI vision
     let screenshotContent = "";
     if (info.screenshotPath && fs.existsSync(info.screenshotPath)) {
         const imgBuffer = fs.readFileSync(info.screenshotPath);
@@ -88,23 +125,18 @@ At the end, output a summary in this format:
         screenshotContent = `data:image/${extension};base64,${imgBuffer.toString("base64")}`;
     }
 
-    // Compose OpenAI messages (Vision)
-    const messages = [
-        {
-            role: "user",
-            content: [
-                { type: "text", text: prompt },
-                ...(screenshotContent
-                    ? [{ type: "image_url", image_url: { url: screenshotContent } }]
-                    : [])
-            ],
-        },
-    ];
+    const messages = [{
+        role: "user",
+        content: [
+            { type: "text", text: prompt },
+            ...(screenshotContent ? [{ type: "image_url", image_url: { url: screenshotContent } }] : [])
+        ],
+    }];
 
-    // Call OpenAI
     let code = "";
     let aiSummary = "";
     let error = "";
+
     try {
         console.log(`🤖 Sending prompt to OpenAI for: ${info.url}`);
         const completion = await openai.chat.completions.create({
@@ -115,18 +147,17 @@ At the end, output a summary in this format:
         });
 
         let message = completion.choices[0].message.content.trim();
-
-        // Extract summary line
         const summaryMatch = message.match(/\/\/ SUMMARY:(.*)$/im);
         if (summaryMatch) aiSummary = summaryMatch[1].trim();
 
-        // Remove summary line from code output
-        code = message.replace(/```(js|javascript)?/gi, "")
+        code = message
+            .replace(/```(js|javascript)?/gi, "")
             .replace(/^javascript\s*/i, "")
             .replace(/\/\/ SUMMARY:.*$/im, "")
             .trim();
 
-        // Save AI code to file
+        if (!code) throw new Error("AI returned empty or invalid JS code.");
+
         fs.writeFileSync(path.join(folder, "ai_code.js"), code, "utf8");
         fs.writeFileSync(path.join(folder, "ai_prompt.txt"), prompt, "utf8");
         console.log(`📥 AI code received and saved for: ${info.url}`);
@@ -138,76 +169,69 @@ At the end, output a summary in this format:
         return { summary: "", resultHtml: "", aiCode: "", outcome: "", error };
     }
 
-    // Run the AI-generated JS code in Playwright
     let resultHtml = "";
     let outcome = "";
+    let browser, context, page;
+
     try {
         console.log(`🕹️ Running AI-generated code in browser for: ${info.url}`);
-        const browser = await chromium.launch({ headless: true });
-        const context = await browser.newContext({
-            recordVideo: { dir: folder, size: { width: 1280, height: 720 } }
-        });
-        const page = await context.newPage();
+        browser = await chromium.launch({ headless: true });
+        context = await browser.newContext({ recordVideo: { dir: folder, size: { width: 1280, height: 720 } } });
+        page = await context.newPage();
+
         await page.goto(info.url, { waitUntil: "domcontentloaded" });
-        await page.waitForTimeout(1000); // let async UI settle
+        await page.waitForTimeout(1000);
         await page.waitForLoadState('domcontentloaded');
-        await page.waitForFunction(() => document.readyState === 'complete');
 
-        await new Promise(res => setTimeout(res, 1000));
-
-        // Inject vars and run code
         await page.exposeFunction("getVars", () => aiVars);
-
-        // Make vars available in this scope
         const vars = aiVars;
 
-        // Run the AI code in Node's scope with 'page' and 'vars'
+        // Monitor for websocket presence
+        let hasWebSocket = false;
+        page.on("websocket", () => {
+            hasWebSocket = true;
+            console.log("🔌 WebSocket detected");
+        });
+
         try {
-            // Hook navigation promise first
             const navigationPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => null);
-
-            // Execute AI-generated interaction code
             await eval(`(async () => { ${code} })()`);
-
-            // Wait for potential navigation to complete
             await navigationPromise;
         } catch (e) {
-            error = "Execution error: " + e.message;
-            fs.writeFileSync(path.join(folder, "ai_run_error.txt"), error, "utf8");
-            console.log(`❌ AI code execution error for ${info.url}: ${e.message}`);
-            throw e;
+            if (!e.message.includes("Execution context was destroyed")) throw e;
+            console.warn("⚠️ Ignoring transient evaluation error due to navigation");
         }
 
-        // Get the HTML after AI interaction
-        await page.waitForLoadState('domcontentloaded');
-        await page.waitForTimeout(1000);
-        await page.waitForFunction(() => document.readyState === 'complete');
+        // 🧠 Wait for HTML stability if websockets are present
+        if (hasWebSocket) {
+            await waitForHtmlStability(page);
+        } else {
+            await page.waitForTimeout(2000); // simple pause if no WebSocket
+        }
 
         resultHtml = await page.content();
-
         fs.writeFileSync(path.join(folder, "result.html"), resultHtml, "utf8");
         console.log(`📄 Saved result.html after AI interaction for: ${info.url}`);
 
-        // Take another screenshot after interaction
         await page.screenshot({ path: path.join(folder, "after.png"), type: "png", fullPage: true });
         console.log(`📸 Saved after-interaction screenshot for: ${info.url}`);
 
-        // Save cookies
         const cookies = await context.cookies();
         fs.writeFileSync(path.join(folder, "after_cookies.json"), JSON.stringify(cookies, null, 2));
         console.log(`🍪 Saved after-interaction cookies for: ${info.url}`);
 
-        await page.close();
-
-        // Save video
         const video = await page.video();
         if (video) {
-            await video.saveAs(path.join(folder, "ai_video.webm"));
-            console.log(`🎥 Saved interaction video for: ${info.url}`);
+            try {
+                await Promise.race([
+                    video.saveAs(path.join(folder, "ai_video.webm")),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error("Video save timeout")), 5000))
+                ]);
+                console.log(`🎥 Saved interaction video for: ${info.url}`);
+            } catch (err) {
+                console.warn(`⚠️ Video save failed or timed out: ${err.message}`);
+            }
         }
-
-        await context.close();
-        await browser.close();
 
         outcome = aiSummary || "Interaction complete.";
         fs.writeFileSync(path.join(folder, "summary.txt"), outcome, "utf8");
@@ -216,9 +240,13 @@ At the end, output a summary in this format:
         error = "Execution error: " + err.message;
         fs.writeFileSync(path.join(folder, "ai_run_error.txt"), error, "utf8");
         console.log(`❌ AI code execution error for ${info.url}: ${err.message}`);
+    } finally {
+        if (page && !page.isClosed()) await page.close();
+        if (context) await context.close();
+        if (browser) await browser.close();
+
     }
 
-    // Save summary and return outcome
     return {
         summary: aiSummary,
         resultHtml,
@@ -227,3 +255,4 @@ At the end, output a summary in this format:
         error
     };
 }
+
