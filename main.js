@@ -3,7 +3,7 @@ import path from 'path';
 import { URL } from 'url';
 import { chromium } from 'playwright';
 import { aiInteract } from './ai.js';
-import crypto from 'crypto'; // <-- add this at the top of your file
+import crypto from 'crypto'; // <-- existing
 
 const DOMAIN = process.env.TARGETS || "https://practicetestautomation.com/practice-test-login/";
 const OUTPUT = process.env.OUTPUT_FOLDER || "./outcome";
@@ -16,6 +16,17 @@ function ensureDir(dir) {
     }
 }
 ensureDir(OUTPUT);
+
+// STORAGE STATE PATCH: set storage path globally
+const storagePath = path.join(OUTPUT, "storage.json");
+
+// Helper: log crawl info as JSON-per-line
+function logPage(info) {
+    const logFile = path.join(OUTPUT, "pages.txt");
+    fs.appendFileSync(logFile, JSON.stringify(info) + "\n");
+}
+
+// --- gatherPageInfo is unchanged ---
 
 export async function gatherPageInfo(page, url, folder) {
     ensureDir(folder);
@@ -139,6 +150,9 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
     console.log(`🚀 Starting crawl at: ${startUrl}`);
 
+    // STORAGE STATE PATCH: check if storage exists before first crawl
+    let storageStateForContext = fs.existsSync(storagePath) ? storagePath : undefined;
+
     while (pagesToVisit.length) {
         const { url, depth, cookies: queuedCookies } = pagesToVisit.shift();
         if (visited.has(url) || depth > maxDepth) continue;
@@ -149,12 +163,18 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
         const folder = path.join(OUTPUT, pageId);
         ensureDir(folder);
 
+        // --- PATCH: Use storageState for all contexts ---
         const browser = await chromium.launch();
-        const context = await browser.newContext({ recordVideo: { dir: folder, size: { width: 1280, height: 720 } } });
+        const context = await browser.newContext(
+            storageStateForContext ? { storageState: storageStateForContext } : {}
+        );
 
-        if (queuedCookies && queuedCookies.length) {
-            await context.addCookies(queuedCookies);
-        }
+        // queuedCookies logic can be removed or kept for ultra-fine tuning,
+        // but storageState includes all cookies and storage!
+        // (Optional: you may want to add queuedCookies as well)
+        // if (queuedCookies && queuedCookies.length) {
+        //     await context.addCookies(queuedCookies);
+        // }
 
         const page = await context.newPage();
 
@@ -183,15 +203,11 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         console.log(`✅ AI interaction complete for form on: ${url}`);
                     }
 
-                    // ------ Universal SPA/DOM content analysis here ------
                     const resultHtml = aiResult.resultHtml || '';
                     const afterActionUrl = aiResult.afterActionUrl || url;
-
-                    // Compose a "state key" (URL + hash of HTML)
                     const htmlHash = resultHtml ? crypto.createHash('md5').update(resultHtml).digest('hex') : '';
                     const stateKey = afterActionUrl + '#' + htmlHash;
 
-                    // If this is a new state, analyze it like a new page (even if the URL didn't change)
                     if (!seenStates.has(stateKey) &&
                         (afterActionUrl !== url || htmlSignificantlyChanged(originalHtml, resultHtml))) {
                         seenStates.add(stateKey);
@@ -202,14 +218,14 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
 
                         // Gather info for the new state (simulate SPA nav)
-                        // Create a temp browser to analyze the virtual state
                         const browser2 = await chromium.launch();
-                        const context2 = await browser2.newContext();
+                        const context2 = await browser2.newContext(
+                            fs.existsSync(storagePath) ? { storageState: storagePath } : {}
+                        );
                         const page2 = await context2.newPage();
                         await page2.setContent(resultHtml, { waitUntil: 'domcontentloaded' });
 
                         const spaPageInfo = await gatherPageInfo(page2, afterActionUrl, virtualFolder);
-                        // Enqueue all links (as usual)
                         const spaLinks = spaPageInfo.links?.filter(l => {
                             try {
                                 const absUrl = new URL(l, baseDomain);
@@ -229,20 +245,13 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         await context2.close();
                         await browser2.close();
                     }
-                    // ----------------------------------------------------
 
-                    // Handle afterActionUrl (in case of real navigation)
                     if (
                         afterActionUrl &&
                         afterActionUrl !== url &&
                         !visited.has(afterActionUrl)
                     ) {
-                        const cookiesPath = path.join(folder, "after_cookies.json");
-                        let cookies = [];
-                        if (fs.existsSync(cookiesPath)) {
-                            cookies = JSON.parse(fs.readFileSync(cookiesPath, "utf8"));
-                        }
-                        pagesToVisit.push({ url: afterActionUrl, depth: depth + 1, cookies });
+                        pagesToVisit.push({ url: afterActionUrl, depth: depth + 1 });
                     }
                 }
             } else {
@@ -265,7 +274,9 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
                     // Gather info for the new state (simulate SPA nav)
                     const browser2 = await chromium.launch();
-                    const context2 = await browser2.newContext();
+                    const context2 = await browser2.newContext(
+                        fs.existsSync(storagePath) ? { storageState: storagePath } : {}
+                    );
                     const page2 = await context2.newPage();
                     await page2.setContent(resultHtml, { waitUntil: 'domcontentloaded' });
 
@@ -295,12 +306,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                     aiResult.afterActionUrl !== url &&
                     !visited.has(aiResult.afterActionUrl)
                 ) {
-                    const cookiesPath = path.join(folder, "after_cookies.json");
-                    let cookies = [];
-                    if (fs.existsSync(cookiesPath)) {
-                        cookies = JSON.parse(fs.readFileSync(cookiesPath, "utf8"));
-                    }
-                    pagesToVisit.push({ url: aiResult.afterActionUrl, depth: depth + 1, cookies });
+                    pagesToVisit.push({ url: aiResult.afterActionUrl, depth: depth + 1 });
                 }
             }
 
@@ -329,6 +335,28 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                 console.log(`➕ Enqueueing new link: ${l}`);
                 pagesToVisit.push({ url: l, depth: depth + 1 });
             }
+
+            // STORAGE STATE PATCH: Save state after *every* context completes
+            await context.storageState({ path: storagePath });
+            storageStateForContext = storagePath;
+
+            // --- LOGGING: Write one row per page (JSON) ---
+            const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+            const title = await page.title?.() || '';
+            const formsCount = (pageData.allForms || []).length;
+            const aiDid = aiResult?.summary || '';
+            const stats = {
+                forms: formsCount,
+                ai_interaction: Boolean(aiDid),
+                interactives: (pageData.interactives || []).length
+            };
+            logPage({
+                url,
+                uuid,
+                summary: aiDid,
+                title,
+                statistics: stats
+            });
 
         } catch (err) {
             console.warn(`⚠️ Error crawling ${url}: ${err.message}`);
