@@ -3,6 +3,7 @@ import path from 'path';
 import { URL } from 'url';
 import { chromium } from 'playwright';
 import { aiInteract } from './ai.js';
+import crypto from 'crypto'; // <-- add this at the top of your file
 
 const DOMAIN = process.env.TARGETS || "https://practicetestautomation.com/practice-test-login/";
 const OUTPUT = process.env.OUTPUT_FOLDER || "./outcome";
@@ -119,17 +120,27 @@ export async function gatherPageInfo(page, url, folder) {
 
     return {
         url, screenshotPath, videoPath, cookies,
-        ...info
+        ...info,
+        currentHtml // store for SPA analysis
     };
 }
 
-export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = new Set()) {
+// Helper: quick HTML diff (could be improved with hashing for large pages)
+function htmlSignificantlyChanged(htmlA, htmlB) {
+    if (!htmlA || !htmlB) return false;
+    // Compare first and last 1000 chars (catch big visible changes)
+    return htmlA.slice(0, 1000) !== htmlB.slice(0, 1000) ||
+        htmlA.slice(-1000) !== htmlB.slice(-1000);
+}
+
+export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = new Set(), seenStates = new Set()) {
     const baseDomain = new URL(startUrl).origin;
     let pagesToVisit = [{ url: startUrl, depth: 0 }];
+
     console.log(`🚀 Starting crawl at: ${startUrl}`);
 
     while (pagesToVisit.length) {
-        const { url, depth } = pagesToVisit.shift();
+        const { url, depth, cookies: queuedCookies } = pagesToVisit.shift();
         if (visited.has(url) || depth > maxDepth) continue;
         visited.add(url);
         console.log(`🌐 Crawling [depth ${depth}]: ${url}`);
@@ -140,6 +151,11 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
         const browser = await chromium.launch();
         const context = await browser.newContext({ recordVideo: { dir: folder, size: { width: 1280, height: 720 } } });
+
+        if (queuedCookies && queuedCookies.length) {
+            await context.addCookies(queuedCookies);
+        }
+
         const page = await context.newPage();
 
         try {
@@ -148,13 +164,14 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
             await page.waitForLoadState('domcontentloaded');
 
             const pageData = await gatherPageInfo(page, url, folder);
+            const originalHtml = pageData.currentHtml;
 
             let aiResult = null;
+
             if (pageData.allForms && pageData.allForms.length > 0) {
                 const seenForms = new Set();
                 for (const form of pageData.allForms) {
                     const key = form.inputs.map(i => i.name + i.type).join(',') + form.buttons.map(b => b.text).join(',');
-
                     if (seenForms.has(key)) continue;
                     seenForms.add(key);
 
@@ -165,31 +182,127 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                     } else {
                         console.log(`✅ AI interaction complete for form on: ${url}`);
                     }
+
+                    // ------ Universal SPA/DOM content analysis here ------
+                    const resultHtml = aiResult.resultHtml || '';
+                    const afterActionUrl = aiResult.afterActionUrl || url;
+
+                    // Compose a "state key" (URL + hash of HTML)
+                    const htmlHash = resultHtml ? crypto.createHash('md5').update(resultHtml).digest('hex') : '';
+                    const stateKey = afterActionUrl + '#' + htmlHash;
+
+                    // If this is a new state, analyze it like a new page (even if the URL didn't change)
+                    if (!seenStates.has(stateKey) &&
+                        (afterActionUrl !== url || htmlSignificantlyChanged(originalHtml, resultHtml))) {
+                        seenStates.add(stateKey);
+
+                        const virtualPageId = Buffer.from(afterActionUrl + '_' + htmlHash).toString('base64').replace(/[/+=]/g, '');
+                        const virtualFolder = path.join(OUTPUT, virtualPageId);
+                        ensureDir(virtualFolder);
+                        fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
+
+                        // Gather info for the new state (simulate SPA nav)
+                        // Create a temp browser to analyze the virtual state
+                        const browser2 = await chromium.launch();
+                        const context2 = await browser2.newContext();
+                        const page2 = await context2.newPage();
+                        await page2.setContent(resultHtml, { waitUntil: 'domcontentloaded' });
+
+                        const spaPageInfo = await gatherPageInfo(page2, afterActionUrl, virtualFolder);
+                        // Enqueue all links (as usual)
+                        const spaLinks = spaPageInfo.links?.filter(l => {
+                            try {
+                                const absUrl = new URL(l, baseDomain);
+                                if (absUrl.origin !== baseDomain) return false;
+                                if (absUrl.href === afterActionUrl) return false;
+                                return !visited.has(absUrl.href);
+                            } catch {
+                                return false;
+                            }
+                        }) || [];
+
+                        for (const l of spaLinks) {
+                            pagesToVisit.push({ url: l, depth: depth + 2 });
+                        }
+
+                        await page2.close();
+                        await context2.close();
+                        await browser2.close();
+                    }
+                    // ----------------------------------------------------
+
+                    // Handle afterActionUrl (in case of real navigation)
+                    if (
+                        afterActionUrl &&
+                        afterActionUrl !== url &&
+                        !visited.has(afterActionUrl)
+                    ) {
+                        const cookiesPath = path.join(folder, "after_cookies.json");
+                        let cookies = [];
+                        if (fs.existsSync(cookiesPath)) {
+                            cookies = JSON.parse(fs.readFileSync(cookiesPath, "utf8"));
+                        }
+                        pagesToVisit.push({ url: afterActionUrl, depth: depth + 1, cookies });
+                    }
                 }
             } else {
                 console.log(`🤖 Passing non-form page to AI for: ${url}`);
                 aiResult = await aiInteract({ ...pageData, form: null }, folder);
-                if (aiResult.error) {
-                    console.log(`❌ AI interaction error: ${aiResult.error}`);
-                } else {
-                    console.log(`✅ AI interaction complete for page: ${url}`);
+
+                const resultHtml = aiResult.resultHtml || '';
+                const afterActionUrl = aiResult.afterActionUrl || url;
+                const htmlHash = resultHtml ? crypto.createHash('md5').update(resultHtml).digest('hex') : '';
+                const stateKey = afterActionUrl + '#' + htmlHash;
+
+                if (!seenStates.has(stateKey) &&
+                    (afterActionUrl !== url || htmlSignificantlyChanged(originalHtml, resultHtml))) {
+                    seenStates.add(stateKey);
+
+                    const virtualPageId = Buffer.from(afterActionUrl + '_' + htmlHash).toString('base64').replace(/[/+=]/g, '');
+                    const virtualFolder = path.join(OUTPUT, virtualPageId);
+                    ensureDir(virtualFolder);
+                    fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
+
+                    // Gather info for the new state (simulate SPA nav)
+                    const browser2 = await chromium.launch();
+                    const context2 = await browser2.newContext();
+                    const page2 = await context2.newPage();
+                    await page2.setContent(resultHtml, { waitUntil: 'domcontentloaded' });
+
+                    const spaPageInfo = await gatherPageInfo(page2, afterActionUrl, virtualFolder);
+                    const spaLinks = spaPageInfo.links?.filter(l => {
+                        try {
+                            const absUrl = new URL(l, baseDomain);
+                            if (absUrl.origin !== baseDomain) return false;
+                            if (absUrl.href === afterActionUrl) return false;
+                            return !visited.has(absUrl.href);
+                        } catch {
+                            return false;
+                        }
+                    }) || [];
+
+                    for (const l of spaLinks) {
+                        pagesToVisit.push({ url: l, depth: depth + 2 });
+                    }
+
+                    await page2.close();
+                    await context2.close();
+                    await browser2.close();
+                }
+
+                if (
+                    aiResult.afterActionUrl &&
+                    aiResult.afterActionUrl !== url &&
+                    !visited.has(aiResult.afterActionUrl)
+                ) {
+                    const cookiesPath = path.join(folder, "after_cookies.json");
+                    let cookies = [];
+                    if (fs.existsSync(cookiesPath)) {
+                        cookies = JSON.parse(fs.readFileSync(cookiesPath, "utf8"));
+                    }
+                    pagesToVisit.push({ url: aiResult.afterActionUrl, depth: depth + 1, cookies });
                 }
             }
-
-            if (
-                aiResult.afterActionUrl &&
-                aiResult.afterActionUrl !== url &&
-                !visited.has(aiResult.afterActionUrl)
-            ) {
-                const cookiesPath = path.join(folder, "after_cookies.json");
-                let cookies = [];
-                if (fs.existsSync(cookiesPath)) {
-                    cookies = JSON.parse(fs.readFileSync(cookiesPath, "utf8"));
-                }
-                pagesToVisit.push({ url: aiResult.afterActionUrl, depth: depth + 1, cookies });
-            }
-
-
 
             let newLinks = pageData.links?.filter(l => {
                 try {

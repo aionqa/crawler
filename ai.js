@@ -24,7 +24,6 @@ function shortText(txt, maxLen = 500) {
 
 async function waitForHtmlStability(page, maxWait = 10000, stableThreshold = 2000) {
     console.log("🔍 Waiting for HTML stability...");
-
     let lastHtml = "";
     try {
         lastHtml = await page.content();
@@ -49,7 +48,7 @@ async function waitForHtmlStability(page, maxWait = 10000, stableThreshold = 200
             currentHtml = await page.content();
         } catch {
             console.warn("⚠️ Skipping unstable HTML snapshot (still navigating?)");
-            continue; // skip this loop iteration safely
+            continue;
         }
 
         if (currentHtml === lastHtml) {
@@ -70,7 +69,7 @@ export async function aiInteract(info, folder) {
     const aiVars = loadAIVars();
     fs.mkdirSync(folder, { recursive: true });
 
-    // Compose the AI prompt (not specific to login, any page)
+    // Compose the AI prompt
     const prompt = `
 You are an intelligent automation agent using Playwright.
 
@@ -183,7 +182,6 @@ At the end, output a summary in this format:
         await page.waitForTimeout(1000);
         await page.waitForLoadState('domcontentloaded');
 
-        // Monitor for websocket presence
         let hasWebSocket = false;
         page.on("websocket", () => {
             hasWebSocket = true;
@@ -193,7 +191,6 @@ At the end, output a summary in this format:
         try {
             const navigationPromise = page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => null);
 
-            // This is the *correct* way: run code with Playwright page object
             const fn = new Function('page', 'vars', `"use strict"; return (async () => { ${code} })()`);
             await fn(page, aiVars);
 
@@ -203,19 +200,16 @@ At the end, output a summary in this format:
             console.warn("⚠️ Ignoring transient evaluation error due to navigation");
         }
 
-        // 🧠 Wait for HTML stability if websockets are present
         if (hasWebSocket) {
             await waitForHtmlStability(page);
         } else {
             await page.waitForTimeout(2000);
         }
 
-        // Always get the current visible URL after any action (SPA/redirect/etc)
         afterActionUrl = await page.evaluate(() => window.location.href);
         fs.writeFileSync(path.join(folder, "after_action_url.txt"), afterActionUrl, "utf8");
         console.log(`🌍 Actual visible URL after action: ${afterActionUrl}`);
 
-        // Save resulting HTML and screenshot
         resultHtml = await page.content();
         fs.writeFileSync(path.join(folder, "result.html"), resultHtml, "utf8");
         console.log(`📄 Saved result.html after AI interaction for: ${info.url}`);
@@ -263,3 +257,5 @@ At the end, output a summary in this format:
         afterActionUrl
     };
 }
+
+// -- No major changes, only make sure resultHtml and afterActionUrl are always present --
