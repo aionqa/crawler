@@ -18,6 +18,20 @@ function isUrlIgnored(url) {
     return TARGETS_IGNORE.some(pattern => url.includes(pattern));
 }
 
+function scopedLogger(id) {
+    const originalLog = console.log;
+    const originalWarn = console.warn;
+
+    console.log = (...args) => originalLog(`[${id}]`, ...args);
+    console.warn = (...args) => originalWarn(`[${id}] ⚠️`, ...args);
+
+    return () => {
+        console.log = originalLog;
+        console.warn = originalWarn;
+    };
+}
+
+
 function ensureDir(dir) {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
@@ -30,7 +44,8 @@ const storagePath = path.join(OUTPUT, "storage.json");
 
 function logPage(info, type = "crawl") {
     const logFile = path.join(OUTPUT, "pages.txt");
-    const entry = { ...info, type };
+    const uuid = info.uuid || (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'));
+    const entry = { ...info, uuid, type };
     fs.appendFileSync(logFile, JSON.stringify(entry) + "\n");
 }
 
@@ -85,6 +100,10 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
     while (pagesToVisit.length) {
         const { url, depth } = pagesToVisit.shift();
+        const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+        const restoreLog = scopedLogger(uuid);
+        const folder = path.join(OUTPUT, uuid);
+        ensureDir(folder);
         if (visited.has(url) || depth > maxDepth) continue;
         if (isUrlIgnored(url)) {
             console.log(`⏩ Skipping ignored URL: ${url}`);
@@ -92,10 +111,6 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
         }
         visited.add(url);
         console.log(`🌐 Crawling [depth ${depth}]: ${url}`);
-
-        const pageId = Buffer.from(url).toString('base64').replace(/[/+=]/g, '');
-        const folder = path.join(OUTPUT, pageId);
-        ensureDir(folder);
 
         let contextOptions = {};
         if (fs.existsSync(storagePath)) {
@@ -242,9 +257,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
             }
 
             await context.storageState({ path: storagePath });
-
-            const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
-            const title = await page.title();
+            const title = await page.title(); // ✅ Fix — declare before use
             const formsCount = (pageData.allForms || []).length;
             const aiDid = aiResult?.summary || '';
             const stats = {
@@ -252,6 +265,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                 ai_interaction: Boolean(aiDid),
                 interactives: (pageData.interactives || []).length
             };
+
             logPage({ url, uuid, summary: aiDid, title, statistics: stats });
 
         } catch (err) {
@@ -261,6 +275,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
             await context.close();
             await browser.close();
             console.log(`🛑 Closed browser for: ${url}`);
+            restoreLog(); // 👈 Restore default logging
         }
     }
 
