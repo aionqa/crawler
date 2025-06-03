@@ -8,6 +8,9 @@ dotenv.config();
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+const OUTPUT = process.env.OUTPUT_FOLDER || "./outcome";
+const storagePath = path.join(OUTPUT, "storage.json"); // ADDED: Consistent path with main.js
+
 function loadAIVars() {
     try {
         return JSON.parse(process.env.AI_VARS || "{}");
@@ -29,7 +32,7 @@ async function waitForHtmlStability(page, maxWait = 10000, stableThreshold = 200
         lastHtml = await page.content();
     } catch {
         console.warn("⚠️ Initial page.content() failed, retrying...");
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(10000);
         try {
             lastHtml = await page.content();
         } catch {
@@ -41,7 +44,7 @@ async function waitForHtmlStability(page, maxWait = 10000, stableThreshold = 200
     const startTime = Date.now();
 
     while (Date.now() - startTime < maxWait) {
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(20000);
         let currentHtml = "";
 
         try {
@@ -174,12 +177,21 @@ At the end, output a summary in this format:
 
     try {
         console.log(`🕹️ Running AI-generated code in browser for: ${info.url}`);
+
+        // ----------- LOAD STORAGE/COOKIES IF EXISTS -----------
+        let contextOptions = {
+            recordVideo: { dir: folder, size: { width: 1280, height: 720 } }
+        };
+        if (fs.existsSync(storagePath)) {
+            contextOptions.storageState = storagePath;
+        }
+
         browser = await chromium.launch({ headless: true });
-        context = await browser.newContext({ recordVideo: { dir: folder, size: { width: 1280, height: 720 } } });
+        context = await browser.newContext(contextOptions);
         page = await context.newPage();
 
         await page.goto(info.url, { waitUntil: "domcontentloaded" });
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(10000);
         await page.waitForLoadState('domcontentloaded');
 
         let hasWebSocket = false;
@@ -203,7 +215,7 @@ At the end, output a summary in this format:
         if (hasWebSocket) {
             await waitForHtmlStability(page);
         } else {
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(20000);
         }
 
         afterActionUrl = await page.evaluate(() => window.location.href);
@@ -237,17 +249,20 @@ At the end, output a summary in this format:
         outcome = aiSummary || "Interaction complete.";
         fs.writeFileSync(path.join(folder, "summary.txt"), outcome, "utf8");
         console.log(`📝 Saved summary for: ${info.url}`);
+
+        // ----------- SAVE STORAGE/COOKIES BACK -----------
+        await context.storageState({ path: storagePath });
+
     } catch (err) {
         error = "Execution error: " + err.message;
         fs.writeFileSync(path.join(folder, "ai_run_error.txt"), error, "utf8");
         console.log(`❌ AI code execution error for ${info.url}: ${err.message}`);
     } finally {
-        if (page && !page.isClosed()) await page.close();
+        if (page && !await page.isClosed()) await page.close();
         if (context) await context.close();
         if (browser) await browser.close();
     }
 
-    // Always return the content and real visible URL
     return {
         summary: aiSummary,
         resultHtml,
@@ -257,5 +272,3 @@ At the end, output a summary in this format:
         afterActionUrl
     };
 }
-
-// -- No major changes, only make sure resultHtml and afterActionUrl are always present --
