@@ -235,6 +235,7 @@ At the end, output a summary in this format:
 
         fs.writeFileSync(path.join(folder, "after_cookies.json"), JSON.stringify(cookies, null, 2));
         console.log(`🍪 Saved after-interaction cookies for: ${info.url}`);
+        if (page && !await page.isClosed()) await page.close();
 
         const video = await page.video();
         if (video) {
@@ -253,52 +254,7 @@ At the end, output a summary in this format:
         fs.writeFileSync(path.join(folder, "summary.txt"), outcome, "utf8");
         console.log(`📝 Saved summary for: ${info.url}`);
 
-        // ----------- SAVE STORAGE/COOKIES BACK -----------
-        const currentState = await context.storageState();
-        let previousState = { cookies: [], origins: [] };
-
-        if (fs.existsSync(storagePath)) {
-            try {
-                previousState = JSON.parse(fs.readFileSync(storagePath, 'utf8'));
-            } catch (err) {
-                console.warn("⚠️ Could not parse previous storage.json:", err.message);
-            }
-        }
-
-// Merge cookies
-        const cookieMap = new Map();
-        for (const c of [...previousState.cookies, ...currentState.cookies]) {
-            const key = `${c.name}|${c.domain}|${c.path}`;
-            cookieMap.set(key, c);
-        }
-        const mergedCookies = Array.from(cookieMap.values());
-
-// Merge origins (localStorage / sessionStorage)
-        const originMap = new Map();
-        for (const o of [...previousState.origins, ...currentState.origins]) {
-            const originKey = o.origin;
-            const existing = originMap.get(originKey) || { origin: originKey, localStorage: [] };
-            const storageMap = new Map();
-
-            for (const item of existing.localStorage) {
-                storageMap.set(item.name, item);
-            }
-
-            for (const item of o.localStorage) {
-                storageMap.set(item.name, item); // overwrite or add
-            }
-
-            existing.localStorage = Array.from(storageMap.values());
-            originMap.set(originKey, existing);
-        }
-        const mergedOrigins = Array.from(originMap.values());
-
-        const mergedState = {
-            cookies: mergedCookies,
-            origins: mergedOrigins
-        };
-
-        fs.writeFileSync(storagePath, JSON.stringify(mergedState, null, 2));
+        await context.storageState({ path: storagePath });
         console.log("💾 Upserted storage.json with merged cookies + localStorage.");
 
 
@@ -307,7 +263,6 @@ At the end, output a summary in this format:
         fs.writeFileSync(path.join(folder, "ai_run_error.txt"), error, "utf8");
         console.log(`❌ AI code execution error for ${info.url}: ${err.message}`);
     } finally {
-        if (page && !await page.isClosed()) await page.close();
         if (context) await context.close();
         if (browser) await browser.close();
     }
