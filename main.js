@@ -143,10 +143,15 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                 console.log(`   #${index + 1}: inputs: [${inputSummary}] | buttons: [${buttonSummary}]`);
             });
 
+            await context.storageState({ path: storagePath });
+            console.log(`🍪 Saved before-forms cookies for: ${url}`);
+
             for (const form of allForms) {
                 const key = form.inputs.map(i => i.name + i.type).join(',') + form.buttons.map(b => b.text).join(',');
                 if (seenForms.has(key)) continue;
                 seenForms.add(key);
+
+
 
                 console.log(`🤖 Passing form to AI for: ${url}`);
                 aiResult = await aiInteractRecursive({ ...pageData, form }, folder);
@@ -243,7 +248,6 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                 }
             }
 
-            await context.storageState({ path: storagePath });
             const title = await page.title();
             const stats = {
                 forms: allForms.length,
