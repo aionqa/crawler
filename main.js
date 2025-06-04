@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { URL } from 'url';
 import { chromium } from 'playwright';
-import { aiInteract } from './ai.js';
+import { aiInteractRecursive } from './ai.js';
 import { analyzeHtmlContent } from './htmlAnalyzer.js';
 import crypto from 'crypto';
 
@@ -100,16 +100,16 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
     while (pagesToVisit.length) {
         const { url, depth } = pagesToVisit.shift();
-        const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
-        const restoreLog = scopedLogger(uuid);
-        const folder = path.join(OUTPUT, uuid);
-        ensureDir(folder);
         if (visited.has(url) || depth > maxDepth) continue;
         if (isUrlIgnored(url)) {
             console.log(`⏩ Skipping ignored URL: ${url}`);
             continue;
         }
         visited.add(url);
+        const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+        const restoreLog = scopedLogger(uuid);
+        const folder = path.join(OUTPUT, uuid);
+        ensureDir(folder);
         console.log(`🌐 Crawling [depth ${depth}]: ${url}`);
 
         let contextOptions = {};
@@ -139,7 +139,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                     seenForms.add(key);
 
                     console.log(`🤖 Passing form to AI for: ${url}`);
-                    aiResult = await aiInteract({ ...pageData, form }, folder);
+                    aiResult = await aiInteractRecursive({ ...pageData, form }, folder);
                     if (aiResult.error) {
                         console.log(`❌ AI interaction error: ${aiResult.error}`);
                         continue;
@@ -186,47 +186,33 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                     }
                 }
             } else {
-                console.log(`🤖 Passing non-form page to AI for: ${url}`);
-                aiResult = await aiInteract({ ...pageData, form: null }, folder);
-                const resultHtml = aiResult.resultHtml || '';
-                const afterActionUrl = aiResult.afterActionUrl || url;
-                const htmlHash = crypto.createHash('md5').update(resultHtml).digest('hex');
-                const stateKey = afterActionUrl + '#' + htmlHash;
+                console.log(`🧠 Describing non-form page using AI: ${url}`);
+                const description = await aiDescribePage({ ...pageData, form: null }, folder);
 
-                if (!seenStates.has(stateKey) &&
-                    (afterActionUrl !== url || htmlSignificantlyChanged(originalHtml, resultHtml))) {
-                    seenStates.add(stateKey);
-
-                    const virtualPageId = Buffer.from(afterActionUrl + '_' + htmlHash).toString('base64').replace(/[/+=]/g, '');
-                    const virtualFolder = path.join(OUTPUT, virtualPageId);
-                    ensureDir(virtualFolder);
-                    fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
-
-                    const spaPageInfo = await analyzeHtmlContent(resultHtml, afterActionUrl);
-
+                if (description) {
+                    fs.writeFileSync(path.join(folder, "page_description.txt"), description, "utf8");
                     logPage({
-                        url: afterActionUrl,
-                        uuid: virtualPageId,
-                        summary: aiResult?.summary || "",
-                        title: spaPageInfo?.title || "",
+                        url,
+                        uuid,
+                        summary: "Described without interaction",
+                        title: await page.title(),
                         statistics: {
-                            forms: (spaPageInfo?.allForms || []).length,
-                            ai_interaction: true,
-                            interactives: (spaPageInfo?.interactives || []).length
+                            forms: (pageData.allForms || []).length,
+                            ai_interaction: false,
+                            interactives: (pageData.interactives || []).length
                         }
-                    }, "virtual");
-
-                    const spaLinks = spaPageInfo.links || [];
-                    for (const l of spaLinks) {
-                        if (!isUrlIgnored(l)) {
-                            pagesToVisit.push({ url: l, depth: depth + 2 });
-                        }
-                    }
+                    });
                 }
 
-                if (afterActionUrl && afterActionUrl !== url && !visited.has(afterActionUrl)) {
-                    pagesToVisit.push({ url: afterActionUrl, depth: depth + 1 });
+                if (aiResult?.newUrls) {
+                    newLinks.push(...aiResult.newUrls.filter(l => {
+                        try {
+                            const u = new URL(l, baseDomain);
+                            return u.origin === baseDomain && !visited.has(u.toString());
+                        } catch { return false; }
+                    }));
                 }
+
             }
 
             let newLinks = pageData.links?.filter(l => {
@@ -241,14 +227,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                 }
             }) || [];
 
-            if (aiResult?.newUrls) {
-                newLinks.push(...aiResult.newUrls.filter(l => {
-                    try {
-                        const u = new URL(l, baseDomain);
-                        return u.origin === baseDomain && !visited.has(u.toString());
-                    } catch { return false; }
-                }));
-            }
+
 
             for (const l of newLinks) {
                 if (!isUrlIgnored(l)) {
@@ -257,7 +236,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
             }
 
             await context.storageState({ path: storagePath });
-            const title = await page.title(); // ✅ Fix — declare before use
+            const title = await page.title();
             const formsCount = (pageData.allForms || []).length;
             const aiDid = aiResult?.summary || '';
             const stats = {

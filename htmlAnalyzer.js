@@ -2,7 +2,7 @@ import { JSDOM, VirtualConsole } from 'jsdom';
 
 export async function analyzeHtmlContent(html, baseUrl = "") {
     const virtualConsole = new VirtualConsole();
-    virtualConsole.sendTo(console).on("jsdomError", () => {}); // Suppress jsdom CSS parse errors
+    virtualConsole.sendTo(console, { omitJSDOMErrors: true }); // <--- Use this!
 
     const dom = new JSDOM(html, {
         pretendToBeVisual: true,
