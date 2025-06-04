@@ -3,6 +3,8 @@ import fs from "fs";
 import path from "path";
 import OpenAI from "openai";
 import { chromium } from "playwright";
+import { analyzeHtmlContent } from './htmlAnalyzer.js';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -271,4 +273,132 @@ At the end, output a summary in this format:
         error,
         afterActionUrl
     };
+}
+
+
+export async function aiInteractRecursive(info, folder, depth = 0, maxDepth = 10, seenForms = new Set()) {
+    if (depth > maxDepth) {
+        console.log(`🛑 Max recursion depth ${maxDepth} reached.`);
+        return { outcome: "Max depth reached", steps: depth };
+    }
+
+    const stepFolder = path.join(folder, `step_${depth}`);
+    const result = await aiInteract(info, stepFolder);
+
+    if (result.error) {
+        console.log(`❌ Error during AI interaction at depth ${depth}: ${result.error}`);
+        return { ...result, steps: depth };
+    }
+
+    const { resultHtml, summary, afterActionUrl } = result;
+
+    if (!resultHtml) {
+        console.log(`⚠️ No HTML returned after step ${depth}`);
+        return { ...result, steps: depth };
+    }
+
+    // Prevent infinite loops on similar HTML
+    const htmlFingerprint = crypto.createHash("md5").update(resultHtml).digest("hex");
+    const stateKey = afterActionUrl + "#" + htmlFingerprint;
+    if (seenForms.has(stateKey)) {
+        console.log(`🛑 Detected repeating state at depth ${depth}, stopping recursion.`);
+        return { ...result, outcome: "Repeated state", steps: depth };
+    }
+    seenForms.add(stateKey);
+
+    console.log(`🔁 Step ${depth} completed. Summary: ${summary}`);
+
+    const nextInfo = await analyzeHtmlContent(resultHtml, afterActionUrl);
+    const nextForm = (nextInfo.allForms || [])[0];
+
+    // Save info snapshot
+    fs.writeFileSync(path.join(stepFolder, `info_step_${depth}.json`), JSON.stringify(nextInfo, null, 2));
+
+    // Stop if no meaningful next form OR success detected
+    const terminal = summary?.toLowerCase().includes("success") || summary?.toLowerCase().includes("completed");
+    const nextFormValid = nextForm && nextForm.inputs?.length > 0;
+
+    if (terminal || !nextFormValid) {
+        console.log(`✅ Ending recursion at step ${depth} — ${summary || "No more forms"}`);
+        return { ...result, steps: depth + 1 };
+    }
+
+    console.log(`🔄 Continuing to step ${depth + 1}...`);
+    return await aiInteractRecursive({
+        ...nextInfo,
+        form: nextForm,
+        url: afterActionUrl,
+        screenshotPath: path.join(stepFolder, "after.png")
+    }, folder, depth + 1, maxDepth, seenForms);
+}
+
+export async function aiDescribePage(info, folder) {
+    const aiVars = loadAIVars();
+    fs.mkdirSync(folder, { recursive: true });
+
+    const prompt = `
+You are a web intelligence agent.
+
+Your job is to read and describe a web page, NOT to interact with it.
+
+You will receive:
+- A page snapshot (DOM, text, and basic structure)
+- A screenshot
+- Some variable context
+
+You must:
+- Summarize what the page appears to do or offer
+- Identify interactive elements (buttons, forms, inputs)
+- Suggest what actions a user might perform on this page
+- Output a short, structured JSON with the following fields:
+  {
+    "summary": "<one sentence>",
+    "interactions": ["<brief list of things a user might do>"],
+    "suggestedActions": ["<suggested AI next steps>"]
+  }
+
+HTML context (text summary):
+${shortText(info.textSummary)}
+
+Form and element info:
+${JSON.stringify(info.form || info.allForms || [], null, 2)}
+
+Other links:
+${JSON.stringify(info.links || [], null, 2)}
+
+Vars: ${Object.keys(aiVars).join(', ')}
+    `.trim();
+
+    let screenshotContent = "";
+    if (info.screenshotPath && fs.existsSync(info.screenshotPath)) {
+        const imgBuffer = fs.readFileSync(info.screenshotPath);
+        const extension = path.extname(info.screenshotPath).replace('.', '') || 'png';
+        screenshotContent = `data:image/${extension};base64,${imgBuffer.toString("base64")}`;
+    }
+
+    const messages = [{
+        role: "user",
+        content: [
+            { type: "text", text: prompt },
+            ...(screenshotContent ? [{ type: "image_url", image_url: { url: screenshotContent } }] : [])
+        ],
+    }];
+
+    try {
+        console.log(`🧠 Asking OpenAI to describe: ${info.url}`);
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages,
+            temperature: 0.3,
+            max_tokens: 2048
+        });
+
+        const outputText = completion.choices[0].message.content.trim();
+        fs.writeFileSync(path.join(folder, "ai_description.json"), outputText, "utf8");
+        return outputText;
+    } catch (err) {
+        const error = "OpenAI API error: " + err.message;
+        fs.writeFileSync(path.join(folder, "ai_error.txt"), error, "utf8");
+        return null;
+    }
 }
