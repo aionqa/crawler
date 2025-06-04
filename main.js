@@ -153,9 +153,11 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
                 const resultHtml = aiResult?.resultHtml || '';
                 const afterActionUrl = aiResult?.afterActionUrl || url;
-
                 const htmlHash = crypto.createHash('md5').update(resultHtml).digest('hex');
                 const stateKey = afterActionUrl + '#' + htmlHash;
+
+                console.log("📌 Form container preview:", form.container.outerHTML.slice(0, 200));
+
 
                 // Only continue if URL changed or DOM changed
                 if (

@@ -1,10 +1,22 @@
 import { JSDOM, VirtualConsole } from 'jsdom';
 
 function isProbablyVisible(el) {
-    const style = el.getAttribute("style") || "";
-    const hidden = el.hasAttribute("hidden") || el.getAttribute("aria-hidden") === "true";
-    return !style.includes("display: none") && !style.includes("visibility: hidden") && !hidden;
+    if (!el || typeof el.closest !== 'function') return false;
+
+    // Walk up the DOM tree to ensure all ancestors are visible
+    let current = el;
+    while (current && current !== current.ownerDocument.body) {
+        const style = current.getAttribute("style") || "";
+        const hidden = current.hasAttribute("hidden") || current.getAttribute("aria-hidden") === "true";
+        const displayNone = style.includes("display: none");
+        const visibilityHidden = style.includes("visibility: hidden");
+
+        if (hidden || displayNone || visibilityHidden) return false;
+        current = current.parentElement;
+    }
+    return true;
 }
+
 
 function getUniversalFormSignature(form) {
     const inputSig = form.inputs
@@ -44,22 +56,37 @@ const extractButton = el => ({
 });
 
 function extractForms(document, selectors) {
-    return Array.from(document.querySelectorAll(selectors))
-        .filter(container => {
-            const hasInputs = container.querySelectorAll("input, textarea, select").length > 0;
-            const hasButtons = container.querySelectorAll("button, input[type='submit'], input[type='button']").length > 0;
-            return hasInputs && hasButtons;
+    const forms = Array.from(document.querySelectorAll(selectors))
+        .map(container => {
+            const inputs = Array.from(container.querySelectorAll("input, textarea, select"))
+                .filter(isProbablyVisible)
+                .map(extractField);
+
+            const buttons = Array.from(container.querySelectorAll("button, input[type='submit'], input[type='button']"))
+                .filter(isProbablyVisible)
+                .map(extractButton);
+
+            const topY = container.getBoundingClientRect?.()?.top || 0;
+
+            return {
+                container,
+                inputs,
+                buttons,
+                score: inputs.length + buttons.length,
+                positionTop: topY
+            };
         })
-        .map(container => ({
-            container,
-            inputs: Array.from(container.querySelectorAll("input, textarea, select"))
-                .filter(isProbablyVisible)
-                .map(extractField),
-            buttons: Array.from(container.querySelectorAll("button, input[type='submit'], input[type='button']"))
-                .filter(isProbablyVisible)
-                .map(extractButton)
-        }));
+        .filter(f => (f.inputs.length + f.buttons.length) > 0);
+
+    // Sort by number of fields/buttons DESC, then vertical position ASC
+    forms.sort((a, b) =>
+        b.score - a.score || a.positionTop - b.positionTop
+    );
+
+    return forms.length ? [forms[0]] : [];
 }
+
+
 
 export async function analyzeHtmlContent(html, baseUrl = "") {
     const virtualConsole = new VirtualConsole();

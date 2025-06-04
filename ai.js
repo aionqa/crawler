@@ -232,6 +232,7 @@ At the end, output a summary in this format:
         console.log(`📸 Saved after-interaction screenshot for: ${info.url}`);
 
         const cookies = await context.cookies();
+
         fs.writeFileSync(path.join(folder, "after_cookies.json"), JSON.stringify(cookies, null, 2));
         console.log(`🍪 Saved after-interaction cookies for: ${info.url}`);
 
@@ -253,7 +254,53 @@ At the end, output a summary in this format:
         console.log(`📝 Saved summary for: ${info.url}`);
 
         // ----------- SAVE STORAGE/COOKIES BACK -----------
-        await context.storageState({ path: storagePath });
+        const currentState = await context.storageState();
+        let previousState = { cookies: [], origins: [] };
+
+        if (fs.existsSync(storagePath)) {
+            try {
+                previousState = JSON.parse(fs.readFileSync(storagePath, 'utf8'));
+            } catch (err) {
+                console.warn("⚠️ Could not parse previous storage.json:", err.message);
+            }
+        }
+
+// Merge cookies
+        const cookieMap = new Map();
+        for (const c of [...previousState.cookies, ...currentState.cookies]) {
+            const key = `${c.name}|${c.domain}|${c.path}`;
+            cookieMap.set(key, c);
+        }
+        const mergedCookies = Array.from(cookieMap.values());
+
+// Merge origins (localStorage / sessionStorage)
+        const originMap = new Map();
+        for (const o of [...previousState.origins, ...currentState.origins]) {
+            const originKey = o.origin;
+            const existing = originMap.get(originKey) || { origin: originKey, localStorage: [] };
+            const storageMap = new Map();
+
+            for (const item of existing.localStorage) {
+                storageMap.set(item.name, item);
+            }
+
+            for (const item of o.localStorage) {
+                storageMap.set(item.name, item); // overwrite or add
+            }
+
+            existing.localStorage = Array.from(storageMap.values());
+            originMap.set(originKey, existing);
+        }
+        const mergedOrigins = Array.from(originMap.values());
+
+        const mergedState = {
+            cookies: mergedCookies,
+            origins: mergedOrigins
+        };
+
+        fs.writeFileSync(storagePath, JSON.stringify(mergedState, null, 2));
+        console.log("💾 Upserted storage.json with merged cookies + localStorage.");
+
 
     } catch (err) {
         error = "Execution error: " + err.message;
