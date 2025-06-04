@@ -106,10 +106,12 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
             continue;
         }
         visited.add(url);
+
         const uuid = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
         const restoreLog = scopedLogger(uuid);
         const folder = path.join(OUTPUT, uuid);
         ensureDir(folder);
+
         console.log(`🌐 Crawling [depth ${depth}]: ${url}`);
 
         let contextOptions = {};
@@ -128,64 +130,77 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
 
             const pageData = await gatherPageInfo(page, url, folder);
             const originalHtml = pageData.currentHtml;
-
+            const allForms = pageData.allForms || [];
             let aiResult = null;
+            let lastUrl = url;
 
-            if (pageData.allForms && pageData.allForms.length > 0) {
-                const seenForms = new Set();
-                for (const form of pageData.allForms) {
-                    const key = form.inputs.map(i => i.name + i.type).join(',') + form.buttons.map(b => b.text).join(',');
-                    if (seenForms.has(key)) continue;
-                    seenForms.add(key);
+            const seenForms = new Set();
 
-                    console.log(`🤖 Passing form to AI for: ${url}`);
-                    aiResult = await aiInteractRecursive({ ...pageData, form }, folder);
-                    if (aiResult.error) {
-                        console.log(`❌ AI interaction error: ${aiResult.error}`);
-                        continue;
-                    }
+            console.log(`🧾 Found ${allForms.length} form(s) on: ${url}`);
+            allForms.forEach((form, index) => {
+                const inputSummary = form.inputs.map(i => `${i.name || i.id || i.placeholder || i.type}`).join(', ');
+                const buttonSummary = form.buttons.map(b => b.text || b.name || b.id).join(', ');
+                console.log(`   #${index + 1}: inputs: [${inputSummary}] | buttons: [${buttonSummary}]`);
+            });
 
-                    const resultHtml = aiResult.resultHtml || '';
-                    const afterActionUrl = aiResult.afterActionUrl || url;
-                    const htmlHash = crypto.createHash('md5').update(resultHtml).digest('hex');
-                    const stateKey = afterActionUrl + '#' + htmlHash;
+            for (const form of allForms) {
+                const key = form.inputs.map(i => i.name + i.type).join(',') + form.buttons.map(b => b.text).join(',');
+                if (seenForms.has(key)) continue;
+                seenForms.add(key);
 
-                    if (!seenStates.has(stateKey) &&
-                        (afterActionUrl !== url || htmlSignificantlyChanged(originalHtml, resultHtml))) {
-                        seenStates.add(stateKey);
+                console.log(`🤖 Passing form to AI for: ${url}`);
+                aiResult = await aiInteractRecursive({ ...pageData, form }, folder);
 
-                        const virtualPageId = Buffer.from(afterActionUrl + '_' + htmlHash).toString('base64').replace(/[/+=]/g, '');
-                        const virtualFolder = path.join(OUTPUT, virtualPageId);
-                        ensureDir(virtualFolder);
-                        fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
+                const resultHtml = aiResult?.resultHtml || '';
+                const afterActionUrl = aiResult?.afterActionUrl || url;
 
-                        const spaPageInfo = await analyzeHtmlContent(resultHtml, afterActionUrl);
+                const htmlHash = crypto.createHash('md5').update(resultHtml).digest('hex');
+                const stateKey = afterActionUrl + '#' + htmlHash;
 
-                        logPage({
-                            url: afterActionUrl,
-                            uuid: virtualPageId,
-                            summary: aiResult?.summary || "",
-                            title: spaPageInfo?.title || "",
-                            statistics: {
-                                forms: (spaPageInfo?.allForms || []).length,
-                                ai_interaction: true,
-                                interactives: (spaPageInfo?.interactives || []).length
-                            }
-                        }, "virtual");
+                // Only continue if URL changed or DOM changed
+                if (
+                    !seenStates.has(stateKey) &&
+                    (afterActionUrl !== url || htmlSignificantlyChanged(originalHtml, resultHtml))
+                ) {
+                    seenStates.add(stateKey);
 
-                        const spaLinks = spaPageInfo.links || [];
-                        for (const l of spaLinks) {
-                            if (!isUrlIgnored(l)) {
-                                pagesToVisit.push({ url: l, depth: depth + 2 });
-                            }
+                    const virtualPageId = Buffer.from(afterActionUrl + '_' + htmlHash).toString('base64').replace(/[/+=]/g, '');
+                    const virtualFolder = path.join(OUTPUT, virtualPageId);
+                    ensureDir(virtualFolder);
+                    fs.writeFileSync(path.join(virtualFolder, "virtual_result.html"), resultHtml, "utf8");
+
+                    const spaPageInfo = await analyzeHtmlContent(resultHtml, afterActionUrl);
+
+                    logPage({
+                        url: afterActionUrl,
+                        uuid: virtualPageId,
+                        summary: aiResult?.summary || "",
+                        title: spaPageInfo?.title || "",
+                        statistics: {
+                            forms: (spaPageInfo?.allForms || []).length,
+                            ai_interaction: true,
+                            interactives: (spaPageInfo?.interactives || []).length
+                        }
+                    });
+
+                    // Push links to crawl
+                    const spaLinks = spaPageInfo.links || [];
+                    for (const l of spaLinks) {
+                        if (!isUrlIgnored(l)) {
+                            pagesToVisit.push({ url: l, depth: depth + 2 });
                         }
                     }
 
-                    if (afterActionUrl && afterActionUrl !== url && !visited.has(afterActionUrl)) {
+                    if (!visited.has(afterActionUrl)) {
                         pagesToVisit.push({ url: afterActionUrl, depth: depth + 1 });
                     }
+
+                    lastUrl = afterActionUrl;
                 }
-            } else {
+            }
+
+            // If no forms or AI skipped, describe the page
+            if (!aiResult && allForms.length === 0) {
                 console.log(`🧠 Describing non-form page using AI: ${url}`);
                 const description = await aiDescribePage({ ...pageData, form: null }, folder);
 
@@ -197,55 +212,44 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                         summary: "Described without interaction",
                         title: await page.title(),
                         statistics: {
-                            forms: (pageData.allForms || []).length,
+                            forms: allForms.length,
                             ai_interaction: false,
                             interactives: (pageData.interactives || []).length
                         }
                     });
                 }
-
-                if (aiResult?.newUrls) {
-                    newLinks.push(...aiResult.newUrls.filter(l => {
-                        try {
-                            const u = new URL(l, baseDomain);
-                            return u.origin === baseDomain && !visited.has(u.toString());
-                        } catch { return false; }
-                    }));
-                }
-
             }
 
-            let newLinks = pageData.links?.filter(l => {
+            // Gather new links to crawl
+            const newLinks = (pageData.links || []).filter(link => {
                 try {
-                    const absUrl = new URL(l, baseDomain);
-                    if (absUrl.origin !== baseDomain) return false;
-                    if (absUrl.href === url) return false;
-                    if (absUrl.hash && absUrl.origin + absUrl.pathname === new URL(url).origin + new URL(url).pathname) return false;
-                    return !visited.has(absUrl.href);
+                    const absUrl = new URL(link, baseDomain);
+                    return (
+                        absUrl.origin === baseDomain &&
+                        absUrl.href !== url &&
+                        !visited.has(absUrl.href) &&
+                        !(absUrl.hash && absUrl.origin + absUrl.pathname === new URL(url).origin + new URL(url).pathname)
+                    );
                 } catch {
                     return false;
                 }
-            }) || [];
+            });
 
-
-
-            for (const l of newLinks) {
-                if (!isUrlIgnored(l)) {
-                    pagesToVisit.push({ url: l, depth: depth + 1 });
+            for (const link of newLinks) {
+                if (!isUrlIgnored(link)) {
+                    pagesToVisit.push({ url: link, depth: depth + 1 });
                 }
             }
 
             await context.storageState({ path: storagePath });
             const title = await page.title();
-            const formsCount = (pageData.allForms || []).length;
-            const aiDid = aiResult?.summary || '';
             const stats = {
-                forms: formsCount,
-                ai_interaction: Boolean(aiDid),
+                forms: allForms.length,
+                ai_interaction: Boolean(aiResult?.summary),
                 interactives: (pageData.interactives || []).length
             };
 
-            logPage({ url, uuid, summary: aiDid, title, statistics: stats });
+            logPage({ url, uuid, summary: aiResult?.summary || "", title, statistics: stats });
 
         } catch (err) {
             console.warn(`⚠️ Error crawling ${url}: ${err.message}`);
@@ -254,7 +258,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
             await context.close();
             await browser.close();
             console.log(`🛑 Closed browser for: ${url}`);
-            restoreLog(); // 👈 Restore default logging
+            restoreLog();
         }
     }
 
