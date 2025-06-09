@@ -300,7 +300,7 @@ At the end, output a summary in this format:
 }
 
 
-export async function aiInteractRecursive(info, folder, depth = 0, maxDepth = 10, seenForms = new Set()) {
+export async function aiInteractRecursive(info, folder, depth = 0, maxDepth = 5, seenForms = new Set()) {
     if (depth > maxDepth) {
         console.log(`🛑 Max recursion depth ${maxDepth} reached.`);
         return { outcome: "Max depth reached", steps: depth };
