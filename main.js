@@ -4,6 +4,7 @@ import path from 'path';
 import { URL } from 'url';
 import { chromium } from 'playwright';
 import { aiInteractRecursive } from './ai.js';
+import { aiDescribePage } from './ai.js';
 import { analyzeHtmlContent } from './htmlAnalyzer.js';
 import crypto from 'crypto';
 
@@ -161,7 +162,7 @@ export async function recursiveCrawl(startUrl, maxDepth = MAX_DEPTH, visited = n
                 const htmlHash = crypto.createHash('md5').update(resultHtml).digest('hex');
                 const stateKey = afterActionUrl + '#' + htmlHash;
 
-                console.log("📌 Form container preview:", form.container.outerHTML.slice(0, 200));
+                //console.log("📌 Form container preview:", form.container.outerHTML.slice(0, 200));
 
 
                 // Only continue if URL changed or DOM changed

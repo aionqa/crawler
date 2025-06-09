@@ -73,10 +73,24 @@ async function waitForHtmlStability(page, maxWait = 10000, stableThreshold = 200
 export async function aiInteract(info, folder) {
     const aiVars = loadAIVars();
     fs.mkdirSync(folder, { recursive: true });
+    const describedVars = Object.entries(aiVars)
+        .filter(([key, value]) =>
+            key !== "description-for-ai" &&
+            typeof value === 'object' &&
+            value !== null &&
+            !Array.isArray(value)
+        )
+        .map(([scope, values]) => {
+            const keys = Object.keys(values).join(', ');
+            const descMap = aiVars["description-for-ai"];
+            const desc = (descMap && typeof descMap === 'object' && descMap[scope]) || 'no description';
+            return `- ${scope}: { ${keys} } (${desc})`;
+        }).join("\n");
 
     // Compose the AI prompt
     const prompt = `
 You are an intelligent automation agent using Playwright.
+Look at the screenshot first. Do not do anything until you'll see it.
 
 Your task is to analyze a webpage and return only executable JavaScript code for Playwright that performs actions like filling in forms, clicking buttons, following links, or waiting for results.
 
@@ -98,6 +112,9 @@ Your task is to analyze a webpage and return only executable JavaScript code for
 - do not wait for neither successes nor failures - assume all done when update or redirection is completed
 - do not add logic for finding an outcome
 
+If there are no variables for a form on a page, generate the static values without placeholders.
+If there is CAPCHA on the screenshot, solve it entering whatever is asked to pass (like symbols from an image which is on teh screenshot).
+
 After each \`
     page.fill()\` or \`
     page.click()\`, add a small delay using:
@@ -110,9 +127,12 @@ You receive a snapshot of a web page with the following info:
 ${JSON.stringify(info.form, null, 2)}
 Other page links:
 ${JSON.stringify(info.links, null, 2)}
-Vars: ${Object.keys(aiVars).join(', ')}
+Variable context:
+${describedVars}
 
 A screenshot is attached.
+
+Also, ${process.env.AI_STATIC_EXTRA}.
 
 Before every action (such as filling in a field, clicking a button, submitting a form, navigating, etc.), insert a line of code like:
 console.log("🔸 [Describe what is happening, with an emoji]");
@@ -143,9 +163,9 @@ At the end, output a summary in this format:
     try {
         console.log(`🤖 Sending prompt to OpenAI for: ${info.url}`);
         const completion = await openai.chat.completions.create({
-            model: "gpt-4o",
+            model: "gpt-4.1",
             messages,
-            temperature: 0.2,
+            temperature: 0,
             max_tokens: 4096
         });
 
@@ -195,6 +215,8 @@ At the end, output a summary in this format:
         await page.goto(info.url, { waitUntil: "domcontentloaded" });
         await page.waitForTimeout(10000);
         await page.waitForLoadState('domcontentloaded');
+        await page.screenshot({ path: path.join(folder, "before.png"), type: "png", fullPage: true });
+        console.log(`📸 Saved before-interaction screenshot for: ${info.url}`);
 
         let hasWebSocket = false;
         page.on("websocket", () => {
@@ -285,6 +307,23 @@ export async function aiInteractRecursive(info, folder, depth = 0, maxDepth = 10
     }
 
     const stepFolder = path.join(folder, `step_${depth}`);
+// Take and save a before screenshot
+    const browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+
+    await page.goto(info.url, { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(10000);
+    await page.waitForLoadState('domcontentloaded');
+
+    const beforeScreenshotPath = path.join(stepFolder, "before.png");
+    await page.screenshot({ path: beforeScreenshotPath, type: "png", fullPage: true });
+    await page.close();
+    await context.close();
+    await browser.close();
+
+    info.screenshotPath = beforeScreenshotPath;
+
     const result = await aiInteract(info, stepFolder);
 
     if (result.error) {
@@ -337,16 +376,31 @@ export async function aiInteractRecursive(info, folder, depth = 0, maxDepth = 10
 export async function aiDescribePage(info, folder) {
     const aiVars = loadAIVars();
     fs.mkdirSync(folder, { recursive: true });
-
+    const describedVars = Object.entries(aiVars)
+        .filter(([key, value]) =>
+            key !== "description-for-ai" &&
+            typeof value === 'object' &&
+            value !== null &&
+            !Array.isArray(value)
+        )
+        .map(([scope, values]) => {
+            const keys = Object.keys(values).join(', ');
+            const descMap = aiVars["description-for-ai"];
+            const desc = (descMap && typeof descMap === 'object' && descMap[scope]) || 'no description';
+            return `- ${scope}: { ${keys} } (${desc})`;
+        }).join("\n");
     const prompt = `
 You are a web intelligence agent.
-
+Look at the screenshot first. Do not do anything until you'll see it.
 Your job is to read and describe a web page, NOT to interact with it.
 
 You will receive:
 - A page snapshot (DOM, text, and basic structure)
 - A screenshot
 - Some variable context
+
+If there are no variables for a form on a page, generate the static values without placeholders.
+If there is CAPTCHA on the screenshot, solve it entering whatever is asked to pass (like symbols from an image).
 
 You must:
 - Summarize what the page appears to do or offer
@@ -368,7 +422,10 @@ ${JSON.stringify(info.form || info.allForms || [], null, 2)}
 Other links:
 ${JSON.stringify(info.links || [], null, 2)}
 
-Vars: ${Object.keys(aiVars).join(', ')}
+Variable context:
+${describedVars}
+
+Also, ${process.env.AI_STATIC_EXTRA}.
     `.trim();
 
     let screenshotContent = "";
@@ -389,10 +446,10 @@ Vars: ${Object.keys(aiVars).join(', ')}
     try {
         console.log(`🧠 Asking OpenAI to describe: ${info.url}`);
         const completion = await openai.chat.completions.create({
-            model: "gpt-4o",
+            model: "gpt-4.1",
             messages,
-            temperature: 0.3,
-            max_tokens: 2048
+            temperature: 0,
+            max_tokens: 4096
         });
 
         const outputText = completion.choices[0].message.content.trim();
