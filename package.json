@@ -1,14 +1,23 @@
 {
+  "name": "single-page-analyzer",
+  "version": "1.0.0",
+  "description": "Single target / single page analyzer that uses Playwright to load one page and GPT-5-mini to enumerate interactive elements. Saves to MongoDB.",
   "type": "module",
+  "main": "singlePageAnalyzer.js",
+  "scripts": {
+    "install:pw": "playwright install chromium",
+    "analyze": "node singlePageAnalyzer.js",
+    "run:action": "node executeAction.js",
+    "format": "prettier -w ../../Downloads/single-page-analyzer"
+  },
   "dependencies": {
-    "argparse": "^2.0.1",
-    "crawlee": "^3.13.5",
-    "dotenv": "^16.5.0",
-    "fs": "^0.0.1-security",
-    "jsdom": "^26.1.0",
-    "openai": "^4.103.0",
-    "path": "^0.12.7",
-    "playwright": "^1.52.0",
-    "url": "^0.11.4"
+    "dotenv": "^16.4.5",
+    "mongodb": "^6.8.0",
+    "openai": "^4.56.0",
+    "playwright": "^1.47.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3"
   }
 }
