@@ -67,6 +67,7 @@ async function uploadToGridFS({ filename, buffer, contentType, metadata }) {
   });
 }
 const OptStr = z.string().trim().min(1).max(20000).nullish();
+const ShortStr = z.string().trim().min(1).max(280);
 const NonEmptyStr = z.string().trim().min(1).max(20000);
 const Sel = z.object({ best: OptStr, css: OptStr, xpath: OptStr }).strict();
 const InteractiveElement = z.object({
@@ -85,9 +86,22 @@ const InteractiveElement = z.object({
   ai_confidence: z.number().min(0).max(1).nullish(),
 }).strict();
 const ModelResponse = z.object({
-  page_summary: OptStr,
+  page_summary: ShortStr,
   interactive_elements: z.array(InteractiveElement),
 }).strict();
+
+
+function deriveShortSummary(html) {
+  try {
+    const title = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').replace(/\s+/g,' ').trim();
+    const h1 = (html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || '').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+    const base = [title, h1].filter(Boolean).join(' — ');
+    if (!base) return 'Web page summary unavailable.';
+    // Cap ~40 words
+    const words = base.split(/\s+/);
+    return words.slice(0, 40).join(' ');
+  } catch { return 'Web page summary unavailable.'; }
+}
 
 function buildPrompt({ url, html, screenshotDataUrl }) {
   return [
@@ -98,7 +112,8 @@ function buildPrompt({ url, html, screenshotDataUrl }) {
         { type: 'text', text:
               `Analyze ONLY this page.
 First, set "page_summary" to a concise plain-English summary of the page in 1–2 sentences (<= 40 words).
-Then list all interactive elements (forms, pseudo-forms, links, buttons). Include robust selectors and a Playwright script for each element, plus result checks.
+Then output "interactive_elements" where EACH <form> is ONE action: element_type="form" with selectors pointing to the form container, an "inputs" array (label, name, id, type, placeholder, selectors, example_value for each field), and ONE "submit_button". DO NOT output separate actions for individual inputs of the same form.
+For non-form actions, include buttons and links that trigger navigation or meaningful network calls.
 Return STRICT JSON per schema, no commentary.` },
         { type: 'text', text: `URL: ${url}` },
         { type: 'text', text: `HTML (truncated):\n${html.slice(0, 150000)}` },
@@ -387,6 +402,97 @@ function dedupeFormGroupsNode(groups = []) {
   }
   return keep.map(x => x.g);
 }
+
+function selToKey(sel) {
+  try {
+    if (!sel) return '';
+    if (typeof sel === 'string') return sel.trim().toLowerCase();
+    if (Array.isArray(sel)) return (sel[0] || '').trim().toLowerCase();
+    const s = sel.best || sel.css || sel.xpath || '';
+    return (s || '').trim().toLowerCase();
+  } catch { return ''; }
+}
+
+function mergeInputs(baseInputs = [], addInputs = []) {
+  const byKey = (i) => (i?.id || i?.name || selToKey(i?.selectors) || '').toLowerCase();
+  const out = [...baseInputs];
+  const idx = new Map(out.map((i, k) => [byKey(i), k]));
+  for (const ai of addInputs) {
+    const k = byKey(ai);
+    if (!k) continue;
+    if (idx.has(k)) {
+      const bi = out[idx.get(k)];
+      // copy example_value if missing
+      if ((!bi.example_value || !String(bi.example_value).trim()) && (ai.example_value && String(ai.example_value).trim())) {
+        bi.example_value = ai.example_value;
+      }
+      // prefer existing selectors; if missing, copy
+      if (!bi.selectors && ai.selectors) bi.selectors = ai.selectors;
+      // fill missing label/type/placeholder
+      for (const f of ['label','type','placeholder','name','id']) {
+        if (!bi[f] && ai[f]) bi[f] = ai[f];
+      }
+    } else {
+      out.push(ai);
+      idx.set(k, out.length - 1);
+    }
+  }
+  return out;
+}
+
+function mergeSubmitButton(a = null, b = null) {
+  if (!a) return b;
+  if (!b) return a;
+  const out = { ...a };
+  // unify text/label terminology
+  const aText = a.text || a.label || null;
+  const bText = b.text || b.label || null;
+  if (!aText && bText) out.text = bText;
+  if (!out.selectors && b.selectors) out.selectors = b.selectors;
+  return out;
+}
+
+function rankSource(s) { return s === 'dom-grouped' ? 0 : s === 'model' ? 1 : 2; }
+
+function dedupeAndMergeActions(actionDocs) {
+  const formsByKey = new Map(); // key -> index of kept action
+  const removeIdx = new Set();
+  for (let i = 0; i < actionDocs.length; i++) {
+    const doc = actionDocs[i];
+    if (doc.kind !== 'form') continue;
+    const key = selToKey(doc.selectors);
+    if (!key) continue;
+    if (!formsByKey.has(key)) {
+      formsByKey.set(key, i);
+      continue;
+    }
+    const keepIdx = formsByKey.get(key);
+    const keep = actionDocs[keepIdx];
+    const cand = doc;
+
+    // choose which to keep by source rank
+    let winner = keepIdx, loser = i;
+    if (rankSource(cand.source) < rankSource(keep.source)) {
+      winner = i; loser = keepIdx;
+      formsByKey.set(key, winner);
+    }
+    const w = actionDocs[winner];
+    const l = actionDocs[loser];
+
+    // merge fields into winner
+    if (!w.selectors && l.selectors) w.selectors = l.selectors;
+    w.inputs = mergeInputs(Array.isArray(w.inputs) ? w.inputs : [], Array.isArray(l.inputs) ? l.inputs : []);
+    w.submit_button = mergeSubmitButton(w.submit_button, l.submit_button);
+    if (!w.method && l.method) w.method = l.method;
+    if (!w.action && l.action) w.action = l.action;
+    w.source = (w.source === l.source) ? w.source : 'dom+model-merged';
+
+    removeIdx.add(loser);
+  }
+  // produce new array without removed
+  const out = actionDocs.filter((_, idx) => !removeIdx.has(idx));
+  return { actions: out, removedIndices: [...removeIdx] };
+}
 // ---------------- Main ----------------
 (async () => {
   console.log('🧵 Connecting to MongoDB…');
@@ -454,12 +560,36 @@ function dedupeFormGroupsNode(groups = []) {
     model: 'gpt-5-mini',
     messages,
     temperature: 1,
-    response_format: { type: 'json_object' },
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'SinglePageExtraction',
+        strict: false,
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['page_summary', 'interactive_elements'],
+          properties: {
+            page_summary: { type: 'string', description: '1–2 sentences, <= 40 words' },
+            interactive_elements: { type: 'array', items: { type: 'object' } }
+          }
+        }
+      }
+    },
   });
   const content = chat.choices?.[0]?.message?.content || '{}';
+  let dataRaw = {};
+  try { dataRaw = JSON.parse(content || '{}'); } catch {}
+  // Try strict parse first
   let data;
-  try { data = ModelResponse.parse(JSON.parse(content)); }
-  catch { data = { page_summary: null, interactive_elements: [] }; }
+  const parsed = ModelResponse.safeParse(dataRaw);
+  if (parsed.success) {
+    data = parsed.data;
+  } else {
+    // salvage interactive_elements even if summary missing
+    const aiElems = Array.isArray(dataRaw?.interactive_elements) ? dataRaw.interactive_elements : [];
+    data = { page_summary: deriveShortSummary(html), interactive_elements: aiElems };
+  }
 
   // Page doc
   const pageDoc = {
@@ -468,8 +598,7 @@ function dedupeFormGroupsNode(groups = []) {
     created_at: new Date(),
     html_file_id: htmlId,
     screenshot_file_id: shotId,
-    page_summary: data.page_summary ?? null,
-    form_groups: formGroups,
+    page_summary: (typeof data.page_summary === 'string' && data.page_summary.trim().length) ? data.page_summary.trim() : deriveShortSummary(html),
     prompt_ref: promptId,
     reanalyzed: !!already,
   };
@@ -477,10 +606,44 @@ function dedupeFormGroupsNode(groups = []) {
   const pageId = insertedPage.insertedId;
 
   // Actions + CodeTests
-  const actionDocs = [];
+  let actionDocs = [];
   const codeTestDocs = [];
 
-  data.interactive_elements.forEach((el, idx) => {
+
+const allowedTypes = new Set(['form','button','link']);
+  const domFormContainers = new Set((formGroups || []).map(fg => fg.container_selector).filter(Boolean));
+
+  const sameContainer = (aSel, bSel) => {
+    if (!aSel || !bSel) return false;
+    const a = aSel.best || aSel.css || '';
+    const b = bSel.best || bSel.css || '';
+    if (!a || !b) return false;
+    return a === b || a.includes(b) || b.includes(a);
+  };
+
+  const modelElements = Array.isArray(data.interactive_elements) ? data.interactive_elements.filter(el => allowedTypes.has(el.element_type)) : [];
+
+// Drop model elements that are inside a DOM-form container (avoid per-button inside a form)
+// unless it's a 'form' itself
+  const filteredModel = modelElements.filter(el => {
+    if (el.element_type === 'form') return true;
+    const sel = el.selectors || {};
+    const s = sel.best || sel.css || '';
+    if (!s) return true;
+    return ![...domFormContainers].some(c => !!c && (s === c || s.includes(c) || c.includes(s)));
+  });
+
+  filteredModel.forEach((el, idx) => {
+    // If it's a form but missing inputs/submit, try to merge from dom group
+    if (el.element_type === 'form' && domFormContainers.size) {
+      const match = (formGroups || []).find(fg => sameContainer(el.selectors || {}, { css: fg.container_selector }));
+      if (match) {
+        if (!Array.isArray(el.inputs) || el.inputs.length === 0) el.inputs = match.inputs || [];
+        if (!el.submit_button) el.submit_button = match.submit_button || null;
+        if (!el.selectors) el.selectors = { best: match.container_selector, css: match.container_selector, xpath: null };
+      }
+    }
+
     actionDocs.push({
       project_id: PROJECT_ID,
       page_id: pageId,
@@ -496,49 +659,25 @@ function dedupeFormGroupsNode(groups = []) {
       selectors: el.selectors ?? null,
       inputs: Array.isArray(el.inputs) ? el.inputs : [],
       submit_button: el.submit_button ?? null,
-      ai_confidence: el.ai_confidence ?? null,
+      ai_confidence: null,
       ordinal: idx,
       created_at: new Date(),
       prompt_ref: promptId,
       source: 'model',
     });
-    if (el.playwright_script) {
+
+    // Create code tests only for model items that have a playwright_script
+    if (el.playwright_script && typeof el.playwright_script === 'string') {
       codeTestDocs.push({
+        target_selector_key: selToKey(el.selectors),
+        target_kind: el.element_type,
         project_id: PROJECT_ID,
-        page_id: pageId,
-        action_id: null, // filled after insertMany
-        model: 'gpt-5-mini',
-        script: el.playwright_script,
-        result_checks: el.result_checks ?? [],
         created_at: new Date(),
-        prompt_ref: promptId,
+        action_kind: el.element_type,
+        playwright_script: el.playwright_script,
+        result_checks: Array.isArray(el.result_checks) ? el.result_checks : [],
       });
     }
-  });
-
-  // Add link actions (DOM)
-  linkActions.forEach((lnk, i) => {
-    actionDocs.push({
-      project_id: PROJECT_ID,
-      page_id: pageId,
-      kind: 'link',
-      id_attr: null,
-      name: null,
-      text: lnk.text,
-      role: null,
-      action: null,
-      method: null,
-      href: lnk.href,
-      target: null,
-      selectors: lnk.selectors,
-      inputs: [],
-      submit_button: null,
-      ai_confidence: null,
-      ordinal: 20000 + i,
-      created_at: new Date(),
-      prompt_ref: promptId,
-      source: 'dom-link',
-    });
   });
 
   // Add grouped form actions (DOM)
@@ -566,12 +705,18 @@ function dedupeFormGroupsNode(groups = []) {
     });
   });
 
+  // Dedupe identical forms (DOM vs model)
+  const deduped = dedupeAndMergeActions(actionDocs);
+  const removedIndices = new Set(deduped.removedIndices || []);
+  actionDocs = deduped.actions;
+
   // Persist actions & backfill code tests
   let insertedActionIds = [];
   if (actionDocs.length) {
     actionDocs.sort((a, b) => {
-      const ra = a.source === 'model' ? 0 : 1;
-      const rb = b.source === 'model' ? 0 : 1;
+      const rank = (s) => s === 'dom-grouped' ? 0 : s === 'model' ? 1 : 2;
+      const ra = rank(a.source);
+      const rb = rank(b.source);
       if (ra !== rb) return ra - rb;
       return (a.ordinal ?? 0) - (b.ordinal ?? 0);
     });
@@ -579,11 +724,12 @@ function dedupeFormGroupsNode(groups = []) {
     insertedActionIds = (await Actions.insertMany(actionDocs)).insertedIds;
   }
   if (codeTestDocs.length && insertedActionIds) {
-    const modelIdsInOrder = actionDocs
-        .map((doc, idx) => ({ idx, doc }))
-        .filter(x => x.doc.source === 'model')
-        .map(x => insertedActionIds[x.idx]);
-    codeTestDocs.forEach((ct, i) => { ct.action_id = modelIdsInOrder[i]; });
+    const keyToId = new Map(actionDocs.map((doc, idx) => [selToKey(doc.selectors) + '::' + doc.kind, insertedActionIds[idx]]));
+    codeTestDocs.forEach((ct) => {
+      const key = String(ct.target_selector_key || '').toLowerCase() + '::' + String(ct.target_kind || '');
+      ct.action_id = keyToId.get(key) || null;
+      delete ct.target_selector_key; delete ct.target_kind;
+    });
     await CodeTests.insertMany(codeTestDocs.filter(ct => ct.action_id));
   }
 
