@@ -11,7 +11,9 @@
     "format": "prettier -w ../../Downloads/single-page-analyzer"
   },
   "dependencies": {
+    "cheerio": "^1.1.2",
     "dotenv": "^16.4.5",
+    "escape-string-regexp": "^5.0.0",
     "mongodb": "^6.8.0",
     "openai": "^4.56.0",
     "playwright": "^1.47.0",
