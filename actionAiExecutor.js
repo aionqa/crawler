@@ -68,7 +68,6 @@ const bucket = new GridFSBucket(db, { bucketName: 'artifacts' });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 // ---------------- Utils ----------------
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 function sha1(buf) { return crypto.createHash('sha1').update(buf).digest('hex'); }
 async function uploadToGridFS({ filename, buffer, contentType, metadata }) {
     return new Promise((resolve, reject) => {
@@ -87,13 +86,6 @@ function deriveShortSummary(html) {
         const words = base.split(/\s+/);
         return words.slice(0, 40).join(' ');
     } catch { return 'Web page summary unavailable.'; }
-}
-function trimHtmlForLLM(html, max = 150000) {
-    if (!html) return '';
-    if (html.length <= max) return html;
-    const head = html.slice(0, Math.floor(max * 0.6));
-    const tail = html.slice(-Math.floor(max * 0.4));
-    return `${head}\n<!-- TRUNCATED (${html.length} bytes total) -->\n${tail}`;
 }
 function isLikelyLoginForm(action) {
     const fields = (action?.inputs || []).map(i => `${(i?.name||'').toLowerCase()} ${(i?.id||'').toLowerCase()} ${(i?.label||'').toLowerCase()}`).join(' ');
