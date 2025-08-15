@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // singlePageAnalyzer.js — analyze ONE page for a given project OID + URL.
-// - CLI params only: --url, --project, [--force]; no TARGET_URL/PROJECT_NAME envs.
+// - CLI params only: --url, --project, [--page_id], [--force]
 // - Upserts the project by _id, not name.
 // - Skips if already analyzed for that project+url unless --force.
 // - Saves artifacts (HTML/screenshot) to GridFS and actions to regular collections.
@@ -12,20 +12,21 @@ import OpenAI from 'openai';
 import crypto from 'crypto';
 import { z } from 'zod';
 
-// ---------------- CLI ----------------
-function args(argv) {
-  const out = { url: null, projectRaw: null, force: false };
+// ------------- CLI -------------
+function parseArgs(argv) {
+  const o = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--url' || a === '-u') out.url = argv[++i];
-    else if (a === '--project' || a === '-p') out.projectRaw = argv[++i];
-    else if (a === '--force' || a === '-f') out.force = true;
+    if (a === '--url') o.url = argv[++i];
+    else if (a === '--project') o.project = argv[++i];
+    else if (a === '--page_id') o.page_id = argv[++i];
+    else if (a === '--force') o.force = true;
   }
-  return out;
+  return o;
 }
-const { url: TARGET_URL, projectRaw, force: FORCE } = args(process.argv.slice(2));
+const { url: TARGET_URL, project: projectRaw, page_id: pageIdRaw, force: FORCE } = parseArgs(process.argv.slice(2));
 if (!TARGET_URL) {
-  console.error('Usage: node singlePageAnalyzer.js --url <URL> --project <MongoObjectId> [--force]');
+  console.error('Usage: node singlePageAnalyzer.js --url <URL> --project <MongoObjectId> [--page_id <MongoObjectId>] [--force]');
   process.exit(2);
 }
 if (!projectRaw || !ObjectId.isValid(projectRaw)) {
@@ -33,6 +34,7 @@ if (!projectRaw || !ObjectId.isValid(projectRaw)) {
   process.exit(2);
 }
 const PROJECT_ID = new ObjectId(projectRaw);
+const PROVIDED_PAGE_ID = pageIdRaw && ObjectId.isValid(pageIdRaw) ? new ObjectId(pageIdRaw) : null;
 
 // ---------------- Env (non-target) ----------------
 const {
@@ -90,6 +92,7 @@ const ModelResponse = z.object({
   interactive_elements: z.array(InteractiveElement),
 }).strict();
 
+function identityUrl(u) { const x = new URL(u); x.hash = ''; return x.toString(); }
 
 function deriveShortSummary(html) {
   try {
@@ -97,7 +100,6 @@ function deriveShortSummary(html) {
     const h1 = (html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || '').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
     const base = [title, h1].filter(Boolean).join(' — ');
     if (!base) return 'Web page summary unavailable.';
-    // Cap ~40 words
     const words = base.split(/\s+/);
     return words.slice(0, 40).join(' ');
   } catch { return 'Web page summary unavailable.'; }
@@ -122,10 +124,7 @@ Return STRICT JSON per schema, no commentary.` },
     },
   ];
 }
-async function toDataUrlPng(buf) {
-  const b64 = Buffer.from(buf).toString('base64');
-  return `data:image/png;base64,${b64}`;
-}
+async function toDataUrlPng(buf) { return `data:image/png;base64,${Buffer.from(buf).toString('base64')}`; }
 function stripImagesFromMessages(o) {
   const c = JSON.parse(JSON.stringify(o));
   if (Array.isArray(c.messages)) {
@@ -136,7 +135,7 @@ function stripImagesFromMessages(o) {
   return c;
 }
 
-// Minimal DOM helpers (unchanged from your version)
+// ---- DOM helpers (unchanged) ----
 async function extractLinksAsActionsViaDOM(page) {
   return await page.evaluate(() => {
     function isVisible(el){ const s = getComputedStyle(el); return s && s.visibility!=='hidden' && s.display!=='none'; }
@@ -166,7 +165,6 @@ async function extractLinksAsActionsViaDOM(page) {
 }
 async function extractFormGroupsViaDOM(page) {
   return await page.evaluate(() => {
-    // ---------- helpers ----------
     function isVisible(el){
       const s = getComputedStyle(el);
       return s && s.visibility !== 'hidden' && s.display !== 'none' && el.offsetParent !== null;
@@ -281,7 +279,6 @@ async function extractFormGroupsViaDOM(page) {
       return score;
     }
 
-    // ---------- collect candidates ----------
     const groups = [];
 
     // Real <form>
@@ -305,7 +302,7 @@ async function extractFormGroupsViaDOM(page) {
       });
     }
 
-    // Pseudo-forms (inputs + a submit-like control within a generic container)
+    // Pseudo-forms
     const scanRoots = Array.from(document.querySelectorAll('div, section, main, article, aside'));
     for (const root of scanRoots) {
       if (!isVisible(root)) continue;
@@ -319,90 +316,88 @@ async function extractFormGroupsViaDOM(page) {
       const submit = visButtons.find(isSubmitty);
       if (!submit) continue;
 
-      // Tighten container to LCA of inputs + submit
-      const container = lca([...visInputs, submit]) || root;
+      const serializeInput = (el) => {
+        const css = uniqueCss(el), xpath = uniqueXPath(el);
+        return {
+          label: (el.labels && el.labels[0] ? el.labels[0].innerText.trim() : null),
+          name: el.getAttribute('name'),
+          id: el.id || null,
+          type: (el.getAttribute('type') || el.nodeName.toLowerCase()),
+          placeholder: el.getAttribute('placeholder'),
+          selectors: { best: css, css, xpath },
+          example_value: null,
+        };
+      };
+      const serializeButton = (el) => {
+        const css = uniqueCss(el), xpath = uniqueXPath(el);
+        const text = (el.innerText || el.value || '').trim() || null;
+        return { text, selectors: { best: css, css, xpath } };
+      };
 
-      const serInputs = visInputs.map(serializeInput);
-      const serSubmit = serializeButton(submit);
+      const inputsSer = visInputs.map(serializeInput);
+      const submitSer = serializeButton(submit);
+
+      // LCA of inputs + submit
+      function lca(nodes){
+        const valid = nodes.filter(Boolean);
+        if (!valid.length) return null;
+        const paths = valid.map(n => {
+          const arr = [];
+          let cur = n;
+          while (cur) { arr.unshift(cur); cur = cur.parentElement; }
+          return arr;
+        });
+        const min = Math.min(...paths.map(p => p.length));
+        let last = null;
+        for (let i = 0; i < min; i++) {
+          const cand = paths[0][i];
+          if (paths.every(p => p[i] === cand)) last = cand; else break;
+        }
+        return last;
+      }
+      const container = lca([...visInputs, submit]) || root;
       const css = uniqueCss(container);
 
       groups.push({
         kind: 'pseudo-form',
         container_selector: css,
-        inputs: serInputs,
-        submit_button: serSubmit,
-        _submitKey: selKey(serSubmit.selectors),
-        _inputsKey: serInputs.map(inputKey),
-        _depth: domDepth(css),
-        _pref: looksLikeAuth(container),
+        inputs: inputsSer,
+        submit_button: submitSer,
+        _submitKey: submitSer.selectors?.best || submitSer.selectors?.css || null,
+        _inputsKey: inputsSer.map(i => i?.selectors?.best || i?.selectors?.css || i?.id || i?.name || null),
+        _depth: (css || '').split('>').length,
+        _pref: 0,
       });
     }
 
-    // ---------- de-duplicate ----------
-    // Strategy:
-    // 1) Sort by preference (auth-ish / real <form>) then by depth (deepest first).
-    // 2) For groups that share the same submit and highly similar inputs, drop ancestors/wrappers.
-    groups.sort((a, b) => {
-      if (b._pref !== a._pref) return b._pref - a._pref;
-      if (b._depth !== a._depth) return b._depth - a._depth;
-      return (a.container_selector || '').length - (b.container_selector || '').length;
-    });
-
+    // Dedup similar groups; prefer deeper containers
+    groups.sort((a, b) => b._depth - a._depth);
     const kept = [];
-    for (const g of groups) {
-      const gSubmit = g._submitKey;
-      const gInputs = g._inputsKey;
-      const gSel = g.container_selector;
-
-      const isDup = kept.some(k => {
-        if (k._submitKey !== gSubmit) return false;
-        const sim = jaccard(k._inputsKey, gInputs);
-        if (sim < 0.8) return false;
-        // If either container contains the other, treat as dup; we kept deeper first.
-        return containsSelector(k.container_selector, gSel) || containsSelector(gSel, k.container_selector);
-      });
-
-      if (!isDup) kept.push(g);
+    function containsSelector(outerCss, innerCss) {
+      try {
+        const outer = document.querySelector(outerCss);
+        const inner = document.querySelector(innerCss);
+        return !!(outer && inner && outer.contains(inner));
+      } catch { return false; }
     }
-
-    // Strip meta keys
+    function jaccard(A, B) {
+      const setA = new Set(A.filter(Boolean));
+      const setB = new Set(B.filter(Boolean));
+      const inter = [...setA].filter(x => setB.has(x)).length;
+      const uni = new Set([...setA, ...setB]).size || 1;
+      return inter / uni;
+    }
+    for (const g of groups) {
+      const dup = kept.some(k => {
+        if ((k._submitKey || '') !== (g._submitKey || '')) return false;
+        if (jaccard(k._inputsKey || [], g._inputsKey || []) < 0.8) return false;
+        return containsSelector(k.container_selector, g.container_selector) || containsSelector(g.container_selector, k.container_selector);
+      });
+      if (!dup) kept.push(g);
+    }
     return kept.map(({ _submitKey, _inputsKey, _depth, _pref, ...rest }) => rest);
   });
 }
-function dedupeFormGroupsNode(groups = []) {
-  const by = (g) => ({
-    submit: g?.submit_button?.selectors?.best || g?.submit_button?.selectors?.css || '',
-    inputs: new Set((g.inputs || []).map(i =>
-        i?.selectors?.best || i?.selectors?.css || i?.id || i?.name || ''
-    )),
-  });
-
-  function jaccard(A, B) {
-    const inter = [...A].filter(x => B.has(x)).length;
-    const uni = new Set([...A, ...B]).size || 1;
-    return inter / uni;
-  }
-
-  const withDepth = groups.map(g => ({
-    g,
-    depth: (g.selectors?.best || g.selectors?.css || '').split('>').length,
-    submit: by(g).submit,
-    inputsSet: by(g).inputs,
-  }));
-
-  withDepth.sort((a, b) => b.depth - a.depth); // deeper first
-
-  const keep = [];
-  for (const cand of withDepth) {
-    const dup = keep.some(k =>
-        k.submit === cand.submit &&
-        jaccard(k.inputsSet, cand.inputsSet) >= 0.8
-    );
-    if (!dup) keep.push(cand);
-  }
-  return keep.map(x => x.g);
-}
-
 function selToKey(sel) {
   try {
     if (!sel) return '';
@@ -412,7 +407,6 @@ function selToKey(sel) {
     return (s || '').trim().toLowerCase();
   } catch { return ''; }
 }
-
 function mergeInputs(baseInputs = [], addInputs = []) {
   const byKey = (i) => (i?.id || i?.name || selToKey(i?.selectors) || '').toLowerCase();
   const out = [...baseInputs];
@@ -422,13 +416,10 @@ function mergeInputs(baseInputs = [], addInputs = []) {
     if (!k) continue;
     if (idx.has(k)) {
       const bi = out[idx.get(k)];
-      // copy example_value if missing
       if ((!bi.example_value || !String(bi.example_value).trim()) && (ai.example_value && String(ai.example_value).trim())) {
         bi.example_value = ai.example_value;
       }
-      // prefer existing selectors; if missing, copy
       if (!bi.selectors && ai.selectors) bi.selectors = ai.selectors;
-      // fill missing label/type/placeholder
       for (const f of ['label','type','placeholder','name','id']) {
         if (!bi[f] && ai[f]) bi[f] = ai[f];
       }
@@ -439,23 +430,19 @@ function mergeInputs(baseInputs = [], addInputs = []) {
   }
   return out;
 }
-
 function mergeSubmitButton(a = null, b = null) {
   if (!a) return b;
   if (!b) return a;
   const out = { ...a };
-  // unify text/label terminology
   const aText = a.text || a.label || null;
   const bText = b.text || b.label || null;
   if (!aText && bText) out.text = bText;
   if (!out.selectors && b.selectors) out.selectors = b.selectors;
   return out;
 }
-
 function rankSource(s) { return s === 'dom-grouped' ? 0 : s === 'model' ? 1 : 2; }
-
 function dedupeAndMergeActions(actionDocs) {
-  const formsByKey = new Map(); // key -> index of kept action
+  const formsByKey = new Map();
   const removeIdx = new Set();
   for (let i = 0; i < actionDocs.length; i++) {
     const doc = actionDocs[i];
@@ -469,8 +456,6 @@ function dedupeAndMergeActions(actionDocs) {
     const keepIdx = formsByKey.get(key);
     const keep = actionDocs[keepIdx];
     const cand = doc;
-
-    // choose which to keep by source rank
     let winner = keepIdx, loser = i;
     if (rankSource(cand.source) < rankSource(keep.source)) {
       winner = i; loser = keepIdx;
@@ -478,37 +463,36 @@ function dedupeAndMergeActions(actionDocs) {
     }
     const w = actionDocs[winner];
     const l = actionDocs[loser];
-
-    // merge fields into winner
     if (!w.selectors && l.selectors) w.selectors = l.selectors;
     w.inputs = mergeInputs(Array.isArray(w.inputs) ? w.inputs : [], Array.isArray(l.inputs) ? l.inputs : []);
     w.submit_button = mergeSubmitButton(w.submit_button, l.submit_button);
     if (!w.method && l.method) w.method = l.method;
     if (!w.action && l.action) w.action = l.action;
     w.source = (w.source === l.source) ? w.source : 'dom+model-merged';
-
     removeIdx.add(loser);
   }
-  // produce new array without removed
   const out = actionDocs.filter((_, idx) => !removeIdx.has(idx));
   return { actions: out, removedIndices: [...removeIdx] };
 }
+
 // ---------------- Main ----------------
 (async () => {
   console.log('🧵 Connecting to MongoDB…');
   await client.connect();
   console.log('✅ MongoDB connected');
 
-  // Ensure project exists by _id (never null)
-  const up = await Projects.updateOne(
+  // Ensure project exists by _id
+  await Projects.updateOne(
       { _id: PROJECT_ID },
       { $setOnInsert: { _id: PROJECT_ID, name: `project_${PROJECT_ID.toHexString()}`, created_at: new Date() } },
       { upsert: true }
   );
   console.log(`📌 Using project _id: ${PROJECT_ID}`);
 
-  // Skip if this (project_id, url) already analyzed
-  const already = await Pages.findOne({ project_id: PROJECT_ID, url: TARGET_URL });
+  const URL_ID = identityUrl(TARGET_URL);
+
+  // Skip if already analyzed (by normalized URL) unless --force
+  const already = await Pages.findOne({ project_id: PROJECT_ID, url: URL_ID });
   if (already && !FORCE) {
     console.log('ℹ️ Page already analyzed for this project. Use --force to re-analyze.');
     await client.close();
@@ -543,8 +527,8 @@ function dedupeAndMergeActions(actionDocs) {
 
   // DOM grouping + links
   const formGroupsRaw = await extractFormGroupsViaDOM(page);
-  const formGroups = dedupeFormGroupsNode(formGroupsRaw);
-  const linkActions = await extractLinksAsActionsViaDOM(page);
+  const formGroups = Array.isArray(formGroupsRaw) ? formGroupsRaw : [];
+  const linkActions = await extractLinksAsActionsViaDOM(page); // (unused here but useful to log if you want)
 
   // LLM extraction
   const messages = buildPrompt({ url: TARGET_URL, html, screenshotDataUrl: await toDataUrlPng(shotBuf) });
@@ -580,37 +564,72 @@ function dedupeAndMergeActions(actionDocs) {
   const content = chat.choices?.[0]?.message?.content || '{}';
   let dataRaw = {};
   try { dataRaw = JSON.parse(content || '{}'); } catch {}
-  // Try strict parse first
   let data;
   const parsed = ModelResponse.safeParse(dataRaw);
   if (parsed.success) {
     data = parsed.data;
   } else {
-    // salvage interactive_elements even if summary missing
     const aiElems = Array.isArray(dataRaw?.interactive_elements) ? dataRaw.interactive_elements : [];
     data = { page_summary: deriveShortSummary(html), interactive_elements: aiElems };
   }
 
-  // Page doc
-  const pageDoc = {
-    project_id: PROJECT_ID,
-    url: TARGET_URL,
-    created_at: new Date(),
-    html_file_id: htmlId,
-    screenshot_file_id: shotId,
-    page_summary: (typeof data.page_summary === 'string' && data.page_summary.trim().length) ? data.page_summary.trim() : deriveShortSummary(html),
-    prompt_ref: promptId,
-    reanalyzed: !!already,
-  };
-  const insertedPage = await Pages.insertOne(pageDoc);
-  const pageId = insertedPage.insertedId;
+  const page_summary_final =
+      (typeof data.page_summary === 'string' && data.page_summary.trim().length)
+          ? data.page_summary.trim()
+          : deriveShortSummary(html);
 
-  // Actions + CodeTests
+  // -------- Upsert Page (idempotent + attach artifacts) --------
+  let page_id;
+  if (PROVIDED_PAGE_ID) {
+    await Pages.updateOne(
+        { _id: PROVIDED_PAGE_ID },
+        {
+          $setOnInsert: {
+            project_id: PROJECT_ID,
+            url: URL_ID,
+            created_at: new Date(),
+            // ⚠️ DO NOT put `reanalyzed` here
+          },
+          $set: {
+            html_file_id: htmlId,
+            screenshot_file_id: shotId,
+            page_summary: page_summary_final,
+            prompt_ref: promptId,
+            reanalyzed: !!already,  // ✅ only here
+          }
+        },
+        { upsert: true }
+    );
+    page_id = PROVIDED_PAGE_ID;
+  } else {
+    const up = await Pages.findOneAndUpdate(
+        { project_id: PROJECT_ID, url: URL_ID },
+        {
+          $setOnInsert: {
+            created_at: new Date(),
+            project_id: PROJECT_ID,
+            url: URL_ID,
+            // ⚠️ DO NOT put `reanalyzed` here
+          },
+          $set: {
+            html_file_id: htmlId,
+            screenshot_file_id: shotId,
+            page_summary: page_summary_final,
+            prompt_ref: promptId,
+            reanalyzed: !!already,  // ✅ only here
+          }
+        },
+        { upsert: true, returnDocument: 'after' }
+    );
+    page_id = up.value._id;
+  }
+
+
+  // -------- Build Actions --------
   let actionDocs = [];
   const codeTestDocs = [];
 
-
-const allowedTypes = new Set(['form','button','link']);
+  const allowedTypes = new Set(['form','button','link']);
   const domFormContainers = new Set((formGroups || []).map(fg => fg.container_selector).filter(Boolean));
 
   const sameContainer = (aSel, bSel) => {
@@ -621,10 +640,10 @@ const allowedTypes = new Set(['form','button','link']);
     return a === b || a.includes(b) || b.includes(a);
   };
 
-  const modelElements = Array.isArray(data.interactive_elements) ? data.interactive_elements.filter(el => allowedTypes.has(el.element_type)) : [];
+  const modelElements = Array.isArray(data.interactive_elements)
+      ? data.interactive_elements.filter(el => allowedTypes.has(el.element_type))
+      : [];
 
-// Drop model elements that are inside a DOM-form container (avoid per-button inside a form)
-// unless it's a 'form' itself
   const filteredModel = modelElements.filter(el => {
     if (el.element_type === 'form') return true;
     const sel = el.selectors || {};
@@ -634,7 +653,6 @@ const allowedTypes = new Set(['form','button','link']);
   });
 
   filteredModel.forEach((el, idx) => {
-    // If it's a form but missing inputs/submit, try to merge from dom group
     if (el.element_type === 'form' && domFormContainers.size) {
       const match = (formGroups || []).find(fg => sameContainer(el.selectors || {}, { css: fg.container_selector }));
       if (match) {
@@ -646,7 +664,7 @@ const allowedTypes = new Set(['form','button','link']);
 
     actionDocs.push({
       project_id: PROJECT_ID,
-      page_id: pageId,
+      page_id: page_id, // ObjectId
       kind: el.element_type,
       id_attr: el.id ?? null,
       name: el.name ?? null,
@@ -666,7 +684,6 @@ const allowedTypes = new Set(['form','button','link']);
       source: 'model',
     });
 
-    // Create code tests only for model items that have a playwright_script
     if (el.playwright_script && typeof el.playwright_script === 'string') {
       codeTestDocs.push({
         target_selector_key: selToKey(el.selectors),
@@ -681,10 +698,10 @@ const allowedTypes = new Set(['form','button','link']);
   });
 
   // Add grouped form actions (DOM)
-  formGroups.forEach((fg, idx) => {
+  (formGroups || []).forEach((fg, idx) => {
     actionDocs.push({
       project_id: PROJECT_ID,
-      page_id: pageId,
+      page_id: page_id, // ObjectId
       kind: 'form',
       id_attr: null,
       name: null,
@@ -707,11 +724,9 @@ const allowedTypes = new Set(['form','button','link']);
 
   // Dedupe identical forms (DOM vs model)
   const deduped = dedupeAndMergeActions(actionDocs);
-  const removedIndices = new Set(deduped.removedIndices || []);
   actionDocs = deduped.actions;
 
   // Persist actions & backfill code tests
-  let insertedActionIds = [];
   if (actionDocs.length) {
     actionDocs.sort((a, b) => {
       const rank = (s) => s === 'dom-grouped' ? 0 : s === 'model' ? 1 : 2;
@@ -721,16 +736,19 @@ const allowedTypes = new Set(['form','button','link']);
       return (a.ordinal ?? 0) - (b.ordinal ?? 0);
     });
     actionDocs.forEach((a, i) => { a.ordinal = i; });
-    insertedActionIds = (await Actions.insertMany(actionDocs)).insertedIds;
-  }
-  if (codeTestDocs.length && insertedActionIds) {
-    const keyToId = new Map(actionDocs.map((doc, idx) => [selToKey(doc.selectors) + '::' + doc.kind, insertedActionIds[idx]]));
-    codeTestDocs.forEach((ct) => {
-      const key = String(ct.target_selector_key || '').toLowerCase() + '::' + String(ct.target_kind || '');
-      ct.action_id = keyToId.get(key) || null;
-      delete ct.target_selector_key; delete ct.target_kind;
-    });
-    await CodeTests.insertMany(codeTestDocs.filter(ct => ct.action_id));
+
+    const res = await Actions.insertMany(actionDocs);
+    if (codeTestDocs.length) {
+      const keyToId = new Map(
+          actionDocs.map((doc, idx) => [selToKey(doc.selectors) + '::' + doc.kind, res.insertedIds[idx]])
+      );
+      codeTestDocs.forEach((ct) => {
+        const key = String(ct.target_selector_key || '').toLowerCase() + '::' + String(ct.target_kind || '');
+        ct.action_id = keyToId.get(key) || null;
+        delete ct.target_selector_key; delete ct.target_kind;
+      });
+      await CodeTests.insertMany(codeTestDocs.filter(ct => ct.action_id));
+    }
   }
 
   console.log('✅ Done.');
