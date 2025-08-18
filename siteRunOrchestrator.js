@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 // siteRunOrchestrator.js — crawl a site (same host) and run both page analyzer and action executor per page
 //
+// Now featuring:
+// - Parallel execution with a worker pool (size controlled via --concurrency)
+// - Stronger de-duping (race-safe frontier + optional project-wide skip)
+// - Upserts to avoid insert races under concurrency
+//
 // Usage (new run):
 //   node siteRunOrchestrator.js \
 //     --seed_url https://example.com \
@@ -8,10 +13,10 @@
 //     [--username <login>] [--password <pass>] \
 //     --analyzer_bin /path/to/singlePageAnalyzer.js \
 //     --executor_bin /path/to/actionAiExecutor.js \
-//     [--max_pages 200] [--max_depth 6] [--concurrency 1] [--headless=true]
+//     [--max_pages 200] [--max_depth 6] [--concurrency 1] [--headless=true] [--dedupe run|project|none]
 //
 // Usage (resume):
-//   node siteRunOrchestrator.js --run_id <ObjectId> [--username ...] [--password ...] [--analyzer_bin ...] [--executor_bin ...] [--headless=true]
+//   node siteRunOrchestrator.js --run_id <ObjectId> [--username ...] [--password ...] [--analyzer_bin ...] [--executor_bin ...] [--headless=true] [--dedupe run|project|none]
 //
 // Persists state in `runs` and `run_frontier` so you can pause/continue.
 
@@ -37,6 +42,7 @@ function argvToOpts(argv) {
         else if (a === '--concurrency') o.concurrency = argv[++i];
         else if (a === '--max_pages') o.max_pages = argv[++i];
         else if (a === '--max_depth') o.max_depth = argv[++i];
+        else if (a === '--dedupe') o.dedupe = argv[++i]; // NEW
     }
     return o;
 }
@@ -80,6 +86,38 @@ const Actions = db.collection('actions');
 const Runs = db.collection('runs');
 const Frontier = db.collection('run_frontier');
 
+
+// Decide whether to skip analyzer/executor for a URL based on dedupe mode
+async function shouldSkipAnalyze(run, pageUrl) {
+    const u = normalizeUrl(pageUrl);
+
+    if (run?.options?.dedupe === 'project') {
+        const p = await Pages.findOne({
+            project_id: run.project_id,
+            url: u,
+            last_analyzed_at: { $ne: null }
+        });
+        return !!p; // any past project analysis
+    }
+
+    if (run?.options?.dedupe === 'run') {
+        // Already finished in THIS run?
+        const wasDone = await Frontier.findOne({ run_id: run._id, url: u, status: 'done' });
+        if (wasDone) return true;
+
+        // Or already stamped by a previous analyzer pass in this run?
+        const p = await Pages.findOne({
+            project_id: run.project_id,
+            url: u,
+            last_analyzed_run_id: run._id
+        });
+        return !!p;
+    }
+
+    return false; // 'none'
+}
+
+
 // ---------------- Child process helpers ----------------
 function runNodeScript(binPath, args, { env = process.env, debug = true, label } = {}) {
     return new Promise((resolve) => {
@@ -117,26 +155,33 @@ function runNodeScript(binPath, args, { env = process.env, debug = true, label }
     });
 }
 
+// Race-safe page upsert (avoid duplicates under concurrency)
 async function upsertPage({ project_id, url }) {
     const u = normalizeUrl(url);
-    const existing = await Pages.findOne({ project_id, url: u });
-    if (existing) return existing._id;
-    const doc = {
-        project_id,
-        url: u,
-        created_at: new Date(),
-        page_summary: null,
-        html_file_id: null,
-        screenshot_file_id: null,
-        prompt_ref: null,
-        reanalyzed: false,
-    };
-    const ins = await Pages.insertOne(doc);
-    return ins.insertedId;
+    const now = new Date();
+    const res = await Pages.findOneAndUpdate(
+        { project_id, url: u },
+        {
+            $setOnInsert: {
+                project_id,
+                url: u,
+                created_at: now,
+                page_summary: null,
+                html_file_id: null,
+                screenshot_file_id: null,
+                prompt_ref: null,
+                reanalyzed: false,
+                last_analyzed_at: null, // NEW: for project-level dedupe
+            }
+        },
+        { upsert: true, returnDocument: 'after' }
+    );
+    const doc = res.value || await Pages.findOne({ project_id, url: u });
+    return doc._id;
 }
 
 // ------------- Frontier helpers (with lease) -------------
-const LEASE_MS = 60_000; // keep whatever you had
+const LEASE_MS = Number(process.env.FRONTIER_LEASE_MS || 300_000); // default 5 min
 
 async function claimNextFrontier(runId) {
     const now = new Date();
@@ -167,22 +212,38 @@ async function markFrontier(runFrontierId, patch) {
     await Frontier.updateOne({ _id: runFrontierId }, { $set: { ...patch, updated_at: new Date() } });
 }
 
+// Race-safe frontier add (unique per run_id+url)
 async function addToFrontier({ run_id, url, depth, discovered_from }) {
     const u = normalizeUrl(url);
-    const exists = await Frontier.findOne({ run_id, url: u });
-    if (exists) return exists._id;
-    const doc = {
-        run_id,
-        url: u,
-        depth,
-        discovered_from: discovered_from ? normalizeUrl(discovered_from) : null,
-        status: 'pending',
-        created_at: new Date(),
-        updated_at: new Date(),
-        picked_at: null
-    };
-    const ins = await Frontier.insertOne(doc);
-    return ins.insertedId;
+    const now = new Date();
+    try {
+        const res = await Frontier.updateOne(
+            { run_id, url: u },
+            {
+                $setOnInsert: {
+                    run_id,
+                    url: u,
+                    depth,
+                    discovered_from: discovered_from ? normalizeUrl(discovered_from) : null,
+                    status: 'pending',
+                    created_at: now,
+                    picked_at: null
+                },
+                $set: { updated_at: now }
+            },
+            { upsert: true }
+        );
+        if (res.upsertedId) return res.upsertedId._id;
+        const existing = await Frontier.findOne({ run_id, url: u });
+        return existing?._id || null;
+    } catch (e) {
+        // Handle duplicate key under races gracefully
+        if (e && e.code === 11000) {
+            const existing = await Frontier.findOne({ run_id, url: u });
+            return existing?._id || null;
+        }
+        throw e;
+    }
 }
 
 function extractLinks(html, baseUrl) {
@@ -347,12 +408,14 @@ async function ensureRun(opts) {
             max_pages: Number(opts.max_pages || '200'),
             max_depth: Number(opts.max_depth || '6'),
             concurrency: Number(opts.concurrency || '1'),
+            dedupe: (opts.dedupe || 'run'), // NEW: run | project | none
         },
         stats: { pages_claimed: 0, pages_done: 0, actions_run: 0, errors: 0, last_url: null },
         notes: [],
     };
     const ins = await Runs.insertOne(runDoc);
     const run_id = ins.insertedId;
+
     await addToFrontier({ run_id, url: seed_url, depth: 0 });
     return await Runs.findOne({ _id: run_id });
 }
@@ -366,7 +429,7 @@ async function tickStopFlag(run) {
     return !!fresh?.stop_requested;
 }
 
-async function analyzeAndExecuteForPage({ run, pageUrl }) {
+async function analyzeAndExecuteForPage({ run, pageUrl, workerId }) {
     const { project_id } = run;
     const analyzer = run.options.analyzer_bin;
     const executor = run.options.executor_bin;
@@ -374,40 +437,53 @@ async function analyzeAndExecuteForPage({ run, pageUrl }) {
     // 1) Ensure page doc exists
     const page_id = await upsertPage({ project_id: run.project_id, url: pageUrl });
 
-    // 2) Analyze page to discover actions
-    const aArgs = ['--url', pageUrl, '--project', String(project_id), '--page_id', String(page_id), '--force'];
-    const aRes = await runNodeScript(analyzer, aArgs, { label: `analyzer ${new URL(pageUrl).pathname}` });
+    // 1a) Optional skip (project-wide dedupe)
+    const skipAnalyze = await shouldSkipAnalyze(run, pageUrl);
+    if (skipAnalyze) {
+        console.log(`[worker:${workerId}] ⏭️  Skipping analyzer (${run.options.dedupe}-dedupe): ${pageUrl}`);
+    } else {
+        // 2) Analyze page to discover actions
+        const forceArg = (run.options.dedupe !== 'project') ? ['--force'] : [];
+        const aArgs = ['--url', pageUrl, '--project', String(project_id), '--page_id', String(page_id), ...forceArg];
+        const aRes = await runNodeScript(analyzer, aArgs, { label: `analyzer ${new URL(pageUrl).pathname}` });
 
-    // Persist analyzer note
-    const pageLog = { stage: 'analyze', url: pageUrl, exit_code: aRes.code, out: aRes.out.slice(0, 4000), err: aRes.err.slice(0, 4000), ts: new Date() };
-    await Runs.updateOne({ _id: run._id }, { $push: { notes: pageLog }, $set: { 'stats.last_url': pageUrl } });
+        // Persist analyzer note
+        const pageLog = { stage: 'analyze', url: pageUrl, exit_code: aRes.code, out: aRes.out.slice(0, 4000), err: aRes.err.slice(0, 4000), ts: new Date() };
+        await Runs.updateOne({ _id: run._id }, { $push: { notes: pageLog }, $set: { 'stats.last_url': pageUrl } });
 
-    // Fail fast if analyzer crashed
-    if (aRes.code !== 0) {
-        throw new Error(`Analyzer failed for ${pageUrl} (exit ${aRes.code})`);
-    }
+        // Fail fast if analyzer crashed
+        if (aRes.code !== 0) {
+            throw new Error(`Analyzer failed for ${pageUrl} (exit ${aRes.code})`);
+        }
 
-    // 3) For each action on that page, run executor
-    // (tolerate either ObjectId or string stored by analyzer)
-    const actions = await Actions.find({
-        $or: [
-            { project_id: run.project_id, page_id },
-            { project_id: String(run.project_id), page_id: String(page_id) }
-        ]
-    }).toArray();
-
-    for (const action of actions) {
-        const eArgs = [
-            '--project_id', String(project_id),
-            '--page_id', String(page_id),
-            '--action_id', String(action._id),
-            '--headless', String(run.options.headless)
-        ];
-        const eRes = await runNodeScript(executor, eArgs, { label: `executor ${action._id}` });
-        await Runs.updateOne(
-            { _id: run._id },
-            { $inc: { 'stats.actions_run': 1 }, $push: { notes: { stage: 'execute', url: pageUrl, action_id: action._id, exit_code: eRes.code, out: eRes.out.slice(0, 4000), err: eRes.err.slice(0, 4000), ts: new Date() } } }
+        // Stamp last_analyzed_at on success for project-level dedupe
+        await Pages.updateOne(
+            { _id: page_id },
+            { $set: { last_analyzed_at: new Date(), last_analyzed_run_id: run._id, reanalyzed: true } }
         );
+
+        // 3) For each action on that page, run executor
+        // (tolerate either ObjectId or string stored by analyzer)
+        const actions = await Actions.find({
+            $or: [
+                { project_id: run.project_id, page_id },
+                { project_id: String(run.project_id), page_id: String(page_id) }
+            ]
+        }).toArray();
+
+        for (const action of actions) {
+            const eArgs = [
+                '--project_id', String(project_id),
+                '--page_id', String(page_id),
+                '--action_id', String(action._id),
+                '--headless', String(run.options.headless)
+            ];
+            const eRes = await runNodeScript(executor, eArgs, { label: `executor ${action._id}` });
+            await Runs.updateOne(
+                { _id: run._id },
+                { $inc: { 'stats.actions_run': 1 }, $push: { notes: { stage: 'execute', url: pageUrl, action_id: action._id, exit_code: eRes.code, out: eRes.out.slice(0, 4000), err: eRes.err.slice(0, 4000), ts: new Date() } } }
+            );
+        }
     }
 
     // 4) Fetch HTML and extract same-host links
@@ -434,6 +510,7 @@ async function main() {
     if (typeof opts.max_pages !== 'undefined')   patch.options.max_pages = Number(opts.max_pages);
     if (typeof opts.max_depth !== 'undefined')   patch.options.max_depth = Number(opts.max_depth);
     if (typeof opts.concurrency !== 'undefined') patch.options.concurrency = Number(opts.concurrency);
+    if (typeof opts.dedupe !== 'undefined')      patch.options.dedupe = String(opts.dedupe);
 
     await updateRun(run._id, patch);
     run = await Runs.findOne({ _id: run._id });
@@ -452,69 +529,105 @@ async function main() {
 
     await updateRun(run._id, { status: 'running' });
 
+    // Reset any orphaned "processing" to "pending" before (re)start
     await Frontier.updateMany({ run_id: run._id, status: 'processing' }, { $set: { status: 'pending' } });
 
-    while (!stopping) {
-        if (await tickStopFlag(run)) {
-            console.log('🛑 stop_requested=true — pausing');
-            await updateRun(run._id, { status: 'paused' });
-            break;
-        }
+    // ---------- Worker pool for parallel processing ----------
+    const workerCount = Math.max(1, Number(run.options.concurrency || 1));
+    console.log(`🧵 Starting ${workerCount} worker(s)…`);
 
-        const doneCount = await Frontier.countDocuments({ run_id: run._id, status: 'done' });
-        if (doneCount >= run.options.max_pages) {
-            console.log(`⛳ Reached max_pages=${run.options.max_pages}`);
-            await updateRun(run._id, { status: 'done' });
-            break;
-        }
+    async function workerLoop(workerId) {
+        // Periodic stats logging per worker
+        const statsEveryN = 10;
+        let iter = 0;
 
-        await logFrontierStats(run._id);
+        while (!stopping) {
+            if (await tickStopFlag(run)) {
+                console.log(`[worker:${workerId}] 🛑 stop_requested=true — pausing`);
+                stopping = true;
+                break;
+            }
 
-        let item = await claimNextFrontier(run._id);
-        if (!item) {
-            await ensureFrontierSeeded(run);
-            item = await claimNextFrontier(run._id);
+            // Soft cap by pages_done
+            const doneCount = await Frontier.countDocuments({ run_id: run._id, status: 'done' });
+            if (doneCount >= run.options.max_pages) {
+                console.log(`[worker:${workerId}] ⛳ Reached max_pages=${run.options.max_pages}`);
+                stopping = true;
+                break;
+            }
+
+            if ((iter++ % statsEveryN) === 0 && workerId === 1) {
+                // Only worker 1 logs to reduce noise
+                await logFrontierStats(run._id);
+            }
+
+            let item = await claimNextFrontier(run._id);
             if (!item) {
+                // Re-check emptiness
                 const [p, pr] = await Promise.all([
                     Frontier.countDocuments({ run_id: run._id, status: 'pending' }),
                     Frontier.countDocuments({ run_id: run._id, status: 'processing' }),
                 ]);
                 if (p === 0 && pr === 0) {
-                    await updateRun(run._id, { status: 'done' });
-                    console.log('🎉 Frontier empty — run complete');
+                    console.log(`[worker:${workerId}] 🎉 Frontier empty — run complete`);
+                    stopping = true;
                     break;
                 }
-                await new Promise(r => setTimeout(r, 1000));
-                continue;
-            }
-        }
-
-        try {
-            if (item.depth > run.options.max_depth) {
-                await markFrontier(item._id, { status: 'done', reason: 'max_depth' });
+                await new Promise(r => setTimeout(r, 500));
                 continue;
             }
 
-            await Runs.updateOne({ _id: run._id }, { $inc: { 'stats.pages_claimed': 1 } });
+            try {
+                if (item.depth > run.options.max_depth) {
+                    await markFrontier(item._id, { status: 'done', reason: 'max_depth' });
+                    continue;
+                }
 
-            console.log(`\n🌐 Page: ${item.url} (depth ${item.depth})`);
-            const { page_id, links } = await analyzeAndExecuteForPage({ run, pageUrl: item.url });
+                await Runs.updateOne({ _id: run._id }, { $inc: { 'stats.pages_claimed': 1 } });
 
-            for (const href of links) {
-                if (!sameHost(href, run.seed_url)) continue;
-                await addToFrontier({ run_id: run._id, url: normalizeUrl(href), depth: item.depth + 1, discovered_from: item.url });
+                console.log(`\n[worker:${workerId}] 🌐 Page: ${item.url} (depth ${item.depth})`);
+                const { page_id, links } = await analyzeAndExecuteForPage({ run, pageUrl: item.url, workerId });
+
+                for (const href of links) {
+                    if (!sameHost(href, run.seed_url)) continue;
+
+                    // Optional project-level dedupe before enqueueing
+                    if (run.options.dedupe === 'project') {
+                        const wasAnalyzed = await Pages.findOne({ project_id: run.project_id, url: normalizeUrl(href), last_analyzed_at: { $ne: null } });
+                        if (wasAnalyzed) continue; // already analyzed in this project sometime before
+                    }
+                    if (run.options.dedupe === 'run') {
+                        const urlN = normalizeUrl(href);
+                        const seen = await Frontier.findOne({ run_id: run._id, url: urlN });
+                        if (seen) continue; // already pending/processing/done in THIS run
+                    }
+
+                    await addToFrontier({ run_id: run._id, url: normalizeUrl(href), depth: item.depth + 1, discovered_from: item.url });
+                }
+
+                await markFrontier(item._id, { status: 'done', page_id });
+                await Runs.updateOne({ _id: run._id }, { $inc: { 'stats.pages_done': 1 } });
+
+            } catch (err) {
+                console.error(`[worker:${workerId}] ❌ Error on page:`, item.url, err?.message || err);
+                await markFrontier(item._id, { status: 'done', error: String(err?.message || err) });
+                await Runs.updateOne({ _id: run._id }, { $inc: { 'stats.errors': 1 }, $push: { notes: { stage: 'error', url: item.url, err: String(err?.stack || err), ts: new Date() } } });
             }
-
-            await markFrontier(item._id, { status: 'done', page_id });
-            await Runs.updateOne({ _id: run._id }, { $inc: { 'stats.pages_done': 1 } });
-
-        } catch (err) {
-            console.error('❌ Error on page:', item.url, err?.message || err);
-            await markFrontier(item._id, { status: 'done', error: String(err?.message || err) });
-            await Runs.updateOne({ _id: run._id }, { $inc: { 'stats.errors': 1 }, $push: { notes: { stage: 'error', url: item.url, err: String(err?.stack || err), ts: new Date() } } });
         }
+    }
 
-        run = await Runs.findOne({ _id: run._id });
+    // Launch workers
+    const workers = Array.from({ length: workerCount }, (_, i) => workerLoop(i + 1));
+    await Promise.all(workers);
+
+    // Finalize status if not already done/paused
+    const still = await Runs.findOne({ _id: run._id });
+    if (still.status !== 'paused' && still.status !== 'done') {
+        const [p, pr] = await Promise.all([
+            Frontier.countDocuments({ run_id: run._id, status: 'pending' }),
+            Frontier.countDocuments({ run_id: run._id, status: 'processing' }),
+        ]);
+        await updateRun(run._id, { status: (p === 0 && pr === 0) ? 'done' : 'paused' });
     }
 
     await client.close();

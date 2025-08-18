@@ -492,8 +492,10 @@ function dedupeAndMergeActions(actionDocs) {
   const URL_ID = identityUrl(TARGET_URL);
 
   // Skip if already analyzed (by normalized URL) unless --force
-  const already = await Pages.findOne({ project_id: PROJECT_ID, url: URL_ID });
-  if (already && !FORCE) {
+  const existing = await Pages.findOne({ project_id: PROJECT_ID, url: URL_ID });
+  const alreadyAnalyzed =
+      !!(existing && (existing.last_analyzed_at || existing.prompt_ref || existing.page_summary));
+  if (!PROVIDED_PAGE_ID && alreadyAnalyzed && !FORCE) {
     console.log('ℹ️ Page already analyzed for this project. Use --force to re-analyze.');
     await client.close();
     process.exit(0);
@@ -528,7 +530,7 @@ function dedupeAndMergeActions(actionDocs) {
   // DOM grouping + links
   const formGroupsRaw = await extractFormGroupsViaDOM(page);
   const formGroups = Array.isArray(formGroupsRaw) ? formGroupsRaw : [];
-  const linkActions = await extractLinksAsActionsViaDOM(page); // (unused here but useful to log if you want)
+
 
   // LLM extraction
   const messages = buildPrompt({ url: TARGET_URL, html, screenshotDataUrl: await toDataUrlPng(shotBuf) });
@@ -595,7 +597,7 @@ function dedupeAndMergeActions(actionDocs) {
             screenshot_file_id: shotId,
             page_summary: page_summary_final,
             prompt_ref: promptId,
-            reanalyzed: !!already,  // ✅ only here
+            reanalyzed: !!alreadyAnalyzed,  // ✅ only here
           }
         },
         { upsert: true }
@@ -616,7 +618,7 @@ function dedupeAndMergeActions(actionDocs) {
             screenshot_file_id: shotId,
             page_summary: page_summary_final,
             prompt_ref: promptId,
-            reanalyzed: !!already,  // ✅ only here
+            reanalyzed: !!alreadyAnalyzed, // ✅ only here
           }
         },
         { upsert: true, returnDocument: 'after' }
@@ -627,6 +629,32 @@ function dedupeAndMergeActions(actionDocs) {
 
   // -------- Build Actions --------
   let actionDocs = [];
+  const linkActions = await extractLinksAsActionsViaDOM(page); // (unused here but useful to log if you want)
+  if (Array.isArray(linkActions) && linkActions.length) {
+    linkActions.forEach((l, idx) => {
+      actionDocs.push({
+        project_id: PROJECT_ID,
+        page_id: page_id,
+        kind: 'link',
+        id_attr: null,
+        name: null,
+        text: l.text || null,
+        role: null,
+        action: null,
+        method: null,
+        href: l.href || null,
+        target: null,
+        selectors: l.selectors || null,
+        inputs: [],
+        submit_button: null,
+        ai_confidence: null,
+        ordinal: 20000 + idx,
+        created_at: new Date(),
+        prompt_ref: promptId,
+        source: 'dom-link',
+      });
+    });
+  }
   const codeTestDocs = [];
 
   const allowedTypes = new Set(['form','button','link']);
