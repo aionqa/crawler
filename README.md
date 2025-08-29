@@ -96,3 +96,4 @@ Once the backend is running, visit:
 - Swagger UI: http://localhost:4000/api-docs
 - OpenAPI spec: http://localhost:4000/openapi.json
 
+
