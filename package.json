@@ -7,8 +7,15 @@
   "scripts": {
     "install:pw": "playwright install chromium",
     "analyze": "node singlePageAnalyzer.js",
+    "crawl": "node app/domainCrawler.js",
     "run:action": "node executeAction.js",
-    "format": "prettier -w ../../Downloads/single-page-analyzer"
+    "format": "prettier -w ../../Downloads/single-page-analyzer",
+    "dev:back": "cd back && npm run dev",
+    "dev:ui": "cd ui && npm run dev",
+    "start:back": "cd back && npm start",
+    "start:ui": "cd ui && npm run preview",
+    "build:ui": "cd ui && npm run build",
+    "install:all": "npm install && cd back && npm install && cd ../ui && npm install"
   },
   "dependencies": {
     "cheerio": "^1.1.2",
