@@ -289,3 +289,4 @@ After completing a domain crawl:
 5. **Analyze patterns** in the crawled data
 
 The domain crawler provides a comprehensive foundation for understanding website structure and extracting actionable insights from web content.
+

@@ -232,3 +232,4 @@ After creating configurations:
 4. **Run analysis** using the configured settings
 
 The configuration system provides the foundation for automated, authenticated web analysis with persistent sessions and optimized browser settings.
+
