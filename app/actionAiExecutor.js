@@ -1,13 +1,13 @@
-import { generateLoginStatements } from './login.js';
-import { generateActionCoderPrompt } from './actionPrompt.js';
-import { generateActionStatements } from './actionCode.js';
-import { judgeOutcome } from './judge.js';
-import { codeWrap, safeEvalFunction } from './sandbox.js';
+import { generateLoginStatements } from '../ai/login.js';
+import { generateActionCoderPrompt } from '../ai/actionPrompt.js';
+import { generateActionStatements } from '../ai/actionCode.js';
+import { judgeOutcome } from '../ai/judge.js';
+import { codeWrap, safeEvalFunction } from '../runtime/sandbox.js';
 import 'dotenv/config';
 import { chromium } from 'playwright';
 import { MongoClient, GridFSBucket, ObjectId } from 'mongodb';
 import crypto from 'crypto';
-import { openai } from './client.js';
+import { openai } from '../ai/client.js';
 // ---------------- CLI ----------------
 function argvToOpts(argv) {
   const out = { projectIdRaw: null, pageIdRaw: null, actionIdRaw: null, headless: 'true' };
