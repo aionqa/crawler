@@ -165,6 +165,58 @@ class CrawlingOrchestrator extends EventEmitter {
     }
   }
 
+  async startActionRun(actionId, projectId, pageId, options = {}) {
+    const jobId = new ObjectId().toString();
+    const headless = options.headless !== undefined ? !!options.headless : false; // default non-headless per request
+    try {
+      // Basic validation
+      if (!ObjectId.isValid(actionId) || !ObjectId.isValid(projectId) || !ObjectId.isValid(pageId)) {
+        throw new Error('Invalid ids');
+      }
+
+      const runDoc = {
+        _id: new ObjectId(jobId),
+        kind: 'partial',
+        status: 'starting',
+        start_time: new Date(),
+        project_id: new ObjectId(projectId),
+        action_id: new ObjectId(actionId),
+        page_id: new ObjectId(pageId),
+        headless,
+        logs: []
+      };
+      await Runs.insertOne(runDoc);
+      this.jobLogs.set(jobId, []);
+
+      const script = path.join(__dirname, 'actionAiExecutor.js');
+      const proc = spawn(process.execPath, [
+        script,
+        '--project_id', String(projectId),
+        '--page_id', String(pageId),
+        '--action_id', String(actionId),
+        '--headless', String(headless)
+      ], { stdio: ['pipe','pipe','pipe'], detached: false, cwd: path.join(__dirname, '../') });
+
+      this.activeJobs.set(jobId, { process: proc, config: { type: 'partial' }, startTime: new Date(), projectId });
+      this.handleProcessOutput(jobId, proc);
+      proc.on('exit', (code, signal) => this.handleProcessExit(jobId, code, signal));
+
+      await Runs.updateOne({ _id: new ObjectId(jobId) }, { $set: { status: 'running' } });
+      this.emit('jobStarted', { jobId, config: { type: 'partial' } });
+
+      return { success: true, jobId, job_id: jobId, message: 'Partial action run started' };
+    } catch (error) {
+      console.error(`❌ Failed to start action run ${jobId}:`, error);
+      if (jobId) {
+        await Runs.updateOne(
+          { _id: new ObjectId(jobId) },
+          { $set: { status: 'failed', end_time: new Date(), error: String(error?.message || error) } }
+        );
+      }
+      return { success: false, error: String(error?.message || error) };
+    }
+  }
+
   async stopCrawl(jobId) {
     const job = this.activeJobs.get(jobId);
     
