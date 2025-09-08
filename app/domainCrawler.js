@@ -1,7 +1,12 @@
 import { analyzePage } from '../ai/pageAnalysis.js';
+import { openai } from '../ai/client.js';
+import { codeWrap, safeEvalFunction } from '../runtime/sandbox.js';
+import { buildLoginMessages } from '../ai/login.js';
 import 'dotenv/config';
 import { chromium } from 'playwright';
 import { MongoClient, GridFSBucket, ObjectId } from 'mongodb';
+import path from 'path';
+import fs from 'fs/promises';
 import crypto from 'crypto';
 import { z } from 'zod';
 
@@ -57,6 +62,7 @@ const db = client.db(DB_NAME);
 const Projects = db.collection('projects');
 const Pages = db.collection('pages');
 const Actions = db.collection('actions');
+const Prompts = db.collection('prompts');
 const Configurations = db.collection('configurations');
 const Runs = db.collection('runs');
 const bucket = new GridFSBucket(db, { bucketName: 'artifacts' });
@@ -125,6 +131,7 @@ class DomainCrawler {
     this.context = null;
     this.page = null;
     this.runId = null;
+    this.videoFileId = null;
   }
 
   async initialize() {
@@ -165,7 +172,8 @@ class DomainCrawler {
     
     this.context = await this.browser.newContext({
       userAgent: this.config.user_agent || undefined,
-      viewport: { width: 1280, height: 720 }
+      viewport: { width: 1280, height: 720 },
+      recordVideo: { dir: path.join('/tmp', 'aionqa_videos') }
     });
     
     this.page = await this.context.newPage();
@@ -184,89 +192,152 @@ class DomainCrawler {
 
     console.log('🔐 Attempting login...');
     
-    try {
-      await this.page.goto(this.config.login_url, { waitUntil: 'load' });
-      
-      // Wait for login form to be ready
-      await this.page.waitForLoadState('networkidle', { timeout: 10000 });
-      
-      // Fill username
-      if (this.config.username) {
-        const usernameSelectors = [
-          'input[name="username"]',
-          'input[name="email"]',
-          'input[type="email"]',
-          'input[id*="username"]',
-          'input[id*="email"]',
-          'input[placeholder*="username" i]',
-          'input[placeholder*="email" i]'
-        ];
-        
-        for (const selector of usernameSelectors) {
-          try {
-            await this.page.fill(selector, this.config.username);
-            break;
-          } catch {}
-        }
-      }
-      
-      // Fill password
-      if (this.config.password) {
-        const passwordSelectors = [
-          'input[name="password"]',
-          'input[type="password"]',
-          'input[id*="password"]',
-          'input[placeholder*="password" i]'
-        ];
-        
-        for (const selector of passwordSelectors) {
-          try {
-            await this.page.fill(selector, this.config.password);
-            break;
-          } catch {}
-        }
-      }
-      
-      // Submit form
-      const submitSelectors = [
-        'button[type="submit"]',
-        'input[type="submit"]',
-        'button:has-text("Login")',
-        'button:has-text("Sign In")',
-        'button:has-text("Log In")'
-      ];
-      
-      for (const selector of submitSelectors) {
+    // Utility helpers for staged login (purely generic; no static IDs)
+    const waitForMeaningfulChange = async (prevUrl, prevHtmlHash, timeoutMs = 60_000) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const nowUrl = this.page.url();
+        if (nowUrl && nowUrl !== prevUrl) return true;
         try {
-          await this.page.click(selector);
-          break;
+          const nowHtml = await this.page.content();
+          const nowHash = sha1(Buffer.from(String(nowHtml||''), 'utf8'));
+          if (nowHash !== prevHtmlHash) return true;
         } catch {}
+        await this.page.waitForTimeout(1000).catch(()=>{});
       }
-      
-      // Wait for login to complete
-      await this.page.waitForLoadState('networkidle', { timeout: 15000 });
-      
-      // Check if login was successful (basic check)
+      return false;
+    };
+
+    const queryOne = async (producer) => {
+      try {
+        const loc = producer();
+        const first = loc.first();
+        if (await first.isVisible({ timeout: 500 }).catch(()=>false)) return first;
+      } catch {}
+      return null;
+    };
+
+    const fillEmailIfPresent = async (username) => {
+      const byRole = await queryOne(() => this.page.getByRole('textbox', { name: /email|user|login/i }));
+      const byType = (await queryOne(() => this.page.locator('input[type="email"]'))) ||
+        (await queryOne(() => this.page.locator('input[type="text"][name*="email" i]')));
+      const target = byRole || byType;
+      if (target) { try { await target.fill(String(username), { timeout: 5000 }); return true; } catch {} }
+      return false;
+    };
+
+    const clickPrimaryContinueOrSubmit = async () => {
+      const candidates = [
+        () => this.page.getByRole('button', { name: /continue|next|sign\s*in|log\s*in|submit|verify/i }),
+        () => this.page.locator('button[type="submit"]'),
+        () => this.page.locator('input[type="submit"]'),
+        () => this.page.locator('button')
+      ];
+      for (const make of candidates) {
+        const loc = await queryOne(make);
+        if (loc) { try { await loc.click({ timeout: 5000 }); return true; } catch {} }
+      }
+      return false;
+    };
+
+    const fillPasswordIfPresent = async (password) => {
+      const passLoc = (await queryOne(() => this.page.getByRole('textbox', { name: /pass(word)?/i }))) ||
+        (await queryOne(() => this.page.locator('input[type="password"]')));
+      if (passLoc) { try { await passLoc.fill(String(password), { timeout: 5000 }); return true; } catch {} }
+      return false;
+    };
+
+    try {
+      await this.page.goto(this.config.login_url, { waitUntil: 'load', timeout: 60000 }).catch(()=>{});
+      try { await this.page.waitForLoadState('domcontentloaded', { timeout: 10000 }); } catch {}
+
+      // Capture login page as a Page document so UI can show it
+      try {
+        const loginHtml = await this.page.content();
+        const loginShot = await this.page.screenshot({ fullPage: true, type: 'png' }).catch(() => null);
+        const pageId = await this.savePage(this.config.login_url, loginHtml, loginShot, deriveShortSummary(loginHtml));
+        await Runs.updateOne({ _id: this.runId }, { $set: { login_page_id: pageId } });
+      } catch {}
+
+      const beforeUrl = this.page.url();
+      const beforeHtml = await this.page.content();
+      const beforeHash = sha1(Buffer.from(String(beforeHtml||''), 'utf8'));
+
+      // Ask the coding model for generic Playwright statements (no hardcoded ids/names)
+      const loginMsgs = buildLoginMessages({ loginUrl: this.config.login_url });
+      // Persist the prompt for UI visibility
+      try {
+        await Prompts.insertOne({
+          project_id: this.projectId,
+          name: 'Login coder prompt',
+          content: JSON.stringify(loginMsgs, null, 2),
+          type: 'action',
+          created_at: new Date(),
+          updated_at: new Date()
+        });
+      } catch {}
+      const chat = await openai.chat.completions.create({ model: 'gpt-5-mini', messages: loginMsgs });
+      const statements = (chat.choices?.[0]?.message?.content || '').trim();
+      // Persist the generated code as a custom prompt for auditability
+      try {
+        if (statements) {
+          await Prompts.insertOne({
+            project_id: this.projectId,
+            name: 'Login AI code',
+            content: statements,
+            type: 'custom',
+            created_at: new Date(),
+            updated_at: new Date()
+          });
+        }
+      } catch {}
+      const wrapped = codeWrap(statements);
+      try {
+        const fn = await safeEvalFunction(wrapped, { console, page: this.page, action: null, project: { credentials: { username: this.config.username, password: this.config.password } }, helpers: {} });
+        await fn({ page: this.page, action: null, project: { credentials: { username: this.config.username, password: this.config.password } }, helpers: {} });
+      } catch {}
+
+      // Heuristic nudges without static selectors to handle staged flows
+      const emailFilled = this.config.username ? await fillEmailIfPresent(this.config.username) : false;
+      if (emailFilled) await clickPrimaryContinueOrSubmit();
+      const passFilled = this.config.password ? await fillPasswordIfPresent(this.config.password) : false;
+      if (passFilled) await clickPrimaryContinueOrSubmit();
+      const ssoBtn = await queryOne(() => this.page.getByRole('button', { name: /redirect/i }));
+      if (ssoBtn) { try { await ssoBtn.click({ timeout: 5000 }); } catch {} }
+
+      // Wait up to 60s for progress; else press Enter and wait briefly again
+      const progressed = await waitForMeaningfulChange(beforeUrl, beforeHash, 60_000);
+      if (!progressed) { try { await this.page.keyboard.press('Enter'); } catch {} await waitForMeaningfulChange(beforeUrl, beforeHash, 10_000); }
+
+      try { await this.page.waitForLoadState('networkidle', { timeout: 8000 }); } catch {}
+
       const currentUrl = this.page.url();
-      if (currentUrl !== this.config.login_url) {
+      const moved = currentUrl && currentUrl !== this.config.login_url;
+      if (moved) {
         console.log('✅ Login appears successful');
-        
-        // Save cookies if enabled
+        // Record an action document representing login success for visibility
+        try {
+          const loginPageId = (await Pages.findOne({ project_id: this.projectId, url: identityUrl(this.config.login_url) }))?._id || null;
+          await Actions.insertOne({
+            project_id: this.projectId,
+            page_id: loginPageId,
+            to_page_id: null,
+            kind: 'login',
+            text: 'AI-driven login flow executed',
+            selector: '',
+            created_at: new Date(),
+            updated_at: new Date()
+          });
+        } catch {}
         if (this.config.save_cookies) {
           const cookies = await this.context.cookies();
-          await Configurations.updateOne(
-            { _id: this.config._id },
-            { $set: { cookies: cookies, updated_at: new Date() } }
-          );
+          await Configurations.updateOne({ _id: this.config._id }, { $set: { cookies, updated_at: new Date() } });
           console.log(`💾 Saved ${cookies.length} cookies`);
         }
-        
         return true;
-      } else {
-        console.log('⚠️ Login may have failed - still on login page');
-        return false;
       }
-      
+      console.log('⚠️ Login may have failed - still on login page');
+      return false;
     } catch (error) {
       console.error('❌ Login failed:', error.message);
       return false;
@@ -351,6 +422,29 @@ class DomainCrawler {
         }
       }
     );
+  }
+
+  async finalizeRunArtifacts() {
+    try {
+      if (this.page && this.page.video) {
+        const video = this.page.video();
+        if (video) {
+          const tempPath = path.join('/tmp', `run_${this.runId.toString()}_${Date.now()}.webm`);
+          try { await video.saveAs(tempPath); } catch {}
+          try {
+            const buf = await fs.readFile(tempPath);
+            const fileId = await uploadToGridFS({
+              filename: path.basename(tempPath),
+              buffer: buf,
+              contentType: 'video/webm',
+              metadata: { project_id: this.projectId, kind: 'run-video', run_id: this.runId.toString() }
+            });
+            this.videoFileId = fileId;
+            await Runs.updateOne({ _id: this.runId }, { $set: { video_file_id: fileId } });
+          } catch {}
+        }
+      }
+    } catch {}
   }
 
   async analyzePage(url, depth) {
@@ -562,6 +656,8 @@ class DomainCrawler {
   }
 
   async cleanup() {
+    // Attempt to persist video before closing context/browser
+    await this.finalizeRunArtifacts().catch(()=>{});
     if (this.page) await this.page.close();
     if (this.context) await this.context.close();
     if (this.browser) await this.browser.close();

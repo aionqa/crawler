@@ -233,7 +233,7 @@ function dedupeAndMergeActions(actionDocs) {
     page_id = ins.insertedId;
   } else {
     await Pages.updateOne({ _id: page_id }, {
-      $set: { page_summary: parsed.page_summary, html_file_id: htmlId, screenshot_file_id: shotId }
+      $set: { page_summary: parsed.page_summary, html_file_id: htmlId, screenshot_file_id: shotId, analyzed: true }
     });
   }
 

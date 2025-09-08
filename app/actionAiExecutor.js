@@ -268,7 +268,7 @@ Variables available: { page, project, helpers }` }
 
   await (async function withBrowserRun() {
     const browser = await chromium.launch({ headless: HEADLESS });
-    const context = await browser.newContext({ storageState: project?.storage_state || undefined });
+    const context = await browser.newContext({ storageState: project?.storage_state || undefined, recordVideo: { dir: '/tmp/aionqa_videos' } });
     const page = await context.newPage();
 
     // Helpers passed into AI code + login step
@@ -290,8 +290,100 @@ Variables available: { page, project, helpers }` }
       },
     };
 
+    // Heuristic staged login with 60s decision loop
+    async function waitForMeaningfulChange(prevUrl, prevHash, timeoutMs = 60_000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const nowUrl = normalizeUrl(page.url());
+        let changed = nowUrl !== prevUrl;
+        if (!changed) {
+          try {
+            const nowHtml = await page.content();
+            const nowHash = htmlHash(nowHtml);
+            changed = changed || nowHash !== prevHash;
+            if (changed) return true;
+          } catch {}
+        } else {
+          return true;
+        }
+        await page.waitForTimeout(1000).catch(()=>{});
+      }
+      return false;
+    }
+
+    async function queryOne(locatorProducer) {
+      try { const loc = locatorProducer(); if (await loc.first().isVisible({ timeout: 500 }).catch(()=>false)) return loc.first(); } catch {}
+      return null;
+    }
+
+    async function fillEmailIfPresent(username) {
+      const byRole = await queryOne(() => page.getByRole('textbox', { name: /email|user|login/i }));
+      const byType = await queryOne(() => page.locator('input[type="email"]')) || await queryOne(() => page.locator('input[type="text"][name*="email" i]'));
+      const target = byRole || byType;
+      if (target) {
+        try { await target.fill(String(username), { timeout: 5_000 }); return true; } catch {}
+      }
+      return false;
+    }
+
+    async function clickPrimaryContinueOrSubmit() {
+      const candidates = [
+        () => page.getByRole('button', { name: /continue|next|sign\s*in|submit|verify/i }),
+        () => page.locator('button[type="submit"]'),
+        () => page.locator('input[type="submit"]'),
+        () => page.locator('button')
+      ];
+      for (const make of candidates) {
+        const loc = await queryOne(make);
+        if (loc) { try { await loc.click({ timeout: 5_000 }); return true; } catch {} }
+      }
+      return false;
+    }
+
+    async function fillPasswordIfPresent(password) {
+      const passLoc = await queryOne(() => page.getByRole('textbox', { name: /pass(word)?/i }))
+        || await queryOne(() => page.locator('input[type="password"]'));
+      if (passLoc) { try { await passLoc.fill(String(password), { timeout: 5_000 }); return true; } catch {} }
+      return false;
+    }
+
+    async function heuristicLoginWithDecisionLoop(projectCreds) {
+      if (!projectCreds?.username) return false;
+      const beforeUrl = normalizeUrl(page.url());
+      const beforeHash = htmlHash(await page.content());
+
+      let acted = false;
+
+      // 1) If an email-only stage is present, fill and try to continue
+      const filledEmail = await fillEmailIfPresent(projectCreds.username);
+      if (filledEmail) {
+        acted = true;
+        await clickPrimaryContinueOrSubmit();
+      }
+
+      // 2) If password appears, fill and submit
+      const passFilled = await fillPasswordIfPresent(projectCreds.password);
+      if (passFilled) {
+        acted = true;
+        await clickPrimaryContinueOrSubmit();
+      }
+
+      // 3) If the page shows explicit SSO redirect, click the redirect button
+      const ssoBtn = await queryOne(() => page.getByRole('button', { name: /redirect/i }));
+      if (ssoBtn) { acted = true; try { await ssoBtn.click({ timeout: 5_000 }); } catch {} }
+
+      // 4) Wait for any meaningful change up to 60s; if none, try fallback interactions
+      const changed = await waitForMeaningfulChange(beforeUrl, beforeHash, 60_000);
+      if (changed) return true;
+
+      // Fallbacks if still stuck: press Enter in focused field and try again
+      try { await page.keyboard.press('Enter'); } catch {}
+      const changedAfterEnter = await waitForMeaningfulChange(beforeUrl, beforeHash, 10_000);
+      return acted || changedAfterEnter;
+    }
+
     try {
-      // --- Login bootstrap (AI-driven) ---
+      // --- Login bootstrap (AI-driven + heuristic staged flow) ---
       if (project?.credentials?.username && project?.credentials?.password) {
         const loginUrl = project?.credentials?.login_url || pageDoc.url;
         console.log(`🔐 AI-driven login at: ${loginUrl}`);
@@ -317,13 +409,24 @@ Variables available: { page, project, helpers }` }
         });
 
         const wrappedLogin = codeWrap(loginStatements);
+        let aiRan = false;
         try {
           const fnLogin = await safeEvalFunction(wrappedLogin, { console, page, action: null, project, helpers });
           await fnLogin({ page, action: null, project, helpers });
+          aiRan = true;
           await helpers.waitStable();
         } catch (e) {
           console.error('❌ AI login code execution error:', e?.message || e);
         }
+
+        // Heuristic staged handler for pages that first ask only for email (e.g., "Continue")
+        try {
+          const successHeuristic = await heuristicLoginWithDecisionLoop(project.credentials);
+          if (!aiRan && !successHeuristic) {
+            // If neither AI nor heuristic caused change, try heuristic again once more
+            await heuristicLoginWithDecisionLoop(project.credentials);
+          }
+        } catch {}
 
         // Wait a bit for any async token writes
         await page.waitForTimeout(1500).catch(()=>{});
@@ -435,6 +538,10 @@ Variables available: { page, project, helpers }` }
         if (afterUrl && normalizeUrl(afterUrl) !== normalizeUrl(pageDoc.url)) {
           const up = await upsertPageFromState({ url: afterUrl, html: afterHtml, projectId: PROJECT_ID, previousPageId: PAGE_ID, fromActionId: ACTION_ID });
           resultPageId = up.page_id;
+        }
+        // If we stayed on the same URL but captured a screenshot, attach it to the existing page
+        if (!resultPageId && screenshot_file_id) {
+          try { await Pages.updateOne({ _id: PAGE_ID }, { $set: { screenshot_file_id, analyzed: true } }); } catch {}
         }
 
         // (8) Ask AI to judge
