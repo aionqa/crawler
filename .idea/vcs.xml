@@ -3,6 +3,14 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/back" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/crawler-media" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/crawler-simplified" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/crawler-static" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/crawler-text" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/login-media" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/login-simplified" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/login-static" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/login-text" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/ui" vcs="Git" />
   </component>
 </project>
