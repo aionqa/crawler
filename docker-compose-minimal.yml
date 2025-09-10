@@ -1,0 +1,196 @@
+services:
+  mongo:
+    image: mongo:6
+    container_name: aionqa-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  redis:
+    image: redis:7-alpine
+    container_name: aionqa-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  back:
+    build:
+      context: .
+      dockerfile: ./back/Dockerfile
+    container_name: aionqa-back
+    restart: unless-stopped
+    environment:
+      - PORT=4000
+      - MONGODB_URI=mongodb://mongo:27017
+      - REDIS_URL=redis://redis:6379
+      - DB_NAME=spa
+      - ORIGIN=http://localhost:3000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LOGIN_SIMPLIFIED_URL=http://login-simplified:3001
+      - LOGIN_TEXT_URL=http://login-text:3002
+      - LOGIN_MEDIA_URL=http://login-media:3003
+      - LOGIN_STATIC_URL=http://login-static:3004
+      - CRAWLER_TEXT_URL=http://crawler-text:3101
+      - CRAWLER_MEDIA_URL=http://crawler-media:3102
+      - CRAWLER_SIMPLIFIED_URL=http://crawler-simplified:3103
+      - CRAWLER_STATIC_URL=http://crawler-static:3104
+    depends_on:
+      - mongo
+      - redis
+    ports:
+      - "4000:4000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  ui:
+    build: ./ui
+    container_name: aionqa-ui
+    restart: unless-stopped
+    depends_on:
+      - back
+    ports:
+      - "3000:3000"
+
+  # Login agents - will be started on demand
+  login-simplified:
+    build:
+      context: ./login-simplified
+      dockerfile: Dockerfile
+    container_name: aionqa-login-simplified
+    restart: "no"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=3001
+    ports:
+      - "3001:3001"
+    profiles:
+      - login
+
+  login-text:
+    build:
+      context: ./login-text
+      dockerfile: Dockerfile
+    container_name: aionqa-login-text
+    restart: "no"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=3002
+    ports:
+      - "3002:3002"
+    profiles:
+      - login
+
+  login-media:
+    build:
+      context: ./login-media
+      dockerfile: Dockerfile
+    container_name: aionqa-login-media
+    restart: "no"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=3003
+    ports:
+      - "3003:3003"
+    profiles:
+      - login
+
+  login-static:
+    build:
+      context: ./login-static
+      dockerfile: Dockerfile
+    container_name: aionqa-login-static
+    restart: "no"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=3004
+    ports:
+      - "3004:3004"
+    profiles:
+      - login
+
+  # Manual analysis service
+  manual-analysis:
+    build:
+      context: ./manual-analysis
+      dockerfile: Dockerfile
+    container_name: aionqa-manual-analysis
+    restart: "no"
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017
+      - DB_NAME=aionqa
+      - PORT=3200
+    ports:
+      - "3200:3200"
+    depends_on:
+      - mongo
+    profiles:
+      - analysis
+
+  # AI Chat service
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    container_name: aionqa-ai-service
+    restart: unless-stopped
+    environment:
+      - AI_SERVICE_PORT=5000
+      - BACKEND_URL=http://back:4000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    ports:
+      - "5000:5000"
+    depends_on:
+      - back
+
+  # Crawler agents - will be started on demand
+  crawler-simplified:
+    build:
+      context: ./crawler-simplified
+      dockerfile: Dockerfile
+    container_name: aionqa-crawler-simplified
+    restart: "no"
+    ports:
+      - "3101:3101"
+    profiles:
+      - crawler
+
+  crawler-text:
+    build:
+      context: ./crawler-text
+      dockerfile: Dockerfile
+    container_name: aionqa-crawler-text
+    restart: "no"
+    ports:
+      - "3102:3102"
+    profiles:
+      - crawler
+
+  crawler-media:
+    build:
+      context: ./crawler-media
+      dockerfile: Dockerfile
+    container_name: aionqa-crawler-media
+    restart: "no"
+    ports:
+      - "3103:3103"
+    profiles:
+      - crawler
+
+  crawler-static:
+    build:
+      context: ./crawler-static
+      dockerfile: Dockerfile
+    container_name: aionqa-crawler-static
+    restart: "no"
+    ports:
+      - "3104:3104"
+    profiles:
+      - crawler
+
+volumes:
+  mongo_data:
+  redis_data:
