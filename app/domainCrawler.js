@@ -1,7 +1,7 @@
-import { analyzePage } from '../ai/pageAnalysis.js';
-import { openai } from '../ai/client.js';
-import { codeWrap, safeEvalFunction } from '../runtime/sandbox.js';
-import { buildLoginMessages } from '../ai/login.js';
+import { analyzePage } from '/app/ai/pageAnalysis.js';
+import { openai } from '/app/ai/client.js';
+import { codeWrap, safeEvalFunction } from '/app/runtime/sandbox.js';
+import { buildLoginMessages } from '/app/ai/login.js';
 import 'dotenv/config';
 import { chromium } from 'playwright';
 import { MongoClient, GridFSBucket, ObjectId } from 'mongodb';
@@ -142,6 +142,13 @@ class DomainCrawler {
     console.log(`📋 Max Depth: ${maxDepth}`);
     console.log(`📋 Job ID: ${JOB_ID}`);
     
+    // Set up global timeout for the entire crawler
+    this.globalTimeout = setTimeout(() => {
+      console.log('⏰ Global timeout reached, shutting down crawler...');
+      this.cleanup().catch(() => {});
+      process.exit(1);
+    }, 10 * 60 * 1000); // 10 minutes global timeout
+    
     // Use provided job ID or create new run record
     if (JOB_ID) {
       this.runId = new ObjectId(JOB_ID);
@@ -165,10 +172,23 @@ class DomainCrawler {
       this.runId = runResult.insertedId;
     }
     
-    // Launch browser with configuration
-    this.browser = await chromium.launch({ 
-      headless: this.config.headless 
-    });
+    // Launch browser with configuration and timeout
+    const browserTimeout = setTimeout(() => {
+      throw new Error('Browser launch timeout');
+    }, 30000); // 30 second browser launch timeout
+    
+    try {
+      this.browser = await chromium.launch({ 
+        headless: true, // Force headless mode in Docker
+        timeout: 30000, // 30 second timeout for browser launch
+        executablePath: '/usr/bin/chromium-browser', // Use system Chromium
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+      });
+      clearTimeout(browserTimeout);
+    } catch (error) {
+      clearTimeout(browserTimeout);
+      throw error;
+    }
     
     this.context = await this.browser.newContext({
       userAgent: this.config.user_agent || undefined,
@@ -178,8 +198,9 @@ class DomainCrawler {
     
     this.page = await this.context.newPage();
     
-    // Set timeout
+    // Set comprehensive timeouts
     this.page.setDefaultTimeout(this.config.timeout || 30000);
+    this.page.setDefaultNavigationTimeout(60000); // 60 second navigation timeout
     
     console.log(`✅ Browser initialized with config: ${this.config.name}`);
   }
@@ -192,62 +213,68 @@ class DomainCrawler {
 
     console.log('🔐 Attempting login...');
     
-    // Utility helpers for staged login (purely generic; no static IDs)
-    const waitForMeaningfulChange = async (prevUrl, prevHtmlHash, timeoutMs = 60_000) => {
-      const start = Date.now();
-      while (Date.now() - start < timeoutMs) {
-        const nowUrl = this.page.url();
-        if (nowUrl && nowUrl !== prevUrl) return true;
-        try {
-          const nowHtml = await this.page.content();
-          const nowHash = sha1(Buffer.from(String(nowHtml||''), 'utf8'));
-          if (nowHash !== prevHtmlHash) return true;
-        } catch {}
-        await this.page.waitForTimeout(1000).catch(()=>{});
-      }
-      return false;
-    };
-
-    const queryOne = async (producer) => {
-      try {
-        const loc = producer();
-        const first = loc.first();
-        if (await first.isVisible({ timeout: 500 }).catch(()=>false)) return first;
-      } catch {}
-      return null;
-    };
-
-    const fillEmailIfPresent = async (username) => {
-      const byRole = await queryOne(() => this.page.getByRole('textbox', { name: /email|user|login/i }));
-      const byType = (await queryOne(() => this.page.locator('input[type="email"]'))) ||
-        (await queryOne(() => this.page.locator('input[type="text"][name*="email" i]')));
-      const target = byRole || byType;
-      if (target) { try { await target.fill(String(username), { timeout: 5000 }); return true; } catch {} }
-      return false;
-    };
-
-    const clickPrimaryContinueOrSubmit = async () => {
-      const candidates = [
-        () => this.page.getByRole('button', { name: /continue|next|sign\s*in|log\s*in|submit|verify/i }),
-        () => this.page.locator('button[type="submit"]'),
-        () => this.page.locator('input[type="submit"]'),
-        () => this.page.locator('button')
-      ];
-      for (const make of candidates) {
-        const loc = await queryOne(make);
-        if (loc) { try { await loc.click({ timeout: 5000 }); return true; } catch {} }
-      }
-      return false;
-    };
-
-    const fillPasswordIfPresent = async (password) => {
-      const passLoc = (await queryOne(() => this.page.getByRole('textbox', { name: /pass(word)?/i }))) ||
-        (await queryOne(() => this.page.locator('input[type="password"]')));
-      if (passLoc) { try { await passLoc.fill(String(password), { timeout: 5000 }); return true; } catch {} }
-      return false;
-    };
-
+    // Set up login timeout
+    const loginTimeout = setTimeout(() => {
+      console.log('⏰ Login timeout reached');
+      throw new Error('Login timeout');
+    }, 2 * 60 * 1000); // 2 minutes login timeout
+    
     try {
+      // Utility helpers for staged login (purely generic; no static IDs)
+      const waitForMeaningfulChange = async (prevUrl, prevHtmlHash, timeoutMs = 60_000) => {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+          const nowUrl = this.page.url();
+          if (nowUrl && nowUrl !== prevUrl) return true;
+          try {
+            const nowHtml = await this.page.content();
+            const nowHash = sha1(Buffer.from(String(nowHtml||''), 'utf8'));
+            if (nowHash !== prevHtmlHash) return true;
+          } catch {}
+          await this.page.waitForTimeout(1000).catch(()=>{});
+        }
+        return false;
+      };
+
+      const queryOne = async (producer) => {
+        try {
+          const loc = producer();
+          const first = loc.first();
+          if (await first.isVisible({ timeout: 500 }).catch(()=>false)) return first;
+        } catch {}
+        return null;
+      };
+
+      const fillEmailIfPresent = async (username) => {
+        const byRole = await queryOne(() => this.page.getByRole('textbox', { name: /email|user|login/i }));
+        const byType = (await queryOne(() => this.page.locator('input[type="email"]'))) ||
+          (await queryOne(() => this.page.locator('input[type="text"][name*="email" i]')));
+        const target = byRole || byType;
+        if (target) { try { await target.fill(String(username), { timeout: 5000 }); return true; } catch {} }
+        return false;
+      };
+
+      const clickPrimaryContinueOrSubmit = async () => {
+        const candidates = [
+          () => this.page.getByRole('button', { name: /continue|next|sign\s*in|log\s*in|submit|verify/i }),
+          () => this.page.locator('button[type="submit"]'),
+          () => this.page.locator('input[type="submit"]'),
+          () => this.page.locator('button')
+        ];
+        for (const make of candidates) {
+          const loc = await queryOne(make);
+          if (loc) { try { await loc.click({ timeout: 5000 }); return true; } catch {} }
+        }
+        return false;
+      };
+
+      const fillPasswordIfPresent = async (password) => {
+        const passLoc = (await queryOne(() => this.page.getByRole('textbox', { name: /pass(word)?/i }))) ||
+          (await queryOne(() => this.page.locator('input[type="password"]')));
+        if (passLoc) { try { await passLoc.fill(String(password), { timeout: 5000 }); return true; } catch {} }
+        return false;
+      };
+
       await this.page.goto(this.config.login_url, { waitUntil: 'load', timeout: 60000 }).catch(()=>{});
       try { await this.page.waitForLoadState('domcontentloaded', { timeout: 10000 }); } catch {}
 
@@ -334,12 +361,15 @@ class DomainCrawler {
           await Configurations.updateOne({ _id: this.config._id }, { $set: { cookies, updated_at: new Date() } });
           console.log(`💾 Saved ${cookies.length} cookies`);
         }
+        clearTimeout(loginTimeout);
         return true;
       }
       console.log('⚠️ Login may have failed - still on login page');
+      clearTimeout(loginTimeout);
       return false;
     } catch (error) {
       console.error('❌ Login failed:', error.message);
+      clearTimeout(loginTimeout);
       return false;
     }
   }
@@ -448,21 +478,35 @@ class DomainCrawler {
   }
 
   async analyzePage(url, depth) {
+    const pageTimeout = setTimeout(() => {
+      console.log(`⏰ Page analysis timeout for: ${url}`);
+      throw new Error('Page analysis timeout');
+    }, 2 * 60 * 1000); // 2 minutes per page timeout
+    
     try {
-      await this.page.goto(url, { waitUntil: 'load' });
-      await this.page.waitForLoadState('networkidle', { timeout: 10000 });
+      console.log(`📄 Loading page: ${url}`);
+      await this.page.goto(url, { waitUntil: 'load', timeout: 60000 });
+      await this.page.waitForLoadState('networkidle', { timeout: 15000 });
       
+      console.log(`📸 Taking screenshot for: ${url}`);
       const html = await this.page.content();
       const screenshotBuf = await this.page.screenshot({ fullPage: true, type: 'png' }).catch(() => null);
       const screenshotDataUrl = screenshotBuf ? await toDataUrlPng(screenshotBuf) : null;
       
-      // Analyze page with AI
+      console.log(`🤖 Analyzing page with AI: ${url}`);
+      // Analyze page with AI with timeout
+      const aiTimeout = setTimeout(() => {
+        throw new Error('AI analysis timeout');
+      }, 180000); // 3 minutes AI analysis timeout
+      
       const raw = await analyzePage({
         url: url,
         html,
         screenshotDataUrl,
         response_format: { type: 'json_object' },
       });
+      
+      clearTimeout(aiTimeout);
       
       let data;
       try { data = JSON.parse(raw); } catch { data = null; }
@@ -491,10 +535,12 @@ class DomainCrawler {
         await this.discoverUrls(url, depth + 1);
       }
       
+      clearTimeout(pageTimeout);
       return true;
       
     } catch (error) {
       console.error(`❌ Error analyzing page ${url}:`, error.message);
+      clearTimeout(pageTimeout);
       return false;
     }
   }
@@ -551,7 +597,12 @@ class DomainCrawler {
         html_file_id: htmlId,
         screenshot_file_id: screenshotId,
         last_analyzed_at: new Date(),
-        last_analyzed_run_id: this.runId
+        last_analyzed_run_id: this.runId,
+        // New analysis settings
+        analysis_approach: 'ai', // 'ai', 'manual', 'custom_script'
+        custom_playwright_script: null,
+        is_login_page: this.isLoginPage(urlId, html),
+        analysis_priority: this.isLoginPage(urlId, html) ? 1 : 0 // Login pages get priority 1
       });
       return result.insertedId;
     }
@@ -655,13 +706,66 @@ class DomainCrawler {
     }
   }
 
+  isLoginPage(url, html) {
+    // Check URL patterns
+    const loginUrlPatterns = [
+      /\/login/i,
+      /\/signin/i,
+      /\/sign-in/i,
+      /\/auth/i,
+      /\/authenticate/i,
+      /\/log-in/i
+    ];
+    
+    if (loginUrlPatterns.some(pattern => pattern.test(url))) {
+      return true;
+    }
+    
+    // Check HTML content for login indicators
+    const loginIndicators = [
+      /<input[^>]*type=["']password["'][^>]*>/i,
+      /<form[^>]*>.*?<input[^>]*type=["']password["'][^>]*>.*?<\/form>/is,
+      /login/i,
+      /sign\s*in/i,
+      /username/i,
+      /email.*password/i,
+      /password.*email/i
+    ];
+    
+    const loginCount = loginIndicators.filter(indicator => indicator.test(html)).length;
+    
+    // If we find 3 or more login indicators, it's likely a login page
+    return loginCount >= 3;
+  }
+
   async cleanup() {
+    console.log('🧹 Cleaning up crawler...');
+    
+    // Clear global timeout
+    if (this.globalTimeout) {
+      clearTimeout(this.globalTimeout);
+    }
+    
     // Attempt to persist video before closing context/browser
     await this.finalizeRunArtifacts().catch(()=>{});
-    if (this.page) await this.page.close();
-    if (this.context) await this.context.close();
-    if (this.browser) await this.browser.close();
-    await client.close();
+    
+    // Close browser resources with timeout
+    const cleanupTimeout = setTimeout(() => {
+      console.log('⚠️ Cleanup timeout, forcing exit');
+      process.exit(1);
+    }, 30000); // 30 second cleanup timeout
+    
+    try {
+      if (this.page) await this.page.close();
+      if (this.context) await this.context.close();
+      if (this.browser) await this.browser.close();
+      await client.close();
+      clearTimeout(cleanupTimeout);
+      console.log('✅ Cleanup completed');
+    } catch (error) {
+      console.error('❌ Error during cleanup:', error.message);
+      clearTimeout(cleanupTimeout);
+    }
   }
 }
 

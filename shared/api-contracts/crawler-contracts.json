@@ -1,0 +1,206 @@
+{
+  "crawlerAgentAPI": {
+    "version": "1.0.0",
+    "description": "API contract for crawler agent modules",
+    "endpoints": {
+      "startCrawl": {
+        "method": "POST",
+        "path": "/rpc",
+        "description": "Start crawling with specified configuration",
+        "request": {
+          "jsonrpc": "2.0",
+          "method": "startCrawl",
+          "params": {
+            "startUrl": {
+              "type": "string",
+              "required": true,
+              "description": "Starting URL for crawling"
+            },
+            "maxPages": {
+              "type": "number",
+              "default": 100,
+              "description": "Maximum number of pages to crawl"
+            },
+            "maxDepth": {
+              "type": "number",
+              "default": 3,
+              "description": "Maximum crawl depth"
+            },
+            "headless": {
+              "type": "boolean",
+              "default": true,
+              "description": "Run browser in headless mode"
+            },
+            "timeout": {
+              "type": "number",
+              "default": 30000,
+              "description": "Timeout in milliseconds"
+            },
+            "cookies": {
+              "type": "array",
+              "items": {
+                "$ref": "#/commonTypes/Cookie"
+              },
+              "description": "Cookies to use for crawling"
+            },
+            "analysisSettings": {
+              "type": "object",
+              "properties": {
+                "takeScreenshots": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "extractText": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "extractLinks": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "extractForms": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "aiAnalysis": {
+                  "type": "boolean",
+                  "default": true
+                }
+              }
+            }
+          },
+          "id": {
+            "type": "number",
+            "description": "Request ID"
+          }
+        },
+        "response": {
+          "success": {
+            "jsonrpc": "2.0",
+            "result": {
+              "success": {
+                "type": "boolean",
+                "description": "Whether crawling was successful"
+              },
+              "pages": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    },
+                    "screenshot": {
+                      "type": "string"
+                    },
+                    "links": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "forms": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "aiAnalysis": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "description": "Crawled pages data"
+              },
+              "error": {
+                "type": "string",
+                "description": "Error message if crawling failed"
+              }
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          },
+          "error": {
+            "jsonrpc": "2.0",
+            "error": {
+              "$ref": "#/commonTypes/Error"
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          }
+        }
+      }
+    },
+    "backendToAgent": {
+      "description": "How backend calls crawler agents",
+      "request": {
+        "module_name": {
+          "type": "string",
+          "required": true,
+          "enum": ["simplified", "text", "media", "static"],
+          "description": "Crawler agent type"
+        },
+        "start_url": {
+          "type": "string",
+          "required": true,
+          "description": "Starting URL for crawling"
+        },
+        "max_pages": {
+          "type": "number",
+          "default": 100,
+          "description": "Maximum number of pages to crawl"
+        },
+        "max_depth": {
+          "type": "number",
+          "default": 3,
+          "description": "Maximum crawl depth"
+        },
+        "options": {
+          "$ref": "#/commonTypes/Options"
+        },
+        "cookies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/commonTypes/Cookie"
+          },
+          "description": "Cookies to use for crawling"
+        },
+        "ai_context": {
+          "$ref": "#/commonTypes/AIContext"
+        }
+      },
+      "response": {
+        "success": {
+          "type": "boolean",
+          "description": "Whether the request was successful"
+        },
+        "result": {
+          "type": "object",
+          "description": "Crawl result from agent"
+        },
+        "module": {
+          "type": "string",
+          "description": "Agent module name"
+        },
+        "containerName": {
+          "type": "string",
+          "description": "Container name used"
+        },
+        "port": {
+          "type": "number",
+          "description": "Container port"
+        }
+      }
+    }
+  }
+}

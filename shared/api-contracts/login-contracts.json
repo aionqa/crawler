@@ -1,0 +1,143 @@
+{
+  "loginAgentAPI": {
+    "version": "1.0.0",
+    "description": "API contract for login agent modules",
+    "endpoints": {
+      "attemptLogin": {
+        "method": "POST",
+        "path": "/rpc",
+        "description": "Attempt login with specified credentials",
+        "request": {
+          "jsonrpc": "2.0",
+          "method": "attemptLogin",
+          "params": {
+            "url": {
+              "type": "string",
+              "required": true,
+              "description": "Login page URL"
+            },
+            "username": {
+              "type": "string",
+              "required": true,
+              "description": "Login username"
+            },
+            "password": {
+              "type": "string",
+              "required": true,
+              "description": "Login password"
+            },
+            "headless": {
+              "type": "boolean",
+              "default": true,
+              "description": "Run browser in headless mode"
+            },
+            "timeout": {
+              "type": "number",
+              "default": 30000,
+              "description": "Timeout in milliseconds"
+            }
+          },
+          "id": {
+            "type": "number",
+            "description": "Request ID"
+          }
+        },
+        "response": {
+          "success": {
+            "jsonrpc": "2.0",
+            "result": {
+              "success": {
+                "type": "boolean",
+                "description": "Whether login was successful"
+              },
+              "cookies": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/commonTypes/Cookie"
+                },
+                "description": "Cookies obtained from login"
+              },
+              "screenshot": {
+                "type": "string",
+                "description": "Base64 encoded screenshot of login result"
+              },
+              "pageContent": {
+                "type": "string",
+                "description": "HTML content of the page after login"
+              },
+              "redirectUrl": {
+                "type": "string",
+                "description": "URL redirected to after login"
+              },
+              "error": {
+                "type": "string",
+                "description": "Error message if login failed"
+              }
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          },
+          "error": {
+            "jsonrpc": "2.0",
+            "error": {
+              "$ref": "#/commonTypes/Error"
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          }
+        }
+      }
+    },
+    "backendToAgent": {
+      "description": "How backend calls login agents",
+      "request": {
+        "module_name": {
+          "type": "string",
+          "required": true,
+          "enum": ["simplified", "text", "media", "static"],
+          "description": "Login agent type"
+        },
+        "target_url": {
+          "type": "string",
+          "required": true,
+          "description": "Login page URL"
+        },
+        "credentials": {
+          "$ref": "#/commonTypes/Credentials"
+        },
+        "options": {
+          "$ref": "#/commonTypes/Options"
+        },
+        "ai_context": {
+          "$ref": "#/commonTypes/AIContext"
+        }
+      },
+      "response": {
+        "success": {
+          "type": "boolean",
+          "description": "Whether the request was successful"
+        },
+        "result": {
+          "type": "object",
+          "description": "Login result from agent"
+        },
+        "module": {
+          "type": "string",
+          "description": "Agent module name"
+        },
+        "containerName": {
+          "type": "string",
+          "description": "Container name used"
+        },
+        "port": {
+          "type": "number",
+          "description": "Container port"
+        }
+      }
+    }
+  }
+}

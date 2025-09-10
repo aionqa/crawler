@@ -94,9 +94,9 @@ class CrawlingOrchestrator extends EventEmitter {
       // Initialize log buffer for this job
       this.jobLogs.set(jobId, []);
       
-      // Start the crawler process
+      // Start the crawler process with timeout
       const crawlerProcess = spawn('node', [
-        'app/domainCrawler.js',
+        '/app/app/domainCrawler.js',
         '--project', projectId,
         '--config', configId,
         '--max-pages', (options.max_pages || 100).toString(),
@@ -105,15 +105,24 @@ class CrawlingOrchestrator extends EventEmitter {
       ], {
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: false,
-        cwd: path.join(__dirname, '../') // Set working directory to project root
+        cwd: '/app' // Set working directory to /app where node_modules are
       });
+      
+      // Set up process timeout (15 minutes max)
+      const processTimeout = setTimeout(() => {
+        console.log(`⏰ Process timeout for job ${jobId}, killing process...`);
+        if (!crawlerProcess.killed) {
+          crawlerProcess.kill('SIGKILL');
+        }
+      }, 15 * 60 * 1000); // 15 minutes process timeout
       
       // Store job info
       this.activeJobs.set(jobId, {
         process: crawlerProcess,
         config: config,
         startTime: new Date(),
-        projectId: projectId
+        projectId: projectId,
+        timeout: processTimeout
       });
       
       // Handle process output
@@ -330,6 +339,11 @@ class CrawlingOrchestrator extends EventEmitter {
     
     const job = this.activeJobs.get(jobId);
     if (!job) return;
+    
+    // Clear the process timeout
+    if (job.timeout) {
+      clearTimeout(job.timeout);
+    }
     
     // Determine final status
     let status = 'completed';
