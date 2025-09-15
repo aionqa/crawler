@@ -1,12 +1,13 @@
 {
   "loginAgentAPI": {
-    "version": "1.0.0",
-    "description": "API contract for login agent modules",
+    "version": "2.0.0",
+    "description": "Standardized API contract for login agent modules - ENFORCES STRICT FORMAT",
+    "compliance": "MUST follow STANDARDIZED_COMMUNICATION_FORMAT.md exactly",
     "endpoints": {
       "attemptLogin": {
         "method": "POST",
         "path": "/rpc",
-        "description": "Attempt login with specified credentials",
+        "description": "Attempt login with standardized input/output format",
         "request": {
           "jsonrpc": "2.0",
           "method": "attemptLogin",
@@ -16,25 +17,74 @@
               "required": true,
               "description": "Login page URL"
             },
-            "username": {
-              "type": "string",
+            "cookies": {
+              "type": "array",
+              "items": {
+                "$ref": "#/commonTypes/Cookie"
+              },
+              "description": "Initial cookies to use"
+            },
+            "context": {
+              "type": "object",
               "required": true,
-              "description": "Login username"
-            },
-            "password": {
-              "type": "string",
-              "required": true,
-              "description": "Login password"
-            },
-            "headless": {
-              "type": "boolean",
-              "default": true,
-              "description": "Run browser in headless mode"
-            },
-            "timeout": {
-              "type": "number",
-              "default": 30000,
-              "description": "Timeout in milliseconds"
+              "properties": {
+                "project_id": {
+                  "type": "string",
+                  "required": true,
+                  "description": "Project identifier"
+                },
+                "configuration_id": {
+                  "type": "string",
+                  "description": "Configuration identifier"
+                },
+                "job_id": {
+                  "type": "string",
+                  "description": "Job identifier"
+                },
+                "credentials": {
+                  "type": "object",
+                  "properties": {
+                    "username": {
+                      "type": "string",
+                      "description": "Login username"
+                    },
+                    "password": {
+                      "type": "string",
+                      "description": "Login password"
+                    }
+                  }
+                },
+                "options": {
+                  "type": "object",
+                  "properties": {
+                    "headless": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Run browser in headless mode"
+                    },
+                    "timeout": {
+                      "type": "number",
+                      "default": 30000,
+                      "description": "Timeout in milliseconds"
+                    },
+                    "max_retries": {
+                      "type": "number",
+                      "default": 2,
+                      "description": "Maximum number of retries"
+                    },
+                    "enable_screenshots": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Enable screenshot capture"
+                    },
+                    "enable_video_recording": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Enable video recording"
+                    }
+                  }
+                }
+              }
             }
           },
           "id": {
@@ -48,30 +98,179 @@
             "result": {
               "success": {
                 "type": "boolean",
-                "description": "Whether login was successful"
+                "required": true,
+                "description": "AI-determined success status"
               },
-              "cookies": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/commonTypes/Cookie"
-                },
-                "description": "Cookies obtained from login"
+              "confidence": {
+                "type": "number",
+                "required": true,
+                "minimum": 0,
+                "maximum": 100,
+                "description": "AI confidence level"
               },
-              "screenshot": {
+              "summary": {
                 "type": "string",
-                "description": "Base64 encoded screenshot of login result"
+                "required": true,
+                "description": "Human-readable summary"
               },
-              "pageContent": {
-                "type": "string",
-                "description": "HTML content of the page after login"
+              "result": {
+                "type": "object",
+                "required": true,
+                "properties": {
+                  "url_after": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Final URL after operation"
+                  },
+                  "cookies": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/commonTypes/Cookie"
+                    },
+                    "required": true,
+                    "description": "Cookies after login"
+                  },
+                  "page_content": {
+                    "type": "string",
+                    "required": true,
+                    "description": "HTML content of final page"
+                  },
+                  "page_title": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Title of final page"
+                  },
+                  "redirect_chain": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Array of URLs in redirect chain"
+                  }
+                }
               },
-              "redirectUrl": {
-                "type": "string",
-                "description": "URL redirected to after login"
+              "artifacts": {
+                "type": "object",
+                "required": true,
+                "properties": {
+                  "screenshots": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "filename": {
+                          "type": "string",
+                          "required": true
+                        },
+                        "data": {
+                          "type": "string",
+                          "required": true,
+                          "description": "Base64 encoded image"
+                        },
+                        "timestamp": {
+                          "type": "string",
+                          "required": true,
+                          "description": "ISO timestamp"
+                        },
+                        "description": {
+                          "type": "string",
+                          "required": true
+                        }
+                      }
+                    },
+                    "required": true
+                  },
+                  "video_file_id": {
+                    "type": "string",
+                    "description": "GridFS file ID for video recording"
+                  },
+                  "playwright_code": {
+                    "type": "string",
+                    "required": true,
+                    "description": "Complete Playwright code executed"
+                  },
+                  "ai_prompts": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "prompt": {
+                          "type": "string",
+                          "required": true
+                        },
+                        "response": {
+                          "type": "string",
+                          "required": true
+                        },
+                        "timestamp": {
+                          "type": "string",
+                          "required": true,
+                          "description": "ISO timestamp"
+                        },
+                        "purpose": {
+                          "type": "string",
+                          "required": true
+                        }
+                      }
+                    },
+                    "required": true
+                  }
+                }
               },
-              "error": {
-                "type": "string",
-                "description": "Error message if login failed"
+              "ai_analysis": {
+                "type": "object",
+                "required": true,
+                "properties": {
+                  "success_indicators": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "required": true
+                  },
+                  "failure_indicators": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "required": true
+                  },
+                  "reasoning": {
+                    "type": "string",
+                    "required": true,
+                    "description": "AI reasoning for success/failure determination"
+                  },
+                  "next_actions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Array of suggested next actions"
+                  }
+                }
+              },
+              "metadata": {
+                "type": "object",
+                "required": true,
+                "properties": {
+                  "module_name": {
+                    "type": "string",
+                    "required": true
+                  },
+                  "duration_ms": {
+                    "type": "number",
+                    "required": true
+                  },
+                  "attempts": {
+                    "type": "number",
+                    "required": true
+                  },
+                  "timestamp": {
+                    "type": "string",
+                    "required": true,
+                    "description": "ISO timestamp"
+                  }
+                }
               }
             },
             "id": {
@@ -93,49 +292,109 @@
       }
     },
     "backendToAgent": {
-      "description": "How backend calls login agents",
+      "description": "Standardized backend to agent communication",
+      "compliance": "MUST follow STANDARDIZED_COMMUNICATION_FORMAT.md exactly",
       "request": {
-        "module_name": {
-          "type": "string",
-          "required": true,
-          "enum": ["simplified", "text", "media", "static"],
-          "description": "Login agent type"
-        },
-        "target_url": {
+        "url": {
           "type": "string",
           "required": true,
           "description": "Login page URL"
         },
-        "credentials": {
-          "$ref": "#/commonTypes/Credentials"
+        "cookies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/commonTypes/Cookie"
+          },
+          "description": "Initial cookies to use"
         },
-        "options": {
-          "$ref": "#/commonTypes/Options"
-        },
-        "ai_context": {
-          "$ref": "#/commonTypes/AIContext"
+        "context": {
+          "type": "object",
+          "required": true,
+          "properties": {
+            "project_id": {
+              "type": "string",
+              "required": true
+            },
+            "configuration_id": {
+              "type": "string"
+            },
+            "job_id": {
+              "type": "string"
+            },
+            "credentials": {
+              "type": "object",
+              "properties": {
+                "username": {
+                  "type": "string"
+                },
+                "password": {
+                  "type": "string"
+                }
+              }
+            },
+            "options": {
+              "type": "object",
+              "properties": {
+                "headless": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "timeout": {
+                  "type": "number",
+                  "default": 30000
+                },
+                "max_retries": {
+                  "type": "number",
+                  "default": 2
+                },
+                "enable_screenshots": {
+                  "type": "boolean",
+                  "default": true
+                },
+                "enable_video_recording": {
+                  "type": "boolean",
+                  "default": false
+                }
+              }
+            }
+          }
         }
       },
       "response": {
         "success": {
           "type": "boolean",
-          "description": "Whether the request was successful"
+          "required": true,
+          "description": "AI-determined success status"
+        },
+        "confidence": {
+          "type": "number",
+          "required": true,
+          "minimum": 0,
+          "maximum": 100
+        },
+        "summary": {
+          "type": "string",
+          "required": true
         },
         "result": {
           "type": "object",
-          "description": "Login result from agent"
+          "required": true,
+          "description": "Standardized result object"
         },
-        "module": {
-          "type": "string",
-          "description": "Agent module name"
+        "artifacts": {
+          "type": "object",
+          "required": true,
+          "description": "Standardized artifacts object"
         },
-        "containerName": {
-          "type": "string",
-          "description": "Container name used"
+        "ai_analysis": {
+          "type": "object",
+          "required": true,
+          "description": "Standardized AI analysis object"
         },
-        "port": {
-          "type": "number",
-          "description": "Container port"
+        "metadata": {
+          "type": "object",
+          "required": true,
+          "description": "Standardized metadata object"
         }
       }
     }
