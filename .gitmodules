@@ -28,3 +28,9 @@
 [submodule "login-text"]
 	path = login-text
 	url = https://github.com/qzaki/login-text.git
+[submodule "ai-service"]
+	path = ai-service
+	url = https://github.com/qzaki/aionqa-ai-service.git
+[submodule "manual-analysis"]
+	path = manual-analysis
+	url = https://github.com/qzaki/aionqa-manual-analysis.git
