@@ -1,0 +1,30 @@
+[submodule "back"]
+	path = back
+	url = https://github.com/qzaki/aionqa-back.git
+[submodule "ui"]
+	path = ui
+	url = https://github.com/qzaki/aionqa-ui.git
+[submodule "crawler-media"]
+	path = crawler-media
+	url = https://github.com/qzaki/crawler-media.git
+[submodule "crawler-simplified"]
+	path = crawler-simplified
+	url = https://github.com/qzaki/crawler-simplified.git
+[submodule "crawler-static"]
+	path = crawler-static
+	url = https://github.com/qzaki/crawler-static.git
+[submodule "crawler-text"]
+	path = crawler-text
+	url = https://github.com/qzaki/crawler-text.git
+[submodule "login-media"]
+	path = login-media
+	url = https://github.com/qzaki/login-media.git
+[submodule "login-simplified"]
+	path = login-simplified
+	url = https://github.com/qzaki/login-simplified.git
+[submodule "login-static"]
+	path = login-static
+	url = https://github.com/qzaki/login-static.git
+[submodule "login-text"]
+	path = login-text
+	url = https://github.com/qzaki/login-text.git
