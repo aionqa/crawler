@@ -26,6 +26,27 @@
 - **MongoDB** - Data persistence
 
 ## Development
+
+### Local Development
+Each agent repository includes standardized local testing capabilities:
+- `test-local.js` - Direct function testing script
+- `test-rpc.js` - JSON-RPC endpoint testing script
+- `README-LOCAL.md` - Repository-specific development guide
+
+**Quick Local Test:**
+```bash
+cd login-simplified
+node test-local.js --headless false
+```
+
+**Test All Agents:**
+```bash
+node test-all-agents.js --quick
+```
+
+See [LOCAL_DEVELOPMENT_GUIDE.md](LOCAL_DEVELOPMENT_GUIDE.md) for detailed instructions.
+
+### Independent Development
 Each module has its own `.cursorrules` file for independent development:
 - `back/` - Main backend service
 - `login-*/` - Login agents (simplified, text, media, static)
