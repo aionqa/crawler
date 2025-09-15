@@ -9,6 +9,8 @@ AionQA uses a monorepo structure with git submodules. Each major component has i
 - **Main Repository**: `https://github.com/qzaki/aicrawler.git`
 - **Backend**: `https://github.com/qzaki/aionqa-back.git`
 - **UI**: `https://github.com/qzaki/aionqa-ui.git`
+- **AI Service**: `https://github.com/qzaki/aionqa-ai-service.git`
+- **Manual Analysis**: `https://github.com/qzaki/aionqa-manual-analysis.git`
 - **Crawler Agents**: 
   - `https://github.com/qzaki/crawler-media.git`
   - `https://github.com/qzaki/crawler-simplified.git`
@@ -165,10 +167,10 @@ aionqa/
 ├── git-status.sh            # Simple status wrapper
 ├── back/                    # Backend submodule
 ├── ui/                      # UI submodule
+├── ai-service/              # AI Service submodule
+├── manual-analysis/         # Manual Analysis submodule
 ├── crawler-*/               # Crawler agent submodules
 ├── login-*/                 # Login agent submodules
-├── ai-service/              # Part of main repo
-├── manual-analysis/         # Part of main repo
 └── shared/                  # Part of main repo
 ```
 
