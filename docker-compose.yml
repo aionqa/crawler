@@ -1,4 +1,7 @@
+version: '3.8'
+
 services:
+  # Core infrastructure services
   mongo:
     image: mongo:6
     container_name: aionqa-mongo
@@ -17,6 +20,7 @@ services:
     volumes:
       - redis_data:/data
 
+  # Main backend service
   back:
     build:
       context: .
@@ -46,6 +50,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
+  # Frontend UI
   ui:
     build: ./ui
     container_name: aionqa-ui
@@ -120,40 +125,6 @@ services:
     depends_on:
       - back
 
-  # Manual analysis service
-  manual-analysis:
-    build:
-      context: ./manual-analysis
-      dockerfile: Dockerfile
-    container_name: aionqa-manual-analysis
-    restart: "no"
-    environment:
-      - MONGODB_URI=mongodb://mongo:27017
-      - DB_NAME=aionqa
-      - PORT=3200
-    ports:
-      - "3200:3200"
-    depends_on:
-      - mongo
-    profiles:
-      - analysis
-
-  # AI Chat service
-  ai-service:
-    build:
-      context: ./ai-service
-      dockerfile: Dockerfile
-    container_name: aionqa-ai-service
-    restart: unless-stopped
-    environment:
-      - AI_SERVICE_PORT=5000
-      - BACKEND_URL=http://back:4000
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-    ports:
-      - "5000:5000"
-    depends_on:
-      - back
-
   # Crawler agents - statically started with dynamic browser instances
   crawler-simplified:
     build:
@@ -219,6 +190,180 @@ services:
     depends_on:
       - back
 
+  # Manual analysis service
+  manual-analysis:
+    build:
+      context: ./manual-analysis
+      dockerfile: Dockerfile
+    container_name: aionqa-manual-analysis
+    restart: "no"
+    environment:
+      - MONGODB_URI=mongodb://mongo:27017
+      - DB_NAME=aionqa
+      - PORT=3200
+    ports:
+      - "3200:3200"
+    depends_on:
+      - mongo
+    profiles:
+      - analysis
+
+  # AI Chat service
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    container_name: aionqa-ai-service
+    restart: unless-stopped
+    environment:
+      - AI_SERVICE_PORT=5000
+      - BACKEND_URL=http://back:4000
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    ports:
+      - "5000:5000"
+    depends_on:
+      - back
+
+  # Dedicated browser instances - only started with 'browsers' profile
+  browser-1:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-1
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9222:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=1"
+    profiles:
+      - browsers
+
+  browser-2:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-2
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9223:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=2"
+    profiles:
+      - browsers
+
+  browser-3:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-3
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9224:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=3"
+    profiles:
+      - browsers
+
+  browser-4:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-4
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9225:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=4"
+    profiles:
+      - browsers
+
+  browser-5:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-5
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9226:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=5"
+    profiles:
+      - browsers
+
 volumes:
   mongo_data:
   redis_data:
+
+networks:
+  default:
+    name: aionqa_default
