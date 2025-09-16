@@ -34,9 +34,9 @@ services:
       - LOGIN_TEXT_URL=http://login-text:3002
       - LOGIN_MEDIA_URL=http://login-media:3003
       - LOGIN_STATIC_URL=http://login-static:3004
-      - CRAWLER_TEXT_URL=http://crawler-text:3101
-      - CRAWLER_MEDIA_URL=http://crawler-media:3102
-      - CRAWLER_SIMPLIFIED_URL=http://crawler-simplified:3103
+      - CRAWLER_SIMPLIFIED_URL=http://crawler-simplified:3101
+      - CRAWLER_TEXT_URL=http://crawler-text:3102
+      - CRAWLER_MEDIA_URL=http://crawler-media:3103
       - CRAWLER_STATIC_URL=http://crawler-static:3104
     depends_on:
       - mongo
@@ -55,62 +55,70 @@ services:
     ports:
       - "3000:3000"
 
-  # Login agents - will be started on demand
+  # Login agents - statically started with dynamic browser instances
   login-simplified:
     build:
       context: ./login-simplified
       dockerfile: Dockerfile
     container_name: aionqa-login-simplified
-    restart: "no"
+    restart: unless-stopped
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3001
+      - USE_REMOTE_BROWSER=true
+      - BROWSER_SERVICE_URL=http://back:4000
     ports:
       - "3001:3001"
-    profiles:
-      - login
+    depends_on:
+      - back
 
   login-text:
     build:
       context: ./login-text
       dockerfile: Dockerfile
     container_name: aionqa-login-text
-    restart: "no"
+    restart: unless-stopped
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3002
+      - USE_REMOTE_BROWSER=true
+      - BROWSER_SERVICE_URL=http://back:4000
     ports:
       - "3002:3002"
-    profiles:
-      - login
+    depends_on:
+      - back
 
   login-media:
     build:
       context: ./login-media
       dockerfile: Dockerfile
     container_name: aionqa-login-media
-    restart: "no"
+    restart: unless-stopped
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3003
+      - USE_REMOTE_BROWSER=true
+      - BROWSER_SERVICE_URL=http://back:4000
     ports:
       - "3003:3003"
-    profiles:
-      - login
+    depends_on:
+      - back
 
   login-static:
     build:
       context: ./login-static
       dockerfile: Dockerfile
     container_name: aionqa-login-static
-    restart: "no"
+    restart: unless-stopped
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3004
+      - USE_REMOTE_BROWSER=true
+      - BROWSER_SERVICE_URL=http://back:4000
     ports:
       - "3004:3004"
-    profiles:
-      - login
+    depends_on:
+      - back
 
   # Manual analysis service
   manual-analysis:
@@ -146,50 +154,70 @@ services:
     depends_on:
       - back
 
-  # Crawler agents - will be started on demand
+  # Crawler agents - statically started with dynamic browser instances
   crawler-simplified:
     build:
       context: ./crawler-simplified
       dockerfile: Dockerfile
     container_name: aionqa-crawler-simplified
-    restart: "no"
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=3101
+      - USE_REMOTE_BROWSER=true
+      - BROWSER_SERVICE_URL=http://back:4000
     ports:
       - "3101:3101"
-    profiles:
-      - crawler
+    depends_on:
+      - back
 
   crawler-text:
     build:
       context: ./crawler-text
       dockerfile: Dockerfile
     container_name: aionqa-crawler-text
-    restart: "no"
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=3102
+      - USE_REMOTE_BROWSER=true
+      - BROWSER_SERVICE_URL=http://back:4000
     ports:
       - "3102:3102"
-    profiles:
-      - crawler
+    depends_on:
+      - back
 
   crawler-media:
     build:
       context: ./crawler-media
       dockerfile: Dockerfile
     container_name: aionqa-crawler-media
-    restart: "no"
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=3103
+      - USE_REMOTE_BROWSER=true
+      - BROWSER_SERVICE_URL=http://back:4000
     ports:
       - "3103:3103"
-    profiles:
-      - crawler
+    depends_on:
+      - back
 
   crawler-static:
     build:
       context: ./crawler-static
       dockerfile: Dockerfile
     container_name: aionqa-crawler-static
-    restart: "no"
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PORT=3104
+      - USE_REMOTE_BROWSER=true
+      - BROWSER_SERVICE_URL=http://back:4000
     ports:
       - "3104:3104"
-    profiles:
-      - crawler
+    depends_on:
+      - back
 
 volumes:
   mongo_data:
