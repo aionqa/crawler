@@ -1,0 +1,143 @@
+version: '3.8'
+
+services:
+  # Browser containers - separate instances for remote browser service
+  browser-1:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-1
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9222:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=1"
+    networks:
+      - default
+
+  browser-2:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-2
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9223:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=2"
+    networks:
+      - default
+
+  browser-3:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-3
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9224:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=3"
+    networks:
+      - default
+
+  browser-4:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-4
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9225:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=4"
+    networks:
+      - default
+
+  browser-5:
+    image: browserless/chrome:latest
+    container_name: aionqa-browser-5
+    restart: unless-stopped
+    environment:
+      - CONCURRENT=1
+      - MAX_CONCURRENT=1
+      - TOKEN=
+      - KEEP_ALIVE=true
+      - CHROME_REFRESH_TIME=300000
+      - MAX_CPU=90
+      - MAX_MEMORY=90
+      - ENABLE_CORS=true
+      - ENABLE_XVFB=false
+      - PREBOOT_CHROME=true
+      - FUNCTION_ENABLE_INCOGNITO_MODE=true
+      - FUNCTION_ENABLE_GOOGLE=true
+      - FUNCTION_BLOCK_ADS=true
+      - FUNCTION_KEEP_ALIVE=true
+    ports:
+      - "9226:3000"
+    labels:
+      - "aionqa.browser=true"
+      - "aionqa.browser.id=5"
+    networks:
+      - default
+
+networks:
+  default:
+    external: true
+    name: aionqa_default

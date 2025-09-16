@@ -141,6 +141,10 @@ curl -X POST http://localhost:4000/test-script \
   -d '{"script": "return {success: true};", "testUrl": "https://example.com"}'
 ```
 
+## Critical Rules
+- **CLI FILES ARE ALWAYS REQUIRED**: All `cli.js` files in crawler and login submodules must be preserved. These are essential for local testing and development.
+- **SUBMODULE STRUCTURE**: All crawler and login modules are git submodules and should be managed independently.
+
 ## Notes
 - Each module has its own `.cursorrules` file for independent development
 - All services use ES Modules (import/export syntax)
