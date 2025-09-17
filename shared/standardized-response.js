@@ -336,18 +336,19 @@ export class AISuccessEvaluator {
    * @returns {Promise<Object>} Detailed summary with AI analysis
    */
   async generateOperationSummary(operationData) {
+    const {
+      operation_type = 'unknown',
+      url,
+      context,
+      result,
+      attempts = [],
+      screenshots = [],
+      ai_prompts = [],
+      duration_ms,
+      success
+    } = operationData;
+    
     try {
-      const {
-        operation_type,
-        url,
-        context,
-        result,
-        attempts = [],
-        screenshots = [],
-        ai_prompts = [],
-        duration_ms,
-        success
-      } = operationData;
       
       const prompt = `You are an AI assistant providing a comprehensive summary of a ${operation_type} operation. Analyze the following data and provide a detailed summary of what happened.
 
@@ -371,7 +372,7 @@ CONTEXT PROVIDED:
 - Video Recording: ${context?.options?.enable_video_recording || false}
 
 ATTEMPTS MADE:
-${attempts.map((attempt, i) => `${i + 1}. ${attempt}`).join('\n') || 'No attempts recorded'}
+${Array.isArray(attempts) ? attempts.map((attempt, i) => `${i + 1}. ${attempt}`).join('\n') : 'No attempts recorded'}
 
 FINAL RESULT:
 - URL After: ${result?.url_after || 'Unknown'}
@@ -440,14 +441,14 @@ Respond in JSON format:
       console.log(`[AISuccessEvaluator] Summary generation error: ${error.message}`);
       return {
         executive_summary: `${operation_type} operation ${success ? 'succeeded' : 'failed'} after ${duration_ms}ms`,
-        detailed_summary: `Operation completed with ${success ? 'success' : 'failure'}. Duration: ${duration_ms}ms, Attempts: ${attempts.length}, Screenshots: ${screenshots.length}`,
+        detailed_summary: `Operation completed with ${success ? 'success' : 'failure'}. Duration: ${duration_ms}ms, Attempts: ${Array.isArray(attempts) ? attempts.length : 0}, Screenshots: ${screenshots.length}`,
         key_findings: ['Summary generation failed'],
         success_factors: success ? ['Operation completed'] : ['Operation failed'],
         failure_factors: success ? [] : ['Operation did not succeed'],
         recommendations: ['Review logs for detailed information'],
         technical_details: {
           pages_analyzed: 1,
-          interactions_performed: attempts.length,
+          interactions_performed: Array.isArray(attempts) ? attempts.length : 0,
           ai_decisions_made: ai_prompts.length,
           artifacts_collected: screenshots.length
         },
