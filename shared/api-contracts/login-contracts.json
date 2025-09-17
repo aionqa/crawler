@@ -4,10 +4,267 @@
     "description": "Standardized API contract for login agent modules - ENFORCES STRICT FORMAT",
     "compliance": "MUST follow STANDARDIZED_COMMUNICATION_FORMAT.md exactly",
     "endpoints": {
+      "queueLoginJob": {
+        "method": "POST",
+        "path": "/rpc",
+        "description": "Queue a login job and return job ID immediately",
+        "request": {
+          "jsonrpc": "2.0",
+          "method": "queueLoginJob",
+          "params": {
+            "url": {
+              "type": "string",
+              "required": true,
+              "description": "Login page URL"
+            },
+            "cookies": {
+              "type": "array",
+              "items": {
+                "$ref": "#/commonTypes/Cookie"
+              },
+              "description": "Initial cookies to use"
+            },
+            "context": {
+              "type": "object",
+              "required": true,
+              "properties": {
+                "project_id": {
+                  "type": "string",
+                  "required": true,
+                  "description": "Project identifier"
+                },
+                "configuration_id": {
+                  "type": "string",
+                  "description": "Configuration identifier"
+                },
+                "job_id": {
+                  "type": "string",
+                  "description": "Job identifier"
+                },
+                "credentials": {
+                  "type": "object",
+                  "properties": {
+                    "username": {
+                      "type": "string",
+                      "description": "Login username"
+                    },
+                    "password": {
+                      "type": "string",
+                      "description": "Login password"
+                    }
+                  }
+                },
+                "options": {
+                  "type": "object",
+                  "properties": {
+                    "headless": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Run browser in headless mode"
+                    },
+                    "timeout": {
+                      "type": "number",
+                      "default": 30000,
+                      "description": "Timeout in milliseconds"
+                    },
+                    "max_retries": {
+                      "type": "number",
+                      "default": 2,
+                      "description": "Maximum number of retries"
+                    },
+                    "enable_screenshots": {
+                      "type": "boolean",
+                      "default": true,
+                      "description": "Enable screenshot capture"
+                    },
+                    "enable_video_recording": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "Enable video recording"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "id": {
+            "type": "number",
+            "description": "Request ID"
+          }
+        },
+        "response": {
+          "success": {
+            "jsonrpc": "2.0",
+            "result": {
+              "job_id": {
+                "type": "string",
+                "required": true,
+                "description": "Unique job identifier"
+              },
+              "status": {
+                "type": "string",
+                "required": true,
+                "enum": ["queued"],
+                "description": "Job status"
+              },
+              "message": {
+                "type": "string",
+                "required": true,
+                "description": "Status message"
+              }
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          },
+          "error": {
+            "jsonrpc": "2.0",
+            "error": {
+              "$ref": "#/commonTypes/Error"
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          }
+        }
+      },
+      "getJobStatus": {
+        "method": "POST",
+        "path": "/rpc",
+        "description": "Get current status of a login job",
+        "request": {
+          "jsonrpc": "2.0",
+          "method": "getJobStatus",
+          "params": {
+            "job_id": {
+              "type": "string",
+              "required": true,
+              "description": "Job identifier"
+            }
+          },
+          "id": {
+            "type": "number",
+            "description": "Request ID"
+          }
+        },
+        "response": {
+          "success": {
+            "jsonrpc": "2.0",
+            "result": {
+              "job_id": {
+                "type": "string",
+                "required": true,
+                "description": "Job identifier"
+              },
+              "status": {
+                "type": "string",
+                "required": true,
+                "enum": ["queued", "running", "completed", "failed", "cancelled"],
+                "description": "Current job status"
+              },
+              "progress": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Job progress percentage"
+              },
+              "message": {
+                "type": "string",
+                "description": "Status message"
+              },
+              "result": {
+                "type": "object",
+                "description": "Job result (only present when status is completed)"
+              },
+              "error": {
+                "type": "string",
+                "description": "Error message (only present when status is failed)"
+              }
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          },
+          "error": {
+            "jsonrpc": "2.0",
+            "error": {
+              "$ref": "#/commonTypes/Error"
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          }
+        }
+      },
+      "sendJobLog": {
+        "method": "POST",
+        "path": "/rpc",
+        "description": "Send periodic log updates from agent to backend",
+        "request": {
+          "jsonrpc": "2.0",
+          "method": "sendJobLog",
+          "params": {
+            "job_id": {
+              "type": "string",
+              "required": true,
+              "description": "Job identifier"
+            },
+            "level": {
+              "type": "string",
+              "required": true,
+              "enum": ["info", "warning", "error", "debug"],
+              "description": "Log level"
+            },
+            "message": {
+              "type": "string",
+              "required": true,
+              "description": "Log message"
+            },
+            "data": {
+              "type": "object",
+              "description": "Additional log data"
+            }
+          },
+          "id": {
+            "type": "number",
+            "description": "Request ID"
+          }
+        },
+        "response": {
+          "success": {
+            "jsonrpc": "2.0",
+            "result": {
+              "received": {
+                "type": "boolean",
+                "required": true,
+                "description": "Whether log was received"
+              }
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          },
+          "error": {
+            "jsonrpc": "2.0",
+            "error": {
+              "$ref": "#/commonTypes/Error"
+            },
+            "id": {
+              "type": "number",
+              "description": "Request ID"
+            }
+          }
+        }
+      },
       "attemptLogin": {
         "method": "POST",
         "path": "/rpc",
-        "description": "Attempt login with standardized input/output format",
+        "description": "Attempt login with standardized input/output format (legacy synchronous method)",
         "request": {
           "jsonrpc": "2.0",
           "method": "attemptLogin",

@@ -86,7 +86,7 @@ services:
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3002
-      - USE_REMOTE_BROWSER=true
+      - USE_REMOTE_BROWSER=false
       - BROWSER_SERVICE_URL=http://back:4000
     ports:
       - "3002:3002"
@@ -103,11 +103,15 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3003
       - USE_REMOTE_BROWSER=true
-      - BROWSER_SERVICE_URL=http://back:4000
+      - BROWSER_SERVICE_URL=http://browser-3:3000
+      - BACKEND_URL=http://back:4000
+    volumes:
+      - ./shared:/app/shared
     ports:
       - "3003:3003"
     depends_on:
       - back
+      - mongo
 
   login-static:
     build:
@@ -136,9 +140,11 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3101
       - USE_REMOTE_BROWSER=true
-      - BROWSER_SERVICE_URL=http://back:4000
+      - BROWSER_SERVICE_URL=http://browser-1:3000
     ports:
       - "3101:3101"
+    volumes:
+      - ./shared:/app/shared
     depends_on:
       - back
 
@@ -152,9 +158,11 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3102
       - USE_REMOTE_BROWSER=true
-      - BROWSER_SERVICE_URL=http://back:4000
+      - BROWSER_SERVICE_URL=http://browser-2:3000
     ports:
       - "3102:3102"
+    volumes:
+      - ./shared:/app/shared
     depends_on:
       - back
 
@@ -168,9 +176,11 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3103
       - USE_REMOTE_BROWSER=true
-      - BROWSER_SERVICE_URL=http://back:4000
+      - BROWSER_SERVICE_URL=http://browser-3:3000
     ports:
       - "3103:3103"
+    volumes:
+      - ./shared:/app/shared
     depends_on:
       - back
 
@@ -184,9 +194,11 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3104
       - USE_REMOTE_BROWSER=true
-      - BROWSER_SERVICE_URL=http://back:4000
+      - BROWSER_SERVICE_URL=http://browser-4:3000
     ports:
       - "3104:3104"
+    volumes:
+      - ./shared:/app/shared
     depends_on:
       - back
 
