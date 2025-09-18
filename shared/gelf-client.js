@@ -50,9 +50,9 @@ class GELFClient {
    */
   async sendJobLog(jobId, level, message, component = 'agent', metadata = {}) {
     await this.sendLog(level, message, {
-      _jobId: jobId,
-      _component: component,
-      _agentName: process.env.AGENT_NAME || 'unknown',
+      jobId: jobId,
+      component: component,
+      agentName: process.env.AGENT_NAME || 'unknown',
       ...metadata
     });
   }
