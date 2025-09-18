@@ -1,15 +1,6 @@
-version: '3.8'
-
 services:
   # Core infrastructure services
-  mongo:
-    image: mongo:6
-    container_name: aionqa-mongo
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
+  # MongoDB is now handled by Graylog compose file
 
   redis:
     image: redis:7-alpine
@@ -29,7 +20,7 @@ services:
     restart: unless-stopped
     environment:
       - PORT=4000
-      - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_URI=mongodb://mongodb:27017
       - REDIS_URL=redis://redis:6379
       - DB_NAME=spa
       - ORIGIN=http://localhost:3000
@@ -42,11 +33,18 @@ services:
       - CRAWLER_TEXT_URL=http://crawler-text:3102
       - CRAWLER_MEDIA_URL=http://crawler-media:3103
       - CRAWLER_STATIC_URL=http://crawler-static:3104
+      - GRAYLOG_ENABLED=true
+      - GRAYLOG_URL=http://graylog:9000
+      - GRAYLOG_GELF_URL=http://graylog:12201
+      - GRAYLOG_USERNAME=admin
+      - GRAYLOG_PASSWORD=admin
     depends_on:
-      - mongo
       - redis
     ports:
       - "4000:4000"
+    networks:
+      - default
+      - graylog
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
@@ -55,10 +53,16 @@ services:
     build: ./ui
     container_name: aionqa-ui
     restart: unless-stopped
+    environment:
+      - VUE_APP_GRAYLOG_ENABLED=true
+      - VUE_APP_GRAYLOG_URL=http://back:4000/api/logs
     depends_on:
       - back
     ports:
       - "3000:3000"
+    networks:
+      - default
+      - graylog
 
   # Login agents - statically started with dynamic browser instances
   login-simplified:
@@ -72,10 +76,17 @@ services:
       - PORT=3001
       - USE_REMOTE_BROWSER=true
       - BROWSER_SERVICE_URL=http://back:4000
+      - GRAYLOG_ENABLED=true
+      - GRAYLOG_URL=http://graylog:9000
+      - GRAYLOG_GELF_URL=http://graylog:12201
+      - AGENT_NAME=login-simplified
     ports:
       - "3001:3001"
     depends_on:
       - back
+    networks:
+      - default
+      - graylog
 
   login-text:
     build:
@@ -88,10 +99,17 @@ services:
       - PORT=3002
       - USE_REMOTE_BROWSER=false
       - BROWSER_SERVICE_URL=http://back:4000
+      - GRAYLOG_ENABLED=true
+      - GRAYLOG_URL=http://graylog:9000
+      - GRAYLOG_GELF_URL=http://graylog:12201
+      - AGENT_NAME=login-text
     ports:
       - "3002:3002"
     depends_on:
       - back
+    networks:
+      - default
+      - graylog
 
   login-media:
     build:
@@ -105,13 +123,19 @@ services:
       - USE_REMOTE_BROWSER=true
       - BROWSER_SERVICE_URL=http://browser-3:3000
       - BACKEND_URL=http://back:4000
+      - GRAYLOG_ENABLED=true
+      - GRAYLOG_URL=http://graylog:9000
+      - GRAYLOG_GELF_URL=http://graylog:12201
+      - AGENT_NAME=login-media
     volumes:
       - ./shared:/app/shared
     ports:
       - "3003:3003"
     depends_on:
       - back
-      - mongo
+    networks:
+      - default
+      - graylog
 
   login-static:
     build:
@@ -124,10 +148,17 @@ services:
       - PORT=3004
       - USE_REMOTE_BROWSER=true
       - BROWSER_SERVICE_URL=http://back:4000
+      - GRAYLOG_ENABLED=true
+      - GRAYLOG_URL=http://graylog:9000
+      - GRAYLOG_GELF_URL=http://graylog:12201
+      - AGENT_NAME=login-static
     ports:
       - "3004:3004"
     depends_on:
       - back
+    networks:
+      - default
+      - graylog
 
   # Crawler agents - statically started with dynamic browser instances
   crawler-simplified:
@@ -141,12 +172,19 @@ services:
       - PORT=3101
       - USE_REMOTE_BROWSER=true
       - BROWSER_SERVICE_URL=http://browser-1:3000
+      - GRAYLOG_ENABLED=true
+      - GRAYLOG_URL=http://graylog:9000
+      - GRAYLOG_GELF_URL=http://graylog:12201
+      - AGENT_NAME=crawler-simplified
     ports:
       - "3101:3101"
     volumes:
       - ./shared:/app/shared
     depends_on:
       - back
+    networks:
+      - default
+      - graylog
 
   crawler-text:
     build:
@@ -159,12 +197,19 @@ services:
       - PORT=3102
       - USE_REMOTE_BROWSER=true
       - BROWSER_SERVICE_URL=http://browser-2:3000
+      - GRAYLOG_ENABLED=true
+      - GRAYLOG_URL=http://graylog:9000
+      - GRAYLOG_GELF_URL=http://graylog:12201
+      - AGENT_NAME=crawler-text
     ports:
       - "3102:3102"
     volumes:
       - ./shared:/app/shared
     depends_on:
       - back
+    networks:
+      - default
+      - graylog
 
   crawler-media:
     build:
@@ -177,12 +222,19 @@ services:
       - PORT=3103
       - USE_REMOTE_BROWSER=true
       - BROWSER_SERVICE_URL=http://browser-3:3000
+      - GRAYLOG_ENABLED=true
+      - GRAYLOG_URL=http://graylog:9000
+      - GRAYLOG_GELF_URL=http://graylog:12201
+      - AGENT_NAME=crawler-media
     ports:
       - "3103:3103"
     volumes:
       - ./shared:/app/shared
     depends_on:
       - back
+    networks:
+      - default
+      - graylog
 
   crawler-static:
     build:
@@ -195,12 +247,19 @@ services:
       - PORT=3104
       - USE_REMOTE_BROWSER=true
       - BROWSER_SERVICE_URL=http://browser-4:3000
+      - GRAYLOG_ENABLED=true
+      - GRAYLOG_URL=http://graylog:9000
+      - GRAYLOG_GELF_URL=http://graylog:12201
+      - AGENT_NAME=crawler-static
     ports:
       - "3104:3104"
     volumes:
       - ./shared:/app/shared
     depends_on:
       - back
+    networks:
+      - default
+      - graylog
 
   # Manual analysis service
   manual-analysis:
@@ -210,13 +269,13 @@ services:
     container_name: aionqa-manual-analysis
     restart: "no"
     environment:
-      - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_URI=mongodb://mongodb:27017
       - DB_NAME=aionqa
       - PORT=3200
     ports:
       - "3200:3200"
     depends_on:
-      - mongo
+      - back
     profiles:
       - analysis
 
@@ -373,9 +432,11 @@ services:
       - browsers
 
 volumes:
-  mongo_data:
   redis_data:
 
 networks:
   default:
     name: aionqa_default
+  graylog:
+    external: true
+    name: aionqa_graylog

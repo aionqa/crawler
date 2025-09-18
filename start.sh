@@ -17,10 +17,9 @@ docker ps -a --filter "name=aionqa-" --filter "name=login-" --filter "name=crawl
 echo "   - Cleaning up unused containers..."
 docker container prune -f
 
-# Start all required services: mongo, redis, backend, UI, and all agent containers
+# Start all required services: redis, backend, UI, and all agent containers
 echo "🔧 Starting all required services..."
 docker compose -f "$BASE_DIR/docker-compose.yml" up -d --build \
-  mongo \
   redis \
   back \
   ui \
@@ -33,6 +32,18 @@ docker compose -f "$BASE_DIR/docker-compose.yml" up -d --build \
   crawler-media \
   crawler-static
 
+# Start Graylog logging appliance (includes MongoDB)
+echo "📊 Starting Graylog logging appliance with MongoDB..."
+docker compose -f "$BASE_DIR/docker-compose-graylog.yml" up -d
+
+# Wait for MongoDB and Graylog to be ready
+echo "⏳ Waiting for MongoDB and Graylog to initialize..."
+sleep 30
+
+# Start Portainer (Container Management UI)
+echo "🖥️ Starting Portainer container management..."
+docker compose -f "$BASE_DIR/docker-compose-portainer.yml" up -d
+
 # Start browser containers using the browsers profile
 echo "🌐 Starting dedicated browser containers (5 instances)..."
 docker compose -f "$BASE_DIR/docker-compose.yml" --profile browsers up -d browser-1 browser-2 browser-3 browser-4 browser-5
@@ -43,6 +54,8 @@ echo "- MongoDB:   mongodb://localhost:27017"
 echo "- Redis:     redis://localhost:6379"
 echo "- Backend:   http://localhost:4000"
 echo "- UI:        http://localhost:3000"
+echo "- Graylog:   http://localhost:9000 (admin/admin)"
+echo "- Portainer: http://localhost:9001 (container management)"
 echo ""
 echo "🤖 Login Agents (with remote browser support):"
 echo "- login-simplified: http://localhost:3001"
@@ -67,6 +80,9 @@ echo "- aionqa-browser-5: http://localhost:9226"
 echo ""
 echo "📊 Container Status:"
 docker compose -f "$BASE_DIR/docker-compose.yml" ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
+echo ""
+echo "📊 Graylog Status:"
+docker compose -f "$BASE_DIR/docker-compose-graylog.yml" ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
 
 echo ""
 echo "🎯 All containers are now running with dedicated browser instances!"
