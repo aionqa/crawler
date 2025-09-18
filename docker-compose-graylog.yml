@@ -1,0 +1,101 @@
+services:
+  # Use existing MongoDB from main system
+  mongodb:
+    image: mongo:6
+    container_name: aionqa-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - graylog
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 256m
+
+  # Graylog Elasticsearch
+  graylog-elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.17.9
+    container_name: graylog-elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx1g"
+      - xpack.security.enabled=false
+      - cluster.name=graylog
+      - bootstrap.memory_lock=true
+    deploy:
+      resources:
+        limits:
+          memory: 1.5g
+        reservations:
+          memory: 512m
+    volumes:
+      - graylog-elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - graylog
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Graylog Server
+  graylog:
+    image: graylog/graylog:5.2
+    container_name: graylog
+    restart: unless-stopped
+    environment:
+      # Password: admin (SHA256 hash)
+      - GRAYLOG_PASSWORD_SECRET=somepasswordpepper
+      - GRAYLOG_ROOT_PASSWORD_SHA2=8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918
+      - GRAYLOG_HTTP_EXTERNAL_URI=http://localhost:9000/
+      - GRAYLOG_ELASTICSEARCH_HOSTS=http://graylog-elasticsearch:9200
+      - GRAYLOG_MONGODB_URI=mongodb://mongodb:27017/graylog
+      - GRAYLOG_WEB_ENABLE=true
+      - GRAYLOG_WEB_ENDPOINT_URI=http://localhost:9000/api/
+    depends_on:
+      mongodb:
+        condition: service_started
+      graylog-elasticsearch:
+        condition: service_healthy
+    ports:
+      # Web Interface
+      - "9000:9000"
+      # GELF TCP/UDP (for agents to send logs)
+      - "12201:12201"
+      - "12201:12201/udp"
+      # Syslog TCP/UDP (alternative)
+      - "1514:1514"
+      - "1514:1514/udp"
+      # Raw TCP (alternative)
+      - "5555:5555"
+    networks:
+      - graylog
+    volumes:
+      - graylog-data:/usr/share/graylog/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/api/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  mongo_data:
+  graylog-elasticsearch-data:
+  graylog-data:
+
+networks:
+  graylog:
+    name: aionqa_graylog
+    driver: bridge
