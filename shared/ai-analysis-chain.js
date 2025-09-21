@@ -405,17 +405,43 @@ Respond with just the JavaScript code (no markdown formatting):`;
   }
 
   /**
-   * Execute the generated playwright script
+   * Execute the generated playwright script with enhanced screenshot capture
    */
   async executePlaywrightScript(page, script, context, depth) {
     try {
       console.log(`[AI-ANALYSIS] 🎭 Executing script at depth ${depth}`);
       
-      // Create a safe execution environment
-      const scriptFunction = new Function('page', 'context', `
+      // Enhanced script execution with screenshot capture during actions
+      const scriptFunction = new Function('page', 'context', 'captureScreenshot', `
         return (async () => {
           try {
-            ${script}
+            // Helper function to capture screenshots during actions
+            const captureActionScreenshot = async (action, description) => {
+              try {
+                const screenshot = await page.screenshot({ type: 'png', fullPage: true });
+                await captureScreenshot({
+                  filename: \`action_\${action}_\${Date.now()}.png\`,
+                  data: screenshot,
+                  metadata: {
+                    action: action,
+                    description: description,
+                    url: page.url(),
+                    title: await page.title().catch(() => ''),
+                    depth: ${depth}
+                  }
+                });
+              } catch (error) {
+                console.log(\`[AI-ANALYSIS] Action screenshot capture failed: \${error.message}\`);
+              }
+            };
+
+            // Enhanced script with screenshot capture
+            ${this.enhanceScriptWithScreenshots(script)}
+            
+            return {
+              success: true,
+              message: 'Script executed successfully with enhanced screenshot capture'
+            };
           } catch (error) {
             return {
               success: false,
@@ -426,9 +452,33 @@ Respond with just the JavaScript code (no markdown formatting):`;
         })();
       `);
 
+      // Screenshot capture helper
+      const captureScreenshot = async (screenshotData) => {
+        try {
+          if (context.options?.enable_screenshots !== false && context.job_id) {
+            const response = await fetch(`${this.backendUrl}/upload/screenshot`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                jobId: context.job_id,
+                data: screenshotData.data.toString('base64'),
+                type: 'image/png',
+                metadata: screenshotData.metadata
+              })
+            });
+            
+            if (response.ok) {
+              console.log(`[AI-ANALYSIS] 📸 Action screenshot uploaded: ${screenshotData.metadata.action}`);
+            }
+          }
+        } catch (error) {
+          console.log(`[AI-ANALYSIS] Screenshot upload failed: ${error.message}`);
+        }
+      };
+
       // Execute with timeout
       const result = await Promise.race([
-        scriptFunction(page, context),
+        scriptFunction(page, context, captureScreenshot),
         new Promise((_, reject) => 
           setTimeout(() => reject(new Error('Script execution timeout')), this.timeout)
         )
@@ -445,6 +495,47 @@ Respond with just the JavaScript code (no markdown formatting):`;
         error: error.stack
       };
     }
+  }
+
+  /**
+   * Enhance playwright script with screenshot capture at key moments
+   */
+  enhanceScriptWithScreenshots(script) {
+    // Add screenshot capture before and after key actions
+    let enhancedScript = script;
+    
+    // Capture screenshot before filling inputs
+    enhancedScript = enhancedScript.replace(
+      /await page\.fill\(([^)]+)\)/g,
+      `await captureActionScreenshot('before_fill', 'Before filling input field');
+await page.fill($1);
+await captureActionScreenshot('after_fill', 'After filling input field');`
+    );
+    
+    // Capture screenshot before and after clicking
+    enhancedScript = enhancedScript.replace(
+      /await page\.click\(([^)]+)\)/g,
+      `await captureActionScreenshot('before_click', 'Before clicking element');
+await page.click($1);
+await captureActionScreenshot('after_click', 'After clicking element');`
+    );
+    
+    // Capture screenshot before and after form submission
+    enhancedScript = enhancedScript.replace(
+      /await page\.press\(([^)]+)\)/g,
+      `await captureActionScreenshot('before_press', 'Before pressing key');
+await page.press($1);
+await captureActionScreenshot('after_press', 'After pressing key');`
+    );
+    
+    // Capture screenshot after navigation
+    enhancedScript = enhancedScript.replace(
+      /await page\.goto\(([^)]+)\)/g,
+      `await page.goto($1);
+await captureActionScreenshot('navigation', 'After page navigation');`
+    );
+    
+    return enhancedScript;
   }
 
   /**
