@@ -18,33 +18,29 @@ services:
       dockerfile: ./back/Dockerfile
     container_name: aionqa-back
     restart: unless-stopped
+    network_mode: host
     environment:
       - PORT=4000
-      - MONGODB_URI=mongodb://mongodb:27017
-      - REDIS_URL=redis://redis:6379
+      - MONGODB_URI=mongodb://localhost:27017
+      - REDIS_URL=redis://localhost:6379
       - DB_NAME=spa
       - ORIGIN=http://localhost:3000
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - LOGIN_SIMPLIFIED_URL=http://login-simplified:3001
-      - LOGIN_TEXT_URL=http://login-text:3002
-      - LOGIN_MEDIA_URL=http://login-media:3003
-      - LOGIN_STATIC_URL=http://login-static:3004
-      - CRAWLER_SIMPLIFIED_URL=http://crawler-simplified:3101
-      - CRAWLER_TEXT_URL=http://crawler-text:3102
-      - CRAWLER_MEDIA_URL=http://crawler-media:3103
-      - CRAWLER_STATIC_URL=http://crawler-static:3104
+      - LOGIN_SIMPLIFIED_URL=http://localhost:3001
+      - LOGIN_TEXT_URL=http://localhost:3002
+      - LOGIN_MEDIA_URL=http://localhost:3003
+      - LOGIN_STATIC_URL=http://localhost:3004
+      - CRAWLER_SIMPLIFIED_URL=http://localhost:3101
+      - CRAWLER_TEXT_URL=http://localhost:3102
+      - CRAWLER_MEDIA_URL=http://localhost:3103
+      - CRAWLER_STATIC_URL=http://localhost:3104
       - GRAYLOG_ENABLED=true
-      - GRAYLOG_URL=http://graylog:9000
-      - GRAYLOG_GELF_URL=http://graylog:12201
+      - GRAYLOG_URL=http://localhost:9000
+      - GRAYLOG_GELF_URL=http://localhost:12201
       - GRAYLOG_USERNAME=admin
       - GRAYLOG_PASSWORD=admin
     depends_on:
       - redis
-    ports:
-      - "4000:4000"
-    networks:
-      - default
-      - graylog
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 
@@ -56,6 +52,7 @@ services:
     environment:
       - VUE_APP_GRAYLOG_ENABLED=true
       - VUE_APP_GRAYLOG_URL=http://back:4000/api/logs
+      - VITE_API_URL=http://back:4000
     depends_on:
       - back
     ports:
@@ -75,7 +72,8 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3001
       - USE_REMOTE_BROWSER=true
-      - BROWSER_SERVICE_URL=http://back:4000
+      - BROWSER_SERVICE_URL=http://172.19.0.1:4000
+      - BACKEND_URL=http://172.19.0.1:4000
       - GRAYLOG_ENABLED=true
       - GRAYLOG_URL=http://graylog:9000
       - GRAYLOG_GELF_URL=http://graylog:12201
@@ -98,7 +96,8 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3002
       - USE_REMOTE_BROWSER=false
-      - BROWSER_SERVICE_URL=http://back:4000
+      - BROWSER_SERVICE_URL=http://172.19.0.1:4000
+      - BACKEND_URL=http://172.19.0.1:4000
       - GRAYLOG_ENABLED=true
       - GRAYLOG_URL=http://graylog:9000
       - GRAYLOG_GELF_URL=http://graylog:12201
@@ -122,7 +121,7 @@ services:
       - PORT=3003
       - USE_REMOTE_BROWSER=true
       - BROWSER_SERVICE_URL=http://browser-3:3000
-      - BACKEND_URL=http://back:4000
+      - BACKEND_URL=http://172.19.0.1:4000
       - GRAYLOG_ENABLED=true
       - GRAYLOG_URL=http://graylog:9000
       - GRAYLOG_GELF_URL=http://graylog:12201
@@ -147,7 +146,8 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - PORT=3004
       - USE_REMOTE_BROWSER=true
-      - BROWSER_SERVICE_URL=http://back:4000
+      - BROWSER_SERVICE_URL=http://172.19.0.1:4000
+      - BACKEND_URL=http://172.19.0.1:4000
       - GRAYLOG_ENABLED=true
       - GRAYLOG_URL=http://graylog:9000
       - GRAYLOG_GELF_URL=http://graylog:12201
@@ -288,7 +288,7 @@ services:
     restart: unless-stopped
     environment:
       - AI_SERVICE_PORT=5000
-      - BACKEND_URL=http://back:4000
+      - BACKEND_URL=http://172.19.0.1:4000
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     ports:
       - "5000:5000"

@@ -70,7 +70,11 @@ USER_CREATE_RESPONSE=$(curl -s "$GRAYLOG_URL/api/users" \
       \"roles:delete\",
       \"sessions:list\",
       \"sessions:edit\",
-      \"sessions:delete\"
+      \"sessions:delete\",
+      \"search:read\",
+      \"search:create\",
+      \"search:edit\",
+      \"search:delete\"
     ]
   }")
 
@@ -109,3 +113,5 @@ echo "Backend user: $BACKEND_USER"
 echo "Backend password: $BACKEND_PASS"
 echo ""
 echo "Update your backend configuration to use these credentials."
+
+
