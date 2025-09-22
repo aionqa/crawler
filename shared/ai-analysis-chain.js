@@ -21,19 +21,53 @@ export class AIAnalysisChain {
   }
 
   /**
+   * Generate human-readable crawler intent
+   */
+  async generateCrawlerIntent(conversationType, textRequest, pageUrl) {
+    const intentMap = {
+      'page_analysis': `I need to analyze this webpage to understand its structure and content so I can determine the best crawling strategy.`,
+      'script_generation': `I need to generate a Playwright script to interact with this page and navigate to the next content.`,
+      'execution_analysis': `I need to analyze the results of my previous action to see if it was successful and what should happen next.`,
+      'final_evaluation': `I need to evaluate the overall crawling results and determine if the mission was successful.`,
+      'login_attempt': `I need to attempt to log into this page using the provided credentials.`,
+      'content_extraction': `I need to extract content from this page for analysis.`
+    };
+    return intentMap[conversationType] || `I need to perform ${conversationType} on this page.`;
+  }
+
+  /**
+   * Generate human-readable AI intent
+   */
+  async generateAIIntent(conversationType, aiResponse, pageUrl) {
+    const intentMap = {
+      'page_analysis': `I've analyzed the page structure and identified key elements. Here's what I found and my recommendations for next steps.`,
+      'script_generation': `I've generated a Playwright script based on my analysis. Here's the code that should accomplish your goal.`,
+      'execution_analysis': `I've analyzed the execution results. Here's my assessment of what happened and what should happen next.`,
+      'final_evaluation': `I've completed the final evaluation of the crawling session. Here's my comprehensive analysis and conclusions.`,
+      'login_attempt': `I've analyzed the login attempt. Here's what happened and whether the login was successful.`,
+      'content_extraction': `I've extracted and analyzed the content from this page. Here's what I found.`
+    };
+    return intentMap[conversationType] || `I've processed your request for ${conversationType}. Here's my analysis and recommendations.`;
+  }
+
+  /**
    * Send AI conversation to backend for chat mode
    */
-  async sendAIConversation(jobId, agentName, conversationType, request, aiResponse, screenshotId = null, pageUrl = null) {
+  async sendAIConversation(jobId, agentName, conversationType, textRequest, sourcePayload, aiResponse, screenshotId = null, pageUrl = null) {
     try {
       const conversationData = {
         job_id: jobId,
         agent_name: agentName,
         conversation_type: conversationType,
-        request: request,
-        response: aiResponse,
+        text_request: textRequest,
+        source_payload: sourcePayload || {},
+        ai_response: aiResponse,
+        human_request: await this.generateCrawlerIntent(conversationType, textRequest, pageUrl),
+        human_response: await this.generateAIIntent(conversationType, aiResponse, pageUrl),
         screenshot_id: screenshotId,
         page_url: pageUrl,
-        timestamp: new Date()
+        timestamp: new Date(),
+        structured_response: true
       };
 
       const httpResponse = await fetch(`${this.backendUrl}/ai-conversations`, {
@@ -366,10 +400,17 @@ Respond in JSON format:
           context.job_id,
           `crawler-${crawlerType}`,
           'page_analysis',
+          `Analyze this ${crawlerType} page and determine the best crawling strategy`,
           {
-            prompt: prompt,
-            page_data: pageData,
-            depth: depth
+            html: pageData.html,
+            forms: pageData.forms,
+            selectors: pageData.selectors,
+            metadata: {
+              depth: depth,
+              page_title: pageData.title,
+              url: pageData.url,
+              content_length: pageData.content.length
+            }
           },
           aiResponse,
           null, // screenshot_id - will be captured separately
@@ -444,11 +485,14 @@ Respond with just the JavaScript code (no markdown formatting):`;
           context.job_id,
           `crawler-${crawlerType}`,
           'script_generation',
+          `Generate a Playwright script for ${crawlerType} page interaction at depth ${depth}`,
           {
-            prompt: prompt,
             analysis: analysis,
-            depth: depth,
-            attempts: attempts.slice(-3)
+            metadata: {
+              depth: depth,
+              attempts: attempts.slice(-3),
+              crawler_type: crawlerType
+            }
           },
           {
             script: script,
@@ -665,8 +709,8 @@ Respond in JSON format:
           context.job_id,
           `crawler-${crawlerType}`,
           'execution_analysis',
+          `Analyze the execution result of the ${crawlerType} crawler script`,
           {
-            prompt: prompt,
             execution_result: executionResult,
             depth: depth,
             current_url: url,
@@ -759,8 +803,8 @@ Respond in JSON format:
           context.job_id,
           `crawler-${crawlerType}`,
           'final_evaluation',
+          `Evaluate the final state of the ${crawlerType} crawler analysis chain`,
           {
-            prompt: prompt,
             final_state: {
               url: url,
               title: title,
@@ -771,7 +815,9 @@ Respond in JSON format:
               screenshots_captured: screenshots.length,
               ai_prompts_used: ai_prompts.length
             },
-            attempts: Array.isArray(attempts) ? attempts : []
+            attempts: Array.isArray(attempts) ? attempts : [],
+            page_content: content,
+            cookies: cookies
           },
           result,
           null, // screenshot_id

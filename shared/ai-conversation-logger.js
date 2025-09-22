@@ -49,27 +49,32 @@ export class AIConversationLogger {
   }
 
   /**
-   * Send AI conversation to backend for chat mode (legacy method)
+   * Send AI conversation to backend for chat mode (updated structured format)
    * @param {string} jobId - Job ID this conversation belongs to
    * @param {string} agentName - Name of the agent (e.g., crawler-simplified, login-text)
    * @param {string} conversationType - Type of conversation (e.g., page_analysis, login_attempt, content_extraction)
-   * @param {Object} request - The request sent to AI (prompt, context, etc.)
-   * @param {Object} response - The AI response
+   * @param {string} textRequest - The text request sent to AI
+   * @param {Object} sourcePayload - Source data provided to AI (HTML, forms, screenshots, etc.)
+   * @param {Object} aiResponse - The AI response
    * @param {string} screenshotId - Optional screenshot ID associated with this conversation
    * @param {string} pageUrl - Optional page URL this conversation relates to
    */
-  async sendAIConversation(jobId, agentName, conversationType, request, response, screenshotId = null, pageUrl = null) {
-    console.log(`[AI-CONVERSATION] 🚀 Attempting to send AI conversation for job ${jobId} by agent ${agentName}`);
+  async sendAIConversation(jobId, agentName, conversationType, textRequest, sourcePayload, aiResponse, screenshotId = null, pageUrl = null) {
+    console.log(`[AI-CONVERSATION] 🚀 Attempting to send structured AI conversation for job ${jobId} by agent ${agentName}`);
     try {
       const conversationData = {
         job_id: jobId,
         agent_name: agentName,
         conversation_type: conversationType,
-        request: request,
-        response: response,
+        text_request: textRequest,
+        source_payload: sourcePayload || {},
+        ai_response: aiResponse,
+        human_request: await this.generateCrawlerIntent(conversationType, textRequest, pageUrl),
+        human_response: await this.generateAIIntent(conversationType, aiResponse, pageUrl),
         screenshot_id: screenshotId,
         page_url: pageUrl,
-        timestamp: new Date()
+        timestamp: new Date(),
+        structured_response: true
       };
 
       const httpResponse = await fetch(`${this.backendUrl}/ai-conversations`, {
@@ -79,13 +84,47 @@ export class AIConversationLogger {
       });
 
       if (httpResponse.ok) {
-        console.log(`[AI-CONVERSATION] 🤖 AI conversation sent to chat mode for job ${jobId} by agent ${agentName}`);
+        console.log(`[AI-CONVERSATION] 🤖 Structured AI conversation sent to chat mode for job ${jobId} by agent ${agentName}`);
       } else {
-        console.log(`[AI-CONVERSATION] ⚠️ Failed to send AI conversation: ${httpResponse.status}`);
+        console.log(`[AI-CONVERSATION] ⚠️ Failed to send structured AI conversation: ${httpResponse.status}`);
       }
     } catch (error) {
-      console.log(`[AI-CONVERSATION] ⚠️ Error sending AI conversation: ${error.message}`);
+      console.log(`[AI-CONVERSATION] ⚠️ Error sending structured AI conversation: ${error.message}`);
     }
+  }
+
+  /**
+   * Generate human-readable crawler intent
+   */
+  async generateCrawlerIntent(conversationType, textRequest, pageUrl) {
+    const intentMap = {
+      'page_analysis': `I need to analyze this webpage to understand its structure and content so I can determine the best crawling strategy.`,
+      'login_attempt': `I need to attempt to log into this page using the provided credentials.`,
+      'form_analysis': `I need to analyze this form structure to understand how to interact with it.`,
+      'screenshot_analysis': `I need to analyze this screenshot to understand the page structure and form elements.`,
+      'script_generation': `I need to generate a Playwright script to interact with this page.`,
+      'execution_analysis': `I need to analyze the results of my previous action to see if it was successful.`,
+      'final_evaluation': `I need to evaluate the overall login results and determine if the mission was successful.`,
+      'content_extraction': `I need to extract content from this page for analysis.`
+    };
+    return intentMap[conversationType] || `I need to perform ${conversationType} on this page.`;
+  }
+
+  /**
+   * Generate human-readable AI intent
+   */
+  async generateAIIntent(conversationType, aiResponse, pageUrl) {
+    const intentMap = {
+      'page_analysis': `I've analyzed the page structure and identified key elements. Here's what I found and my recommendations for next steps.`,
+      'login_attempt': `I've analyzed the login attempt. Here's what happened and whether the login was successful.`,
+      'form_analysis': `I've analyzed the form structure and identified the best approach for interaction.`,
+      'screenshot_analysis': `I've analyzed the screenshot and identified key form elements and interaction points.`,
+      'script_generation': `I've generated a Playwright script based on my analysis. Here's the code that should accomplish your goal.`,
+      'execution_analysis': `I've analyzed the execution results. Here's my assessment of what happened and what should happen next.`,
+      'final_evaluation': `I've completed the final evaluation of the login session. Here's my comprehensive analysis and conclusions.`,
+      'content_extraction': `I've extracted and analyzed the content from this page. Here's what I found.`
+    };
+    return intentMap[conversationType] || `I've processed your request for ${conversationType}. Here's my analysis and recommendations.`;
   }
 
   /**
