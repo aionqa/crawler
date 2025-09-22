@@ -420,7 +420,6 @@ Respond in JSON format:
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
-        temperature: 0.2
       });
 
       const summary = JSON.parse(response.choices[0].message.content);
@@ -546,7 +545,6 @@ Respond in JSON format:
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
-        temperature: 0.1
       });
 
       const result = JSON.parse(response.choices[0].message.content);
