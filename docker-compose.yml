@@ -26,6 +26,7 @@ services:
       - DB_NAME=spa
       - ORIGIN=http://localhost:3000
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - BACKEND_URL=http://172.19.0.1:4000
       - LOGIN_SIMPLIFIED_URL=http://localhost:3001
       - LOGIN_TEXT_URL=http://localhost:3002
       - LOGIN_MEDIA_URL=http://localhost:3003
@@ -301,8 +302,8 @@ services:
     container_name: aionqa-browser-1
     restart: unless-stopped
     environment:
-      - CONCURRENT=1
-      - MAX_CONCURRENT=1
+      - CONCURRENT=5
+      - MAX_CONCURRENT=5
       - TOKEN=
       - KEEP_ALIVE=true
       - CHROME_REFRESH_TIME=300000
@@ -328,8 +329,8 @@ services:
     container_name: aionqa-browser-2
     restart: unless-stopped
     environment:
-      - CONCURRENT=1
-      - MAX_CONCURRENT=1
+      - CONCURRENT=5
+      - MAX_CONCURRENT=5
       - TOKEN=
       - KEEP_ALIVE=true
       - CHROME_REFRESH_TIME=300000
@@ -355,8 +356,8 @@ services:
     container_name: aionqa-browser-3
     restart: unless-stopped
     environment:
-      - CONCURRENT=1
-      - MAX_CONCURRENT=1
+      - CONCURRENT=5
+      - MAX_CONCURRENT=5
       - TOKEN=
       - KEEP_ALIVE=true
       - CHROME_REFRESH_TIME=300000
@@ -382,8 +383,8 @@ services:
     container_name: aionqa-browser-4
     restart: unless-stopped
     environment:
-      - CONCURRENT=1
-      - MAX_CONCURRENT=1
+      - CONCURRENT=5
+      - MAX_CONCURRENT=5
       - TOKEN=
       - KEEP_ALIVE=true
       - CHROME_REFRESH_TIME=300000
@@ -409,8 +410,8 @@ services:
     container_name: aionqa-browser-5
     restart: unless-stopped
     environment:
-      - CONCURRENT=1
-      - MAX_CONCURRENT=1
+      - CONCURRENT=5
+      - MAX_CONCURRENT=5
       - TOKEN=
       - KEEP_ALIVE=true
       - CHROME_REFRESH_TIME=300000
