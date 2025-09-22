@@ -21,6 +21,38 @@ export class AIAnalysisChain {
   }
 
   /**
+   * Send AI conversation to backend for chat mode
+   */
+  async sendAIConversation(jobId, agentName, conversationType, request, aiResponse, screenshotId = null, pageUrl = null) {
+    try {
+      const conversationData = {
+        job_id: jobId,
+        agent_name: agentName,
+        conversation_type: conversationType,
+        request: request,
+        response: aiResponse,
+        screenshot_id: screenshotId,
+        page_url: pageUrl,
+        timestamp: new Date()
+      };
+
+      const httpResponse = await fetch(`${this.backendUrl}/ai-conversations`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(conversationData)
+      });
+
+      if (httpResponse.ok) {
+        console.log(`[AI-ANALYSIS] 🤖 AI conversation sent to chat mode for job ${jobId}`);
+      } else {
+        console.log(`[AI-ANALYSIS] ⚠️ Failed to send AI conversation: ${httpResponse.status}`);
+      }
+    } catch (error) {
+      console.log(`[AI-ANALYSIS] ⚠️ Error sending AI conversation: ${error.message}`);
+    }
+  }
+
+  /**
    * Main analysis chain execution
    * @param {Object} page - Playwright page object
    * @param {Object} context - Operation context
@@ -324,10 +356,28 @@ Respond in JSON format:
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
-        temperature: 0.2
       });
 
-      return JSON.parse(response.choices[0].message.content);
+      const aiResponse = JSON.parse(response.choices[0].message.content);
+      
+      // Send AI conversation to backend for chat mode
+      if (context.job_id) {
+        await this.sendAIConversation(
+          context.job_id,
+          `crawler-${crawlerType}`,
+          'page_analysis',
+          {
+            prompt: prompt,
+            page_data: pageData,
+            depth: depth
+          },
+          aiResponse,
+          null, // screenshot_id - will be captured separately
+          url
+        );
+      }
+
+      return aiResponse;
     } catch (error) {
       console.log(`[AI-ANALYSIS] Page analysis failed: ${error.message}`);
       return {
@@ -384,10 +434,31 @@ Respond with just the JavaScript code (no markdown formatting):`;
       const response = await this.openai.chat.completions.create({
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.3
       });
 
       const script = response.choices[0].message.content.trim();
+      
+      // Send AI conversation to backend for chat mode
+      if (context.job_id) {
+        await this.sendAIConversation(
+          context.job_id,
+          `crawler-${crawlerType}`,
+          'script_generation',
+          {
+            prompt: prompt,
+            analysis: analysis,
+            depth: depth,
+            attempts: attempts.slice(-3)
+          },
+          {
+            script: script,
+            success: true,
+            message: 'Script generated successfully'
+          },
+          null, // screenshot_id
+          url
+        );
+      }
       
       return {
         success: true,
@@ -584,10 +655,28 @@ Respond in JSON format:
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
-        temperature: 0.2
       });
 
       const result = JSON.parse(response.choices[0].message.content);
+      
+      // Send AI conversation to backend for chat mode
+      if (context.job_id) {
+        await this.sendAIConversation(
+          context.job_id,
+          `crawler-${crawlerType}`,
+          'execution_analysis',
+          {
+            prompt: prompt,
+            execution_result: executionResult,
+            depth: depth,
+            current_url: url,
+            current_title: title
+          },
+          result,
+          null, // screenshot_id
+          url
+        );
+      }
       
       return {
         ...result,
@@ -660,10 +749,37 @@ Respond in JSON format:
         model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_object" },
-        temperature: 0.1
       });
 
-      return JSON.parse(response.choices[0].message.content);
+      const result = JSON.parse(response.choices[0].message.content);
+      
+      // Send AI conversation to backend for chat mode
+      if (context.job_id) {
+        await this.sendAIConversation(
+          context.job_id,
+          `crawler-${crawlerType}`,
+          'final_evaluation',
+          {
+            prompt: prompt,
+            final_state: {
+              url: url,
+              title: title,
+              content_length: content.length,
+              cookies_count: cookies.length,
+              final_depth: finalDepth,
+              total_attempts: Array.isArray(attempts) ? attempts.length : 0,
+              screenshots_captured: screenshots.length,
+              ai_prompts_used: ai_prompts.length
+            },
+            attempts: Array.isArray(attempts) ? attempts : []
+          },
+          result,
+          null, // screenshot_id
+          url
+        );
+      }
+
+      return result;
     } catch (error) {
       console.log(`[AI-ANALYSIS] Final evaluation failed: ${error.message}`);
       return {
