@@ -224,15 +224,55 @@ export function createScreenshotArtifact(filename, data, description) {
  * @param {string} prompt - The prompt sent to AI
  * @param {string} response - The AI response
  * @param {string} purpose - Purpose of the prompt
+ * @param {string} humanRequest - Human-readable description of what the crawler wants from AI
+ * @param {string} humanResponse - Human-readable description of AI's intentions and response
  * @returns {Object} AI prompt artifact object
  */
-export function createAIPromptArtifact(prompt, response, purpose) {
+export function createAIPromptArtifact(prompt, response, purpose, humanRequest = null, humanResponse = null, textRequest = null, sourcePayload = null) {
   return {
-    prompt,
-    response,
+    text_request: textRequest || prompt,
+    source_payload: sourcePayload || {},
+    ai_response: response,
+    human_request: humanRequest || generateDefaultHumanRequest(purpose),
+    human_response: humanResponse || generateDefaultHumanResponse(purpose),
     timestamp: new Date().toISOString(),
-    purpose
+    purpose,
+    // Legacy fields for backward compatibility
+    prompt,
+    response
   };
+}
+
+/**
+ * Generate default human-readable request description
+ */
+function generateDefaultHumanRequest(purpose) {
+  const intentMap = {
+    'page_analysis': 'I need to analyze this webpage to understand its structure and content so I can determine the best crawling strategy.',
+    'action_generation': 'I need to generate a Playwright script to interact with this page and navigate to the next content.',
+    'result_analysis': 'I need to analyze the results of my previous action to see if it was successful and what should happen next.',
+    'final_evaluation': 'I need to evaluate the overall crawling results and determine if the mission was successful.',
+    'login_attempt': 'I need to attempt to log into this page using the provided credentials.',
+    'content_extraction': 'I need to extract and analyze the content from this page for further processing.'
+  };
+  
+  return intentMap[purpose] || `I need to perform ${purpose} on this page.`;
+}
+
+/**
+ * Generate default human-readable response description
+ */
+function generateDefaultHumanResponse(purpose) {
+  const intentMap = {
+    'page_analysis': 'I\'ve analyzed the page structure and identified key elements. Here\'s what I found and my recommendations for next steps.',
+    'action_generation': 'I\'ve generated a Playwright script based on my analysis. Here\'s the code that should accomplish your goal.',
+    'result_analysis': 'I\'ve analyzed the results of your previous action. Here\'s what happened and what I recommend doing next.',
+    'final_evaluation': 'I\'ve evaluated the complete crawling session. Here\'s my assessment of success and the overall results.',
+    'login_attempt': 'I\'ve analyzed the login attempt. Here\'s what happened and whether the login was successful.',
+    'content_extraction': 'I\'ve extracted and analyzed the page content. Here\'s what I found and the structured data I\'ve prepared.'
+  };
+  
+  return intentMap[purpose] || `I\'ve processed your request for ${purpose}. Here\'s my analysis and recommendations.`;
 }
 
 /**

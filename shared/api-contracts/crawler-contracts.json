@@ -224,13 +224,52 @@
                     "items": {
                       "type": "object",
                       "properties": {
-                        "prompt": {
+                        "text_request": {
                           "type": "string",
-                          "required": true
+                          "required": true,
+                          "description": "The actual text request sent to AI (e.g., 'Analyze this login form')"
                         },
-                        "response": {
+                        "source_payload": {
+                          "type": "object",
+                          "required": true,
+                          "description": "Source data provided to AI (HTML, forms, screenshots, etc.)",
+                          "properties": {
+                            "html": {
+                              "type": "string",
+                              "description": "HTML content of the page"
+                            },
+                            "forms": {
+                              "type": "object",
+                              "description": "Form elements and structure"
+                            },
+                            "selectors": {
+                              "type": "object",
+                              "description": "CSS selectors for elements"
+                            },
+                            "screenshots": {
+                              "type": "array",
+                              "description": "Screenshot data"
+                            },
+                            "metadata": {
+                              "type": "object",
+                              "description": "Additional metadata about the page"
+                            }
+                          }
+                        },
+                        "ai_response": {
                           "type": "string",
-                          "required": true
+                          "required": true,
+                          "description": "Raw AI response"
+                        },
+                        "human_request": {
+                          "type": "string",
+                          "required": true,
+                          "description": "Human-readable description of what the crawler wants from AI"
+                        },
+                        "human_response": {
+                          "type": "string",
+                          "required": true,
+                          "description": "Human-readable description of AI's intentions and response"
                         },
                         "timestamp": {
                           "type": "string",
