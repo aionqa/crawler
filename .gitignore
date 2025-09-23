@@ -1,4 +1,4 @@
-node_modules
+node_modules/
 .env
 artifacts
 
@@ -18,3 +18,6 @@ logs/
 *.log
 
 dist/
+
+# Node.js dependencies
+**/node_modules/
