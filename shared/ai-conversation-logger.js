@@ -62,6 +62,12 @@ export class AIConversationLogger {
   async sendAIConversation(jobId, agentName, conversationType, textRequest, sourcePayload, aiResponse, screenshotId = null, pageUrl = null) {
     console.log(`[AI-CONVERSATION] 🚀 Attempting to send structured AI conversation for job ${jobId} by agent ${agentName}`);
     try {
+      // Generate human-readable descriptions using AI
+      const [humanRequest, humanResponse] = await Promise.all([
+        this.generateCrawlerIntent(conversationType, textRequest, pageUrl),
+        this.generateAIIntent(conversationType, aiResponse, pageUrl)
+      ]);
+
       const conversationData = {
         job_id: jobId,
         agent_name: agentName,
@@ -69,8 +75,8 @@ export class AIConversationLogger {
         text_request: textRequest,
         source_payload: sourcePayload || {},
         ai_response: aiResponse,
-        human_request: await this.generateCrawlerIntent(conversationType, textRequest, pageUrl),
-        human_response: await this.generateAIIntent(conversationType, aiResponse, pageUrl),
+        human_request: humanRequest,
+        human_response: humanResponse,
         screenshot_id: screenshotId,
         page_url: pageUrl,
         timestamp: new Date(),
@@ -85,6 +91,8 @@ export class AIConversationLogger {
 
       if (httpResponse.ok) {
         console.log(`[AI-CONVERSATION] 🤖 Structured AI conversation sent to chat mode for job ${jobId} by agent ${agentName}`);
+        console.log(`[AI-CONVERSATION] 📝 Human Request: ${humanRequest}`);
+        console.log(`[AI-CONVERSATION] 🤖 AI Response: ${humanResponse}`);
       } else {
         console.log(`[AI-CONVERSATION] ⚠️ Failed to send structured AI conversation: ${httpResponse.status}`);
       }
@@ -94,37 +102,145 @@ export class AIConversationLogger {
   }
 
   /**
-   * Generate human-readable crawler intent
+   * Generate human-readable crawler intent using AI
    */
   async generateCrawlerIntent(conversationType, textRequest, pageUrl) {
-    const intentMap = {
-      'page_analysis': `I need to analyze this webpage to understand its structure and content so I can determine the best crawling strategy.`,
-      'login_attempt': `I need to attempt to log into this page using the provided credentials.`,
-      'form_analysis': `I need to analyze this form structure to understand how to interact with it.`,
-      'screenshot_analysis': `I need to analyze this screenshot to understand the page structure and form elements.`,
-      'script_generation': `I need to generate a Playwright script to interact with this page.`,
-      'execution_analysis': `I need to analyze the results of my previous action to see if it was successful.`,
-      'final_evaluation': `I need to evaluate the overall login results and determine if the mission was successful.`,
-      'content_extraction': `I need to extract content from this page for analysis.`
-    };
-    return intentMap[conversationType] || `I need to perform ${conversationType} on this page.`;
+    try {
+      // Extract key information from the technical prompt
+      let extractedInfo = '';
+      if (typeof textRequest === 'string') {
+        // Look for key patterns in the technical prompt
+        const urlMatch = textRequest.match(/Target URL:\s*([^\n]+)/);
+        const titleMatch = textRequest.match(/Page Title:\s*([^\n]+)/);
+        const taskMatch = textRequest.match(/Task:\s*([^\n]+)/);
+        
+        if (urlMatch) extractedInfo += `URL: ${urlMatch[1]}\n`;
+        if (titleMatch) extractedInfo += `Page: ${titleMatch[1]}\n`;
+        if (taskMatch) extractedInfo += `Task: ${taskMatch[1]}\n`;
+      }
+
+      const intentPrompt = `You are an AI assistant that generates human-readable descriptions for web automation requests in a chat interface.
+
+Based on this web automation request, generate a clear, conversational description of what the HUMAN wants to accomplish:
+
+Conversation Type: ${conversationType}
+Page URL: ${pageUrl}
+${extractedInfo ? `Key Info:\n${extractedInfo}` : ''}
+
+Requirements:
+- Write in first person from the human's perspective ("I want to...", "I need to...")
+- Use clear, conversational language
+- Focus on the goal/intent, not the technical details
+- Keep it concise (1-2 sentences)
+- Make it sound natural for a chat interface
+
+Examples:
+- "I want to analyze this login page to understand how to automate the login process"
+- "I need to extract all the forms and interactive elements from this webpage"
+- "I want to test if I can successfully log into this website with the provided credentials"
+- "I need to crawl through this website and catalog all the pages and content"
+
+Respond with ONLY the human-readable description, no quotes or explanations.`;
+
+      const response = await this.openaiClient.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: intentPrompt }],
+        max_tokens: 100,
+        temperature: 0.7
+      });
+
+      return response.choices[0].message.content.trim();
+    } catch (error) {
+      console.warn('[AI-CONVERSATION] ⚠️ Failed to generate AI intent, using fallback:', error.message);
+      
+      // Fallback to static mapping
+      const intentMap = {
+        'page_analysis': `I want to analyze this webpage to understand its structure and content for crawling.`,
+        'login_attempt': `I want to attempt to log into this page using the provided credentials.`,
+        'form_analysis': `I need to analyze this form structure to understand how to interact with it.`,
+        'screenshot_analysis': `I want to analyze this screenshot to understand the page structure and form elements.`,
+        'script_generation': `I need to generate a Playwright script to interact with this page.`,
+        'execution_analysis': `I want to analyze the results of my previous action to see if it was successful.`,
+        'final_evaluation': `I need to evaluate the overall results and determine if the mission was successful.`,
+        'content_extraction': `I want to extract content from this page for analysis.`,
+        'crawl_summary': `I want to get a summary of the crawling operation and its results.`
+      };
+      return intentMap[conversationType] || `I want to perform ${conversationType} on this page.`;
+    }
   }
 
   /**
-   * Generate human-readable AI intent
+   * Generate human-readable AI intent using AI
    */
   async generateAIIntent(conversationType, aiResponse, pageUrl) {
-    const intentMap = {
-      'page_analysis': `I've analyzed the page structure and identified key elements. Here's what I found and my recommendations for next steps.`,
-      'login_attempt': `I've analyzed the login attempt. Here's what happened and whether the login was successful.`,
-      'form_analysis': `I've analyzed the form structure and identified the best approach for interaction.`,
-      'screenshot_analysis': `I've analyzed the screenshot and identified key form elements and interaction points.`,
-      'script_generation': `I've generated a Playwright script based on my analysis. Here's the code that should accomplish your goal.`,
-      'execution_analysis': `I've analyzed the execution results. Here's my assessment of what happened and what should happen next.`,
-      'final_evaluation': `I've completed the final evaluation of the login session. Here's my comprehensive analysis and conclusions.`,
-      'content_extraction': `I've extracted and analyzed the content from this page. Here's what I found.`
-    };
-    return intentMap[conversationType] || `I've processed your request for ${conversationType}. Here's my analysis and recommendations.`;
+    try {
+      // Extract key information from the AI response
+      let extractedInfo = '';
+      if (typeof aiResponse === 'string') {
+        // Look for key patterns in the response
+        const formsMatch = aiResponse.match(/Found.*?(\d+).*?form/i);
+        const elementsMatch = aiResponse.match(/Found.*?(\d+).*?element/i);
+        const successMatch = aiResponse.match(/success.*?(true|false)/i);
+        
+        if (formsMatch) extractedInfo += `Forms found: ${formsMatch[1]}\n`;
+        if (elementsMatch) extractedInfo += `Elements found: ${elementsMatch[1]}\n`;
+        if (successMatch) extractedInfo += `Success: ${successMatch[1]}\n`;
+      } else if (typeof aiResponse === 'object' && aiResponse !== null) {
+        // Extract from structured response
+        if (aiResponse.forms) extractedInfo += `Forms: ${Array.isArray(aiResponse.forms) ? aiResponse.forms.length : 'found'}\n`;
+        if (aiResponse.success !== undefined) extractedInfo += `Success: ${aiResponse.success}\n`;
+        if (aiResponse.confidence) extractedInfo += `Confidence: ${aiResponse.confidence}\n`;
+      }
+
+      const responsePrompt = `You are an AI assistant that generates human-readable descriptions for web automation responses in a chat interface.
+
+Based on this AI response, generate a clear, conversational description of what the AI accomplished or found:
+
+Conversation Type: ${conversationType}
+Page URL: ${pageUrl}
+${extractedInfo ? `Key Results:\n${extractedInfo}` : ''}
+
+Requirements:
+- Write in first person from the AI's perspective ("I found...", "I discovered...", "I generated...")
+- Use clear, conversational language
+- Focus on what was accomplished or discovered
+- Keep it concise (1-2 sentences)
+- Make it sound natural for a chat interface
+- Mention key findings or results
+
+Examples:
+- "I found 3 login forms on this page and generated a script to automate the login process"
+- "I discovered 12 interactive elements and 5 forms that can be crawled"
+- "I successfully analyzed the page structure and identified the best approach for automation"
+- "I generated a Playwright script that should handle the login form interaction"
+
+Respond with ONLY the human-readable description, no quotes or explanations.`;
+
+      const response = await this.openaiClient.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [{ role: "user", content: responsePrompt }],
+        max_tokens: 100,
+        temperature: 0.7
+      });
+
+      return response.choices[0].message.content.trim();
+    } catch (error) {
+      console.warn('[AI-CONVERSATION] ⚠️ Failed to generate AI response description, using fallback:', error.message);
+      
+      // Fallback to static mapping
+      const intentMap = {
+        'page_analysis': `I've analyzed the page structure and identified key elements. Here's what I found and my recommendations for next steps.`,
+        'login_attempt': `I've analyzed the login attempt. Here's what happened and whether the login was successful.`,
+        'form_analysis': `I've analyzed the form structure and identified the best approach for interaction.`,
+        'screenshot_analysis': `I've analyzed the screenshot and identified key form elements and interaction points.`,
+        'script_generation': `I've generated a Playwright script based on my analysis. Here's the code that should accomplish your goal.`,
+        'execution_analysis': `I've analyzed the execution results. Here's my assessment of what happened and what should happen next.`,
+        'final_evaluation': `I've completed the final evaluation of the session. Here's my comprehensive analysis and conclusions.`,
+        'content_extraction': `I've extracted and analyzed the content from this page. Here's what I found.`,
+        'crawl_summary': `I've completed the crawling operation and generated a summary of the results.`
+      };
+      return intentMap[conversationType] || `I've processed your request for ${conversationType}. Here's my analysis and recommendations.`;
+    }
   }
 
   /**
@@ -136,18 +252,23 @@ export class AIConversationLogger {
    * @param {Object} options - OpenAI chat completion options
    * @param {string} screenshotId - Optional screenshot ID
    * @param {string} pageUrl - Optional page URL
+   * @param {Object} sourcePayload - Optional source data (HTML, forms, etc.)
    * @returns {Promise<Object>} OpenAI response
    */
-  async createChatCompletion(openaiClient, jobId, agentName, conversationType, options, screenshotId = null, pageUrl = null) {
+  async createChatCompletion(openaiClient, jobId, agentName, conversationType, options, screenshotId = null, pageUrl = null, sourcePayload = null) {
     try {
       const response = await openaiClient.chat.completions.create(options);
       
-      // Log the conversation
+      // Extract the main user message for logging
+      const userMessage = options.messages.find(msg => msg.role === 'user')?.content || '';
+      
+      // Log the conversation with enhanced human-readable descriptions
       await this.sendAIConversation(
         jobId,
         agentName,
         conversationType,
-        {
+        userMessage,
+        sourcePayload || {
           model: options.model,
           messages: options.messages,
           ...(options.temperature !== undefined && { temperature: options.temperature }),
@@ -158,7 +279,8 @@ export class AIConversationLogger {
           choices: response.choices,
           usage: response.usage,
           model: response.model,
-          id: response.id
+          id: response.id,
+          content: response.choices[0]?.message?.content || ''
         },
         screenshotId,
         pageUrl
@@ -167,11 +289,14 @@ export class AIConversationLogger {
       return response;
     } catch (error) {
       // Log failed conversation
+      const userMessage = options.messages.find(msg => msg.role === 'user')?.content || '';
+      
       await this.sendAIConversation(
         jobId,
         agentName,
         conversationType,
-        {
+        userMessage,
+        sourcePayload || {
           model: options.model,
           messages: options.messages,
           ...(options.temperature !== undefined && { temperature: options.temperature }),
