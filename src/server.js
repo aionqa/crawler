@@ -11,6 +11,10 @@ import { createSuccessResponse, createErrorResponse } from './utils.js';
 import { attemptLogin, startCrawl } from './unified-operations.js';
 import { validateInput, createValidationErrorResponse } from './schemas/validation.js';
 import gelfClient from '/app/shared/gelf-client.js';
+import swaggerUi from 'swagger-ui-express';
+import swaggerJSDoc from 'swagger-jsdoc';
+import { fileURLToPath } from 'url';
+import path from 'path';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,6 +23,50 @@ const SERVICE_NAME = 'unified-crawler';
 // Job management
 const activeJobs = new Map();
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
+
+// Swagger configuration
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const swaggerSpec = swaggerJSDoc({
+  definition: {
+    openapi: "3.0.3",
+    info: {
+      title: "AionQA Unified Crawler API",
+      version: "1.0.0",
+      description: "Unified AI-powered web crawling and login automation system. Supports multiple modes: auto, media, text, forms, static, script. Uses JSON-RPC 2.0 protocol.",
+      contact: {
+        name: "AionQA Team",
+        email: "support@aionqa.com"
+      },
+      license: {
+        name: "MIT",
+        url: "https://opensource.org/licenses/MIT"
+      }
+    },
+    servers: [
+      { 
+        url: `http://localhost:${PORT}`, 
+        description: "Development server" 
+      },
+      { 
+        url: "http://unified-crawler:3005", 
+        description: "Docker container server" 
+      }
+    ],
+    tags: [
+      {
+        name: "Health",
+        description: "Health check endpoints"
+      },
+      {
+        name: "JSON-RPC",
+        description: "JSON-RPC 2.0 endpoints for crawler operations"
+      }
+    ]
+  },
+  apis: [path.join(__dirname, "server.js")],
+});
 
 // Helper function to send logs to backend
 async function sendLogToBackend(jobId, level, message, data = {}) {
@@ -64,7 +112,45 @@ function updateJobStatus(jobId, status, result = null, error = null) {
 app.use(cors());
 app.use(bodyParser.json({ limit: '10mb' }));
 
-// Health check endpoint
+// Swagger UI routes
+app.get("/openapi.json", (_req, res) => res.json(swaggerSpec));
+app.use("/docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec, { explorer: true }));
+
+/**
+ * @swagger
+ * /health:
+ *   get:
+ *     summary: Health check endpoint
+ *     description: Returns the health status of the unified crawler service
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Service is healthy
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: healthy
+ *                 service:
+ *                   type: string
+ *                   example: unified-crawler
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                 supported_modes:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                   example: [auto, media, text, forms, static, script]
+ *                 operations:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                   example: [login, crawl]
+ */
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
@@ -75,7 +161,197 @@ app.get('/health', (req, res) => {
   });
 });
 
-// JSON-RPC endpoint
+/**
+ * @swagger
+ * components:
+ *   schemas:
+ *     JSONRPCRequest:
+ *       type: object
+ *       required:
+ *         - jsonrpc
+ *         - method
+ *         - id
+ *       properties:
+ *         jsonrpc:
+ *           type: string
+ *           example: "2.0"
+ *         method:
+ *           type: string
+ *           enum: [queueLoginJob, getJobStatus, attemptLogin, startCrawl]
+ *           example: "attemptLogin"
+ *         params:
+ *           type: object
+ *         id:
+ *           type: string
+ *           example: "1"
+ *     JSONRPCResponse:
+ *       type: object
+ *       required:
+ *         - jsonrpc
+ *         - id
+ *       properties:
+ *         jsonrpc:
+ *           type: string
+ *           example: "2.0"
+ *         result:
+ *           type: object
+ *         error:
+ *           type: object
+ *           properties:
+ *             code:
+ *               type: integer
+ *             message:
+ *               type: string
+ *         id:
+ *           type: string
+ *           example: "1"
+ *     LoginParams:
+ *       type: object
+ *       required:
+ *         - url
+ *         - username
+ *         - password
+ *       properties:
+ *         url:
+ *           type: string
+ *           format: uri
+ *           example: "https://example.com/login"
+ *         username:
+ *           type: string
+ *           example: "user@example.com"
+ *         password:
+ *           type: string
+ *           example: "password123"
+ *         context:
+ *           type: object
+ *           properties:
+ *             mode:
+ *               type: string
+ *               enum: [auto, media, text, forms, static, script]
+ *               example: "auto"
+ *             cookies:
+ *               type: array
+ *               items:
+ *                 type: object
+ *             openai_api_key:
+ *               type: string
+ *     CrawlParams:
+ *       type: object
+ *       required:
+ *         - url
+ *       properties:
+ *         url:
+ *           type: string
+ *           format: uri
+ *           example: "https://example.com"
+ *         cookies:
+ *           type: array
+ *           items:
+ *             type: object
+ *         context:
+ *           type: object
+ *           properties:
+ *             job_id:
+ *               type: string
+ *               example: "job-uuid-here"
+ *             mode:
+ *               type: string
+ *               enum: [auto, media, text, forms, static, script]
+ *               example: "auto"
+ *             openai_api_key:
+ *               type: string
+ * /rpc:
+ *   post:
+ *     summary: JSON-RPC 2.0 endpoint
+ *     description: Main JSON-RPC endpoint for all crawler operations including login, crawl, and job management
+ *     tags: [JSON-RPC]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/JSONRPCRequest'
+ *           examples:
+ *             attemptLogin:
+ *               summary: Login operation
+ *               value:
+ *                 jsonrpc: "2.0"
+ *                 method: "attemptLogin"
+ *                 params:
+ *                   url: "https://example.com/login"
+ *                   username: "user@example.com"
+ *                   password: "password123"
+ *                   context:
+ *                     mode: "auto"
+ *                     openai_api_key: "your-openai-key"
+ *                 id: "1"
+ *             startCrawl:
+ *               summary: Crawl operation
+ *               value:
+ *                 jsonrpc: "2.0"
+ *                 method: "startCrawl"
+ *                 params:
+ *                   url: "https://example.com"
+ *                   context:
+ *                     job_id: "job-uuid-here"
+ *                     mode: "auto"
+ *                     openai_api_key: "your-openai-key"
+ *                 id: "1"
+ *             queueLoginJob:
+ *               summary: Queue login job
+ *               value:
+ *                 jsonrpc: "2.0"
+ *                 method: "queueLoginJob"
+ *                 params:
+ *                   url: "https://example.com/login"
+ *                   context:
+ *                     credentials:
+ *                       username: "user@example.com"
+ *                       password: "password123"
+ *                     mode: "auto"
+ *                     openai_api_key: "your-openai-key"
+ *                 id: "1"
+ *             getJobStatus:
+ *               summary: Get job status
+ *               value:
+ *                 jsonrpc: "2.0"
+ *                 method: "getJobStatus"
+ *                 params:
+ *                   job_id: "job-uuid-here"
+ *                 id: "1"
+ *     responses:
+ *       200:
+ *         description: JSON-RPC response
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/JSONRPCResponse'
+ *             examples:
+ *               success:
+ *                 summary: Successful operation
+ *                 value:
+ *                   jsonrpc: "2.0"
+ *                   result:
+ *                     success: true
+ *                     message: "Login completed successfully"
+ *                     duration_ms: 5000
+ *                     final_url: "https://example.com/dashboard"
+ *                     final_title: "Dashboard"
+ *                     cookies: []
+ *                     details: {}
+ *                     logs: []
+ *                     screenshots: []
+ *                     video: null
+ *                   id: "1"
+ *               error:
+ *                 summary: Error response
+ *                 value:
+ *                   jsonrpc: "2.0"
+ *                   error:
+ *                     code: -32601
+ *                     message: "Method not found"
+ *                   id: "1"
+ */
 app.post('/rpc', async (req, res) => {
   console.log('[SERVER] 📥 Received JSON-RPC request');
   
@@ -239,8 +515,8 @@ async function handleAttemptLogin(req, res, params, id) {
       params.context?.cookies || [],
       {
         ...params.context,
-        useRemoteBrowser: false, // Force local browser
-        browserServiceUrl: null
+        useRemoteBrowser: true, // Use remote browser service
+        browserServiceUrl: process.env.BROWSER_SERVICE_URL || 'http://browser-1:3000'
       },
       openaiApiKey
     );
@@ -287,13 +563,7 @@ async function handleStartCrawl(req, res, params, id) {
       });
     }
     
-    if (!params?.context?.project_id) {
-      return res.json({ 
-        jsonrpc: '2.0', 
-        id, 
-        error: { code: -32602, message: 'Missing required parameter: context.project_id' } 
-      });
-    }
+    // project_id is no longer required - crawler doesn't need to know about projects
 
     // Initialize OpenAI with API key from context or environment
     const openaiApiKey = params.context.openai_api_key || process.env.OPENAI_API_KEY;
@@ -362,8 +632,8 @@ async function executeLoginJob(jobId) {
       context.cookies || [],
       {
         ...context,
-        useRemoteBrowser: false, // Force local browser
-        browserServiceUrl: null,
+        useRemoteBrowser: true, // Use remote browser service
+        browserServiceUrl: process.env.BROWSER_SERVICE_URL || 'http://browser-1:3000',
         ...options
       },
       openaiApiKey

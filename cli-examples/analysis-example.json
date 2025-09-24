@@ -1,0 +1,19 @@
+{
+  "operation": "analysis",
+  "url": "https://example.com",
+  "context": {
+    "job_id": "cli-analysis-test",
+    "mode": "auto",
+    "openai_api_key": "your-openai-api-key-here",
+    "headless": false,
+    "timeout": 30000,
+    "analysis_type": "page_structure"
+  },
+  "options": {
+    "extract_forms": true,
+    "extract_links": true,
+    "analyze_content": true,
+    "detect_login_forms": true,
+    "wait_for_navigation": true
+  }
+}

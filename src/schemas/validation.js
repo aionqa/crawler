@@ -32,7 +32,7 @@ const OptionsSchema = z.object({
 });
 
 const ContextSchema = z.object({
-  project_id: z.string().min(1, 'Project ID is required'),
+  project_id: z.string().optional(), // No longer required - crawler doesn't need to know about projects
   configuration_id: z.string().optional(),
   job_id: z.string().optional(),
   credentials: CredentialsSchema.optional(),

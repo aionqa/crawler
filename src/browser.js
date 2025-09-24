@@ -343,8 +343,15 @@ async function withRemoteBrowser(action, options = {}, browserServiceUrl) {
       await uploadLogs(options.backend_endpoints.logs, logs);
     }
 
-    // Get final cookies (remote browsers don't support video recording yet)
-    const cookies = []; // TODO: Implement cookie retrieval from remote browser
+    // Get final cookies from remote browser
+    let cookies = [];
+    try {
+      cookies = await context.cookies();
+      console.log(`[REMOTE-BROWSER] 🍪 Retrieved ${cookies.length} cookies from remote browser`);
+    } catch (error) {
+      console.log(`[REMOTE-BROWSER] ❌ Failed to get cookies:`, error.message);
+      cookies = [];
+    }
     
     // If no backend endpoints, return data in result
     const returnData = {
