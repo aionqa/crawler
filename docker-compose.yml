@@ -89,8 +89,8 @@ services:
 
   login-text:
     build:
-      context: .
-      dockerfile: ./login-text/Dockerfile
+      context: ./login-text
+      dockerfile: Dockerfile
     container_name: aionqa-login-text
     restart: unless-stopped
     environment:
