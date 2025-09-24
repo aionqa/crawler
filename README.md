@@ -190,7 +190,6 @@ The unified crawler consolidates functionality from multiple specialized modules
 - **crawler-media**: Media crawl functionality
 - **crawler-text**: Text crawl functionality
 - **crawler-static**: Static crawl functionality
-- **manual-analysis**: Script mode functionality
 
 ## Response Format
 
