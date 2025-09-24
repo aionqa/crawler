@@ -4,8 +4,27 @@
 
 import { chromium } from 'playwright';
 import OpenAI from 'openai';
-import gelfClient from '/app/shared/gelf-client.js';
-import { aiConversationLogger } from '/app/shared/ai-conversation-logger.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Conditional imports for shared modules
+let gelfClient = null;
+let aiConversationLogger = null;
+
+try {
+  // Try to import shared modules (works in container)
+  const gelfModule = await import('/app/shared/gelf-client.js');
+  gelfClient = gelfModule.default;
+  
+  const aiModule = await import('/app/shared/ai-conversation-logger.js');
+  aiConversationLogger = aiModule.aiConversationLogger;
+} catch (error) {
+  // Fallback for CLI mode (shared modules not available)
+  console.log('[CLI] Shared modules not available, using CLI mode');
+}
 // For now, we'll create simplified versions of these functions
 // In production, these would be imported from the shared directory
 
@@ -37,11 +56,29 @@ process.env.AGENT_NAME = 'unified-crawler';
 
 // Helper function to send logs to both console and Graylog
 async function sendLog(jobId, level, message, data = {}) {
-  // Send to console for local debugging
-  console.log(`[${level.toUpperCase()}] ${message}`);
+  // Check if we're in CLI mode (no GELF client available or CLI mode flag)
+  const isCLIMode = process.env.CLI_MODE === 'true' || !process.env.BACKEND_URL || !gelfClient;
   
-  // Send to Graylog via GELF
-  await gelfClient.sendJobLog(jobId, level, message, 'unified-crawler', data);
+  // Determine agent name based on mode
+  const mode = data.mode || 'auto';
+  const agentName = `unified-crawler-${mode}`;
+  
+  if (isCLIMode) {
+    // CLI mode: output structured JSON to stdout
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      level: level.toUpperCase(),
+      message,
+      jobId,
+      agent: agentName,
+      ...data
+    };
+    console.log(JSON.stringify(logEntry));
+  } else {
+    // Server mode: send to console and Graylog
+    console.log(`[${level.toUpperCase()}] ${message}`);
+    await gelfClient.sendJobLog(jobId, level, message, agentName, data);
+  }
 }
 
 // Upload files via backend API
@@ -74,17 +111,87 @@ async function uploadFileToBackend({ buffer, contentType, type, jobId }) {
   }
 }
 
+// Take screenshot and upload to backend
+async function takeScreenshot(page, jobId, action = 'screenshot') {
+  try {
+    const screenshot = await page.screenshot({ 
+      type: 'png', 
+      fullPage: true 
+    });
+    
+    const fileId = await uploadFileToBackend({
+      buffer: screenshot,
+      contentType: 'image/png',
+      type: 'screenshot',
+      jobId
+    });
+    
+    if (fileId) {
+      await sendLog(jobId, 'info', `📸 Screenshot captured: ${action}`, { 
+        fileId, 
+        action,
+        url: page.url(),
+        title: await page.title()
+      });
+    }
+    
+    return fileId;
+  } catch (error) {
+    await sendLog(jobId, 'error', `📸 Screenshot failed: ${action}`, { 
+      error: error.message,
+      action,
+      url: page.url()
+    });
+    return null;
+  }
+}
+
 // Browser automation wrapper
 async function withBrowser(action, options = {}) {
-  const browser = await chromium.launch({
-    headless: options.headless !== false,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-gpu',
-      '--disable-dev-shm-usage'
-    ]
-  });
+  const isCLIMode = process.env.CLI_MODE === 'true';
+  const useRemoteBrowser = process.env.USE_REMOTE_BROWSER === 'true';
+  
+  // Debug environment variables
+  await sendLog(options.jobId || 'debug', 'info', `Browser config - CLI_MODE: ${isCLIMode}, USE_REMOTE_BROWSER: ${useRemoteBrowser}, BACKEND_URL: ${process.env.BACKEND_URL}`);
+  
+  let browser;
+  
+  if (isCLIMode) {
+    // CLI mode: use local browser installation
+    await sendLog(options.jobId || 'cli', 'info', 'Launching local browser for CLI mode');
+    
+    browser = await chromium.launch({
+      headless: options.headless !== false,
+      executablePath: '/usr/bin/chromium-browser', // Use system Chromium
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor'
+      ]
+    });
+  } else if (useRemoteBrowser) {
+    // Container mode: MUST use remote browsers
+    const browserServiceUrl = process.env.BROWSER_SERVICE_URL || 'http://browser-1:3000';
+    await sendLog(options.jobId || 'server', 'info', `Using remote browser service: ${browserServiceUrl}`);
+    
+    try {
+      // Use the base WebSocket URL for CDP connection
+      const wsUrl = browserServiceUrl.replace('http://', 'ws://');
+      await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket: ${wsUrl}`);
+      browser = await chromium.connectOverCDP(wsUrl);
+      await sendLog(options.jobId || 'server', 'info', 'Successfully connected to remote browser service via CDP');
+    } catch (error) {
+      await sendLog(options.jobId || 'server', 'error', `Failed to connect to remote browser service: ${error.message}`);
+      throw new Error(`Remote browser connection failed: ${error.message}`);
+    }
+  } else {
+    // This should not happen in container mode
+    await sendLog(options.jobId || 'server', 'error', 'No browser configuration found - this should not happen in container mode');
+    throw new Error('Browser configuration error: USE_REMOTE_BROWSER must be set to true in container mode');
+  }
   
   const contextOptions = {
     userAgent: options.userAgent,
@@ -92,8 +199,8 @@ async function withBrowser(action, options = {}) {
     viewport: options.viewport || { width: 1280, height: 800 }
   };
   
-  // Add video recording if enabled
-  if (options.enable_video_recording) {
+  // Add video recording only for local browsers (CLI mode)
+  if (isCLIMode && options.enable_video_recording) {
     contextOptions.recordVideo = { 
       dir: '/tmp/aionqa_videos',
       size: { width: 1280, height: 800 }
@@ -171,7 +278,7 @@ async function withBrowser(action, options = {}) {
 const modeHandlers = {
   // Auto mode - AI-driven approach (default)
   auto: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '🤖 Using auto mode - AI-driven approach');
+    await sendLog(context.job_id, 'info', '🤖 Using auto mode - AI-driven approach', { mode: 'auto' });
     
     if (operation === 'login') {
       return await performAutoLogin(page, context, openaiClient);
@@ -182,7 +289,7 @@ const modeHandlers = {
 
   // Media mode - Screenshot analysis
   media: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '📸 Using media mode - Screenshot analysis');
+    await sendLog(context.job_id, 'info', '📸 Using media mode - Screenshot analysis', { mode: 'media' });
     
     if (operation === 'login') {
       return await performMediaLogin(page, context, openaiClient);
@@ -193,7 +300,7 @@ const modeHandlers = {
 
   // Text mode - HTML text analysis
   text: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '📝 Using text mode - HTML text analysis');
+    await sendLog(context.job_id, 'info', '📝 Using text mode - HTML text analysis', { mode: 'text' });
     
     if (operation === 'login') {
       return await performTextLogin(page, context, openaiClient);
@@ -204,7 +311,7 @@ const modeHandlers = {
 
   // Forms mode - Form field analysis
   forms: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '📋 Using forms mode - Form field analysis');
+    await sendLog(context.job_id, 'info', '📋 Using forms mode - Form field analysis', { mode: 'forms' });
     
     if (operation === 'login') {
       return await performFormsLogin(page, context, openaiClient);
@@ -215,7 +322,7 @@ const modeHandlers = {
 
   // Static mode - Standard field ID matching
   static: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '🔍 Using static mode - Standard field ID matching');
+    await sendLog(context.job_id, 'info', '🔍 Using static mode - Standard field ID matching', { mode: 'static' });
     
     if (operation === 'login') {
       return await performStaticLogin(page, context, openaiClient);
@@ -226,7 +333,7 @@ const modeHandlers = {
 
   // Script mode - Custom script execution
   script: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '📜 Using script mode - Custom script execution');
+    await sendLog(context.job_id, 'info', '📜 Using script mode - Custom script execution', { mode: 'script' });
     
     if (operation === 'login') {
       return await performScriptLogin(page, context, openaiClient);
@@ -766,17 +873,37 @@ async function performStaticLogin(page, context, openaiClient) {
     };
   }
 
-  // Fill form and submit
+  // Fill form and submit with step-by-step screenshots
   try {
-    await usernameField.fill(context.credentials.username);
-    await passwordField.fill(context.credentials.password);
+    // Screenshot before action
+    await sendLog(jobId, 'info', '📸 Taking screenshot before form filling');
+    await takeScreenshot(page, jobId, 'before_form_fill');
     
+    // Fill username field
+    await sendLog(jobId, 'info', '✏️ Filling username field');
+    await usernameField.fill(context.credentials.username);
+    await sendLog(jobId, 'info', '📸 Taking screenshot after username filled');
+    await takeScreenshot(page, jobId, 'after_username_filled');
+    
+    // Fill password field
+    await sendLog(jobId, 'info', '✏️ Filling password field');
+    await passwordField.fill(context.credentials.password);
+    await sendLog(jobId, 'info', '📸 Taking screenshot after password filled');
+    await takeScreenshot(page, jobId, 'after_password_filled');
+    
+    // Submit form
     if (submitButton) {
+      await sendLog(jobId, 'info', '🖱️ Clicking submit button');
       await submitButton.click();
     } else {
       // Try pressing Enter on password field
+      await sendLog(jobId, 'info', '⌨️ Pressing Enter on password field');
       await passwordField.press('Enter');
     }
+    
+    // Screenshot after submission
+    await sendLog(jobId, 'info', '📸 Taking screenshot after form submission');
+    await takeScreenshot(page, jobId, 'after_form_submission');
 
     // Wait for navigation or response
     await page.waitForTimeout(3000);
@@ -957,7 +1084,7 @@ export async function attemptLogin(url, username, password, cookies, context, op
   const jobId = context.job_id || 'unknown-job';
   const mode = context.mode || 'auto';
   
-  await sendLog(jobId, 'info', `🚀 Starting ${mode} mode login attempt for ${url}`);
+  await sendLog(jobId, 'info', `🚀 Starting ${mode} mode login attempt for ${url}`, { mode });
   
   try {
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
@@ -977,7 +1104,17 @@ export async function attemptLogin(url, username, password, cookies, context, op
         waitUntil: 'domcontentloaded', 
         timeout: 30000 
       });
-      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+      
+      // Wait for navigation if DOM is loaded, otherwise wait for timeout then analyze
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 10000 });
+        await sendLog(jobId, 'info', '✅ Page fully loaded');
+      } catch (error) {
+        await sendLog(jobId, 'warn', '⚠️ Page not fully loaded, proceeding with analysis');
+        // Wait for timeout then analyze the page with AI
+        await page.waitForTimeout(5000);
+        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...');
+      }
 
       // Set credentials in context
       const enhancedContext = {
@@ -1031,7 +1168,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   const jobId = context.job_id || 'unknown';
   const mode = context.mode || 'auto';
   
-  await sendLog(jobId, 'info', `🚀 Starting ${mode} mode crawl process for ${url}`);
+  await sendLog(jobId, 'info', `🚀 Starting ${mode} mode crawl process for ${url}`, { mode });
   
   try {
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
@@ -1051,7 +1188,17 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         waitUntil: 'domcontentloaded', 
         timeout: 30000 
       });
-      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+      
+      // Wait for navigation if DOM is loaded, otherwise wait for timeout then analyze
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 10000 });
+        await sendLog(jobId, 'info', '✅ Page fully loaded');
+      } catch (error) {
+        await sendLog(jobId, 'warn', '⚠️ Page not fully loaded, proceeding with analysis');
+        // Wait for timeout then analyze the page with AI
+        await page.waitForTimeout(5000);
+        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...');
+      }
 
       // Execute mode-specific operation
       const modeHandler = modeHandlers[mode];
