@@ -80,7 +80,7 @@ async function withLocalBrowser(action, options = {}) {
     if (options.backend_endpoints?.stream) {
       streamInterval = setInterval(async () => {
         try {
-          const screenshot = await page.screenshot({ type: 'jpeg', quality: 70 });
+          const screenshot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: true });
           await streamFrame(options.backend_endpoints.stream, screenshot, {
             timestamp: new Date().toISOString(),
             url: page.url()
@@ -289,7 +289,7 @@ async function withRemoteBrowser(action, options = {}, browserServiceUrl) {
     if (options.backend_endpoints?.stream) {
       streamInterval = setInterval(async () => {
         try {
-          const screenshot = await page.screenshot({ type: 'jpeg', quality: 70 });
+          const screenshot = await page.screenshot({ type: 'jpeg', quality: 70, fullPage: true });
           await streamFrame(options.backend_endpoints.stream, screenshot, {
             timestamp: new Date().toISOString(),
             url: await page.url()

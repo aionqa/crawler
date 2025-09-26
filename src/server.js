@@ -73,7 +73,9 @@ async function sendLogToBackend(jobId, level, message, data = {}) {
   try {
     const timestamp = new Date().toISOString();
     const mode = data.mode || 'auto';
-    const componentName = `CRAWLER-${mode.toUpperCase()}`;
+    // Replace 'auto' mode with 'text' for component naming consistency
+    const componentMode = mode === 'auto' ? 'text' : mode;
+    const componentName = `CRAWLER-${componentMode.toUpperCase()}`;
     
     const response = await fetch(`${BACKEND_URL}/jobs/${jobId}/logs`, {
       method: 'POST',
