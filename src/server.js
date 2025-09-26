@@ -72,6 +72,9 @@ const swaggerSpec = swaggerJSDoc({
 async function sendLogToBackend(jobId, level, message, data = {}) {
   try {
     const timestamp = new Date().toISOString();
+    const mode = data.mode || 'auto';
+    const componentName = `CRAWLER-${mode.toUpperCase()}`;
+    
     const response = await fetch(`${BACKEND_URL}/jobs/${jobId}/logs`, {
       method: 'POST',
       headers: {
@@ -84,7 +87,8 @@ async function sendLogToBackend(jobId, level, message, data = {}) {
           ...data,
           timestamp
         },
-        agent_name: SERVICE_NAME
+        agent_name: SERVICE_NAME,
+        component: componentName
       })
     });
     
