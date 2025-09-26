@@ -64,29 +64,31 @@ async function sendLog(jobId, level, message, data = {}) {
   const agentName = 'unified-crawler';
   
   // Create specific component name based on action and mode
-  let componentName = `CRAWLER-${mode.toUpperCase()}`;
+  // Replace 'auto' mode with 'text' for component naming consistency
+  const componentMode = mode === 'auto' ? 'text' : mode;
+  let componentName = `CRAWLER-${componentMode.toUpperCase()}`;
   if (data.action) {
     switch (data.action) {
       case 'screenshot':
-        componentName = `CRAWLER-${mode.toUpperCase()}-SCREENSHOT`;
+        componentName = `CRAWLER-${componentMode.toUpperCase()}-SCREENSHOT`;
         break;
       case 'text_login_analysis':
-        componentName = `CRAWLER-${mode.toUpperCase()}-TEXT-LOGIN-OPENAI`;
+        componentName = `CRAWLER-${componentMode.toUpperCase()}-TEXT-LOGIN-OPENAI`;
         break;
       case 'ai_analysis':
-        componentName = `CRAWLER-${mode.toUpperCase()}-OPENAI`;
+        componentName = `CRAWLER-${componentMode.toUpperCase()}-OPENAI`;
         break;
       case 'form_fill':
-        componentName = `CRAWLER-${mode.toUpperCase()}-FORM-FILL`;
+        componentName = `CRAWLER-${componentMode.toUpperCase()}-FORM-FILL`;
         break;
       case 'login_execution':
-        componentName = `CRAWLER-${mode.toUpperCase()}-LOGIN-EXECUTION`;
+        componentName = `CRAWLER-${componentMode.toUpperCase()}-LOGIN-EXECUTION`;
         break;
       case 'token_extraction':
-        componentName = `CRAWLER-${mode.toUpperCase()}-TOKEN-EXTRACTION`;
+        componentName = `CRAWLER-${componentMode.toUpperCase()}-TOKEN-EXTRACTION`;
         break;
       default:
-        componentName = `CRAWLER-${mode.toUpperCase()}`;
+        componentName = `CRAWLER-${componentMode.toUpperCase()}`;
     }
   }
   
@@ -173,10 +175,14 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
       throw new Error(`Page is no longer valid: ${error.message}`);
     }
     
+    // Ensure page is properly loaded and sized
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    
     // Capture full HD screenshot
     const screenshot = await page.screenshot({ 
       type: 'png', 
-      fullPage: true
+      fullPage: true,
+      animations: 'disabled' // Disable animations for consistent screenshots
     });
     
     if (!screenshot || screenshot.length === 0) {
@@ -498,8 +504,7 @@ async function performAutoLogin(page, context, openaiClient) {
     const screenshot = await page.screenshot({ 
       type: 'jpeg', 
       quality: 30, 
-      fullPage: false,
-      clip: { x: 0, y: 0, width: 800, height: 600 }
+      fullPage: true
     });
     
     // Analyze the page with AI
@@ -630,8 +635,7 @@ async function performMediaLogin(page, context, openaiClient) {
   const screenshot = await page.screenshot({ 
     type: 'jpeg', 
     quality: 30, 
-    fullPage: false,
-    clip: { x: 0, y: 0, width: 800, height: 600 }
+    fullPage: true
   });
   const screenshotBase64 = screenshot.toString('base64');
   
@@ -698,8 +702,7 @@ async function performMediaCrawl(page, context, openaiClient) {
   const screenshot = await page.screenshot({ 
     type: 'jpeg', 
     quality: 30, 
-    fullPage: false,
-    clip: { x: 0, y: 0, width: 800, height: 600 }
+    fullPage: true
   });
   const screenshotBase64 = screenshot.toString('base64');
   
@@ -1507,7 +1510,7 @@ export async function attemptLogin(url, username, password, cookies, context, op
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
     
     const result = await withBrowser(async ({ page, context: browserContext }) => {
-      await sendLog(jobId, 'info', '🌐 Starting browser session...');
+      await sendLog(jobId, 'info', '🌐 Starting browser session...', { mode });
       
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {
@@ -1516,7 +1519,7 @@ export async function attemptLogin(url, username, password, cookies, context, op
       }
 
       // Navigate to URL
-      await sendLog(jobId, 'info', `🧭 Navigating to ${url}...`);
+      await sendLog(jobId, 'info', `🧭 Navigating to ${url}...`, { mode });
       await page.goto(url, { 
         waitUntil: 'domcontentloaded', 
         timeout: 30000 
@@ -1525,12 +1528,12 @@ export async function attemptLogin(url, username, password, cookies, context, op
       // Wait for navigation if DOM is loaded, otherwise wait for timeout then analyze
       try {
         await page.waitForLoadState('networkidle', { timeout: 10000 });
-        await sendLog(jobId, 'info', '✅ Page fully loaded');
+        await sendLog(jobId, 'info', '✅ Page fully loaded', { mode });
       } catch (error) {
         await sendLog(jobId, 'warn', '⚠️ Page not fully loaded, proceeding with analysis');
         // Wait for timeout then analyze the page with AI
         await page.waitForTimeout(5000);
-        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...');
+        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', { mode });
       }
 
       // Set credentials in context
@@ -1654,7 +1657,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
     
     const result = await withBrowser(async ({ page, context: browserContext }) => {
-      await sendLog(jobId, 'info', '🌐 Starting browser session...');
+      await sendLog(jobId, 'info', '🌐 Starting browser session...', { mode });
       
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {
@@ -1694,7 +1697,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       }
 
       // Navigate to URL
-      await sendLog(jobId, 'info', `🧭 Navigating to ${url}...`);
+      await sendLog(jobId, 'info', `🧭 Navigating to ${url}...`, { mode });
       await page.goto(url, { 
         waitUntil: 'domcontentloaded', 
         timeout: 30000 
@@ -1703,12 +1706,12 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       // Wait for navigation if DOM is loaded, otherwise wait for timeout then analyze
       try {
         await page.waitForLoadState('networkidle', { timeout: 10000 });
-        await sendLog(jobId, 'info', '✅ Page fully loaded');
+        await sendLog(jobId, 'info', '✅ Page fully loaded', { mode });
       } catch (error) {
         await sendLog(jobId, 'warn', '⚠️ Page not fully loaded, proceeding with analysis');
         // Wait for timeout then analyze the page with AI
         await page.waitForTimeout(5000);
-        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...');
+        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', { mode });
       }
 
       // Execute mode-specific operation
