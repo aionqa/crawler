@@ -286,6 +286,111 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
   }
 }
 
+// Enhanced screenshot capture for conversation flow
+async function takeScreenshotWithMetadata(page, jobId, action = 'screenshot', context = {}, options = {}) {
+  try {
+    const screenshot = await takeScreenshot(page, jobId, action, context);
+    
+    if (!screenshot) {
+      return null;
+    }
+
+    // Enhanced metadata for conversation flow
+    const enhancedMetadata = {
+      ...screenshot,
+      step: context.step || action,
+      before_action: context.before_action || false,
+      after_action: context.after_action || false,
+      conversation_flow: options.conversation_flow || false,
+      flow_step: options.flow_step || null,
+      action_sequence: options.action_sequence || null,
+      timestamp: new Date().toISOString(),
+      metadata: {
+        ...context,
+        ...options.metadata
+      }
+    };
+
+    return enhancedMetadata;
+  } catch (error) {
+    console.error(`[SCREENSHOT] ❌ Enhanced screenshot failed: ${error.message}`);
+    return null;
+  }
+}
+
+// Take screenshot before action
+async function takeScreenshotBeforeAction(page, jobId, action, context = {}) {
+  return await takeScreenshotWithMetadata(page, jobId, `before_${action}`, {
+    ...context,
+    before_action: true,
+    step: `before_${action}`
+  }, {
+    conversation_flow: true,
+    before_action: true
+  });
+}
+
+// Take screenshot after action
+async function takeScreenshotAfterAction(page, jobId, action, context = {}) {
+  return await takeScreenshotWithMetadata(page, jobId, `after_${action}`, {
+    ...context,
+    after_action: true,
+    step: `after_${action}`
+  }, {
+    conversation_flow: true,
+    after_action: true
+  });
+}
+
+// Create conversation flow step with screenshots
+async function createConversationFlowStep(page, jobId, stepData) {
+  const { action, description, beforeScreenshot = true, afterScreenshot = true, payload = null } = stepData;
+  
+  const flowStep = {
+    type: action,
+    description,
+    action: action,
+    timestamp: new Date().toISOString(),
+    screenshots: [],
+    payload: payload
+  };
+
+  // Take before screenshot
+  if (beforeScreenshot) {
+    const beforeShot = await takeScreenshotBeforeAction(page, jobId, action, {
+      step: `before_${action}`,
+      description: `Before ${description}`
+    });
+    if (beforeShot) {
+      flowStep.screenshots.push({
+        ...beforeShot,
+        before_action: true,
+        step: `before_${action}`
+      });
+    }
+  }
+
+  // Execute action (placeholder - actual action should be implemented by caller)
+  // This is just for the flow structure
+
+  // Take after screenshot
+  if (afterScreenshot) {
+    const afterShot = await takeScreenshotAfterAction(page, jobId, action, {
+      step: `after_${action}`,
+      description: `After ${description}`
+    });
+    if (afterShot) {
+      flowStep.screenshots.push({
+        ...afterShot,
+        after_action: true,
+        step: `after_${action}`
+      });
+    }
+  }
+
+  return flowStep;
+}
+
 // Browser automation wrapper
 async function withBrowser(action, options = {}) {
   const isCLIMode = process.env.CLI_MODE === 'true';
@@ -416,21 +521,69 @@ async function withBrowser(action, options = {}) {
 
 // Mode-specific operation handlers
 const modeHandlers = {
-  // Auto mode - AI-driven approach (default)
+  // Auto mode - Sequential approach selection (tries multiple approaches until one works)
   auto: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '🤖 Using auto mode - AI-driven approach', { mode: 'auto' });
+    const approachSequence = ['static', 'media', 'text', 'forms', 'script'];
+    let lastError = null;
     
-    if (operation === 'login') {
-      return await performAutoLogin(page, context, openaiClient);
-    } else {
-      return await performAutoCrawl(page, context, openaiClient);
+    for (let i = 0; i < approachSequence.length; i++) {
+      const approach = approachSequence[i];
+      
+      try {
+        await sendLog(context.job_id, 'info', `Auto: Trying ${approach} (${i + 1}/${approachSequence.length})`, { 
+          mode: 'auto', 
+          approach: approach,
+          attempt: i + 1
+        });
+        
+        let result;
+        if (operation === 'login') {
+          result = await modeHandlers[approach](page, context, openaiClient, operation);
+        } else {
+          result = await modeHandlers[approach](page, context, openaiClient, operation);
+        }
+        
+        if (result && result.success) {
+          await sendLog(context.job_id, 'info', `Auto: ${approach} succeeded`, { 
+            mode: 'auto', 
+            successful_approach: approach
+          });
+          return result;
+        }
+        
+      } catch (error) {
+        lastError = error;
+        await sendLog(context.job_id, 'error', `Auto: ${approach} failed - ${error.message}`, { 
+          mode: 'auto', 
+          failed_approach: approach,
+          error: error.message
+        });
+      }
+      
+      if (i < approachSequence.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
     }
+    
+    await sendLog(context.job_id, 'error', `Auto: All approaches failed`, { 
+      mode: 'auto', 
+      approaches_tried: approachSequence,
+      last_error: lastError?.message
+    });
+    
+    return {
+      success: false,
+      error: lastError?.message || 'All approaches failed',
+      details: {
+        mode: 'auto',
+        attempts: approachSequence.length,
+        approaches_tried: approachSequence
+      }
+    };
   },
 
   // Media mode - Screenshot analysis
   media: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '📸 Using media mode - Screenshot analysis', { mode: 'media' });
-    
     if (operation === 'login') {
       return await performMediaLogin(page, context, openaiClient);
     } else {
@@ -440,8 +593,6 @@ const modeHandlers = {
 
   // Text mode - HTML text analysis
   text: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '📝 Using text mode - HTML text analysis', { mode: 'text' });
-    
     if (operation === 'login') {
       return await performTextLogin(page, context, openaiClient);
     } else {
@@ -451,8 +602,6 @@ const modeHandlers = {
 
   // Forms mode - Form field analysis
   forms: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '📋 Using forms mode - Form field analysis', { mode: 'forms' });
-    
     if (operation === 'login') {
       return await performFormsLogin(page, context, openaiClient);
     } else {
@@ -462,8 +611,6 @@ const modeHandlers = {
 
   // Static mode - Standard field ID matching
   static: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '🔍 Using static mode - Standard field ID matching', { mode: 'static' });
-    
     if (operation === 'login') {
       return await performStaticLogin(page, context, openaiClient);
     } else {
@@ -473,8 +620,6 @@ const modeHandlers = {
 
   // Script mode - Custom script execution
   script: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '📜 Using script mode - Custom script execution', { mode: 'script' });
-    
     if (operation === 'login') {
       return await performScriptLogin(page, context, openaiClient);
     } else {
@@ -550,6 +695,7 @@ Respond with JSON format:
         screenshot_path: screenshotResult?.screenshotPath,
         page_title: currentTitle,
         mode: 'auto',
+        approach: 'auto',
         conversationId,
         full_hd_screenshot: true
       }
@@ -620,9 +766,7 @@ async function performAutoCrawl(page, context, openaiClient) {
 async function performMediaLogin(page, context, openaiClient) {
   const conversationId = `conv_${context.job_id}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
-  await sendLog(context.job_id, 'info', '📸 Performing media-based login analysis', {
-    aiConversationId: conversationId
-  });
+  // Media login analysis
   
   // Take a full HD screenshot for storage and reference
   const screenshotResult = await takeScreenshot(page, context.job_id, 'media_login_analysis', {
@@ -678,6 +822,7 @@ Respond with JSON format:
       screenshot_path: screenshotResult?.screenshotPath,
       page_title: await page.title(),
       mode: 'media',
+      approach: 'media',
       conversationId,
       full_hd_screenshot: true
     }
@@ -690,7 +835,6 @@ Respond with JSON format:
 }
 
 async function performMediaCrawl(page, context, openaiClient) {
-  await sendLog(context.job_id, 'info', '📸 Performing media-based crawl analysis');
   
   // Take a full HD screenshot for storage and reference
   const screenshotResult = await takeScreenshot(page, context.job_id, 'media_crawl_analysis', {
@@ -748,7 +892,8 @@ Respond with JSON format:
       screenshot_id: screenshotResult?.screenshotId,
       screenshot_path: screenshotResult?.screenshotPath,
       page_title: await page.title(),
-      mode: 'media'
+      mode: 'media',
+      approach: 'media'
     }
   );
 
@@ -763,9 +908,7 @@ async function performTextLogin(page, context, openaiClient) {
   // Generate a unique conversation ID for this AI analysis
   const conversationId = `conv_${context.job_id}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
-  await sendLog(context.job_id, 'info', '📝 Performing text-based login analysis', {
-    aiConversationId: conversationId
-  });
+  // Text login analysis
   
   // Take a full HD screenshot for storage and reference
   const screenshotResult = await takeScreenshot(page, context.job_id, 'text_login_analysis', {
@@ -815,6 +958,7 @@ Respond with JSON format:
       screenshot_path: screenshotResult?.screenshotPath,
       page_title: currentTitle,
       mode: 'text',
+      approach: 'text',
       conversationId,
       full_hd_screenshot: true
     }
@@ -827,7 +971,6 @@ Respond with JSON format:
 }
 
 async function performTextCrawl(page, context, openaiClient) {
-  await sendLog(context.job_id, 'info', '📝 Performing text-based crawl analysis');
   
   const htmlContent = await page.content();
   const currentUrl = page.url();
@@ -868,7 +1011,8 @@ Respond with JSON format:
     {
       html_content: htmlContent.substring(0, 2000),
       page_title: currentTitle,
-      mode: 'text'
+      mode: 'text',
+      approach: 'text'
     }
   );
 
@@ -880,7 +1024,6 @@ Respond with JSON format:
 
 // Forms mode implementations
 async function performFormsLogin(page, context, openaiClient) {
-  await sendLog(context.job_id, 'info', '📋 Performing forms-based login analysis');
   
   // Take a full HD screenshot for storage and reference
   const screenshotResult = await takeScreenshot(page, context.job_id, 'forms_login_analysis', {
@@ -942,6 +1085,7 @@ Respond with JSON format:
       screenshot_path: screenshotResult?.screenshotPath,
       page_title: await page.title(),
       mode: 'forms',
+      approach: 'forms',
       full_hd_screenshot: true
     }
   );
@@ -953,7 +1097,6 @@ Respond with JSON format:
 }
 
 async function performFormsCrawl(page, context, openaiClient) {
-  await sendLog(context.job_id, 'info', '📋 Performing forms-based crawl analysis');
   
   // Extract all forms and inputs
   const forms = await page.$$eval('form', forms => forms.map((form, index) => ({
@@ -1078,41 +1221,136 @@ async function performStaticLogin(page, context, openaiClient) {
     };
   }
 
-  // Fill form and submit with step-by-step screenshots
+  // Enhanced form filling with conversation flow pattern
+  const conversationFlowSteps = [];
   const formScreenshots = [];
   
   try {
-    // Screenshot before action
-    await sendLog(jobId, 'info', '📸 Taking screenshot before form filling');
-    const beforeScreenshot = await takeScreenshot(page, jobId, 'before_form_fill', {
-      step: 'before_form_fill',
-      form_type: 'login'
+    // Step 1: Initial page state
+    await sendLog(jobId, 'info', '📸 Taking initial screenshot');
+    const initialScreenshot = await takeScreenshotBeforeAction(page, jobId, 'form_fill', {
+      step: 'initial_state',
+      form_type: 'login',
+      description: 'Initial page state before form interaction'
     });
-    if (beforeScreenshot) formScreenshots.push(beforeScreenshot);
+    if (initialScreenshot) {
+      formScreenshots.push(initialScreenshot);
+      conversationFlowSteps.push({
+        type: 'screenshot',
+        description: 'Initial page state',
+        action: 'initial_state',
+        screenshots: [initialScreenshot],
+        payload: {
+          type: 'html',
+          name: 'initial-page-state.html',
+          content: await page.content(),
+          metadata: {
+            page_url: page.url(),
+            page_title: await page.title(),
+            form_elements_found: {
+              username_field: !!usernameField,
+              password_field: !!passwordField,
+              submit_button: !!submitButton
+            }
+          }
+        }
+      });
+    }
     
-    // Fill username field
-    await sendLog(jobId, 'info', '✏️ Filling username field');
+    // Step 2: Fill username field
+    await sendLog(jobId, 'info', 'Fill username');
+    const usernameBeforeShot = await takeScreenshotBeforeAction(page, jobId, 'username_fill', {
+      step: 'before_username_fill',
+      form_type: 'login',
+      description: 'Before filling username field'
+    });
+    
     await usernameField.fill(context.credentials.username);
-    await sendLog(jobId, 'info', '📸 Taking screenshot after username filled');
-    const usernameScreenshot = await takeScreenshot(page, jobId, 'after_username_filled', {
+    
+    const usernameAfterShot = await takeScreenshotAfterAction(page, jobId, 'username_fill', {
       step: 'after_username_filled',
       form_type: 'login',
-      field_filled: 'username'
+      field_filled: 'username',
+      description: 'After filling username field'
     });
-    if (usernameScreenshot) formScreenshots.push(usernameScreenshot);
     
-    // Fill password field
-    await sendLog(jobId, 'info', '✏️ Filling password field');
+    if (usernameBeforeShot) formScreenshots.push(usernameBeforeShot);
+    if (usernameAfterShot) formScreenshots.push(usernameAfterShot);
+    
+    conversationFlowSteps.push({
+      type: 'action',
+      description: 'Fill username field',
+      action: 'username_fill',
+      screenshots: [usernameBeforeShot, usernameAfterShot].filter(Boolean),
+      payload: {
+        type: 'forms',
+        name: 'username-field-data.json',
+        data: {
+          field_type: 'username',
+          field_found: true,
+          value_filled: context.credentials.username,
+          selector_used: usernameSelectors.find(selector => {
+            try { return page.$(selector); } catch { return false; }
+          })
+        },
+        metadata: {
+          field_filled: 'username',
+          step: 'username_fill'
+        }
+      }
+    });
+    
+    // Step 3: Fill password field
+    await sendLog(jobId, 'info', 'Fill password');
+    const passwordBeforeShot = await takeScreenshotBeforeAction(page, jobId, 'password_fill', {
+      step: 'before_password_fill',
+      form_type: 'login',
+      description: 'Before filling password field'
+    });
+    
     await passwordField.fill(context.credentials.password);
-    await sendLog(jobId, 'info', '📸 Taking screenshot after password filled');
-    const passwordScreenshot = await takeScreenshot(page, jobId, 'after_password_filled', {
+    
+    const passwordAfterShot = await takeScreenshotAfterAction(page, jobId, 'password_fill', {
       step: 'after_password_filled',
       form_type: 'login',
-      field_filled: 'password'
+      field_filled: 'password',
+      description: 'After filling password field'
     });
-    if (passwordScreenshot) formScreenshots.push(passwordScreenshot);
     
-    // Submit form
+    if (passwordBeforeShot) formScreenshots.push(passwordBeforeShot);
+    if (passwordAfterShot) formScreenshots.push(passwordAfterShot);
+    
+    conversationFlowSteps.push({
+      type: 'action',
+      description: 'Fill password field',
+      action: 'password_fill',
+      screenshots: [passwordBeforeShot, passwordAfterShot].filter(Boolean),
+      payload: {
+        type: 'forms',
+        name: 'password-field-data.json',
+        data: {
+          field_type: 'password',
+          field_found: true,
+          value_filled: '[REDACTED]',
+          selector_used: passwordSelectors.find(selector => {
+            try { return page.$(selector); } catch { return false; }
+          })
+        },
+        metadata: {
+          field_filled: 'password',
+          step: 'password_fill'
+        }
+      }
+    });
+    
+    // Step 4: Submit form
+    await sendLog(jobId, 'info', 'Submit form');
+    const submitBeforeShot = await takeScreenshotBeforeAction(page, jobId, 'form_submit', {
+      step: 'before_form_submit',
+      form_type: 'login',
+      description: 'Before submitting form'
+    });
+    
     if (submitButton) {
       await sendLog(jobId, 'info', '🖱️ Clicking submit button');
       await submitButton.click();
@@ -1122,21 +1360,80 @@ async function performStaticLogin(page, context, openaiClient) {
       await passwordField.press('Enter');
     }
     
-    // Screenshot after submission
-    await sendLog(jobId, 'info', '📸 Taking screenshot after form submission');
-    const submissionScreenshot = await takeScreenshot(page, jobId, 'after_form_submission', {
+    const submitAfterShot = await takeScreenshotAfterAction(page, jobId, 'form_submit', {
       step: 'after_form_submission',
       form_type: 'login',
-      action: 'form_submitted'
+      action: 'form_submitted',
+      description: 'After submitting form'
     });
-    if (submissionScreenshot) formScreenshots.push(submissionScreenshot);
+    
+    if (submitBeforeShot) formScreenshots.push(submitBeforeShot);
+    if (submitAfterShot) formScreenshots.push(submitAfterShot);
+    
+    conversationFlowSteps.push({
+      type: 'action',
+      description: 'Submit login form',
+      action: 'form_submit',
+      screenshots: [submitBeforeShot, submitAfterShot].filter(Boolean),
+      payload: {
+        type: 'forms',
+        name: 'form-submission-data.json',
+        data: {
+          submission_method: submitButton ? 'button_click' : 'enter_key',
+          submit_button_found: !!submitButton,
+          final_url: page.url(),
+          final_title: await page.title()
+        },
+        metadata: {
+          action: 'form_submitted',
+          step: 'form_submit'
+        }
+      }
+    });
 
     // Wait for navigation or response
     await page.waitForTimeout(3000);
 
+    // Log enhanced conversation with separate payload components
+    if (aiConversationLogger) {
+      try {
+        const payloadComponents = conversationFlowSteps.map(step => ({
+          type: step.payload.type,
+          name: step.payload.name,
+          content: step.payload.content,
+          data: step.payload.data,
+          metadata: step.payload.metadata
+        }));
+
+        const screenshotData = conversationFlowSteps.flatMap(step => 
+          step.screenshots.map(screenshot => ({
+            screenshot_id: screenshot.screenshotId || screenshot.fileId,
+            url: screenshot.screenshotPath,
+            step: screenshot.step,
+            action: screenshot.action,
+            before_action: screenshot.before_action,
+            after_action: screenshot.after_action,
+            metadata: screenshot.metadata || {}
+          }))
+        );
+
+        await aiConversationLogger.sendConversationFlow(
+          context.job_id,
+          'login-static',
+          page.url(),
+          conversationFlowSteps,
+          { approach: 'static' }
+        );
+
+        await sendLog(context.job_id, 'info', '🤖 Enhanced conversation flow logged to chat mode');
+      } catch (conversationError) {
+        console.warn('[CONVERSATION] ⚠️ Failed to log enhanced conversation:', conversationError.message);
+      }
+    }
+
     return {
       success: true,
-      message: 'Login form submitted using static field matching',
+      message: 'Login form submitted using enhanced conversation flow pattern',
       details: {
         usernameFieldFound: true,
         passwordFieldFound: true,
@@ -1144,7 +1441,11 @@ async function performStaticLogin(page, context, openaiClient) {
         finalUrl: page.url(),
         finalTitle: await page.title(),
         screenshots: formScreenshots,
-        screenshotCount: formScreenshots.length
+        screenshotCount: formScreenshots.length,
+        conversationFlow: conversationFlowSteps,
+        flowStepsCount: conversationFlowSteps.length,
+        enhancedPayload: true,
+        separateScreenshots: true
       }
     };
   } catch (error) {
@@ -1504,13 +1805,13 @@ export async function attemptLogin(url, username, password, cookies, context, op
   const jobId = context.job_id || 'unknown-job';
   const mode = context.mode || 'auto';
   
-  await sendLog(jobId, 'info', `🚀 Starting ${mode} mode login attempt for ${url}`, { mode });
+  await sendLog(jobId, 'info', `${mode.toUpperCase()}: Login ${url}`, { mode });
   
   try {
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
     
     const result = await withBrowser(async ({ page, context: browserContext }) => {
-      await sendLog(jobId, 'info', '🌐 Starting browser session...', { mode });
+      await sendLog(jobId, 'info', 'Browser session started', { mode });
       
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {
@@ -1519,7 +1820,7 @@ export async function attemptLogin(url, username, password, cookies, context, op
       }
 
       // Navigate to URL
-      await sendLog(jobId, 'info', `🧭 Navigating to ${url}...`, { mode });
+      await sendLog(jobId, 'info', `Navigate: ${url}`, { mode });
       await page.goto(url, { 
         waitUntil: 'domcontentloaded', 
         timeout: 30000 
@@ -1657,7 +1958,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
     
     const result = await withBrowser(async ({ page, context: browserContext }) => {
-      await sendLog(jobId, 'info', '🌐 Starting browser session...', { mode });
+      await sendLog(jobId, 'info', 'Browser session started', { mode });
       
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {
@@ -1697,7 +1998,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       }
 
       // Navigate to URL
-      await sendLog(jobId, 'info', `🧭 Navigating to ${url}...`, { mode });
+      await sendLog(jobId, 'info', `Navigate: ${url}`, { mode });
       await page.goto(url, { 
         waitUntil: 'domcontentloaded', 
         timeout: 30000 
