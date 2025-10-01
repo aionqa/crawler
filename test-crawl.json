@@ -1,0 +1,11 @@
+{
+  "operation": "crawl",
+  "url": "https://practicetestautomation.com",
+  "context": {
+    "mode": "static",
+    "job_id": "test_cli_crawl_001",
+    "headless": false
+  },
+  "description": "Test crawl of Practice Test Automation website"
+}
+
