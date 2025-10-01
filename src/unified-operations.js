@@ -160,6 +160,95 @@ async function uploadFileToBackend({ buffer, contentType, type, jobId, metadata 
   }
 }
 
+// Detect captcha on page
+async function detectCaptcha(page, jobId) {
+  try {
+    // Common captcha selectors and indicators
+    const captchaIndicators = [
+      // reCAPTCHA
+      'iframe[src*="recaptcha"]',
+      'div.g-recaptcha',
+      'div[class*="recaptcha"]',
+      // hCaptcha
+      'iframe[src*="hcaptcha"]',
+      'div.h-captcha',
+      'div[class*="hcaptcha"]',
+      // Cloudflare Turnstile
+      'iframe[src*="turnstile"]',
+      'div[class*="turnstile"]',
+      // Generic captcha indicators
+      'div[id*="captcha"]',
+      'div[class*="captcha"]',
+      'img[src*="captcha"]',
+      'input[name*="captcha"]'
+    ];
+    
+    for (const selector of captchaIndicators) {
+      const element = await page.$(selector);
+      if (element) {
+        const captchaType = selector.includes('recaptcha') ? 'reCAPTCHA' :
+                           selector.includes('hcaptcha') ? 'hCaptcha' :
+                           selector.includes('turnstile') ? 'Cloudflare Turnstile' :
+                           'Generic Captcha';
+        
+        await sendLog(jobId, 'warn', `⚠️ CAPTCHA DETECTED: ${captchaType} found on page`, {
+          captcha_type: captchaType,
+          selector: selector,
+          page_url: page.url(),
+          action: 'captcha_detection'
+        });
+        
+        return {
+          detected: true,
+          type: captchaType,
+          selector: selector
+        };
+      }
+    }
+    
+    return { detected: false };
+  } catch (error) {
+    console.error(`Captcha detection error: ${error.message}`);
+    return { detected: false, error: error.message };
+  }
+}
+
+// Attempt to handle captcha
+async function handleCaptcha(page, jobId, captchaInfo) {
+  try {
+    await sendLog(jobId, 'info', `🔐 Attempting to handle ${captchaInfo.type}...`, {
+      captcha_type: captchaInfo.type,
+      action: 'captcha_handling'
+    });
+    
+    // Wait for potential manual intervention or automatic solving
+    // In a real scenario, this would integrate with a captcha solving service
+    await page.waitForTimeout(5000);
+    
+    // Check if captcha is still present
+    const stillPresent = await page.$(captchaInfo.selector);
+    
+    if (!stillPresent) {
+      await sendLog(jobId, 'info', `✅ CAPTCHA PASSED: ${captchaInfo.type} was resolved`, {
+        captcha_type: captchaInfo.type,
+        action: 'captcha_passed',
+        page_url: page.url()
+      });
+      return { passed: true };
+    } else {
+      await sendLog(jobId, 'warn', `⚠️ CAPTCHA STILL PRESENT: ${captchaInfo.type} requires manual intervention`, {
+        captcha_type: captchaInfo.type,
+        action: 'captcha_failed',
+        page_url: page.url()
+      });
+      return { passed: false };
+    }
+  } catch (error) {
+    await sendLog(jobId, 'error', `❌ Captcha handling error: ${error.message}`);
+    return { passed: false, error: error.message };
+  }
+}
+
 // Take screenshot and upload to backend with enhanced metadata
 async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) {
   try {
@@ -173,6 +262,13 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
       await page.url();
     } catch (error) {
       throw new Error(`Page is no longer valid: ${error.message}`);
+    }
+    
+    // Detect captcha before taking screenshot
+    const captchaInfo = await detectCaptcha(page, jobId);
+    if (captchaInfo.detected) {
+      context.captcha_detected = true;
+      context.captcha_type = captchaInfo.type;
     }
     
     // Ensure page is properly loaded and sized
@@ -396,29 +492,16 @@ async function withBrowser(action, options = {}) {
   const isCLIMode = process.env.CLI_MODE === 'true';
   const useRemoteBrowser = process.env.USE_REMOTE_BROWSER === 'true';
   
+  // In container, always use remote browser even in CLI mode
+  const inContainer = !!process.env.BACKEND_URL || useRemoteBrowser;
+  
   // Debug environment variables
-  await sendLog(options.jobId || 'debug', 'info', `Browser config - CLI_MODE: ${isCLIMode}, USE_REMOTE_BROWSER: ${useRemoteBrowser}, BACKEND_URL: ${process.env.BACKEND_URL}`);
+  await sendLog(options.jobId || 'debug', 'info', `Browser config - CLI_MODE: ${isCLIMode}, USE_REMOTE_BROWSER: ${useRemoteBrowser}, inContainer: ${inContainer}`);
   
   let browser;
   
-  if (isCLIMode) {
-    // CLI mode: use local browser installation
-    await sendLog(options.jobId || 'cli', 'info', 'Launching local browser for CLI mode');
-    
-    browser = await chromium.launch({
-      headless: options.headless !== false,
-      executablePath: '/usr/bin/chromium-browser', // Use system Chromium
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-gpu',
-        '--disable-dev-shm-usage',
-        '--disable-web-security',
-        '--disable-features=VizDisplayCompositor'
-      ]
-    });
-  } else if (useRemoteBrowser) {
-    // Container mode: MUST use remote browsers
+  if (inContainer) {
+    // Container mode: ALWAYS use remote browsers
     const browserServiceUrl = process.env.BROWSER_SERVICE_URL || 'http://browser-1:3000';
     await sendLog(options.jobId || 'server', 'info', `Using remote browser service: ${browserServiceUrl}`);
     
@@ -433,9 +516,43 @@ async function withBrowser(action, options = {}) {
       throw new Error(`Remote browser connection failed: ${error.message}`);
     }
   } else {
-    // This should not happen in container mode
-    await sendLog(options.jobId || 'server', 'error', 'No browser configuration found - this should not happen in container mode');
-    throw new Error('Browser configuration error: USE_REMOTE_BROWSER must be set to true in container mode');
+    // True local CLI mode (outside container): use system browser
+    await sendLog(options.jobId || 'cli', 'info', 'Launching local browser for CLI mode');
+    
+    // Try different executable paths
+    const chromiumPaths = [
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/google-chrome',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', // macOS
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' // Windows
+    ];
+    
+    let executablePath = null;
+    for (const path of chromiumPaths) {
+      try {
+        const fs = await import('fs');
+        if (fs.existsSync(path)) {
+          executablePath = path;
+          break;
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    
+    browser = await chromium.launch({
+      headless: options.headless !== false,
+      executablePath: executablePath || undefined, // Use default if none found
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+        '--disable-web-security',
+        '--disable-features=VizDisplayCompositor'
+      ]
+    });
   }
   
   const contextOptions = {
@@ -444,8 +561,9 @@ async function withBrowser(action, options = {}) {
     viewport: options.viewport || { width: 1280, height: 800 }
   };
   
-  // Add video recording only for local browsers (CLI mode)
-  if (isCLIMode && options.enable_video_recording) {
+  // Add video recording only for local browsers (true CLI mode outside container)
+  // Disabled for remote browsers as they don't have ffmpeg
+  if (!inContainer && options.enable_video_recording) {
     contextOptions.recordVideo = { 
       dir: '/tmp/aionqa_videos',
       size: { width: 1280, height: 800 }
@@ -521,9 +639,19 @@ async function withBrowser(action, options = {}) {
 
 // Mode-specific operation handlers
 const modeHandlers = {
+  // Simplified mode - Comprehensive approach (best of all methods)
+  simplified: async (page, context, openaiClient, operation) => {
+    await sendLog(context.job_id, 'info', '🚀 Using simplified mode (comprehensive approach)');
+    if (operation === 'login') {
+      return await performStaticLogin(page, context, openaiClient);
+    } else {
+      return await performStaticCrawl(page, context, openaiClient);
+    }
+  },
+
   // Auto mode - Sequential approach selection (tries multiple approaches until one works)
   auto: async (page, context, openaiClient, operation) => {
-    const approachSequence = ['static', 'media', 'text', 'forms', 'script'];
+    const approachSequence = ['static', 'forms', 'text', 'media', 'script'];
     let lastError = null;
     
     for (let i = 0; i < approachSequence.length; i++) {
@@ -835,72 +963,70 @@ Respond with JSON format:
 }
 
 async function performMediaCrawl(page, context, openaiClient) {
+  const jobId = context.job_id;
+  await sendLog(jobId, 'info', '🚀 Starting MEDIA mode recursive crawl');
   
-  // Take a full HD screenshot for storage and reference
-  const screenshotResult = await takeScreenshot(page, context.job_id, 'media_crawl_analysis', {
-    mode: 'media',
-    analysis_type: 'crawl_analysis'
+  const startUrl = page.url();
+  
+  // Perform recursive crawl with approach name
+  const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'media', openaiClient, {
+    max_depth: context.options?.max_depth || 3,
+    max_pages: context.options?.max_pages || 50
   });
   
-  // Take screenshot for AI analysis (reduced size to avoid token limits)
-  const screenshot = await page.screenshot({ 
-    type: 'jpeg', 
-    quality: 30, 
-    fullPage: true
-  });
-  const screenshotBase64 = screenshot.toString('base64');
+  // Build overall conclusion
+  const totalLinks = analyzedPages.reduce((sum, p) => sum + p.total_links, 0);
+  const totalForms = analyzedPages.reduce((sum, p) => sum + p.total_forms, 0);
+  const totalFormInputs = analyzedPages.reduce((sum, p) => sum + p.total_form_inputs, 0);
   
-  // Analyze screenshot with AI for crawling
-  const aiPrompt = `Analyze this webpage screenshot and provide crawling instructions.
-
-SCREENSHOT: data:image/png;base64,${screenshotBase64}
-URL: ${page.url()}
-TITLE: ${await page.title()}
-Full HD Screenshot ID: ${screenshotResult?.screenshotId || 'N/A'}
-
-Provide detailed instructions for crawling, including:
-1. Interactive elements to click
-2. Links to follow
-3. Forms to fill
-4. Content to extract
-5. Navigation patterns
-
-Respond with JSON format:
-{
-  "interactive_elements": [...],
-  "links": [...],
-  "forms": [...],
-  "content_areas": [...],
-  "crawl_instructions": "...",
-  "confidence": 0.0-1.0
-}`;
-
-  const completion = await aiConversationLogger.createChatCompletion(
-    openaiClient,
-    context.job_id,
-    'unified-crawler',
-    'media_crawl_analysis',
-    {
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: aiPrompt }],
-      response_format: { type: "json_object" }
+  const conclusion = {
+    crawl_started_at: new Date().toISOString(),
+    start_url: startUrl,
+    approach: 'media',
+    
+    pages_summary: {
+      total_analyzed: analyzedPages.length,
+      pages: analyzedPages.map(p => ({ url: p.url, title: p.title, forms: p.total_forms, links: p.total_links }))
     },
-    screenshotResult?.screenshotId, // Pass screenshot ID to AI conversation logger
-    page.url(),
-    {
-      screenshot_base64: screenshotBase64,
-      screenshot_id: screenshotResult?.screenshotId,
-      screenshot_path: screenshotResult?.screenshotPath,
-      page_title: await page.title(),
-      mode: 'media',
-      approach: 'media'
-    }
-  );
+    
+    overall_stats: {
+      total_links: totalLinks,
+      total_forms: totalForms,
+      total_form_inputs: totalFormInputs,
+      unique_pages: analyzedPages.length
+    },
+    
+    recommendations: [
+      `Media-based analysis of ${analyzedPages.length} pages`,
+      `Found ${totalForms} forms across all pages`,
+      `Ready for visual testing`
+    ]
+  };
 
-  const analysis = JSON.parse(completion.choices[0].message.content);
-  
-  // Execute crawl based on analysis
-  return await executeCrawlFromAnalysis(page, analysis, context);
+  await sendLog(jobId, 'info', `✅ Media crawl complete: ${analyzedPages.length} pages`, { conclusion });
+
+  return {
+    success: true,
+    message: `Media crawl completed: ${analyzedPages.length} pages analyzed`,
+    details: {
+      discovered_pages: analyzedPages, // Changed from analyzed_pages to match backend expectation
+      total_pages: analyzedPages.length,
+      total_links: totalLinks,
+      total_forms: totalForms
+    },
+    conclusion,
+    discovered_pages: analyzedPages.map(p => ({
+      url: p.url,
+      title: p.title,
+      forms: p.forms,
+      links: p.links,
+      internal_links: p.internal_links,
+      interactive_elements: p.interactive_elements,
+      non_interactive_elements: p.non_interactive_elements,
+      screenshot_file_id: p.screenshot_file_id,
+      analyzed_at: p.analyzed_at
+    }))
+  };
 }
 
 // Text mode implementations
@@ -971,55 +1097,70 @@ Respond with JSON format:
 }
 
 async function performTextCrawl(page, context, openaiClient) {
+  const jobId = context.job_id;
+  await sendLog(jobId, 'info', '🚀 Starting TEXT mode recursive crawl');
   
-  const htmlContent = await page.content();
-  const currentUrl = page.url();
-  const currentTitle = await page.title();
+  const startUrl = page.url();
   
-  // Analyze HTML content with AI for crawling
-  const aiPrompt = `Analyze this HTML page and provide crawling instructions.
-
-URL: ${currentUrl}
-TITLE: ${currentTitle}
-HTML CONTENT:
-${htmlContent.substring(0, 2000)}${htmlContent.length > 2000 ? '...[truncated]' : ''}
-
-Focus on text content, links, forms, and interactive elements. Provide detailed instructions for crawling.
-
-Respond with JSON format:
-{
-  "links": [...],
-  "forms": [...],
-  "interactive_elements": [...],
-  "content_areas": [...],
-  "crawl_instructions": "...",
-  "confidence": 0.0-1.0
-}`;
-
-  const completion = await aiConversationLogger.createChatCompletion(
-    openaiClient,
-    context.job_id,
-    'unified-crawler',
-    'text_crawl_analysis',
-    {
-      model: "gpt-4o-mini",
-      messages: [{ role: "user", content: aiPrompt }],
-      response_format: { type: "json_object" }
+  // Perform recursive crawl with approach name
+  const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'text', openaiClient, {
+    max_depth: context.options?.max_depth || 3,
+    max_pages: context.options?.max_pages || 50
+  });
+  
+  // Build overall conclusion
+  const totalLinks = analyzedPages.reduce((sum, p) => sum + p.total_links, 0);
+  const totalForms = analyzedPages.reduce((sum, p) => sum + p.total_forms, 0);
+  const totalFormInputs = analyzedPages.reduce((sum, p) => sum + p.total_form_inputs, 0);
+  
+  const conclusion = {
+    crawl_started_at: new Date().toISOString(),
+    start_url: startUrl,
+    approach: 'text',
+    
+    pages_summary: {
+      total_analyzed: analyzedPages.length,
+      pages: analyzedPages.map(p => ({ url: p.url, title: p.title, forms: p.total_forms, links: p.total_links }))
     },
-    null, // screenshot_id
-    currentUrl,
-    {
-      html_content: htmlContent.substring(0, 2000),
-      page_title: currentTitle,
-      mode: 'text',
-      approach: 'text'
-    }
-  );
+    
+    overall_stats: {
+      total_links: totalLinks,
+      total_forms: totalForms,
+      total_form_inputs: totalFormInputs,
+      unique_pages: analyzedPages.length
+    },
+    
+    recommendations: [
+      `Text-based analysis of ${analyzedPages.length} pages`,
+      `Found ${totalForms} forms across all pages`,
+      `Ready for automated testing`
+    ]
+  };
 
-  const analysis = JSON.parse(completion.choices[0].message.content);
-  
-  // Execute crawl based on analysis
-  return await executeCrawlFromAnalysis(page, analysis, context);
+  await sendLog(jobId, 'info', `✅ Text crawl complete: ${analyzedPages.length} pages`, { conclusion });
+
+  return {
+    success: true,
+    message: `Text crawl completed: ${analyzedPages.length} pages analyzed`,
+    details: {
+      discovered_pages: analyzedPages, // Changed from analyzed_pages to match backend expectation
+      total_pages: analyzedPages.length,
+      total_links: totalLinks,
+      total_forms: totalForms
+    },
+    conclusion,
+    discovered_pages: analyzedPages.map(p => ({
+      url: p.url,
+      title: p.title,
+      forms: p.forms,
+      links: p.links,
+      internal_links: p.internal_links,
+      interactive_elements: p.interactive_elements,
+      non_interactive_elements: p.non_interactive_elements,
+      screenshot_file_id: p.screenshot_file_id,
+      analyzed_at: p.analyzed_at
+    }))
+  };
 }
 
 // Forms mode implementations
@@ -1097,48 +1238,129 @@ Respond with JSON format:
 }
 
 async function performFormsCrawl(page, context, openaiClient) {
+  const jobId = context.job_id;
+  await sendLog(jobId, 'info', '🚀 Starting FORMS mode recursive crawl');
   
-  // Extract all forms and inputs
-  const forms = await page.$$eval('form', forms => forms.map((form, index) => ({
-    index,
-    action: form.action,
-    method: form.method,
-    inputs: Array.from(form.querySelectorAll('input, textarea, select')).map(input => ({
-      type: input.type,
-      name: input.name,
-      id: input.id,
-      placeholder: input.placeholder,
-      required: input.required
-    })),
-    buttons: Array.from(form.querySelectorAll('button, input[type="submit"]')).map(button => ({
-      text: button.textContent?.trim(),
-      type: button.type
-    }))
-  })));
-
-  // Simple analysis without AI for testing
-  const analysis = {
-    forms_to_use: forms.map(form => form.index),
-    crawl_instructions: `Found ${forms.length} forms. Each form has ${forms.reduce((sum, form) => sum + form.inputs.length, 0)} input fields.`,
-    confidence: 0.8
+  const startUrl = page.url();
+  
+  // Perform recursive crawl with approach name
+  const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'forms', openaiClient, {
+    max_depth: context.options?.max_depth || 3,
+    max_pages: context.options?.max_pages || 50
+  });
+  
+  // Build overall conclusion
+  const totalLinks = analyzedPages.reduce((sum, p) => sum + p.total_links, 0);
+  const totalForms = analyzedPages.reduce((sum, p) => sum + p.total_forms, 0);
+  const totalFormInputs = analyzedPages.reduce((sum, p) => sum + p.total_form_inputs, 0);
+  
+  const conclusion = {
+    crawl_started_at: new Date().toISOString(),
+    start_url: startUrl,
+    approach: 'forms',
+    
+    pages_summary: {
+      total_analyzed: analyzedPages.length,
+      pages: analyzedPages.map(p => ({ url: p.url, title: p.title, forms: p.total_forms, links: p.total_links }))
+    },
+    
+    overall_stats: {
+      total_links: totalLinks,
+      total_forms: totalForms,
+      total_form_inputs: totalFormInputs,
+      unique_pages: analyzedPages.length
+    },
+    
+    recommendations: [
+      `Forms-focused analysis of ${analyzedPages.length} pages`,
+      `Found ${totalForms} forms with ${totalFormInputs} inputs`,
+      `Ready for form testing automation`
+    ]
   };
-  
-  // Simple crawl execution
+
+  await sendLog(jobId, 'info', `✅ Forms crawl complete: ${analyzedPages.length} pages`, { conclusion });
+
   return {
     success: true,
-    message: 'Forms crawl completed',
+    message: `Forms crawl completed: ${analyzedPages.length} pages analyzed`,
     details: {
-      forms: forms,
-      analysis: analysis,
-      totalForms: forms.length,
-      totalInputs: forms.reduce((sum, form) => sum + form.inputs.length, 0)
-    }
+      discovered_pages: analyzedPages, // Changed from analyzed_pages to match backend expectation
+      total_pages: analyzedPages.length,
+      total_links: totalLinks,
+      total_forms: totalForms,
+      total_form_inputs: totalFormInputs
+    },
+    conclusion,
+    discovered_pages: analyzedPages.map(p => ({
+      url: p.url,
+      title: p.title,
+      forms: p.forms,
+      links: p.links,
+      internal_links: p.internal_links,
+      interactive_elements: p.interactive_elements,
+      non_interactive_elements: p.non_interactive_elements,
+      screenshot_file_id: p.screenshot_file_id,
+      analyzed_at: p.analyzed_at
+    }))
   };
+}
+
+// Extract interactive and non-interactive elements
+async function extractPageElements(page, jobId) {
+  try {
+    await sendLog(jobId, 'info', '🔍 Extracting page elements...');
+    
+    // Extract interactive elements
+    const interactive = await page.$$eval('button, a, input, select, textarea', elements => 
+      elements.map(el => ({
+        type: el.tagName.toLowerCase(),
+        text: el.textContent?.trim() || el.value || '',
+        href: el.href || null,
+        selector: el.id ? `#${el.id}` : el.className ? `.${el.className.split(' ')[0]}` : el.tagName.toLowerCase(),
+        name: el.name || null,
+        id: el.id || null,
+        placeholder: el.placeholder || null
+      }))
+    );
+    
+    // Extract non-interactive elements
+    const nonInteractive = await page.$$eval('p, h1, h2, h3, h4, h5, h6, span, div, label', elements => 
+      elements.filter(el => {
+        const text = el.textContent?.trim() || '';
+        return text.length > 0 && text.length < 500; // Filter out empty or very long text
+      }).slice(0, 50).map(el => ({ // Limit to 50 elements
+        type: el.tagName.toLowerCase(),
+        text: el.textContent?.trim() || '',
+        selector: el.id ? `#${el.id}` : el.className ? `.${el.className.split(' ')[0]}` : el.tagName.toLowerCase()
+      }))
+    );
+    
+    await sendLog(jobId, 'info', `📊 Extracted ${interactive.length} interactive and ${nonInteractive.length} non-interactive elements`);
+    
+    return { interactive, nonInteractive };
+  } catch (error) {
+    await sendLog(jobId, 'error', `Failed to extract elements: ${error.message}`);
+    return { interactive: [], nonInteractive: [] };
+  }
 }
 
 // Static mode implementations
 async function performStaticLogin(page, context, openaiClient) {
-  await sendLog(context.job_id, 'info', '🔍 Performing static login with standard field matching');
+  const jobId = context.job_id;
+  await sendLog(jobId, 'info', '🔍 Performing static login with standard field matching');
+  
+  // Detect captcha first
+  const captchaInfo = await detectCaptcha(page, jobId);
+  if (captchaInfo.detected) {
+    const captchaResult = await handleCaptcha(page, jobId, captchaInfo);
+    if (!captchaResult.passed) {
+      return {
+        success: false,
+        message: `Captcha detected but not resolved: ${captchaInfo.type}`,
+        details: { captchaInfo }
+      };
+    }
+  }
   
   // Standard field selectors
   const usernameSelectors = [
@@ -1151,6 +1373,7 @@ async function performStaticLogin(page, context, openaiClient) {
     'input[id="email"]',
     'input[id="login"]',
     'input[type="email"]',
+    'input[type="text"]', // Added for practice test automation site
     'input[placeholder*="username" i]',
     'input[placeholder*="email" i]',
     'input[placeholder*="user" i]'
@@ -1169,9 +1392,11 @@ async function performStaticLogin(page, context, openaiClient) {
   const submitSelectors = [
     'button[type="submit"]',
     'input[type="submit"]',
-    'button:contains("Login")',
-    'button:contains("Sign In")',
-    'button:contains("Submit")',
+    'button[id="submit"]',
+    'input[id="submit"]',
+    'button:has-text("Login")',
+    'button:has-text("Sign In")',
+    'button:has-text("Submit")',
     'input[value*="Login" i]',
     'input[value*="Sign In" i]',
     'input[value*="Submit" i]'
@@ -1462,47 +1687,458 @@ async function performStaticLogin(page, context, openaiClient) {
   }
 }
 
-async function performStaticCrawl(page, context, openaiClient) {
-  await sendLog(context.job_id, 'info', '🔍 Performing static crawl with standard element matching');
+// Comprehensive link extraction
+async function extractAllLinks(page, jobId, baseUrl) {
+  try {
+    await sendLog(jobId, 'info', '🔗 Extracting all links from page...');
+    
+    const links = await page.$$eval('a[href]', (anchors, baseUrl) => {
+      return anchors.map(link => {
+        const href = link.href;
+        const text = link.textContent?.trim() || '';
+        
+        // Parse URL to check if it's within domain
+        let isInternal = false;
+        let fullUrl = href;
+        try {
+          const linkUrl = new URL(href);
+          const baseUrlObj = new URL(baseUrl);
+          isInternal = linkUrl.hostname === baseUrlObj.hostname;
+          fullUrl = linkUrl.href;
+        } catch (e) {
+          // Relative URL or invalid
+          if (href.startsWith('/') || href.startsWith('./') || !href.includes('://')) {
+            isInternal = true;
+            try {
+              fullUrl = new URL(href, baseUrl).href;
+            } catch (e2) {
+              fullUrl = href;
+            }
+          }
+        }
+        
+        return {
+          text: text,
+          href: fullUrl,
+          title: link.title || '',
+          isInternal: isInternal,
+          target: link.target || '',
+          rel: link.rel || ''
+        };
+      }).filter(link => link.href && !link.href.startsWith('javascript:') && !link.href.startsWith('#'));
+    }, baseUrl);
+    
+    const internalLinks = links.filter(l => l.isInternal);
+    const externalLinks = links.filter(l => !l.isInternal);
+    
+    await sendLog(jobId, 'info', `📊 Found ${links.length} total links (${internalLinks.length} internal, ${externalLinks.length} external)`);
+    
+    return {
+      all: links,
+      internal: internalLinks,
+      external: externalLinks,
+      total: links.length
+    };
+  } catch (error) {
+    await sendLog(jobId, 'error', `Failed to extract links: ${error.message}`);
+    return { all: [], internal: [], external: [], total: 0 };
+  }
+}
+
+// Enhanced form extraction - detects both <form> tags and logical form groups
+async function extractFormsAndLogicalGroups(page, jobId) {
+  try {
+    await sendLog(jobId, 'info', '📋 Extracting forms and logical form groups...');
+    
+    // Extract traditional <form> elements
+    const traditionalForms = await page.$$eval('form', forms => forms.map((form, index) => ({
+      type: 'form_tag',
+      index,
+      action: form.action,
+      method: form.method || 'GET',
+      id: form.id || '',
+      className: form.className || '',
+      inputs: Array.from(form.querySelectorAll('input, textarea, select')).map(input => ({
+        type: input.type || 'text',
+        name: input.name || '',
+        id: input.id || '',
+        placeholder: input.placeholder || '',
+        required: input.required,
+        value: input.value || '',
+        className: input.className || ''
+      })),
+      buttons: Array.from(form.querySelectorAll('button, input[type="submit"], input[type="button"]')).map(button => ({
+        text: button.textContent?.trim() || button.value || '',
+        type: button.type || 'button',
+        id: button.id || '',
+        name: button.name || ''
+      }))
+    })));
+    
+    // Extract logical form groups (divs/containers with inputs and submit buttons)
+    const logicalForms = await page.$$eval('div[id*="form"], div[class*="form"], div:has(input[type="password"])', containers => {
+      return containers.map((container, index) => {
+        const inputs = Array.from(container.querySelectorAll('input, textarea, select')).filter(input => {
+          // Filter out hidden inputs and those already in actual forms
+          return !input.closest('form') && input.type !== 'hidden';
+        });
+        
+        const buttons = Array.from(container.querySelectorAll('button, input[type="submit"], input[type="button"]')).filter(button => {
+          return !button.closest('form');
+        });
+        
+        // Only consider it a logical form if it has inputs and buttons
+        if (inputs.length > 0 && buttons.length > 0) {
+          return {
+            type: 'logical_group',
+            index,
+            id: container.id || '',
+            className: container.className || '',
+            inputs: inputs.map(input => ({
+              type: input.type || 'text',
+              name: input.name || '',
+              id: input.id || '',
+              placeholder: input.placeholder || '',
+              required: input.required,
+              value: input.value || '',
+              className: input.className || ''
+            })),
+            buttons: buttons.map(button => ({
+              text: button.textContent?.trim() || button.value || '',
+              type: button.type || 'button',
+              id: button.id || '',
+              name: button.name || ''
+            }))
+          };
+        }
+        return null;
+      }).filter(Boolean);
+    });
+    
+    // Combine both types
+    const allForms = [...traditionalForms, ...logicalForms];
+    
+    await sendLog(jobId, 'info', `📊 Found ${traditionalForms.length} traditional forms and ${logicalForms.length} logical form groups (total: ${allForms.length})`);
+    
+    return allForms;
+  } catch (error) {
+    await sendLog(jobId, 'error', `Failed to extract forms: ${error.message}`);
+    return [];
+  }
+}
+
+// Analyze a single page and extract all data with detailed logging
+async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
+  const currentUrl = page.url();
+  const currentTitle = await page.title();
   
-  // Extract standard elements
-  const links = await page.$$eval('a[href]', links => links.map(link => ({
-    text: link.textContent?.trim(),
-    href: link.href,
-    title: link.title
-  })));
+  // Generate unique conversation ID for this page's analysis
+  const conversationId = `conv_${jobId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  
+  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  await sendLog(jobId, 'info', `📄 ANALYZING PAGE: ${currentTitle}`);
+  await sendLog(jobId, 'info', `🔗 URL: ${currentUrl}`);
+  await sendLog(jobId, 'info', `🎯 Approach: ${approach}`);
+  await sendLog(jobId, 'info', `💬 Conversation ID: ${conversationId}`);
+  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  
+  // Step 1: Detect captcha
+  await sendLog(jobId, 'info', `🔍 Step 1/6: Checking for captcha...`);
+  const captchaInfo = await detectCaptcha(page, jobId);
+  if (captchaInfo.detected) {
+    await sendLog(jobId, 'warn', `⚠️  Captcha detected: ${captchaInfo.type}`);
+    await handleCaptcha(page, jobId, captchaInfo);
+  } else {
+    await sendLog(jobId, 'info', `✓ No captcha detected`);
+  }
+  
+  // Step 2: Extract links
+  await sendLog(jobId, 'info', `🔍 Step 2/6: Extracting links from page...`);
+  const linksData = await extractAllLinks(page, jobId, currentUrl);
+  await sendLog(jobId, 'info', `✓ Found ${linksData.total} links (${linksData.internal.length} internal, ${linksData.external.length} external)`);
+  
+  // Step 3: Extract forms
+  await sendLog(jobId, 'info', `🔍 Step 3/6: Extracting forms and form groups...`);
+  const forms = await extractFormsAndLogicalGroups(page, jobId);
+  const totalInputs = forms.reduce((sum, f) => sum + f.inputs.length, 0);
+  await sendLog(jobId, 'info', `✓ Found ${forms.length} forms with ${totalInputs} total inputs`);
+  
+  // Log each form's details
+  for (let idx = 0; idx < forms.length; idx++) {
+    const form = forms[idx];
+    await sendLog(jobId, 'info', `  📋 Form ${idx + 1}: ${form.type} (${form.id || form.className || 'unnamed'}) - ${form.inputs.length} inputs, ${form.buttons?.length || 0} buttons`);
+  }
+  
+  // Step 4: Extract interactive elements
+  await sendLog(jobId, 'info', `🔍 Step 4/6: Extracting interactive elements...`);
+  const pageElements = await extractPageElements(page, jobId);
+  await sendLog(jobId, 'info', `✓ Found ${pageElements.interactive.length} interactive elements`);
+  
+  // Step 5: Take screenshot
+  await sendLog(jobId, 'info', `🔍 Step 5/6: Capturing screenshot...`);
+  const screenshotResult = await takeScreenshot(page, jobId, 'page_analysis', {
+    url: currentUrl,
+    title: currentTitle,
+    approach: approach,
+    conversationId: conversationId
+  });
+  await sendLog(jobId, 'info', `✓ Screenshot captured: ${screenshotResult?.fileId || 'none'}`);
+  
+  // Step 6: Log AI conversation for this specific page and approach
+  await sendLog(jobId, 'info', `🔍 Step 6/6: Logging AI conversation for this page...`);
+  
+  const pageContent = await page.content();
+  
+  // Create AI conversation entry for this page analysis
+  if (aiConversationLogger) {
+    try {
+      const aiPrompt = `Analyze this webpage and provide insights:
 
-  const forms = await page.$$eval('form', forms => forms.map((form, index) => ({
-    index,
-    action: form.action,
-    method: form.method,
-    inputs: Array.from(form.querySelectorAll('input, textarea, select')).map(input => ({
-      type: input.type,
-      name: input.name,
-      id: input.id,
-      placeholder: input.placeholder
-    }))
-  })));
+URL: ${currentUrl}
+Title: ${currentTitle}
+Approach: ${approach}
 
-  const buttons = await page.$$eval('button, input[type="button"], input[type="submit"]', buttons => buttons.map(button => ({
-    text: button.textContent?.trim() || button.value,
-    type: button.type,
-    id: button.id,
-    name: button.name
-  })));
+Forms found: ${forms.length}
+${forms.map((f, i) => `  Form ${i + 1}: ${f.inputs.length} inputs (${f.inputs.map(inp => inp.type).join(', ')})`).join('\n')}
 
-  return {
-    success: true,
-    message: 'Static crawl completed',
-    details: {
-      links: links.slice(0, 50), // Limit to first 50 links
-      forms,
-      buttons,
-      totalLinks: links.length,
-      totalForms: forms.length,
-      totalButtons: buttons.length
+Links found: ${linksData.total} (${linksData.internal.length} internal)
+
+Provide brief analysis and testing recommendations.`;
+
+      const completion = await aiConversationLogger.createChatCompletion(
+        openaiClient,
+        jobId,
+        'unified-crawler',
+        `page_analysis_${approach}`,
+        {
+          model: "gpt-4o-mini",
+          messages: [{ role: "user", content: aiPrompt }],
+          response_format: { type: "json_object" }
+        },
+        screenshotResult?.fileId,
+        currentUrl,
+        {
+          approach: approach,
+          conversationId: conversationId,
+          page_title: currentTitle,
+          forms_count: forms.length,
+          links_count: linksData.total,
+          has_forms: forms.length > 0,
+          has_internal_links: linksData.internal.length > 0
+        }
+      );
+      
+      await sendLog(jobId, 'info', `✓ AI conversation logged (ID: ${conversationId})`);
+    } catch (aiError) {
+      await sendLog(jobId, 'warn', `⚠️  AI conversation logging failed: ${aiError.message}`);
     }
+  }
+  
+  // Build page analysis
+  const pageAnalysis = {
+    url: currentUrl,
+    title: currentTitle,
+    content: pageContent,
+    timestamp: new Date().toISOString(),
+    screenshot_file_id: screenshotResult?.fileId || null,
+    conversation_id: conversationId,
+    approach: approach,
+    
+    // Links data
+    links: linksData.all,
+    internal_links: linksData.internal,
+    external_links: linksData.external,
+    total_links: linksData.total,
+    
+    // Forms data
+    forms: forms,
+    total_forms: forms.length,
+    total_form_inputs: totalInputs,
+    
+    // Elements data
+    interactive_elements: pageElements.interactive,
+    non_interactive_elements: pageElements.nonInteractive,
+    
+    // Metadata
+    captcha_detected: captchaInfo.detected,
+    captcha_type: captchaInfo.type || null,
+    analyzed_at: new Date().toISOString()
   };
+  
+  await sendLog(jobId, 'info', `✅ COMPLETED: ${currentTitle} - ${forms.length} forms, ${linksData.total} links, ${linksData.internal.length} to crawl`);
+  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  
+  return pageAnalysis;
+}
+
+// Recursive crawler - visits all internal links up to max depth
+async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, options = {}) {
+  const maxDepth = options.max_depth || 3;
+  const maxPages = options.max_pages || 50;
+  
+  const visitedUrls = new Set();
+  const analyzedPages = [];
+  const urlQueue = [{ url: startUrl, depth: 0 }];
+  
+  await sendLog(jobId, 'info', `╔═══════════════════════════════════════════════════════════════════╗`);
+  await sendLog(jobId, 'info', `║  🌐 STARTING RECURSIVE CRAWL`);
+  await sendLog(jobId, 'info', `║  Start URL: ${startUrl}`);
+  await sendLog(jobId, 'info', `║  Approach: ${approach}`);
+  await sendLog(jobId, 'info', `║  Max Depth: ${maxDepth}`);
+  await sendLog(jobId, 'info', `║  Max Pages: ${maxPages}`);
+  await sendLog(jobId, 'info', `╚═══════════════════════════════════════════════════════════════════╝`);
+  
+  while (urlQueue.length > 0 && analyzedPages.length < maxPages) {
+    const { url: currentUrl, depth } = urlQueue.shift();
+    
+    // Skip if already visited
+    if (visitedUrls.has(currentUrl)) {
+      await sendLog(jobId, 'info', `⏭️  Skipping (already visited): ${currentUrl}`);
+      continue;
+    }
+    
+    // Skip if max depth reached
+    if (depth > maxDepth) {
+      await sendLog(jobId, 'info', `⏭️  Skipping (max depth ${maxDepth} reached): ${currentUrl}`);
+      continue;
+    }
+    
+    try {
+      // Mark as visited
+      visitedUrls.add(currentUrl);
+      
+      await sendLog(jobId, 'info', ``);
+      await sendLog(jobId, 'info', `🌍 ═══ PAGE ${analyzedPages.length + 1}/${maxPages} (Depth ${depth}/${maxDepth}) ═══`);
+      await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl}`);
+      
+      // Navigate to URL
+      await page.goto(currentUrl, { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 30000 
+      });
+      
+      await sendLog(jobId, 'info', `⏳ Waiting for page to fully load...`);
+      
+      // Wait for page to settle
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+      await page.waitForTimeout(1000);
+      
+      await sendLog(jobId, 'info', `✓ Page loaded successfully`);
+      
+      // Analyze this page with detailed logging
+      const pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient);
+      analyzedPages.push(pageAnalysis);
+      
+      // Add internal links to queue for next depth level
+      if (depth < maxDepth && pageAnalysis.internal_links && pageAnalysis.internal_links.length > 0) {
+        let newLinksAdded = 0;
+        for (const link of pageAnalysis.internal_links) {
+          if (!visitedUrls.has(link.href) && !urlQueue.find(item => item.url === link.href)) {
+            urlQueue.push({ url: link.href, depth: depth + 1 });
+            newLinksAdded++;
+          }
+        }
+        await sendLog(jobId, 'info', `📋 Queue updated: +${newLinksAdded} new links | Total in queue: ${urlQueue.length} | Visited: ${visitedUrls.size}`);
+      } else if (depth >= maxDepth) {
+        await sendLog(jobId, 'info', `⚠️  Max depth reached - not adding more links from this page`);
+      }
+      
+    } catch (error) {
+      await sendLog(jobId, 'error', `❌ Failed to crawl ${currentUrl}: ${error.message}`);
+      await sendLog(jobId, 'error', `   Stack: ${error.stack}`);
+      // Continue with next URL
+      continue;
+    }
+  }
+  
+  await sendLog(jobId, 'info', ``);
+  await sendLog(jobId, 'info', `╔═══════════════════════════════════════════════════════════════════╗`);
+  await sendLog(jobId, 'info', `║  🎉 RECURSIVE CRAWL COMPLETE`);
+  await sendLog(jobId, 'info', `║  Pages Analyzed: ${analyzedPages.length}`);
+  await sendLog(jobId, 'info', `║  URLs Visited: ${visitedUrls.size}`);
+  await sendLog(jobId, 'info', `║  URLs Remaining in Queue: ${urlQueue.length}`);
+  await sendLog(jobId, 'info', `╚═══════════════════════════════════════════════════════════════════╝`);
+  
+  return analyzedPages;
+}
+
+async function performStaticCrawl(page, context, openaiClient) {
+  const jobId = context.job_id;
+  await sendLog(jobId, 'info', '🚀 Starting STATIC mode recursive crawl');
+  
+  const startUrl = page.url();
+  
+  // Perform recursive crawl with approach name
+  const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'static', openaiClient, {
+    max_depth: context.options?.max_depth || 3,
+    max_pages: context.options?.max_pages || 50
+  });
+  
+  // Build overall conclusion
+  const totalLinks = analyzedPages.reduce((sum, p) => sum + p.total_links, 0);
+  const totalForms = analyzedPages.reduce((sum, p) => sum + p.total_forms, 0);
+  const totalFormInputs = analyzedPages.reduce((sum, p) => sum + p.total_form_inputs, 0);
+  
+  const conclusion = {
+    crawl_started_at: new Date().toISOString(),
+    start_url: startUrl,
+    approach: 'static',
+    
+    pages_summary: {
+      total_analyzed: analyzedPages.length,
+      pages: analyzedPages.map(p => ({
+        url: p.url,
+        title: p.title,
+        forms: p.total_forms,
+        links: p.total_links
+      }))
+    },
+    
+    overall_stats: {
+      total_links: totalLinks,
+      total_forms: totalForms,
+      total_form_inputs: totalFormInputs,
+      unique_pages: analyzedPages.length
+    },
+    
+    recommendations: [
+      `Analyzed ${analyzedPages.length} pages from the website`,
+      `Found ${totalForms} forms across all pages`,
+      `Discovered ${totalLinks} total links`,
+      `Ready for comprehensive testing`
+    ]
+  };
+
+  await sendLog(jobId, 'info', `✅ Crawl complete: ${analyzedPages.length} pages, ${totalForms} forms, ${totalLinks} links`, {
+    conclusion: conclusion
+  });
+
+  const returnValue = {
+    success: true,
+    message: `Recursive crawl completed: ${analyzedPages.length} pages analyzed`,
+    details: {
+      discovered_pages: analyzedPages, // Changed from analyzed_pages to match backend expectation
+      total_pages: analyzedPages.length,
+      total_links: totalLinks,
+      total_forms: totalForms,
+      total_form_inputs: totalFormInputs
+    },
+    conclusion: conclusion,
+    discovered_pages: analyzedPages.map(p => ({
+      url: p.url,
+      title: p.title,
+      forms: p.forms,
+      links: p.links,
+      internal_links: p.internal_links,
+      interactive_elements: p.interactive_elements,
+      non_interactive_elements: p.non_interactive_elements,
+      screenshot_file_id: p.screenshot_file_id,
+      analyzed_at: p.analyzed_at
+    }))
+  };
+  
+  console.log(`[PERFORM-STATIC-CRAWL] Returning with success=${returnValue.success}, pages=${analyzedPages.length}`);
+  return returnValue;
 }
 
 // Script mode implementations
@@ -2023,13 +2659,29 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
 
       const operationResult = await modeHandler(page, context, openaiClient, 'crawl');
       
-      return {
+      // Extract page elements for storage (may fail if browser already closed after long crawl)
+      let pageElements = { interactive: [], nonInteractive: [] };
+      try {
+        pageElements = await extractPageElements(page, jobId);
+      } catch (error) {
+        await sendLog(jobId, 'warn', `⚠️ Could not extract final page elements (browser may have closed): ${error.message}`);
+        // Not a critical error - we already have all the page data from recursive crawl
+      }
+      
+      console.log(`[START-CRAWL] operationResult.success = ${operationResult.success}`);
+      
+      const finalResult = {
         ...operationResult,
         startTime,
         duration_ms: Date.now() - startTime,
-        finalUrl: page.url(),
-        finalTitle: await page.title()
+        finalUrl: operationResult.url || 'unknown', // Use URL from operation result if page is closed
+        finalTitle: operationResult.title || 'unknown', // Use title from operation result if page is closed
+        interactive_elements: pageElements.interactive || operationResult.details?.interactive_elements || [],
+        non_interactive_elements: pageElements.nonInteractive || operationResult.details?.non_interactive_elements || []
       };
+      
+      console.log(`[START-CRAWL] finalResult.success = ${finalResult.success}`);
+      return finalResult;
     }, {
       headless: context.options?.headless !== false,
       enable_screenshots: context.options?.enable_screenshots !== false,
