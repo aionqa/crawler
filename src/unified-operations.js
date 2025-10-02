@@ -785,7 +785,7 @@ async function performAutoLogin(page, context, openaiClient) {
     const currentUrl = page.url();
     const currentTitle = await page.title();
     
-    const aiPrompt = `Analyze this login page and provide login instructions.
+    const aiPrompt = `Analyze this login page and provide login instructions in JSON format.
 
 URL: ${currentUrl}
 TITLE: ${currentTitle}
@@ -912,7 +912,7 @@ async function performMediaLogin(page, context, openaiClient) {
   const screenshotBase64 = screenshot.toString('base64');
   
   // Analyze screenshot with AI
-  const aiPrompt = `Analyze this login page screenshot and provide login instructions.
+  const aiPrompt = `Analyze this login page screenshot and provide login instructions in JSON format.
 
 SCREENSHOT: data:image/png;base64,${screenshotBase64}
 URL: ${page.url()}
@@ -1048,7 +1048,7 @@ async function performTextLogin(page, context, openaiClient) {
   const currentTitle = await page.title();
   
   // Analyze HTML content with AI
-  const aiPrompt = `Analyze this HTML page and provide login instructions.
+  const aiPrompt = `Analyze this HTML page and provide login instructions in JSON format.
 
 URL: ${currentUrl}
 TITLE: ${currentTitle}
@@ -1191,7 +1191,7 @@ async function performFormsLogin(page, context, openaiClient) {
   })));
 
   // Analyze forms with AI
-  const aiPrompt = `Analyze these forms and provide login instructions.
+  const aiPrompt = `Analyze these forms and provide login instructions in JSON format.
 
 FORMS: ${JSON.stringify(forms, null, 2)}
 URL: ${page.url()}
@@ -1892,7 +1892,7 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
   // Create AI conversation entry for this page analysis
   if (aiConversationLogger) {
     try {
-      const aiPrompt = `Analyze this webpage and provide insights:
+      const aiPrompt = `Analyze this webpage and provide insights in JSON format:
 
 URL: ${currentUrl}
 Title: ${currentTitle}
