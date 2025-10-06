@@ -17,7 +17,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// CLI Logger for stdout output instead of GELF
+// CLI Logger for stdout output
 class CLILogger {
   constructor() {
     this.startTime = Date.now();
