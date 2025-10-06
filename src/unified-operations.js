@@ -761,7 +761,22 @@ async function withBrowser(action, options = {}) {
         '--disable-gpu',
         '--disable-dev-shm-usage',
         '--disable-web-security',
-        '--disable-features=VizDisplayCompositor'
+        '--disable-features=VizDisplayCompositor',
+        '--disable-software-rasterizer',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-breakpad',
+        '--disable-component-extensions-with-background-pages',
+        '--disable-features=TranslateUI',
+        '--disable-ipc-flooding-protection',
+        '--disable-renderer-backgrounding',
+        '--enable-features=NetworkService,NetworkServiceInProcess',
+        '--force-color-profile=srgb',
+        '--metrics-recording-only',
+        '--mute-audio',
+        '--no-first-run'
       ]
     });
   }
@@ -2149,8 +2164,22 @@ async function extractFormsAndLogicalGroups(page, jobId) {
 
 // Analyze a single page and extract all data with detailed logging
 async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
-  const currentUrl = page.url();
-  const currentTitle = await page.title();
+  // Verify page is still valid before analysis
+  try {
+    if (!page || page.isClosed()) {
+      throw new Error('Page is closed - cannot analyze');
+    }
+  } catch (checkError) {
+    throw new Error(`Page validation failed: ${checkError.message}`);
+  }
+  
+  let currentUrl, currentTitle;
+  try {
+    currentUrl = page.url();
+    currentTitle = await page.title();
+  } catch (error) {
+    throw new Error(`Failed to get page info: ${error.message}`);
+  }
   
   // Generate unique conversation ID for this page's analysis
   const conversationId = `conv_${jobId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -2164,65 +2193,106 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
   
   // Step 1: Detect captcha
   await sendLog(jobId, 'info', `🔍 Step 1/6: Checking for captcha...`);
-  const captchaInfo = await detectCaptcha(page, jobId);
-  if (captchaInfo.detected) {
-    await sendLog(jobId, 'warn', `⚠️  Captcha detected: ${captchaInfo.type}`);
-    await handleCaptcha(page, jobId, captchaInfo);
-  } else {
-    await sendLog(jobId, 'info', `✓ No captcha detected`);
+  let captchaInfo = { detected: false };
+  try {
+    captchaInfo = await detectCaptcha(page, jobId);
+    if (captchaInfo.detected) {
+      await sendLog(jobId, 'warn', `⚠️  Captcha detected: ${captchaInfo.type}`);
+      await handleCaptcha(page, jobId, captchaInfo);
+    } else {
+      await sendLog(jobId, 'info', `✓ No captcha detected`);
+    }
+  } catch (error) {
+    await sendLog(jobId, 'warn', `⚠️ Captcha detection failed: ${error.message}`);
   }
   
   // Step 2: Extract links
   await sendLog(jobId, 'info', `🔍 Step 2/6: Extracting links from page...`);
-  const linksData = await extractAllLinks(page, jobId, currentUrl);
-  await sendLog(jobId, 'info', `✓ Found ${linksData.total} links (${linksData.internal.length} internal, ${linksData.external.length} external)`);
+  let linksData = { all: [], internal: [], external: [], total: 0 };
+  try {
+    linksData = await extractAllLinks(page, jobId, currentUrl);
+    await sendLog(jobId, 'info', `✓ Found ${linksData.total} links (${linksData.internal.length} internal, ${linksData.external.length} external)`);
+  } catch (error) {
+    await sendLog(jobId, 'warn', `⚠️ Link extraction failed: ${error.message}`);
+  }
   
   // Step 3: Extract forms
   await sendLog(jobId, 'info', `🔍 Step 3/6: Extracting forms and form groups...`);
-  const forms = await extractFormsAndLogicalGroups(page, jobId);
-  const totalInputs = forms.reduce((sum, f) => sum + f.inputs.length, 0);
-  await sendLog(jobId, 'info', `✓ Found ${forms.length} forms with ${totalInputs} total inputs`);
-  
-  // Log each form's details
-  for (let idx = 0; idx < forms.length; idx++) {
-    const form = forms[idx];
-    await sendLog(jobId, 'info', `  📋 Form ${idx + 1}: ${form.type} (${form.id || form.className || 'unnamed'}) - ${form.inputs.length} inputs, ${form.buttons?.length || 0} buttons`);
+  let forms = [];
+  let totalInputs = 0;
+  try {
+    forms = await extractFormsAndLogicalGroups(page, jobId);
+    totalInputs = forms.reduce((sum, f) => sum + f.inputs.length, 0);
+    await sendLog(jobId, 'info', `✓ Found ${forms.length} forms with ${totalInputs} total inputs`);
+    
+    // Log each form's details
+    for (let idx = 0; idx < forms.length; idx++) {
+      const form = forms[idx];
+      await sendLog(jobId, 'info', `  📋 Form ${idx + 1}: ${form.type} (${form.id || form.className || 'unnamed'}) - ${form.inputs.length} inputs, ${form.buttons?.length || 0} buttons`);
+    }
+  } catch (error) {
+    await sendLog(jobId, 'warn', `⚠️ Form extraction failed: ${error.message}`);
   }
   
   // Step 4: Extract interactive elements
   await sendLog(jobId, 'info', `🔍 Step 4/6: Extracting interactive elements...`);
-  const pageElements = await extractPageElements(page, jobId);
-  await sendLog(jobId, 'info', `✓ Found ${pageElements.interactive.length} interactive elements`);
+  let pageElements = { interactive: [], nonInteractive: [] };
+  try {
+    pageElements = await extractPageElements(page, jobId);
+    await sendLog(jobId, 'info', `✓ Found ${pageElements.interactive.length} interactive elements`);
+  } catch (error) {
+    await sendLog(jobId, 'warn', `⚠️ Failed to extract elements: ${error.message}`);
+    // Continue with empty elements
+  }
   
   // Step 5: Take screenshot
   await sendLog(jobId, 'info', `🔍 Step 5/6: Capturing screenshot...`);
-  const screenshotResult = await takeScreenshot(page, jobId, 'page_analysis', {
-    url: currentUrl,
-    title: currentTitle,
-    approach: approach,
-    conversationId: conversationId
-  });
-  await sendLog(jobId, 'info', `✓ Screenshot captured: ${screenshotResult?.fileId || 'none'}`);
+  let screenshotResult = null;
+  try {
+    screenshotResult = await takeScreenshot(page, jobId, 'page_analysis', {
+      url: currentUrl,
+      title: currentTitle,
+      approach: approach,
+      conversationId: conversationId
+    });
+    await sendLog(jobId, 'info', `✓ Screenshot captured: ${screenshotResult?.fileId || 'none'}`);
+  } catch (error) {
+    await sendLog(jobId, 'warn', `⚠️ Screenshot capture failed: ${error.message}`);
+    // Continue without screenshot
+  }
   
   // Step 6: Approach-specific AI analysis
   await sendLog(jobId, 'info', `🔍 Step 6/6: Analyzing with ${approach} approach...`);
   
-  const pageContent = await page.content();
+  let pageContent = '';
+  try {
+    pageContent = await page.content();
+  } catch (error) {
+    await sendLog(jobId, 'warn', `⚠️ Failed to get page content: ${error.message}`);
+    // Continue with empty content
+  }
   
   // Approach-specific AI analysis
-  if (aiConversationLogger && openaiClient) {
+  if (aiConversationLogger && openaiClient && pageContent) {
     try {
       let aiPrompt, aiMessages;
       
       if (approach === 'media') {
         // MEDIA: Use vision API with screenshot
         await sendLog(jobId, 'info', `📸 Using AI vision to analyze screenshot...`);
-        const screenshot = await page.screenshot({ 
-          type: 'jpeg', 
-          quality: 60, 
-          fullPage: false  // Just viewport for faster analysis
-        });
-        const screenshotBase64 = screenshot.toString('base64');
+        
+        let screenshot, screenshotBase64;
+        try {
+          screenshot = await page.screenshot({ 
+            type: 'jpeg', 
+            quality: 60, 
+            fullPage: false  // Just viewport for faster analysis
+          });
+          screenshotBase64 = screenshot.toString('base64');
+        } catch (screenshotError) {
+          await sendLog(jobId, 'warn', `⚠️ Failed to capture screenshot for AI: ${screenshotError.message}`);
+          return; // Skip AI analysis if screenshot fails
+        }
         
         aiMessages = [{
           role: "user",
@@ -2434,8 +2504,24 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       await sendLog(jobId, 'info', `✓ Page loaded successfully`);
       
       // Analyze this page with detailed logging
-      const pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient);
-      analyzedPages.push(pageAnalysis);
+      let pageAnalysis;
+      try {
+        pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient);
+        analyzedPages.push(pageAnalysis);
+      } catch (analysisError) {
+        await sendLog(jobId, 'error', `❌ Failed to analyze page: ${analysisError.message}`);
+        
+        // Check if browser is still alive
+        try {
+          await page.url();
+        } catch (pageCheckError) {
+          await sendLog(jobId, 'error', `❌ Browser context lost, stopping crawl`);
+          break; // Exit the while loop
+        }
+        
+        // Continue to next page if browser is still alive
+        continue;
+      }
       
       // Add internal links to queue for next depth level
       if (depth < maxDepth && pageAnalysis.internal_links && pageAnalysis.internal_links.length > 0) {
@@ -2451,10 +2537,38 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         await sendLog(jobId, 'info', `⚠️  Max depth reached - not adding more links from this page`);
       }
       
+      // Cleanup: Clear any dialogs or popups
+      try {
+        const openDialogs = page.context().pages().length;
+        if (openDialogs > 1) {
+          await sendLog(jobId, 'info', `🧹 Cleaning up ${openDialogs - 1} extra pages/dialogs`);
+          const pages = page.context().pages();
+          for (let i = 1; i < pages.length; i++) {
+            await pages[i].close().catch(() => {});
+          }
+        }
+      } catch (cleanupError) {
+        // Ignore cleanup errors
+      }
+      
+      // Small delay between pages to prevent memory issues
+      if (analyzedPages.length < maxPages && urlQueue.length > 0) {
+        await sendLog(jobId, 'info', `⏸️ Brief pause before next page (analyzed ${analyzedPages.length}/${maxPages})...`);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
     } catch (error) {
       await sendLog(jobId, 'error', `❌ Failed to crawl ${currentUrl}: ${error.message}`);
       await sendLog(jobId, 'error', `   Stack: ${error.stack}`);
-      // Continue with next URL
+      
+      // Check if this is a browser closure error
+      if (error.message.includes('Target page, context or browser has been closed') ||
+          error.message.includes('Browser has been closed')) {
+        await sendLog(jobId, 'error', `❌ Browser closed unexpectedly, stopping crawl`);
+        break; // Stop crawling
+      }
+      
+      // Continue with next URL for other errors
       continue;
     }
   }
