@@ -2331,6 +2331,16 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       await sendLog(jobId, 'info', `🌍 ═══ PAGE ${analyzedPages.length + 1}/${maxPages} (Depth ${depth}/${maxDepth}) ═══`);
       await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl}`);
       
+      // Check if page/browser is still valid before navigating
+      try {
+        if (!page || page.isClosed()) {
+          throw new Error('Page is closed - cannot continue crawl');
+        }
+      } catch (checkError) {
+        await sendLog(jobId, 'error', `❌ Browser context closed, stopping crawl at page ${analyzedPages.length + 1}`);
+        break; // Exit the while loop
+      }
+      
       // Navigate to URL
       await page.goto(currentUrl, { 
         waitUntil: 'domcontentloaded', 
