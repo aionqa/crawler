@@ -2204,26 +2204,102 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
   });
   await sendLog(jobId, 'info', `✓ Screenshot captured: ${screenshotResult?.fileId || 'none'}`);
   
-  // Step 6: Log AI conversation for this specific page and approach
-  await sendLog(jobId, 'info', `🔍 Step 6/6: Logging AI conversation for this page...`);
+  // Step 6: Approach-specific AI analysis
+  await sendLog(jobId, 'info', `🔍 Step 6/6: Analyzing with ${approach} approach...`);
   
   const pageContent = await page.content();
   
-  // Create AI conversation entry for this page analysis
-  if (aiConversationLogger) {
+  // Approach-specific AI analysis
+  if (aiConversationLogger && openaiClient) {
     try {
-      const aiPrompt = `Analyze this webpage and provide insights in JSON format:
+      let aiPrompt, aiMessages;
+      
+      if (approach === 'media') {
+        // MEDIA: Use vision API with screenshot
+        await sendLog(jobId, 'info', `📸 Using AI vision to analyze screenshot...`);
+        const screenshot = await page.screenshot({ 
+          type: 'jpeg', 
+          quality: 60, 
+          fullPage: false  // Just viewport for faster analysis
+        });
+        const screenshotBase64 = screenshot.toString('base64');
+        
+        aiMessages = [{
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Analyze this webpage screenshot and provide insights in JSON format:
 
 URL: ${currentUrl}
 Title: ${currentTitle}
-Approach: ${approach}
+Approach: MEDIA (Screenshot Analysis)
+
+Focus on visual elements, layout, forms, and interactive elements you can see.
+Provide brief analysis and testing recommendations.
+
+Required JSON format:
+{
+  "visual_elements": ["..."],
+  "forms_visible": number,
+  "interactive_elements": ["..."],
+  "recommendations": ["..."]
+}`
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${screenshotBase64}`,
+                detail: "low"
+              }
+            }
+          ]
+        }];
+        
+      } else if (approach === 'text') {
+        // TEXT: HTML analysis only
+        await sendLog(jobId, 'info', `📝 Using AI to analyze HTML content...`);
+        const htmlSnippet = pageContent.length > 15000 
+          ? pageContent.substring(0, 15000) + '...[truncated]' 
+          : pageContent;
+          
+        aiPrompt = `Analyze this webpage HTML and provide insights in JSON format:
+
+URL: ${currentUrl}
+Title: ${currentTitle}
+Approach: TEXT (HTML Analysis)
+
+HTML Content:
+${htmlSnippet}
 
 Forms found: ${forms.length}
-${forms.map((f, i) => `  Form ${i + 1}: ${f.inputs.length} inputs (${f.inputs.map(inp => inp.type).join(', ')})`).join('\n')}
+Links found: ${linksData.total}
 
-Links found: ${linksData.total} (${linksData.internal.length} internal)
+Provide brief analysis and testing recommendations.
 
-Provide brief analysis and testing recommendations.`;
+Required JSON format:
+{
+  "content_analysis": "...",
+  "forms_detected": number,
+  "testing_recommendations": ["..."]
+}`;
+
+        aiMessages = [{ role: "user", content: aiPrompt }];
+        
+      } else {
+        // STATIC/OTHER: Basic summary
+        await sendLog(jobId, 'info', `⚡ Using ${approach} approach - AI logging page summary...`);
+        aiPrompt = `Page analyzed with ${approach} approach:
+
+URL: ${currentUrl}
+Title: ${currentTitle}
+Forms: ${forms.length}
+Links: ${linksData.total} (${linksData.internal.length} internal)
+
+Provide brief summary in JSON format with testing recommendations.`;
+
+        aiMessages = [{ role: "user", content: aiPrompt }];
+      }
 
       const completion = await aiConversationLogger.createChatCompletion(
         openaiClient,
@@ -2231,9 +2307,10 @@ Provide brief analysis and testing recommendations.`;
         'unified-crawler',
         `page_analysis_${approach}`,
         {
-          model: "gpt-4o-mini",
-          messages: [{ role: "user", content: aiPrompt }],
-          response_format: { type: "json_object" }
+          model: approach === 'media' ? "gpt-4o" : "gpt-4o-mini",  // Use vision model for media
+          messages: aiMessages,
+          response_format: { type: "json_object" },
+          max_tokens: approach === 'media' ? 500 : 300
         },
         screenshotResult?.fileId,
         currentUrl,
@@ -2244,11 +2321,12 @@ Provide brief analysis and testing recommendations.`;
           forms_count: forms.length,
           links_count: linksData.total,
           has_forms: forms.length > 0,
-          has_internal_links: linksData.internal.length > 0
+          has_internal_links: linksData.internal.length > 0,
+          analysis_mode: approach === 'media' ? 'vision' : 'text'
         }
       );
       
-      await sendLog(jobId, 'info', `✓ AI conversation logged (ID: ${conversationId})`);
+      await sendLog(jobId, 'info', `✓ AI ${approach} analysis complete (ID: ${conversationId})`);
     } catch (aiError) {
       await sendLog(jobId, 'warn', `⚠️  AI conversation logging failed: ${aiError.message}`);
     }
