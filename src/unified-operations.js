@@ -717,11 +717,12 @@ async function withBrowser(action, options = {}) {
     await sendLog(options.jobId || 'server', 'info', `Using remote browser service: ${browserServiceUrl}`);
     
     try {
-      // Use the base WebSocket URL for CDP connection
-      const wsUrl = browserServiceUrl.replace('http://', 'ws://');
+      // Use the base WebSocket URL for CDP connection with timeout parameter
+      // Browserless accepts timeout via query parameter (in milliseconds)
+      const wsUrl = browserServiceUrl.replace('http://', 'ws://') + '?timeout=900000'; // 15 minute timeout
       await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket: ${wsUrl}`);
       browser = await chromium.connectOverCDP(wsUrl);
-      await sendLog(options.jobId || 'server', 'info', 'Successfully connected to remote browser service via CDP');
+      await sendLog(options.jobId || 'server', 'info', 'Successfully connected to remote browser service via CDP (15min timeout)');
     } catch (error) {
       await sendLog(options.jobId || 'server', 'error', `Failed to connect to remote browser service: ${error.message}`);
       throw new Error(`Remote browser connection failed: ${error.message}`);
