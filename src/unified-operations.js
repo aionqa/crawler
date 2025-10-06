@@ -510,18 +510,19 @@ async function createConversationFlowStep(page, jobId, stepData) {
   return flowStep;
 }
 
-// Validate login success with AI
-async function validateLoginSuccessWithAI(page, context, openaiClient, approach) {
+// Generic AI validation function for ANY operation
+async function validateActionSuccessWithAI(page, context, openaiClient, approach, operation, expectedOutcome = null) {
   const jobId = context.job_id || 'unknown';
   
   try {
-    await sendLog(jobId, 'info', '🤖 AI validating login success...');
+    await sendLog(jobId, 'info', `🤖 AI validating ${operation} success...`);
     
     // Take screenshot for AI validation
-    const validationScreenshot = await takeScreenshot(page, jobId, 'login_validation', {
+    const validationScreenshot = await takeScreenshot(page, jobId, `${operation}_validation`, {
       mode: 'auto',
       approach: approach,
-      validation_type: 'ai_login_confirmation'
+      validation_type: `ai_${operation}_confirmation`,
+      operation: operation
     });
     
     // Get page information
@@ -551,8 +552,9 @@ async function validateLoginSuccessWithAI(page, context, openaiClient, approach)
       return storage;
     });
     
-    // Build AI prompt to validate login (RELAXED VALIDATION)
-    const aiPrompt = `You are validating whether a login attempt was successful. 
+    // Build operation-specific prompts
+    let operationPrompts = {
+      login: `You are validating whether a login attempt was successful.
 
 IMPORTANT: Consider login SUCCESSFUL if the page content clearly shows success indicators,
 EVEN IF no cookies were collected. Many test/demo sites don't set authentication cookies.
@@ -561,7 +563,45 @@ SUCCESS INDICATORS (ANY of these means login succeeded):
 ✅ Page title contains: "logged in", "success", "dashboard", "welcome", "home", "profile"
 ✅ Page content contains: "logged in successfully", "welcome", "logout", "sign out"
 ✅ URL changed from login page to different page
-✅ Cookies/tokens collected (bonus, but NOT required)
+✅ Cookies/tokens collected (bonus, but NOT required)`,
+
+      crawl: `You are validating whether a page crawl/analysis was successful.
+
+SUCCESS INDICATORS:
+✅ Page loaded completely (no errors)
+✅ Page content is accessible
+✅ Interactive elements are visible
+✅ No access denied or error messages`,
+
+      form_test: `You are validating whether a form submission was successful.
+
+SUCCESS INDICATORS:
+✅ Form submitted without errors
+✅ Success message or confirmation displayed
+✅ Page changed or updated after submission
+✅ No validation errors shown`,
+
+      link_click: `You are validating whether a link click/navigation was successful.
+
+SUCCESS INDICATORS:
+✅ Navigation completed to new page
+✅ New page loaded successfully  
+✅ No 404 or error pages
+✅ Content is accessible`,
+
+      page_analysis: `You are validating whether a page analysis was successful.
+
+SUCCESS INDICATORS:
+✅ Page content extracted successfully
+✅ Interactive elements identified
+✅ Forms and links detected
+✅ No parsing or access errors`
+    };
+
+    const operationInstructions = operationPrompts[operation] || operationPrompts['page_analysis'];
+    const expectedInfo = expectedOutcome ? `\n\nEXPECTED OUTCOME:\n${expectedOutcome}` : '';
+    
+    const aiPrompt = `${operationInstructions}
 
 CURRENT STATE:
 URL: ${currentUrl}
@@ -570,13 +610,7 @@ COOKIES: ${allCookies.length} total
 AUTH COOKIES: ${allCookies.filter(c => c.name.toLowerCase().includes('auth') || c.name.toLowerCase().includes('session')).length}
 
 PAGE CONTENT:
-${pageContent.substring(0, 1500)}${pageContent.length > 1500 ? '...[truncated]' : ''}
-
-INSTRUCTIONS:
-- If page shows "Logged In Successfully" or similar → return confirmed: true
-- If page has "Welcome" message or "Logout" button → return confirmed: true  
-- If URL changed and content looks like logged-in page → return confirmed: true
-- ONLY return confirmed: false if page clearly shows login FAILED or is still on login form
+${pageContent.substring(0, 1500)}${pageContent.length > 1500 ? '...[truncated]' : ''}${expectedInfo}
 
 Respond with JSON:
 {
@@ -589,7 +623,8 @@ Respond with JSON:
     "localStorage_keys": [],
     "sessionStorage_keys": []
   },
-  "recommendations": []
+  "recommendations": [],
+  "action_completed": true/false
 }`;
 
     // Create AI conversation for validation
@@ -597,7 +632,7 @@ Respond with JSON:
       openaiClient,
       jobId,
       'unified-crawler',
-      'login_validation',
+      `${operation}_validation`,
       {
         model: "gpt-4o-mini",
         messages: [{ 
@@ -610,7 +645,8 @@ Respond with JSON:
       currentUrl,
       {
         approach: approach,
-        validation_type: 'login_success',
+        operation: operation,
+        validation_type: `${operation}_success`,
         page_title: currentTitle,
         cookies_count: allCookies.length,
         localStorage_count: Object.keys(localStorage).length,
@@ -655,6 +691,11 @@ Respond with JSON:
       error: error.stack
     };
   }
+}
+
+// Backward compatibility wrapper for login validation
+async function validateLoginSuccessWithAI(page, context, openaiClient, approach) {
+  return await validateActionSuccessWithAI(page, context, openaiClient, approach, 'login');
 }
 
 // Browser automation wrapper
@@ -894,15 +935,47 @@ const modeHandlers = {
               continue;
             }
           } else {
-            // For non-login operations, just return success
-            await sendLog(context.job_id, 'info', `✅ Auto: ${approach} succeeded - STOPPING further attempts`, { 
-              mode: 'auto', 
-              successful_approach: approach,
-              stopped_at_attempt: i + 1
+            // For non-login operations (crawl, form_test, link_click, etc.), ALSO validate with AI
+            await sendLog(context.job_id, 'info', `🤖 Validating ${operation} success with AI...`, {
+              mode: 'auto',
+              approach: approach,
+              action: `ai_${operation}_validation`
             });
             
-            result.approach = approach;
-            return result;
+            const validationResult = await validateActionSuccessWithAI(page, context, openaiClient, approach, operation, expectedOutcome);
+            
+            // Update result with validation information
+            result.validation = validationResult;
+            result.confirmed = validationResult.confirmed;
+            result.approach = approach; // Tag result with winning approach
+            
+            if (validationResult.confirmed) {
+              // SUCCESS + VALIDATED - stop immediately
+              await sendLog(context.job_id, 'info', `✅ Auto: ${approach} succeeded and VALIDATED for ${operation} - STOPPING all further attempts`, {
+                mode: 'auto',
+                approach: approach,
+                operation: operation,
+                successful_approach: approach,
+                stopped_at_attempt: i + 1,
+                confidence: validationResult.confidence,
+                reason: validationResult.reason
+              });
+              
+              // Return immediately - don't try any more approaches
+              return result;
+            } else {
+              // Appeared to succeed but validation failed - try next approach
+              await sendLog(context.job_id, 'warn', `⚠️ Auto: ${approach} appeared to succeed but ${operation} validation FAILED: ${validationResult.reason} - Trying next approach`, {
+                mode: 'auto',
+                approach: approach,
+                operation: operation,
+                failed_validation: true,
+                confidence: validationResult.confidence
+              });
+              
+              // Continue to next approach (don't return yet)
+              continue;
+            }
           }
         }
         
