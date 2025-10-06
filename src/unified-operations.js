@@ -1290,8 +1290,8 @@ async function performMediaCrawl(page, context, openaiClient) {
   
   // Perform recursive crawl with approach name
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'media', openaiClient, {
-    max_depth: context.options?.max_depth || 3,
-    max_pages: context.options?.max_pages || 50
+    max_depth: context.options?.max_depth ?? 3,
+    max_pages: context.options?.max_pages ?? 50
   });
   
   // Build overall conclusion
@@ -1429,8 +1429,8 @@ async function performTextCrawl(page, context, openaiClient) {
   
   // Perform recursive crawl with approach name
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'text', openaiClient, {
-    max_depth: context.options?.max_depth || 3,
-    max_pages: context.options?.max_pages || 50
+    max_depth: context.options?.max_depth ?? 3,
+    max_pages: context.options?.max_pages ?? 50
   });
   
   // Build overall conclusion
@@ -1570,8 +1570,8 @@ async function performFormsCrawl(page, context, openaiClient) {
   
   // Perform recursive crawl with approach name
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'forms', openaiClient, {
-    max_depth: context.options?.max_depth || 3,
-    max_pages: context.options?.max_pages || 50
+    max_depth: context.options?.max_depth ?? 3,
+    max_pages: context.options?.max_pages ?? 50
   });
   
   // Build overall conclusion
@@ -2592,8 +2592,8 @@ async function performStaticCrawl(page, context, openaiClient) {
   
   // Perform recursive crawl with approach name
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'static', openaiClient, {
-    max_depth: context.options?.max_depth || 3,
-    max_pages: context.options?.max_pages || 50
+    max_depth: context.options?.max_depth ?? 3,
+    max_pages: context.options?.max_pages ?? 50
   });
   
   // Build overall conclusion

@@ -585,6 +585,14 @@ async function handleStartCrawl(req, res, params, id) {
 
     console.log(`[SERVER] 🎯 Processing crawl request for: ${params.url}`);
     console.log(`[SERVER] 🎯 Mode: ${params.context?.mode || 'auto'}`);
+    console.log(`[SERVER] 🎯 Context.options:`, JSON.stringify(params.context?.options || null));
+    console.log(`[SERVER] 🎯 Max Depth from context:`, params.context?.options?.max_depth);
+    console.log(`[SERVER] 🎯 Max Pages from context:`, params.context?.options?.max_pages);
+
+    // Send debug info to job logs if job_id is available
+    if (params.context?.job_id) {
+      await sendLogToBackend(params.context.job_id, 'info', `🔧 DEBUG: Received max_depth=${params.context?.options?.max_depth}, max_pages=${params.context?.options?.max_pages}`);
+    }
 
     const result = await startCrawl(params.url, params.cookies || [], params.context, openaiApiKey);
     
