@@ -1186,7 +1186,12 @@ Respond with JSON format:
   const analysis = JSON.parse(completion.choices[0].message.content);
   
   // Execute login based on analysis
-  return await executeLoginFromAnalysis(page, analysis, context);
+  const result = await executeLoginFromAnalysis(page, analysis, context);
+  // Tag with approach name
+  if (result) {
+    result.approach = 'media';
+  }
+  return result;
 }
 
 async function performMediaCrawl(page, context, openaiClient) {
@@ -1320,7 +1325,12 @@ Respond with JSON format:
   const analysis = JSON.parse(completion.choices[0].message.content);
   
   // Execute login based on analysis
-  return await executeLoginFromAnalysis(page, analysis, context);
+  const result = await executeLoginFromAnalysis(page, analysis, context);
+  // Tag with approach name
+  if (result) {
+    result.approach = 'text';
+  }
+  return result;
 }
 
 async function performTextCrawl(page, context, openaiClient) {
@@ -1893,6 +1903,7 @@ async function performStaticLogin(page, context, openaiClient) {
 
     return {
       success: true,
+      approach: 'static', // Tag with approach name
       message: 'Login form submitted using enhanced conversation flow pattern',
       details: {
         usernameFieldFound: true,
@@ -1911,6 +1922,7 @@ async function performStaticLogin(page, context, openaiClient) {
   } catch (error) {
     return {
       success: false,
+      approach: 'static',
       message: `Error submitting form: ${error.message}`,
       details: {
         error: error.stack,
