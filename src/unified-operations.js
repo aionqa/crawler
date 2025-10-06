@@ -2284,9 +2284,9 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
         let screenshot, screenshotBase64;
         try {
           screenshot = await page.screenshot({ 
-            type: 'jpeg', 
-            quality: 60, 
-            fullPage: false  // Just viewport for faster analysis
+            type: 'png', 
+            fullPage: true,  // Capture full page for complete analysis
+            animations: 'disabled'
           });
           screenshotBase64 = screenshot.toString('base64');
         } catch (screenshotError) {
