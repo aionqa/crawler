@@ -531,6 +531,7 @@ async function handleAttemptLogin(req, res, params, id) {
     // Return standardized response
     const response = createSuccessResponse({
       success: result.success,
+      approach: result.approach || 'unknown', // Include the winning approach!
       message: result.message,
       duration_ms: result.duration_ms,
       final_url: result.finalUrl,
@@ -539,7 +540,9 @@ async function handleAttemptLogin(req, res, params, id) {
       details: result.details || {},
       logs: result.logs || [],
       screenshots: result.screenshots || [],
-      video: result.video || null
+      video: result.video || null,
+      loginValidation: result.loginValidation || null,
+      loginConfirmed: result.loginConfirmed || false
     }, id);
     
     res.json(response);
