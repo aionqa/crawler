@@ -238,7 +238,7 @@ The system provides comprehensive error handling with detailed error messages an
 The unified crawler provides comprehensive logging:
 
 - **Console Logging**: Real-time operation logs
-- **GELF Logging**: Structured logging to Graylog
+- **MongoDB Logging**: Structured logging to backend MongoDB
 - **Backend Logging**: Job-specific logs sent to backend
 - **AI Conversation Logging**: Complete AI interaction history
 

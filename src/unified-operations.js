@@ -11,22 +11,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Conditional imports for shared modules
-let gelfClient = null;
 let aiConversationLogger = null;
 
 try {
   // Try to import shared modules (works in container)
-  const gelfModule = await import('/app/shared/gelf-client.js');
-  gelfClient = gelfModule.default;
-  
   const aiModule = await import('/app/shared/ai-conversation-logger.js');
   aiConversationLogger = aiModule.aiConversationLogger;
 } catch (error) {
   // Fallback for CLI mode (shared modules not available)
   console.log('[CLI] Shared modules not available, using CLI mode');
 }
-// For now, we'll create simplified versions of these functions
-// In production, these would be imported from the shared directory
 
 function createSuccessResponse(data, id = null) {
   return {
@@ -51,13 +45,13 @@ function createErrorResponse(error, id = null) {
   };
 }
 
-// Set agent name for GELF
+// Set agent name
 process.env.AGENT_NAME = 'unified-crawler';
 
-// Helper function to send logs to both console and Graylog
+// Helper function to send logs to backend via HTTP
 async function sendLog(jobId, level, message, data = {}) {
-  // Check if we're in CLI mode (no GELF client available or CLI mode flag)
-  const isCLIMode = process.env.CLI_MODE === 'true' || !process.env.BACKEND_URL || !gelfClient;
+  // Check if we're in CLI mode (no backend URL available or CLI mode flag)
+  const isCLIMode = process.env.CLI_MODE === 'true' || !process.env.BACKEND_URL;
   
   // Determine agent name and component based on mode and action
   const mode = data.mode || 'auto';
@@ -119,9 +113,30 @@ async function sendLog(jobId, level, message, data = {}) {
     };
     console.log(JSON.stringify(logEntry));
   } else {
-    // Server mode: send to console and Graylog
+    // Server mode: send to console and backend
     console.log(`[${level.toUpperCase()}] [${componentName}] ${message}`);
-    await gelfClient.sendJobLog(jobId, level, message, agentName, { component: componentName, mode, ...data, ...specialFields });
+    
+    // Send log to backend via HTTP
+    try {
+      const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+      await fetch(`${backendUrl}/logs`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          jobId,
+          level,
+          message,
+          component: componentName,
+          agentName,
+          metadata: { mode, ...data },
+          ...specialFields
+        })
+      });
+    } catch (error) {
+      console.error(`Failed to send log to backend: ${error.message}`);
+    }
   }
 }
 
@@ -153,7 +168,10 @@ async function uploadFileToBackend({ buffer, contentType, type, jobId, metadata 
     if (!result.file_id) {
       throw new Error('Backend did not return file_id');
     }
-    return result.file_id;
+    return {
+      fileId: result.file_id,
+      objectName: result.object_name
+    };
   } catch (error) {
     console.error(`[unified-crawler] Backend upload error: ${error.message}`);
     return null;
@@ -288,7 +306,7 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
     // Generate unique screenshot ID
     const screenshotId = `screenshot_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    const fileId = await uploadFileToBackend({
+    const uploadResult = await uploadFileToBackend({
       buffer: screenshot,
       contentType: 'image/png',
       type: 'screenshot',
@@ -303,8 +321,13 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
       }
     });
     
-    if (fileId) {
-      const screenshotPath = `http://localhost:9002/aionqa-files/${fileId}.png`;
+    if (uploadResult) {
+      const { fileId, objectName } = uploadResult;
+      
+      // Use configurable MinIO URL or construct from backend URL
+      const minioUrl = process.env.MINIO_PUBLIC_URL || process.env.MINIO_URL || 'http://localhost:9002';
+      const minioBucket = process.env.MINIO_BUCKET || 'aionqa-files';
+      const screenshotPath = `${minioUrl}/${minioBucket}/${objectName}`;
       
       // Convert screenshot to base64 for display in logs
       const screenshotBase64 = screenshot.toString('base64');
@@ -312,7 +335,7 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
       
       await sendLog(jobId, 'info', `📸 Screenshot captured: ${action}`, { 
         fileId, 
-        screenshotId: fileId,
+        screenshotId: objectName, // Use objectName as screenshotId for API access
         action: 'screenshot',
         url: page.url(),
         title: await page.title(),
@@ -334,7 +357,7 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
             mediaType: 'screenshot',
             fileInfo: {
               fileId,
-              screenshotId,
+              screenshotId: objectName, // Use objectName as screenshotId
               url: screenshotPath,
               size: screenshot.length,
               action,
@@ -487,6 +510,153 @@ async function createConversationFlowStep(page, jobId, stepData) {
   return flowStep;
 }
 
+// Validate login success with AI
+async function validateLoginSuccessWithAI(page, context, openaiClient, approach) {
+  const jobId = context.job_id || 'unknown';
+  
+  try {
+    await sendLog(jobId, 'info', '🤖 AI validating login success...');
+    
+    // Take screenshot for AI validation
+    const validationScreenshot = await takeScreenshot(page, jobId, 'login_validation', {
+      mode: 'auto',
+      approach: approach,
+      validation_type: 'ai_login_confirmation'
+    });
+    
+    // Get page information
+    const currentUrl = page.url();
+    const currentTitle = await page.title();
+    const pageContent = await page.content();
+    
+    // Extract all cookies
+    const allCookies = await page.context().cookies();
+    
+    // Get localStorage and sessionStorage
+    const localStorage = await page.evaluate(() => {
+      const storage = {};
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const key = window.localStorage.key(i);
+        storage[key] = window.localStorage.getItem(key);
+      }
+      return storage;
+    });
+    
+    const sessionStorage = await page.evaluate(() => {
+      const storage = {};
+      for (let i = 0; i < window.sessionStorage.length; i++) {
+        const key = window.sessionStorage.key(i);
+        storage[key] = window.sessionStorage.getItem(key);
+      }
+      return storage;
+    });
+    
+    // Build AI prompt to validate login (RELAXED VALIDATION)
+    const aiPrompt = `You are validating whether a login attempt was successful. 
+
+IMPORTANT: Consider login SUCCESSFUL if the page content clearly shows success indicators,
+EVEN IF no cookies were collected. Many test/demo sites don't set authentication cookies.
+
+SUCCESS INDICATORS (ANY of these means login succeeded):
+✅ Page title contains: "logged in", "success", "dashboard", "welcome", "home", "profile"
+✅ Page content contains: "logged in successfully", "welcome", "logout", "sign out"
+✅ URL changed from login page to different page
+✅ Cookies/tokens collected (bonus, but NOT required)
+
+CURRENT STATE:
+URL: ${currentUrl}
+TITLE: ${currentTitle}
+COOKIES: ${allCookies.length} total
+AUTH COOKIES: ${allCookies.filter(c => c.name.toLowerCase().includes('auth') || c.name.toLowerCase().includes('session')).length}
+
+PAGE CONTENT:
+${pageContent.substring(0, 1500)}${pageContent.length > 1500 ? '...[truncated]' : ''}
+
+INSTRUCTIONS:
+- If page shows "Logged In Successfully" or similar → return confirmed: true
+- If page has "Welcome" message or "Logout" button → return confirmed: true  
+- If URL changed and content looks like logged-in page → return confirmed: true
+- ONLY return confirmed: false if page clearly shows login FAILED or is still on login form
+
+Respond with JSON:
+{
+  "confirmed": true/false,
+  "confidence": 0.0-1.0,
+  "reason": "explanation focusing on page content",
+  "evidence": ["evidence from page content"],
+  "auth_tokens_collected": {
+    "cookies": ["cookie names"],
+    "localStorage_keys": [],
+    "sessionStorage_keys": []
+  },
+  "recommendations": []
+}`;
+
+    // Create AI conversation for validation
+    const completion = await aiConversationLogger.createChatCompletion(
+      openaiClient,
+      jobId,
+      'unified-crawler',
+      'login_validation',
+      {
+        model: "gpt-4o-mini",
+        messages: [{ 
+          role: "user", 
+          content: aiPrompt 
+        }],
+        response_format: { type: "json_object" }
+      },
+      validationScreenshot?.fileId,
+      currentUrl,
+      {
+        approach: approach,
+        validation_type: 'login_success',
+        page_title: currentTitle,
+        cookies_count: allCookies.length,
+        localStorage_count: Object.keys(localStorage).length,
+        sessionStorage_count: Object.keys(sessionStorage).length,
+        screenshot_id: validationScreenshot?.screenshotId,
+        screenshot_path: validationScreenshot?.screenshotPath
+      }
+    );
+
+    const validation = JSON.parse(completion.choices[0].message.content);
+    
+    await sendLog(jobId, 'info', `🤖 AI Validation Complete: ${validation.confirmed ? 'CONFIRMED' : 'NOT CONFIRMED'}`, {
+      confidence: validation.confidence,
+      reason: validation.reason,
+      evidence_count: validation.evidence?.length || 0
+    });
+    
+    return {
+      confirmed: validation.confirmed || false,
+      confidence: validation.confidence || 0,
+      reason: validation.reason || 'No reason provided',
+      evidence: validation.evidence || [],
+      authTokensCollected: validation.auth_tokens_collected || {},
+      recommendations: validation.recommendations || [],
+      allCookies: allCookies,
+      localStorage: localStorage,
+      sessionStorage: sessionStorage,
+      validationScreenshot: validationScreenshot,
+      currentUrl: currentUrl,
+      currentTitle: currentTitle
+    };
+    
+  } catch (error) {
+    await sendLog(jobId, 'error', `❌ AI validation failed: ${error.message}`);
+    return {
+      confirmed: false,
+      confidence: 0,
+      reason: `Validation error: ${error.message}`,
+      evidence: [],
+      authTokensCollected: {},
+      recommendations: ['Retry login with different approach'],
+      error: error.stack
+    };
+  }
+}
+
 // Browser automation wrapper
 async function withBrowser(action, options = {}) {
   const isCLIMode = process.env.CLI_MODE === 'true';
@@ -582,18 +752,29 @@ async function withBrowser(action, options = {}) {
     // Capture screenshot if enabled
     if (options.enable_screenshots && page) {
       try {
-        await sendLog(options.job_id || 'unknown', 'info', '📸 Capturing screenshot...');
         const screenshot = await page.screenshot({ 
           type: 'png', 
           fullPage: true 
         });
-        screenshotFileId = await uploadFileToBackend({
+        const uploadResult = await uploadFileToBackend({
           buffer: screenshot,
           contentType: 'image/png',
           type: 'screenshot',
           jobId: options.job_id
         });
-        await sendLog(options.job_id || 'unknown', 'info', `📸 Screenshot captured successfully: ${screenshotFileId}`);
+        // FIXED: Extract fileId from upload result object
+        if (uploadResult && uploadResult.fileId) {
+          screenshotFileId = uploadResult.fileId;
+          // Include screenshotId in metadata so UI can construct URL
+          await sendLog(options.job_id || 'unknown', 'info', `📸 Screenshot captured successfully: ${screenshotFileId}`, {
+            screenshotId: screenshotFileId,
+            fileId: screenshotFileId,
+            action: 'screenshot',
+            isScreenshot: true
+          });
+        } else {
+          await sendLog(options.job_id || 'unknown', 'warn', `📸 Screenshot captured but upload returned no file ID`);
+        }
       } catch (error) {
         await sendLog(options.job_id || 'unknown', 'error', `📸 Screenshot capture failed: ${error.message}`);
       }
@@ -672,11 +853,57 @@ const modeHandlers = {
         }
         
         if (result && result.success) {
-          await sendLog(context.job_id, 'info', `Auto: ${approach} succeeded`, { 
-            mode: 'auto', 
-            successful_approach: approach
-          });
-          return result;
+          // For login operations, validate IMMEDIATELY before considering it successful
+          if (operation === 'login') {
+            await sendLog(context.job_id, 'info', '🤖 Validating login success with OpenAI...', {
+              mode: 'auto',
+              approach: approach,
+              action: 'ai_login_validation'
+            });
+            
+            const validationResult = await validateLoginSuccessWithAI(page, context, openaiClient, approach);
+            
+            // Update result with validation information
+            result.loginValidation = validationResult;
+            result.loginConfirmed = validationResult.confirmed;
+            result.approach = approach; // Tag result with winning approach
+            
+            if (validationResult.confirmed) {
+              // SUCCESS + VALIDATED - stop immediately
+              await sendLog(context.job_id, 'info', `✅ Auto: ${approach} succeeded and VALIDATED - STOPPING all further attempts`, {
+                mode: 'auto',
+                approach: approach,
+                successful_approach: approach,
+                stopped_at_attempt: i + 1,
+                confidence: validationResult.confidence,
+                reason: validationResult.reason
+              });
+              
+              // Return immediately - don't try any more approaches
+              return result;
+            } else {
+              // Appeared to succeed but validation failed - try next approach
+              await sendLog(context.job_id, 'warn', `⚠️ Auto: ${approach} appeared to succeed but validation FAILED: ${validationResult.reason} - Trying next approach`, {
+                mode: 'auto',
+                approach: approach,
+                failed_validation: true,
+                confidence: validationResult.confidence
+              });
+              
+              // Continue to next approach (don't return yet)
+              continue;
+            }
+          } else {
+            // For non-login operations, just return success
+            await sendLog(context.job_id, 'info', `✅ Auto: ${approach} succeeded - STOPPING further attempts`, { 
+              mode: 'auto', 
+              successful_approach: approach,
+              stopped_at_attempt: i + 1
+            });
+            
+            result.approach = approach;
+            return result;
+          }
         }
         
       } catch (error) {
@@ -693,7 +920,7 @@ const modeHandlers = {
       }
     }
     
-    await sendLog(context.job_id, 'error', `Auto: All approaches failed`, { 
+    await sendLog(context.job_id, 'error', `Auto: All approaches failed (none validated successfully)`, { 
       mode: 'auto', 
       approaches_tried: approachSequence,
       last_error: lastError?.message
@@ -701,7 +928,7 @@ const modeHandlers = {
     
     return {
       success: false,
-      error: lastError?.message || 'All approaches failed',
+      error: lastError?.message || 'All approaches failed validation',
       details: {
         mode: 'auto',
         attempts: approachSequence.length,
@@ -1618,6 +1845,14 @@ async function performStaticLogin(page, context, openaiClient) {
 
     // Wait for navigation or response
     await page.waitForTimeout(3000);
+    
+    // Extract and log all cookies
+    const allCookiesCollected = await page.context().cookies();
+    await sendLog(jobId, 'info', `🍪 Collected ${allCookiesCollected.length} cookies from login session`, {
+      action: 'cookies_collected',
+      cookie_count: allCookiesCollected.length,
+      cookie_names: allCookiesCollected.map(c => c.name).join(', ')
+    });
 
     // Log enhanced conversation with separate payload components
     if (aiConversationLogger) {
@@ -2390,11 +2625,24 @@ async function executeLoginFromAnalysis(page, analysis, context) {
     const finalUrl = page.url();
     const finalTitle = await page.title();
     
-    await sendLog(jobId, 'info', `🔑 Authentication tokens extracted: ${authTokens.cookies.length} cookies, ${Object.keys(authTokens.localStorage).length} localStorage items, ${Object.keys(authTokens.sessionStorage).length} sessionStorage items`, { action: 'token_extraction' });
+    // Log all cookies for project storage (combined log to avoid duplication)
+    await sendLog(jobId, 'info', `🔑 Auth tokens extracted: ${authTokens.cookies.length} auth cookies, ${extractedCookies.length} total cookies, ${Object.keys(authTokens.localStorage).length} localStorage, ${Object.keys(authTokens.sessionStorage).length} sessionStorage`, {
+      action: 'token_extraction',
+      total_cookies: extractedCookies.length,
+      auth_cookies: authTokens.cookies.length,
+      localStorage_items: Object.keys(authTokens.localStorage).length,
+      sessionStorage_items: Object.keys(authTokens.sessionStorage).length,
+      cookies: extractedCookies.map(c => ({
+        name: c.name,
+        domain: c.domain,
+        path: c.path,
+        value_length: c.value.length
+      }))
+    });
     
     return {
       success: true,
-      message: 'Login executed successfully - authentication tokens acquired',
+      message: `Login executed successfully - ${extractedCookies.length} cookies and authentication tokens acquired`,
       details: {
         analysis,
         usernameFieldFound: true,
@@ -2405,11 +2653,14 @@ async function executeLoginFromAnalysis(page, analysis, context) {
         authTokens,
         screenshots: [beforeScreenshot, usernameScreenshot, passwordScreenshot, afterScreenshot].filter(Boolean)
       },
-      // Return tokens for use in crawling
+      // Return ALL cookies for use in crawling and storage with project
       cookies: extractedCookies,
       authTokens: authTokens,
       finalUrl,
-      finalTitle
+      finalTitle,
+      // Summary
+      cookiesCollected: extractedCookies.length,
+      authCookiesCollected: authTokens.cookies.length
     };
     
   } catch (error) {
@@ -2539,7 +2790,24 @@ export async function attemptLogin(url, username, password, cookies, context, op
         }, {})
       };
       
-      await sendLog(jobId, 'info', `🔑 Authentication tokens acquired: ${authTokens.cookies.length} cookies, ${Object.keys(authTokens.localStorage).length} localStorage items, ${Object.keys(authTokens.sessionStorage).length} sessionStorage items`, { action: 'token_extraction' });
+      // Single comprehensive log for token acquisition
+      if (extractedCookies.length > 0) {
+        await sendLog(jobId, 'info', `📦 ${extractedCookies.length} cookies ready for project storage (${authTokens.cookies.length} auth-related)`, {
+          action: 'cookies_for_storage',
+          total_cookies: extractedCookies.length,
+          auth_cookies: authTokens.cookies.length,
+          localStorage_items: Object.keys(authTokens.localStorage).length,
+          sessionStorage_items: Object.keys(authTokens.sessionStorage).length,
+          cookie_names: extractedCookies.map(c => c.name).join(', ')
+        });
+      } else {
+        await sendLog(jobId, 'warn', `⚠️ No cookies were collected during login`, {
+          action: 'cookies_for_storage',
+          auth_cookies: authTokens.cookies.length,
+          localStorage_items: Object.keys(authTokens.localStorage).length,
+          sessionStorage_items: Object.keys(authTokens.sessionStorage).length
+        });
+      }
       
       return {
         ...operationResult,
@@ -2547,14 +2815,23 @@ export async function attemptLogin(url, username, password, cookies, context, op
         duration_ms: Date.now() - startTime,
         finalUrl: page.url(),
         finalTitle: await page.title(),
-        // Authentication tokens for crawling
+        // ALL cookies for storage with project
         cookies: extractedCookies,
+        // Authentication tokens for crawling (filtered subset)
         authTokens: authTokens,
         tokenCount: {
           cookies: authTokens.cookies.length,
           localStorage: Object.keys(authTokens.localStorage).length,
           sessionStorage: Object.keys(authTokens.sessionStorage).length,
           total: authTokens.cookies.length + Object.keys(authTokens.localStorage).length + Object.keys(authTokens.sessionStorage).length
+        },
+        // Summary for project storage
+        storageReady: {
+          totalCookies: extractedCookies.length,
+          authCookies: authTokens.cookies.length,
+          localStorageItems: Object.keys(authTokens.localStorage).length,
+          sessionStorageItems: Object.keys(authTokens.sessionStorage).length,
+          readyForStorage: extractedCookies.length > 0
         }
       };
     }, {

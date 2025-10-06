@@ -10,7 +10,6 @@ import { randomUUID } from 'crypto';
 import { createSuccessResponse, createErrorResponse } from './utils.js';
 import { attemptLogin, startCrawl } from './unified-operations.js';
 import { validateInput, createValidationErrorResponse } from './schemas/validation.js';
-import gelfClient from '/app/shared/gelf-client.js';
 import swaggerUi from 'swagger-ui-express';
 import swaggerJSDoc from 'swagger-jsdoc';
 import { fileURLToPath } from 'url';
