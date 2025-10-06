@@ -784,7 +784,7 @@ async function withBrowser(action, options = {}) {
   const contextOptions = {
     userAgent: options.userAgent,
     ignoreHTTPSErrors: true,
-    viewport: options.viewport || { width: 1280, height: 800 }
+    viewport: options.viewport || { width: 1920, height: 1080 }
   };
   
   // Add video recording only for local browsers (true CLI mode outside container)
@@ -792,7 +792,7 @@ async function withBrowser(action, options = {}) {
   if (!inContainer && options.enable_video_recording) {
     contextOptions.recordVideo = { 
       dir: '/tmp/aionqa_videos',
-      size: { width: 1280, height: 800 }
+      size: { width: 1920, height: 1080 }
     };
   }
   
