@@ -112,7 +112,7 @@ async function sendLog(jobId, level, message, data = {}, conversationId = null) 
     }
   }
   
-  // Extract special fields for AI conversations and screenshots
+  // Extract special fields for AI conversations, screenshots, and page URLs
   const specialFields = {};
   if (data.aiConversationId) {
     specialFields.aiConversationId = data.aiConversationId;
@@ -126,6 +126,11 @@ async function sendLog(jobId, level, message, data = {}, conversationId = null) 
   }
   if (data.screenshotPath) {
     specialFields.screenshotPath = data.screenshotPath;
+  }
+  // Extract page_url from data to include as top-level field for proper routing
+  if (data.page_url) {
+    specialFields.page_url = data.page_url;
+    specialFields.pageUrl = data.page_url; // Include both formats for compatibility
   }
   
   if (isCLIMode) {
@@ -543,9 +548,11 @@ async function createConversationFlowStep(page, jobId, stepData) {
 // Generic AI validation function for ANY operation
 async function validateActionSuccessWithAI(page, context, openaiClient, approach, operation, expectedOutcome = null) {
   const jobId = context.job_id || 'unknown';
+  const currentUrl = page.url();
+  const pageContext = { page_url: currentUrl, mode: context.mode || 'auto' };
   
   try {
-    await sendLog(jobId, 'info', `🤖 AI validating ${operation} success...`);
+    await sendLog(jobId, 'info', `🤖 AI validating ${operation} success...`, pageContext);
     
     // Take screenshot for AI validation
     const validationScreenshot = await takeScreenshot(page, jobId, `${operation}_validation`, {
@@ -689,6 +696,7 @@ Respond with JSON:
     const validation = JSON.parse(completion.choices[0].message.content);
     
     await sendLog(jobId, 'info', `🤖 AI Validation Complete: ${validation.confirmed ? 'CONFIRMED' : 'NOT CONFIRMED'}`, {
+      ...pageContext,
       confidence: validation.confidence,
       reason: validation.reason,
       evidence_count: validation.evidence?.length || 0
@@ -920,6 +928,8 @@ const modeHandlers = {
   // Auto mode - Sequential approach selection (tries multiple approaches until one works)
   auto: async (page, context, openaiClient, operation) => {
     const approachSequence = ['static', 'forms', 'text', 'media', 'script'];
+    const currentUrl = page.url();
+    const pageContext = { page_url: currentUrl, mode: 'auto' };
     let lastError = null;
     
     for (let i = 0; i < approachSequence.length; i++) {
@@ -927,7 +937,7 @@ const modeHandlers = {
       
       try {
         await sendLog(context.job_id, 'info', `Auto: Trying ${approach} (${i + 1}/${approachSequence.length})`, { 
-          mode: 'auto', 
+          ...pageContext,
           approach: approach,
           attempt: i + 1
         });
@@ -943,7 +953,7 @@ const modeHandlers = {
           // For login operations, validate IMMEDIATELY before considering it successful
           if (operation === 'login') {
             await sendLog(context.job_id, 'info', '🤖 Validating login success with OpenAI...', {
-              mode: 'auto',
+              ...pageContext,
               approach: approach,
               action: 'ai_login_validation'
             });
@@ -958,7 +968,7 @@ const modeHandlers = {
             if (validationResult.confirmed) {
               // SUCCESS + VALIDATED - stop immediately
               await sendLog(context.job_id, 'info', `✅ Auto: ${approach} succeeded and VALIDATED - STOPPING all further attempts`, {
-                mode: 'auto',
+                ...pageContext,
                 approach: approach,
                 successful_approach: approach,
                 stopped_at_attempt: i + 1,
@@ -1703,7 +1713,10 @@ async function extractPageElements(page, jobId) {
 // Static mode implementations
 async function performStaticLogin(page, context, openaiClient) {
   const jobId = context.job_id;
-  await sendLog(jobId, 'info', '🔍 Performing static login with standard field matching');
+  const currentUrl = page.url();
+  const pageContext = { page_url: currentUrl, mode: 'static' };
+  
+  await sendLog(jobId, 'info', '🔍 Performing static login with standard field matching', pageContext);
   
   // Detect captcha first
   const captchaInfo = await detectCaptcha(page, jobId);
@@ -1808,7 +1821,7 @@ async function performStaticLogin(page, context, openaiClient) {
   
   try {
     // Step 1: Initial page state
-    await sendLog(jobId, 'info', '📸 Taking initial screenshot');
+    await sendLog(jobId, 'info', '📸 Taking initial screenshot', pageContext);
     const initialScreenshot = await takeScreenshotBeforeAction(page, jobId, 'form_fill', {
       step: 'initial_state',
       form_type: 'login',
@@ -1839,7 +1852,7 @@ async function performStaticLogin(page, context, openaiClient) {
     }
     
     // Step 2: Fill username field
-    await sendLog(jobId, 'info', 'Fill username');
+    await sendLog(jobId, 'info', 'Fill username', pageContext);
     const usernameBeforeShot = await takeScreenshotBeforeAction(page, jobId, 'username_fill', {
       step: 'before_username_fill',
       form_type: 'login',
@@ -1882,7 +1895,7 @@ async function performStaticLogin(page, context, openaiClient) {
     });
     
     // Step 3: Fill password field
-    await sendLog(jobId, 'info', 'Fill password');
+    await sendLog(jobId, 'info', 'Fill password', pageContext);
     const passwordBeforeShot = await takeScreenshotBeforeAction(page, jobId, 'password_fill', {
       step: 'before_password_fill',
       form_type: 'login',
@@ -1925,7 +1938,7 @@ async function performStaticLogin(page, context, openaiClient) {
     });
     
     // Step 4: Submit form
-    await sendLog(jobId, 'info', 'Submit form');
+    await sendLog(jobId, 'info', 'Submit form', pageContext);
     const submitBeforeShot = await takeScreenshotBeforeAction(page, jobId, 'form_submit', {
       step: 'before_form_submit',
       form_type: 'login',
@@ -1933,11 +1946,11 @@ async function performStaticLogin(page, context, openaiClient) {
     });
     
     if (submitButton) {
-      await sendLog(jobId, 'info', '🖱️ Clicking submit button');
+      await sendLog(jobId, 'info', '🖱️ Clicking submit button', pageContext);
       await submitButton.click();
     } else {
       // Try pressing Enter on password field
-      await sendLog(jobId, 'info', '⌨️ Pressing Enter on password field');
+      await sendLog(jobId, 'info', '⌨️ Pressing Enter on password field', pageContext);
       await passwordField.press('Enter');
     }
     
@@ -1978,6 +1991,7 @@ async function performStaticLogin(page, context, openaiClient) {
     // Extract and log all cookies
     const allCookiesCollected = await page.context().cookies();
     await sendLog(jobId, 'info', `🍪 Collected ${allCookiesCollected.length} cookies from login session`, {
+      ...pageContext,
       action: 'cookies_collected',
       cookie_count: allCookiesCollected.length,
       cookie_names: allCookiesCollected.map(c => c.name).join(', ')
@@ -2014,7 +2028,7 @@ async function performStaticLogin(page, context, openaiClient) {
           { approach: 'static' }
         );
 
-        await sendLog(context.job_id, 'info', '🤖 Enhanced conversation flow logged to chat mode');
+        await sendLog(context.job_id, 'info', '🤖 Enhanced conversation flow logged to chat mode', pageContext);
       } catch (conversationError) {
         console.warn('[CONVERSATION] ⚠️ Failed to log enhanced conversation:', conversationError.message);
       }
@@ -2215,69 +2229,72 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
   // Generate unique conversation ID for this page's analysis
   const conversationId = `conv_${jobId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
-  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  await sendLog(jobId, 'info', `📄 ANALYZING PAGE: ${currentTitle}`);
-  await sendLog(jobId, 'info', `🔗 URL: ${currentUrl}`);
-  await sendLog(jobId, 'info', `🎯 Approach: ${approach}`);
-  await sendLog(jobId, 'info', `💬 Conversation ID: ${conversationId}`);
-  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  // Context data to include in all logs for this page
+  const pageContext = { page_url: currentUrl, mode: approach };
+  
+  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, pageContext);
+  await sendLog(jobId, 'info', `📄 ANALYZING PAGE: ${currentTitle}`, pageContext);
+  await sendLog(jobId, 'info', `🔗 URL: ${currentUrl}`, pageContext);
+  await sendLog(jobId, 'info', `🎯 Approach: ${approach}`, pageContext);
+  await sendLog(jobId, 'info', `💬 Conversation ID: ${conversationId}`, pageContext);
+  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, pageContext);
   
   // Step 1: Detect captcha
-  await sendLog(jobId, 'info', `🔍 Step 1/6: Checking for captcha...`);
+  await sendLog(jobId, 'info', `🔍 Step 1/6: Checking for captcha...`, pageContext);
   let captchaInfo = { detected: false };
   try {
     captchaInfo = await detectCaptcha(page, jobId);
     if (captchaInfo.detected) {
-      await sendLog(jobId, 'warn', `⚠️  Captcha detected: ${captchaInfo.type}`);
+      await sendLog(jobId, 'warn', `⚠️  Captcha detected: ${captchaInfo.type}`, pageContext);
       await handleCaptcha(page, jobId, captchaInfo);
     } else {
-      await sendLog(jobId, 'info', `✓ No captcha detected`);
+      await sendLog(jobId, 'info', `✓ No captcha detected`, pageContext);
     }
   } catch (error) {
-    await sendLog(jobId, 'warn', `⚠️ Captcha detection failed: ${error.message}`);
+    await sendLog(jobId, 'warn', `⚠️ Captcha detection failed: ${error.message}`, pageContext);
   }
   
   // Step 2: Extract links
-  await sendLog(jobId, 'info', `🔍 Step 2/6: Extracting links from page...`);
+  await sendLog(jobId, 'info', `🔍 Step 2/6: Extracting links from page...`, pageContext);
   let linksData = { all: [], internal: [], external: [], total: 0 };
   try {
     linksData = await extractAllLinks(page, jobId, currentUrl);
-    await sendLog(jobId, 'info', `✓ Found ${linksData.total} links (${linksData.internal.length} internal, ${linksData.external.length} external)`);
+    await sendLog(jobId, 'info', `✓ Found ${linksData.total} links (${linksData.internal.length} internal, ${linksData.external.length} external)`, pageContext);
   } catch (error) {
-    await sendLog(jobId, 'warn', `⚠️ Link extraction failed: ${error.message}`);
+    await sendLog(jobId, 'warn', `⚠️ Link extraction failed: ${error.message}`, pageContext);
   }
   
   // Step 3: Extract forms
-  await sendLog(jobId, 'info', `🔍 Step 3/6: Extracting forms and form groups...`);
+  await sendLog(jobId, 'info', `🔍 Step 3/6: Extracting forms and form groups...`, pageContext);
   let forms = [];
   let totalInputs = 0;
   try {
     forms = await extractFormsAndLogicalGroups(page, jobId);
     totalInputs = forms.reduce((sum, f) => sum + f.inputs.length, 0);
-    await sendLog(jobId, 'info', `✓ Found ${forms.length} forms with ${totalInputs} total inputs`);
+    await sendLog(jobId, 'info', `✓ Found ${forms.length} forms with ${totalInputs} total inputs`, pageContext);
     
     // Log each form's details
     for (let idx = 0; idx < forms.length; idx++) {
       const form = forms[idx];
-      await sendLog(jobId, 'info', `  📋 Form ${idx + 1}: ${form.type} (${form.id || form.className || 'unnamed'}) - ${form.inputs.length} inputs, ${form.buttons?.length || 0} buttons`);
+      await sendLog(jobId, 'info', `  📋 Form ${idx + 1}: ${form.type} (${form.id || form.className || 'unnamed'}) - ${form.inputs.length} inputs, ${form.buttons?.length || 0} buttons`, pageContext);
     }
   } catch (error) {
-    await sendLog(jobId, 'warn', `⚠️ Form extraction failed: ${error.message}`);
+    await sendLog(jobId, 'warn', `⚠️ Form extraction failed: ${error.message}`, pageContext);
   }
   
   // Step 4: Extract interactive elements
-  await sendLog(jobId, 'info', `🔍 Step 4/6: Extracting interactive elements...`);
+  await sendLog(jobId, 'info', `🔍 Step 4/6: Extracting interactive elements...`, pageContext);
   let pageElements = { interactive: [], nonInteractive: [] };
   try {
     pageElements = await extractPageElements(page, jobId);
-    await sendLog(jobId, 'info', `✓ Found ${pageElements.interactive.length} interactive elements`);
+    await sendLog(jobId, 'info', `✓ Found ${pageElements.interactive.length} interactive elements`, pageContext);
   } catch (error) {
-    await sendLog(jobId, 'warn', `⚠️ Failed to extract elements: ${error.message}`);
+    await sendLog(jobId, 'warn', `⚠️ Failed to extract elements: ${error.message}`, pageContext);
     // Continue with empty elements
   }
   
   // Step 5: Take screenshot
-  await sendLog(jobId, 'info', `🔍 Step 5/6: Capturing screenshot...`);
+  await sendLog(jobId, 'info', `🔍 Step 5/6: Capturing screenshot...`, pageContext);
   let screenshotResult = null;
   try {
     screenshotResult = await takeScreenshot(page, jobId, 'page_analysis', {
@@ -2286,20 +2303,20 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
       approach: approach,
       conversationId: conversationId
     });
-    await sendLog(jobId, 'info', `✓ Screenshot captured: ${screenshotResult?.fileId || 'none'}`);
+    await sendLog(jobId, 'info', `✓ Screenshot captured: ${screenshotResult?.fileId || 'none'}`, pageContext);
   } catch (error) {
-    await sendLog(jobId, 'warn', `⚠️ Screenshot capture failed: ${error.message}`);
+    await sendLog(jobId, 'warn', `⚠️ Screenshot capture failed: ${error.message}`, pageContext);
     // Continue without screenshot
   }
   
   // Step 6: Approach-specific AI analysis
-  await sendLog(jobId, 'info', `🔍 Step 6/6: Analyzing with ${approach} approach...`);
+  await sendLog(jobId, 'info', `🔍 Step 6/6: Analyzing with ${approach} approach...`, pageContext);
   
   let pageContent = '';
   try {
     pageContent = await page.content();
   } catch (error) {
-    await sendLog(jobId, 'warn', `⚠️ Failed to get page content: ${error.message}`);
+    await sendLog(jobId, 'warn', `⚠️ Failed to get page content: ${error.message}`, pageContext);
     // Continue with empty content
   }
   
@@ -2310,7 +2327,7 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
       
       if (approach === 'media') {
         // MEDIA: Use vision API with screenshot
-        await sendLog(jobId, 'info', `📸 Using AI vision to analyze screenshot...`);
+        await sendLog(jobId, 'info', `📸 Using AI vision to analyze screenshot...`, pageContext);
         
         let screenshot, screenshotBase64;
         try {
@@ -2321,7 +2338,7 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
           });
           screenshotBase64 = screenshot.toString('base64');
         } catch (screenshotError) {
-          await sendLog(jobId, 'warn', `⚠️ Failed to capture screenshot for AI: ${screenshotError.message}`);
+          await sendLog(jobId, 'warn', `⚠️ Failed to capture screenshot for AI: ${screenshotError.message}`, pageContext);
           return; // Skip AI analysis if screenshot fails
         }
         
@@ -2359,7 +2376,7 @@ Required JSON format:
         
       } else if (approach === 'text') {
         // TEXT: HTML analysis only
-        await sendLog(jobId, 'info', `📝 Using AI to analyze HTML content...`);
+        await sendLog(jobId, 'info', `📝 Using AI to analyze HTML content...`, pageContext);
         const htmlSnippet = pageContent.length > 15000 
           ? pageContent.substring(0, 15000) + '...[truncated]' 
           : pageContent;
@@ -2389,7 +2406,7 @@ Required JSON format:
         
       } else {
         // STATIC/OTHER: Basic summary
-        await sendLog(jobId, 'info', `⚡ Using ${approach} approach - AI logging page summary...`);
+        await sendLog(jobId, 'info', `⚡ Using ${approach} approach - AI logging page summary...`, pageContext);
         aiPrompt = `Page analyzed with ${approach} approach:
 
 URL: ${currentUrl}
@@ -2427,9 +2444,9 @@ Provide brief summary in JSON format with testing recommendations.`;
         }
       );
       
-      await sendLog(jobId, 'info', `✓ AI ${approach} analysis complete (ID: ${conversationId})`);
+      await sendLog(jobId, 'info', `✓ AI ${approach} analysis complete (ID: ${conversationId})`, pageContext);
     } catch (aiError) {
-      await sendLog(jobId, 'warn', `⚠️  AI conversation logging failed: ${aiError.message}`);
+      await sendLog(jobId, 'warn', `⚠️  AI conversation logging failed: ${aiError.message}`, pageContext);
     }
   }
   
@@ -2464,8 +2481,8 @@ Provide brief summary in JSON format with testing recommendations.`;
     analyzed_at: new Date().toISOString()
   };
   
-  await sendLog(jobId, 'info', `✅ COMPLETED: ${currentTitle} - ${forms.length} forms, ${linksData.total} links, ${linksData.internal.length} to crawl`);
-  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+  await sendLog(jobId, 'info', `✅ COMPLETED: ${currentTitle} - ${forms.length} forms, ${linksData.total} links, ${linksData.internal.length} to crawl`, pageContext);
+  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, pageContext);
   
   return pageAnalysis;
 }
@@ -2492,13 +2509,13 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
     
     // Skip if already visited
     if (visitedUrls.has(currentUrl)) {
-      await sendLog(jobId, 'info', `⏭️  Skipping (already visited): ${currentUrl}`);
+      await sendLog(jobId, 'info', `⏭️  Skipping (already visited): ${currentUrl}`, { page_url: currentUrl, mode: approach });
       continue;
     }
     
     // Skip if max depth reached
     if (depth > maxDepth) {
-      await sendLog(jobId, 'info', `⏭️  Skipping (max depth ${maxDepth} reached): ${currentUrl}`);
+      await sendLog(jobId, 'info', `⏭️  Skipping (max depth ${maxDepth} reached): ${currentUrl}`, { page_url: currentUrl, mode: approach });
       continue;
     }
     
@@ -2506,9 +2523,12 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       // Mark as visited
       visitedUrls.add(currentUrl);
       
-      await sendLog(jobId, 'info', ``);
-      await sendLog(jobId, 'info', `🌍 ═══ PAGE ${analyzedPages.length + 1}/${maxPages} (Depth ${depth}/${maxDepth}) ═══`);
-      await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl}`);
+      // Create page context for this URL
+      const currentPageContext = { page_url: currentUrl, mode: approach };
+      
+      await sendLog(jobId, 'info', ``, currentPageContext);
+      await sendLog(jobId, 'info', `🌍 ═══ PAGE ${analyzedPages.length + 1}/${maxPages} (Depth ${depth}/${maxDepth}) ═══`, currentPageContext);
+      await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl}`, currentPageContext);
       
       // Check if page/browser is still valid before navigating
       try {
@@ -2516,7 +2536,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           throw new Error('Page is closed - cannot continue crawl');
         }
       } catch (checkError) {
-        await sendLog(jobId, 'error', `❌ Browser context closed, stopping crawl at page ${analyzedPages.length + 1}`);
+        await sendLog(jobId, 'error', `❌ Browser context closed, stopping crawl at page ${analyzedPages.length + 1}`, currentPageContext);
         break; // Exit the while loop
       }
       
@@ -2526,21 +2546,21 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         timeout: 30000 
       });
       
-      await sendLog(jobId, 'info', `⏳ Waiting for page to fully load...`);
+      await sendLog(jobId, 'info', `⏳ Waiting for page to fully load...`, currentPageContext);
       
       // Wait for page to settle
       await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
       await page.waitForTimeout(1000);
       
-      await sendLog(jobId, 'info', `✓ Page loaded successfully`);
+      await sendLog(jobId, 'info', `✓ Page loaded successfully`, currentPageContext);
       
       // Get page title for better log organization
       let pageTitle;
       try {
         pageTitle = await page.title();
-        await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl} - ${pageTitle}`);
+        await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl} - ${pageTitle}`, currentPageContext);
       } catch (titleError) {
-        await sendLog(jobId, 'warn', `⚠️ Could not get page title: ${titleError.message}`);
+        await sendLog(jobId, 'warn', `⚠️ Could not get page title: ${titleError.message}`, currentPageContext);
         pageTitle = currentUrl;
       }
       
@@ -2553,7 +2573,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         // Send discovered page to backend immediately (incremental storage)
         await sendDiscoveredPageToBackend(jobId, pageAnalysis);
       } catch (analysisError) {
-        await sendLog(jobId, 'error', `❌ Failed to analyze page: ${analysisError.message}`);
+        await sendLog(jobId, 'error', `❌ Failed to analyze page: ${analysisError.message}`, currentPageContext);
         
         // Check if browser is still alive
         try {
@@ -2709,7 +2729,10 @@ async function performStaticCrawl(page, context, openaiClient) {
 
 // Script mode implementations
 async function performScriptLogin(page, context, openaiClient) {
-  await sendLog(context.job_id, 'info', '📜 Performing script-based login');
+  const currentUrl = page.url();
+  const pageContext = { page_url: currentUrl, mode: 'script' };
+  
+  await sendLog(context.job_id, 'info', '📜 Performing script-based login', pageContext);
   
   if (!context.script) {
     return {
@@ -2770,7 +2793,10 @@ async function performScriptLogin(page, context, openaiClient) {
 }
 
 async function performScriptCrawl(page, context, openaiClient) {
-  await sendLog(context.job_id, 'info', '📜 Performing script-based crawl');
+  const currentUrl = page.url();
+  const pageContext = { page_url: currentUrl, mode: 'script' };
+  
+  await sendLog(context.job_id, 'info', '📜 Performing script-based crawl', pageContext);
   
   if (!context.script) {
     return {
@@ -2812,9 +2838,11 @@ async function performScriptCrawl(page, context, openaiClient) {
 // Helper functions
 async function executeLoginFromAnalysis(page, analysis, context) {
   const jobId = context.job_id || 'unknown-job';
+  const currentUrl = page.url();
+  const pageContext = { page_url: currentUrl, mode: 'analysis' };
   
   try {
-    await sendLog(jobId, 'info', '🔐 Executing login based on AI analysis');
+    await sendLog(jobId, 'info', '🔐 Executing login based on AI analysis', pageContext);
     
     // Extract form information from analysis
     const forms = analysis.forms || [];
@@ -2868,7 +2896,7 @@ async function executeLoginFromAnalysis(page, analysis, context) {
     });
     
     // Fill login form
-    await sendLog(jobId, 'info', '✏️ Filling username field', { action: 'form_fill' });
+    await sendLog(jobId, 'info', '✏️ Filling username field', { ...pageContext, action: 'form_fill' });
     await usernameField.fill(context.credentials.username);
     
     const usernameScreenshot = await takeScreenshot(page, jobId, 'after_username', {
@@ -2877,7 +2905,7 @@ async function executeLoginFromAnalysis(page, analysis, context) {
       field_filled: 'username'
     });
     
-    await sendLog(jobId, 'info', '✏️ Filling password field', { action: 'form_fill' });
+    await sendLog(jobId, 'info', '✏️ Filling password field', { ...pageContext, action: 'form_fill' });
     await passwordField.fill(context.credentials.password);
     
     const passwordScreenshot = await takeScreenshot(page, jobId, 'after_password', {
@@ -2887,7 +2915,7 @@ async function executeLoginFromAnalysis(page, analysis, context) {
     });
     
     // Submit form
-    await sendLog(jobId, 'info', '🖱️ Submitting login form', { action: 'login_execution' });
+    await sendLog(jobId, 'info', '🖱️ Submitting login form', { ...pageContext, action: 'login_execution' });
     if (submitButton) {
       await submitButton.click();
     } else {
@@ -3029,6 +3057,7 @@ export async function attemptLogin(url, username, password, cookies, context, op
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
     
     const result = await withBrowser(async ({ page, context: browserContext }) => {
+      // Navigate first to get the URL
       await sendLog(jobId, 'info', 'Browser session started', { mode });
       
       // Set initial cookies if provided
@@ -3044,15 +3073,19 @@ export async function attemptLogin(url, username, password, cookies, context, op
         timeout: 30000 
       });
       
+      // Now we have the page URL, create pageContext
+      const currentUrl = page.url();
+      const pageContext = { page_url: currentUrl, mode };
+      
       // Wait for navigation if DOM is loaded, otherwise wait for timeout then analyze
       try {
         await page.waitForLoadState('networkidle', { timeout: 10000 });
-        await sendLog(jobId, 'info', '✅ Page fully loaded', { mode });
+        await sendLog(jobId, 'info', '✅ Page fully loaded', pageContext);
       } catch (error) {
-        await sendLog(jobId, 'warn', '⚠️ Page not fully loaded, proceeding with analysis');
+        await sendLog(jobId, 'warn', '⚠️ Page not fully loaded, proceeding with analysis', pageContext);
         // Wait for timeout then analyze the page with AI
         await page.waitForTimeout(5000);
-        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', { mode });
+        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', pageContext);
       }
 
       // Set credentials in context
@@ -3133,6 +3166,7 @@ export async function attemptLogin(url, username, password, cookies, context, op
         });
       } else {
         await sendLog(jobId, 'warn', `⚠️ No cookies were collected during login`, {
+          ...pageContext,
           action: 'cookies_for_storage',
           auth_cookies: authTokens.cookies.length,
           localStorage_items: Object.keys(authTokens.localStorage).length,
@@ -3172,8 +3206,11 @@ export async function attemptLogin(url, username, password, cookies, context, op
       job_id: jobId
     });
 
-    await sendLog(jobId, 'info', `✅ Login attempt completed in ${result.duration_ms}ms`);
-    await sendLog(jobId, result.success ? 'info' : 'error', `📊 Result: ${result.success ? 'SUCCESS' : 'FAILED'}`);
+    // Create page context for final logs
+    const finalPageContext = { page_url: result.finalUrl || url, mode };
+    
+    await sendLog(jobId, 'info', `✅ Login attempt completed in ${result.duration_ms}ms`, finalPageContext);
+    await sendLog(jobId, result.success ? 'info' : 'error', `📊 Result: ${result.success ? 'SUCCESS' : 'FAILED'}`, finalPageContext);
     
     return result;
 
