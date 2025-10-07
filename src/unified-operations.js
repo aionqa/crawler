@@ -49,7 +49,33 @@ function createErrorResponse(error, id = null) {
 process.env.AGENT_NAME = 'unified-crawler';
 
 // Helper function to send logs to backend via HTTP
-async function sendLog(jobId, level, message, data = {}) {
+// Send discovered page to backend immediately (incremental storage)
+async function sendDiscoveredPageToBackend(jobId, pageData) {
+  try {
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    console.log(`[INCREMENTAL-STORAGE] Sending page to backend: ${pageData.url}`);
+    const response = await fetch(`${backendUrl}/jobs/${jobId}/discovered-page`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        jobId,
+        page: pageData
+      })
+    });
+    if (!response.ok) {
+      console.error(`[INCREMENTAL-STORAGE] Backend returned ${response.status}`);
+    } else {
+      console.log(`[INCREMENTAL-STORAGE] ✅ Page stored: ${pageData.url}`);
+    }
+  } catch (error) {
+    console.error(`[INCREMENTAL-STORAGE] Failed to send discovered page to backend: ${error.message}`);
+    // Don't throw - continue crawling even if page storage fails
+  }
+}
+
+async function sendLog(jobId, level, message, data = {}, conversationId = null) {
   // Check if we're in CLI mode (no backend URL available or CLI mode flag)
   const isCLIMode = process.env.CLI_MODE === 'true' || !process.env.BACKEND_URL;
   
@@ -90,6 +116,10 @@ async function sendLog(jobId, level, message, data = {}) {
   const specialFields = {};
   if (data.aiConversationId) {
     specialFields.aiConversationId = data.aiConversationId;
+  }
+  if (conversationId) {
+    specialFields.aiConversationId = conversationId;
+    specialFields.conversationId = conversationId;
   }
   if (data.screenshotId) {
     specialFields.screenshotId = data.screenshotId;
@@ -2504,11 +2534,24 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       
       await sendLog(jobId, 'info', `✓ Page loaded successfully`);
       
+      // Get page title for better log organization
+      let pageTitle;
+      try {
+        pageTitle = await page.title();
+        await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl} - ${pageTitle}`);
+      } catch (titleError) {
+        await sendLog(jobId, 'warn', `⚠️ Could not get page title: ${titleError.message}`);
+        pageTitle = currentUrl;
+      }
+      
       // Analyze this page with detailed logging
       let pageAnalysis;
       try {
         pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient);
         analyzedPages.push(pageAnalysis);
+        
+        // Send discovered page to backend immediately (incremental storage)
+        await sendDiscoveredPageToBackend(jobId, pageAnalysis);
       } catch (analysisError) {
         await sendLog(jobId, 'error', `❌ Failed to analyze page: ${analysisError.message}`);
         
