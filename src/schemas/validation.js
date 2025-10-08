@@ -26,7 +26,7 @@ const OptionsSchema = z.object({
   timeout: z.number().min(1000).max(300000).default(30000),
   max_retries: z.number().min(1).max(10).default(2),
   enable_screenshots: z.boolean().default(true),
-  enable_video_recording: z.boolean().default(false), // TEMPORARILY disabled due to remote browser hang issue
+  enable_video_recording: z.boolean().default(true), // Mandatory per rule 38 - using browserless native recording
   max_pages: z.number().min(1).max(1000).default(100),
   max_depth: z.number().min(0).max(10).default(3) // Changed min from 1 to 0 to allow single-page analysis
 });

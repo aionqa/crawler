@@ -341,6 +341,80 @@ async function uploadVideoAsync(jobId, videoBuffer) {
   }
 }
 
+// Download video from browserless and upload to MinIO (rule 38-video-recording-mandatory.mdc)
+// Browserless native recording: browser records video, crawler downloads and uploads
+async function downloadAndUploadBrowserlessVideo(jobId, browserServiceUrl, sessionId) {
+  const startTime = Date.now();
+  
+  try {
+    // Wait for browserless to finalize the recording
+    // Browserless needs time after session ends to process video
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    
+    await sendLog(jobId, 'info', `🎥 Downloading video from browserless (session: ${sessionId.substring(0, 8)}...)`);
+    
+    // Step 1: Download video from browserless /download endpoint
+    const videoDownloadUrl = `${browserServiceUrl}/download/${sessionId}`;
+    const downloadResponse = await fetch(videoDownloadUrl);
+    
+    if (!downloadResponse.ok) {
+      throw new Error(`Browserless download failed: ${downloadResponse.status} ${downloadResponse.statusText}`);
+    }
+    
+    const videoBuffer = Buffer.from(await downloadResponse.arrayBuffer());
+    const videoSize = videoBuffer.length;
+    
+    if (videoSize === 0) {
+      throw new Error('Downloaded video is empty (0 bytes)');
+    }
+    
+    await sendLog(jobId, 'info', `✅ Video downloaded (${(videoSize / 1024 / 1024).toFixed(2)} MB)`);
+    
+    // Step 2: Get presigned URL from backend
+    const prepareResult = await backendLogger.prepareVideoUpload(jobId, {
+      size: videoSize,
+      format: 'webm',
+      sessionId: sessionId
+    });
+    
+    if (!prepareResult.ok || !prepareResult.uploadUrl) {
+      throw new Error('Backend did not provide presigned URL');
+    }
+    
+    const { key, uploadUrl, publicUrl } = prepareResult;
+    
+    // Step 3: Upload to MinIO
+    await sendLog(jobId, 'info', `🎥 Uploading to MinIO...`);
+    
+    const uploadSuccess = await backendLogger.uploadVideoToPresignedUrl(uploadUrl, videoBuffer);
+    
+    if (!uploadSuccess) {
+      throw new Error('MinIO upload failed');
+    }
+    
+    const totalDuration = ((Date.now() - startTime) / 1000).toFixed(1);
+    
+    // Step 4: Log success
+    await sendLog(jobId, 'info', `✅ Video uploaded in ${totalDuration}s: ${publicUrl}`, {
+      video_key: key,
+      video_url: publicUrl,
+      video_size_mb: (videoSize / 1024 / 1024).toFixed(2),
+      duration_s: totalDuration,
+      session_id: sessionId,
+      isVideo: true
+    });
+    
+    return { success: true, key, publicUrl };
+    
+  } catch (error) {
+    await sendLog(jobId, 'error', `❌ Video processing failed: ${error.message}`, {
+      session_id: sessionId,
+      browserServiceUrl
+    });
+    return { success: false, error: error.message };
+  }
+}
+
 // Detect captcha on page
 async function detectCaptcha(page, jobId) {
   try {
@@ -874,13 +948,38 @@ async function withBrowser(action, options = {}) {
   const source = options.browserServiceUrl ? 'backend-assigned' : 'environment-default';
   await sendLog(options.jobId || 'server', 'info', `Using remote browser: ${browserServiceUrl} (${source})`);
   
+  // Video recording via browserless native API (rule 38)
+  const enableRecording = options.enable_video_recording !== false; // Default to true
+  let sessionId = null;
+  
   try {
-    // Use the base WebSocket URL for CDP connection with timeout parameter
-    // Browserless accepts timeout via query parameter (in milliseconds)
-    const wsUrl = browserServiceUrl.replace('http://', 'ws://') + '?timeout=900000'; // 15 minute timeout
-    await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket: ${wsUrl}`);
+    // Use browserless WebSocket URL with recording enabled
+    // Browserless natively records when &record=true is set
+    const recordParam = enableRecording ? '&record=true' : '';
+    const wsUrl = browserServiceUrl.replace('http://', 'ws://') + `?timeout=900000${recordParam}`;
+    
+    if (enableRecording) {
+      await sendLog(options.jobId || 'server', 'info', `🎥 Connecting with video recording enabled: ${wsUrl}`);
+    } else {
+      await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket: ${wsUrl}`);
+    }
+    
     browser = await chromium.connectOverCDP(wsUrl);
-    await sendLog(options.jobId || 'server', 'info', 'Successfully connected to remote browser service via CDP (15min timeout)');
+    
+    // Extract session ID from browser endpoint URL
+    // Browserless provides session ID in the CDP endpoint
+    try {
+      const cdpEndpoint = browser.wsEndpoint();
+      const sessionMatch = cdpEndpoint.match(/\/([a-f0-9-]{36})\/?$/);
+      if (sessionMatch) {
+        sessionId = sessionMatch[1];
+        await sendLog(options.jobId || 'server', 'info', `📹 Session ID: ${sessionId}`);
+      }
+    } catch (e) {
+      await sendLog(options.jobId || 'server', 'warn', `Could not extract session ID: ${e.message}`);
+    }
+    
+    await sendLog(options.jobId || 'server', 'info', `✅ Connected to remote browser service via CDP (15min timeout)${enableRecording ? ' with recording' : ''}`);
   } catch (error) {
     await sendLog(options.jobId || 'server', 'error', `Failed to connect to remote browser service: ${error.message}`);
     throw new Error(`Remote browser connection failed: ${error.message}`);
@@ -891,18 +990,6 @@ async function withBrowser(action, options = {}) {
     ignoreHTTPSErrors: true,
     viewport: options.viewport || { width: 1920, height: 1080 }
   };
-  
-  // Video recording is MANDATORY per rule 38-video-recording-mandatory.mdc
-  // Record for ALL browser interactions (local and remote)
-  const enableRecording = options.enable_video_recording !== false; // Default to true
-  
-  if (enableRecording) {
-    contextOptions.recordVideo = { 
-      dir: '/tmp/aionqa_videos',
-      size: { width: 1920, height: 1080 }
-    };
-    await sendLog(options.job_id || 'unknown', 'info', '🎥 Video recording enabled for this session');
-  }
   
   const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
@@ -954,56 +1041,27 @@ async function withBrowser(action, options = {}) {
     }
     
     // Handle video recording - MANDATORY per rule 38-video-recording-mandatory.mdc
-    // Upload asynchronously with proper logging
-    if (page) {
+    // Download from browserless and upload to MinIO asynchronously
+    if (sessionId && enableRecording) {
       try {
-        // Get video object (may return null for remote browsers)
-        let video;
-        try {
-          video = page.video ? page.video() : null;
-        } catch (videoError) {
-          await sendLog(options.job_id || 'unknown', 'warn', `🎥 Could not get video object: ${videoError.message}`);
-          video = null;
-        }
+        await sendLog(options.job_id || 'unknown', 'info', '🎥 Processing video recording from browserless...');
         
-        if (video) {
-          await sendLog(options.job_id || 'unknown', 'info', '🎥 Processing video recording...');
-          const tempPath = `/tmp/run_${options.job_id || Date.now()}_${Date.now()}.webm`;
-          
-          // Save video with timeout
-          const savePromise = video.saveAs(tempPath);
-          const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Video save timeout after 30s')), 30000)
-          );
-          
-          await Promise.race([savePromise, timeoutPromise]);
-          
-          const fs = await import('fs');
-          const videoBuffer = fs.readFileSync(tempPath);
-          const videoSize = videoBuffer.length;
-          
-          // Clean up temp file immediately
-          fs.unlinkSync(tempPath);
-          
-          // Upload video asynchronously (non-blocking per rule 38)
-          // Log upload start immediately
-          await sendLog(options.job_id || 'unknown', 'info', `🎥 Starting video upload (${(videoSize / 1024 / 1024).toFixed(2)} MB)...`);
-          
-          // Start async upload without awaiting
-          uploadVideoAsync(options.job_id, videoBuffer).catch(error => {
-            sendLog(options.job_id || 'unknown', 'error', `🎥 Video upload failed: ${error.message}`);
-          });
-          
-          videoFileId = `uploading-${Date.now()}`; // Placeholder while uploading
-          await sendLog(options.job_id || 'unknown', 'info', '🎥 Video upload started in background');
-        } else {
-          await sendLog(options.job_id || 'unknown', 'warn', '🎥 No video recording available (video object is null)');
-        }
+        // Download video from browserless (async, non-blocking)
+        downloadAndUploadBrowserlessVideo(
+          options.job_id || 'unknown',
+          browserServiceUrl,
+          sessionId
+        ).catch(error => {
+          sendLog(options.job_id || 'unknown', 'error', `🎥 Video processing failed: ${error.message}`);
+        });
+        
+        videoFileId = `browserless-${sessionId}`;
+        await sendLog(options.job_id || 'unknown', 'info', '🎥 Video download and upload started in background');
       } catch (error) {
-        await sendLog(options.job_id || 'unknown', 'error', `🎥 Video recording failed: ${error.message}`);
+        await sendLog(options.job_id || 'unknown', 'error', `🎥 Video processing failed: ${error.message}`);
       }
-    } else {
-      await sendLog(options.job_id || 'unknown', 'info', '🎥 Video recording not available for this page');
+    } else if (enableRecording && !sessionId) {
+      await sendLog(options.job_id || 'unknown', 'warn', '🎥 Video recording enabled but no session ID available');
     }
     
     return {
