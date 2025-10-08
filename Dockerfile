@@ -1,6 +1,6 @@
 FROM node:18-slim
 
-# Install minimal system dependencies
+# Install system dependencies for Playwright (including ffmpeg for video recording)
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -15,11 +15,12 @@ WORKDIR /app
 # Copy package files
 COPY unified-crawler/package*.json ./
 
-# Install dependencies
+# Install Node.js dependencies
 RUN npm install
 
-# Note: Using remote browsers via browserless containers
-# No local browser installation needed
+# Install Playwright browsers and system dependencies (including ffmpeg for video recording)
+# This is required for video recording even when using remote browsers
+RUN npx playwright install --with-deps chromium
 
 # Copy source code
 COPY unified-crawler/src/ ./src/
