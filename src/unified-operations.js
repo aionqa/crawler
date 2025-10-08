@@ -922,7 +922,12 @@ async function withBrowser(action, options = {}) {
         });
         
         // Use presigned URL flow (architecture compliant)
-        const pageUrl = await page.url().catch(() => 'unknown');
+        let pageUrl;
+        try {
+          pageUrl = page.url();
+        } catch (error) {
+          pageUrl = 'unknown';
+        }
         const prepareResult = await backendLogger.prepareScreenshotUpload(options.job_id, pageUrl);
         
         if (prepareResult.ok && prepareResult.key && prepareResult.uploadUrl) {
