@@ -958,10 +958,26 @@ async function withBrowser(action, options = {}) {
     if (page && page.video) {
       try {
         await sendLog(options.job_id || 'unknown', 'info', '🎥 Processing video recording...');
-        const video = page.video();
+        
+        // Get video object (synchronous call)
+        let video;
+        try {
+          video = page.video();
+        } catch (videoError) {
+          await sendLog(options.job_id || 'unknown', 'warn', `🎥 Could not get video object: ${videoError.message}`);
+          video = null;
+        }
+        
         if (video) {
           const tempPath = `/tmp/run_${options.job_id || Date.now()}_${Date.now()}.webm`;
-          await video.saveAs(tempPath);
+          
+          // Save video with timeout
+          const savePromise = video.saveAs(tempPath);
+          const timeoutPromise = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Video save timeout after 30s')), 30000)
+          );
+          
+          await Promise.race([savePromise, timeoutPromise]);
           
           const fs = await import('fs');
           const videoBuffer = fs.readFileSync(tempPath);
@@ -980,10 +996,15 @@ async function withBrowser(action, options = {}) {
           });
           
           videoFileId = `uploading-${Date.now()}`; // Placeholder while uploading
+          await sendLog(options.job_id || 'unknown', 'info', '🎥 Video upload started in background');
+        } else {
+          await sendLog(options.job_id || 'unknown', 'warn', '🎥 No video recording available (video object is null)');
         }
       } catch (error) {
         await sendLog(options.job_id || 'unknown', 'error', `🎥 Video recording failed: ${error.message}`);
       }
+    } else {
+      await sendLog(options.job_id || 'unknown', 'info', '🎥 Video recording not available for this page');
     }
     
     return {
