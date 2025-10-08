@@ -49,7 +49,43 @@ function createErrorResponse(error, id = null) {
 process.env.AGENT_NAME = 'unified-crawler';
 
 // Helper function to send logs to backend via HTTP
+// Send basic page data to backend first (creates page document)
+// Returns the pageId from the backend
+async function sendBasicPageToBackend(jobId, pageUrl, pageTitle) {
+  try {
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    console.log(`[INCREMENTAL-STORAGE] Creating basic page document: ${pageUrl}`);
+    const response = await fetch(`${backendUrl}/jobs/${jobId}/discovered-page`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        jobId,
+        page: {
+          url: pageUrl,
+          title: pageTitle,
+          content: '', // Will be filled later
+          analyzed: false // Will be updated after analysis
+        }
+      })
+    });
+    if (!response.ok) {
+      console.error(`[INCREMENTAL-STORAGE] Backend returned ${response.status}`);
+      return null;
+    } else {
+      const result = await response.json();
+      console.log(`[INCREMENTAL-STORAGE] ✅ Basic page created: ${pageUrl} (ID: ${result.pageId})`);
+      return result.pageId; // Return the MongoDB page ID
+    }
+  } catch (error) {
+    console.error(`[INCREMENTAL-STORAGE] Failed to create basic page: ${error.message}`);
+    return null;
+  }
+}
+
 // Send discovered page to backend immediately (incremental storage)
+// Returns the pageId from the backend
 async function sendDiscoveredPageToBackend(jobId, pageData) {
   try {
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
@@ -66,12 +102,15 @@ async function sendDiscoveredPageToBackend(jobId, pageData) {
     });
     if (!response.ok) {
       console.error(`[INCREMENTAL-STORAGE] Backend returned ${response.status}`);
+      return null;
     } else {
-      console.log(`[INCREMENTAL-STORAGE] ✅ Page stored: ${pageData.url}`);
+      const result = await response.json();
+      console.log(`[INCREMENTAL-STORAGE] ✅ Page stored: ${pageData.url} (ID: ${result.pageId})`);
+      return result.pageId; // Return the MongoDB page ID
     }
   } catch (error) {
     console.error(`[INCREMENTAL-STORAGE] Failed to send discovered page to backend: ${error.message}`);
-    // Don't throw - continue crawling even if page storage fails
+    return null;
   }
 }
 
@@ -2208,7 +2247,7 @@ async function extractFormsAndLogicalGroups(page, jobId) {
 }
 
 // Analyze a single page and extract all data with detailed logging
-async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
+async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, pageId = null) {
   // Verify page is still valid before analysis
   try {
     if (!page || page.isClosed()) {
@@ -2230,7 +2269,11 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient) {
   const conversationId = `conv_${jobId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   
   // Context data to include in all logs for this page
-  const pageContext = { page_url: currentUrl, mode: approach };
+  const pageContext = { 
+    page_url: currentUrl, 
+    mode: approach,
+    pageId: pageId // Include pageId if available
+  };
   
   await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, pageContext);
   await sendLog(jobId, 'info', `📄 ANALYZING PAGE: ${currentTitle}`, pageContext);
@@ -2554,24 +2597,48 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       
       await sendLog(jobId, 'info', `✓ Page loaded successfully`, currentPageContext);
       
-      // Get page title for better log organization
-      let pageTitle;
+      // Get basic page info first
+      let pageTitle, pageUrl;
       try {
         pageTitle = await page.title();
+        pageUrl = await page.url();
         await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl} - ${pageTitle}`, currentPageContext);
-      } catch (titleError) {
-        await sendLog(jobId, 'warn', `⚠️ Could not get page title: ${titleError.message}`, currentPageContext);
-        pageTitle = currentUrl;
+      } catch (error) {
+        await sendLog(jobId, 'error', `❌ Failed to get page info: ${error.message}`, currentPageContext);
+        continue;
       }
       
-      // Analyze this page with detailed logging
+      // Create basic page document in backend FIRST
+      let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle);
+      
+      // Update page context with pageId for all subsequent logs
+      if (pageId) {
+        currentPageContext.pageId = pageId;
+        currentPageContext.page_id = pageId;
+      }
+      
+      // Log that basic page was created
+      if (pageId) {
+        await sendLog(jobId, 'info', `✓ Basic page created in database`, {
+          ...currentPageContext,
+          pageId: pageId
+        });
+      }
+      
+      // Now analyze this page with detailed logging (pageId available for all logs)
       let pageAnalysis;
       try {
-        pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient);
+        pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient, pageId);
         analyzedPages.push(pageAnalysis);
         
-        // Send discovered page to backend immediately (incremental storage)
-        await sendDiscoveredPageToBackend(jobId, pageAnalysis);
+        // Update the page with full analysis data
+        if (pageId) {
+          await sendDiscoveredPageToBackend(jobId, pageAnalysis);
+          await sendLog(jobId, 'info', `✓ Page analysis complete and stored`, {
+            ...currentPageContext,
+            pageId: pageId
+          });
+        }
       } catch (analysisError) {
         await sendLog(jobId, 'error', `❌ Failed to analyze page: ${analysisError.message}`, currentPageContext);
         
