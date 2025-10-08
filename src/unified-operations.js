@@ -955,20 +955,19 @@ async function withBrowser(action, options = {}) {
     
     // Handle video recording - MANDATORY per rule 38-video-recording-mandatory.mdc
     // Upload asynchronously with proper logging
-    if (page && page.video) {
+    if (page) {
       try {
-        await sendLog(options.job_id || 'unknown', 'info', '🎥 Processing video recording...');
-        
-        // Get video object (synchronous call)
+        // Get video object (may return null for remote browsers)
         let video;
         try {
-          video = page.video();
+          video = page.video ? page.video() : null;
         } catch (videoError) {
           await sendLog(options.job_id || 'unknown', 'warn', `🎥 Could not get video object: ${videoError.message}`);
           video = null;
         }
         
         if (video) {
+          await sendLog(options.job_id || 'unknown', 'info', '🎥 Processing video recording...');
           const tempPath = `/tmp/run_${options.job_id || Date.now()}_${Date.now()}.webm`;
           
           // Save video with timeout
