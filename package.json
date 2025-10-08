@@ -6,13 +6,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
-    "cli": "node src/cli.js",
-    "test:login": "node src/cli.js --file cli-examples/login-example.json",
-    "test:crawl": "node src/cli.js --file cli-examples/crawl-example.json",
-    "test:analysis": "node src/cli.js --file cli-examples/analysis-example.json",
-    "examples": "node src/cli.js --list-examples",
-    "generate-payload": "node src/generate-payload.js"
+    "dev": "node --watch src/server.js"
   },
   "dependencies": {
     "express": "^4.18.2",
