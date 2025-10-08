@@ -14,6 +14,7 @@ import swaggerUi from 'swagger-ui-express';
 import swaggerJSDoc from 'swagger-jsdoc';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import * as backendLogger from './backend-logger.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -67,34 +68,36 @@ const swaggerSpec = swaggerJSDoc({
   apis: [path.join(__dirname, "server.js")],
 });
 
-// Helper function to send logs to backend
+// Helper function to send logs to backend using structured logging endpoints
 async function sendLogToBackend(jobId, level, message, data = {}) {
   try {
-    const timestamp = new Date().toISOString();
     const mode = data.mode || 'auto';
-    // Replace 'auto' mode with 'text' for component naming consistency
     const componentMode = mode === 'auto' ? 'text' : mode;
     const componentName = `CRAWLER-${componentMode.toUpperCase()}`;
     
-    const response = await fetch(`${BACKEND_URL}/jobs/${jobId}/logs`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
+    // Use structured logging based on presence of page_url
+    const pageUrl = data.page_url || data.pageUrl;
+    
+    if (pageUrl) {
+      // Page-level log
+      await backendLogger.appendPageLog(
+        jobId,
+        pageUrl,
         level,
         message,
-        data: {
-          ...data,
-          timestamp
-        },
-        agent_name: SERVICE_NAME,
-        component: componentName
-      })
-    });
-    
-    if (!response.ok) {
-      console.error(`❌ Failed to send log to backend: ${response.status} ${response.statusText}`);
+        null, // pageLogId - will be created if needed
+        componentName,
+        data
+      );
+    } else {
+      // Job-level log
+      await backendLogger.appendJobLog(
+        jobId,
+        level,
+        message,
+        componentName,
+        data
+      );
     }
   } catch (error) {
     console.error(`❌ Error sending log to backend:`, error);

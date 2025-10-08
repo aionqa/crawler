@@ -6,6 +6,7 @@ import { chromium } from 'playwright';
 import OpenAI from 'openai';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import * as backendLogger from './backend-logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,6 +48,30 @@ function createErrorResponse(error, id = null) {
 
 // Set agent name
 process.env.AGENT_NAME = 'unified-crawler';
+
+// Sequence tracking per job (for ordered logging)
+const jobSequences = new Map(); // jobId -> sequenceNumber
+
+function getNextSequence(jobId) {
+  if (!jobSequences.has(jobId)) {
+    jobSequences.set(jobId, 0);
+  }
+  const seq = jobSequences.get(jobId);
+  jobSequences.set(jobId, seq + 1);
+  return seq;
+}
+
+// Helper function to remove ASCII graphics from log messages
+function cleanLogMessage(message) {
+  // Remove box drawing characters
+  message = message.replace(/[╔╗╚╝═║│┌┐└┘─├┤┬┴┼━┃┏┓┗┛┣┫┳┻╋]/g, '');
+  // Remove decorative emojis at start of lines (but keep meaningful ones)
+  message = message.replace(/^[🌍📍⏳🔗📊📋🔍📄🎯💬✓✅🚀🎉📸🎥🔐⚠️❌]/gm, '');
+  // Clean up excessive whitespace
+  message = message.replace(/\n{3,}/g, '\n\n');
+  message = message.trim();
+  return message;
+}
 
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
@@ -114,107 +139,98 @@ async function sendDiscoveredPageToBackend(jobId, pageData) {
   }
 }
 
+/**
+ * Send log to backend - SINGLE ENDPOINT ONLY
+ * Backend determines collection based on metadata:
+ * - No page_url & no conversationId → logs_jobs
+ * - Has page_url, no conversationId → logs_pages  
+ * - Has conversationId → logs_aichats
+ */
 async function sendLog(jobId, level, message, data = {}, conversationId = null) {
-  // Check if we're in CLI mode (no backend URL available or CLI mode flag)
-  const isCLIMode = process.env.CLI_MODE === 'true' || !process.env.BACKEND_URL;
+  // Clean log message
+  const cleanedMessage = cleanLogMessage(message);
   
-  // Determine agent name and component based on mode and action
+  // Determine component name
   const mode = data.mode || 'auto';
-  const agentName = 'unified-crawler';
-  
-  // Create specific component name based on action and mode
-  // Replace 'auto' mode with 'text' for component naming consistency
   const componentMode = mode === 'auto' ? 'text' : mode;
   let componentName = `CRAWLER-${componentMode.toUpperCase()}`;
+  
   if (data.action) {
     switch (data.action) {
       case 'screenshot':
         componentName = `CRAWLER-${componentMode.toUpperCase()}-SCREENSHOT`;
         break;
-      case 'text_login_analysis':
-        componentName = `CRAWLER-${componentMode.toUpperCase()}-TEXT-LOGIN-OPENAI`;
-        break;
       case 'ai_analysis':
         componentName = `CRAWLER-${componentMode.toUpperCase()}-OPENAI`;
         break;
-      case 'form_fill':
-        componentName = `CRAWLER-${componentMode.toUpperCase()}-FORM-FILL`;
+      case 'ai_request':
+        componentName = 'OPENAI-REQUEST';
         break;
-      case 'login_execution':
-        componentName = `CRAWLER-${componentMode.toUpperCase()}-LOGIN-EXECUTION`;
-        break;
-      case 'token_extraction':
-        componentName = `CRAWLER-${componentMode.toUpperCase()}-TOKEN-EXTRACTION`;
+      case 'ai_response':
+        componentName = 'OPENAI-RESPONSE';
         break;
       default:
         componentName = `CRAWLER-${componentMode.toUpperCase()}`;
     }
   }
   
-  // Extract special fields for AI conversations, screenshots, and page URLs
-  const specialFields = {};
-  if (data.aiConversationId) {
-    specialFields.aiConversationId = data.aiConversationId;
-  }
-  if (conversationId) {
-    specialFields.aiConversationId = conversationId;
-    specialFields.conversationId = conversationId;
-  }
-  if (data.screenshotId) {
-    specialFields.screenshotId = data.screenshotId;
-  }
-  if (data.screenshotPath) {
-    specialFields.screenshotPath = data.screenshotPath;
-  }
-  // Extract page_url from data to include as top-level field for proper routing
-  if (data.page_url) {
-    specialFields.page_url = data.page_url;
-    specialFields.pageUrl = data.page_url; // Include both formats for compatibility
-  }
+  // Always log to console for docker logs (human-readable)
+  console.log(`[${level.toUpperCase()}] [${componentName}] ${cleanedMessage}`);
   
-  if (isCLIMode) {
-    // CLI mode: output structured JSON to stdout
-    const logEntry = {
-      timestamp: new Date().toISOString(),
-      level: level.toUpperCase(),
-      message,
-      jobId,
-      agent: agentName,
-      component: componentName,
-      mode: mode, // Include mode in log data
-      ...data,
-      ...specialFields
-    };
-    console.log(JSON.stringify(logEntry));
-  } else {
-    // Server mode: send to console and backend
-    console.log(`[${level.toUpperCase()}] [${componentName}] ${message}`);
+  try {
+    const pageUrl = data.page_url;
+    const convId = conversationId || data.aiConversationId;
     
-    // Send log to backend via HTTP
-    try {
-      const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
-      await fetch(`${backendUrl}/logs`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          jobId,
-          level,
-          message,
-          component: componentName,
-          agentName,
-          metadata: { mode, ...data },
-          ...specialFields
-        })
-      });
-    } catch (error) {
-      console.error(`Failed to send log to backend: ${error.message}`);
+    // Prepare metadata
+    const metadata = { 
+      mode, 
+      ...data,
+      sequenceNumber: getNextSequence(jobId)
+    };
+    
+    // Route based on presence of page_url and conversationId
+    if (convId && pageUrl) {
+      // AI chat log
+      await backendLogger.appendAIChatLog(
+        jobId,
+        pageUrl,
+        convId,
+        level,
+        cleanedMessage,
+        data.chatContextId || null,
+        componentName,
+        metadata,
+        data.requestPayload || null,
+        data.responsePayload || null
+      );
+    } else if (pageUrl) {
+      // Page log
+      await backendLogger.appendPageLog(
+        jobId,
+        pageUrl,
+        level,
+        cleanedMessage,
+        data.pageContextId || null,
+        componentName,
+        metadata
+      );
+    } else {
+      // Job log
+      await backendLogger.appendJobLog(
+        jobId,
+        level,
+        cleanedMessage,
+        componentName,
+        metadata
+      );
     }
+    
+  } catch (error) {
+    console.error(`Failed to send log: ${error.message}`);
   }
 }
 
-// Upload files via backend API
+// Upload files via backend API (legacy - used for fallback only)
 async function uploadFileToBackend({ buffer, contentType, type, jobId, metadata = {} }) {
   try {
     const backendUrl = process.env.BACKEND_URL || 'http://localhost:4000';
@@ -249,6 +265,79 @@ async function uploadFileToBackend({ buffer, contentType, type, jobId, metadata 
   } catch (error) {
     console.error(`[unified-crawler] Backend upload error: ${error.message}`);
     return null;
+  }
+}
+
+// Async video upload with proper logging (rule 38-video-recording-mandatory.mdc)
+async function uploadVideoAsync(jobId, videoBuffer) {
+  const uploadStartTime = Date.now();
+  
+  try {
+    // Step 1: Log upload start
+    await sendLog(jobId, 'info', '🎥 Preparing video upload...');
+    
+    // Step 2: Get presigned URL from backend
+    const prepareResult = await backendLogger.prepareVideoUpload(jobId, {
+      size: videoBuffer.length,
+      format: 'webm'
+    });
+    
+    if (!prepareResult.ok || !prepareResult.key || !prepareResult.uploadUrl) {
+      throw new Error('Failed to prepare video upload - backend did not return key/uploadUrl');
+    }
+    
+    const { key, uploadUrl, publicUrl } = prepareResult;
+    
+    // Step 3: Upload to MinIO via presigned URL
+    await sendLog(jobId, 'info', `🎥 Uploading video to MinIO (${(videoBuffer.length / 1024 / 1024).toFixed(2)} MB)...`);
+    
+    const uploadSuccess = await backendLogger.uploadVideoToPresignedUrl(uploadUrl, videoBuffer);
+    
+    if (!uploadSuccess) {
+      throw new Error('Failed to upload video to MinIO via presigned URL');
+    }
+    
+    // Step 4: Log upload completion with URL
+    const uploadDuration = Date.now() - uploadStartTime;
+    await sendLog(jobId, 'info', `🎥 Video uploaded successfully in ${(uploadDuration / 1000).toFixed(1)}s`, {
+      videoKey: key,
+      videoUrl: publicUrl,
+      videoSize: videoBuffer.length,
+      uploadDurationMs: uploadDuration,
+      isVideo: true
+    });
+    
+    // Step 5: Track media file in backend
+    try {
+      const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+      await fetch(`${backendUrl}/track-media-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobId,
+          mediaType: 'video',
+          fileInfo: {
+            videoKey: key,
+            objectName: key,
+            url: publicUrl,
+            size: videoBuffer.length,
+            duration: uploadDuration,
+            format: 'webm'
+          }
+        })
+      });
+    } catch (trackingError) {
+      console.warn('[VIDEO] ⚠️ Failed to track media file:', trackingError.message);
+    }
+    
+    return { success: true, key, publicUrl };
+    
+  } catch (error) {
+    await sendLog(jobId, 'error', `🎥 Video upload failed: ${error.message}`, {
+      error: error.message,
+      uploadDurationMs: Date.now() - uploadStartTime
+    });
+    throw error;
   }
 }
 
@@ -377,87 +466,79 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
       throw new Error('Screenshot capture returned empty buffer');
     }
     
-    // Generate unique screenshot ID
-    const screenshotId = `screenshot_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
-    const uploadResult = await uploadFileToBackend({
-      buffer: screenshot,
-      contentType: 'image/png',
-      type: 'screenshot',
-      jobId,
-      metadata: {
-        screenshotId,
-        action,
-        timestamp: new Date().toISOString(),
-        pageUrl: page.url(),
-        pageTitle: await page.title(),
-        ...context
-      }
+    // Step 1: Get presigned URL and key from backend (backend generates filename)
+    const pageUrl = page.url();
+    const prepareResult = await backendLogger.prepareScreenshotUpload(jobId, pageUrl, {
+      action,
+      pageTitle: await page.title(),
+      ...context
     });
     
-    if (uploadResult) {
-      const { fileId, objectName } = uploadResult;
-      
-      // Use configurable MinIO URL or construct from backend URL
-      const minioUrl = process.env.MINIO_PUBLIC_URL || process.env.MINIO_URL || 'http://localhost:9002';
-      const minioBucket = process.env.MINIO_BUCKET || 'aionqa-files';
-      const screenshotPath = `${minioUrl}/${minioBucket}/${objectName}`;
-      
-      // Convert screenshot to base64 for display in logs
-      const screenshotBase64 = screenshot.toString('base64');
-      const screenshotDataUrl = `data:image/png;base64,${screenshotBase64}`;
-      
-      await sendLog(jobId, 'info', `📸 Screenshot captured: ${action}`, { 
-        fileId, 
-        screenshotId: objectName, // Use objectName as screenshotId for API access
-        action: 'screenshot',
-        url: page.url(),
-        title: await page.title(),
-        screenshotPath,
-        screenshotData: screenshotDataUrl, // Include actual screenshot data
-        resolution: 'full_hd',
-        timestamp: new Date().toISOString(),
-        ...context
-      });
-
-      // Track media file creation in job tracking
-      try {
-        const jobTrackingUrl = process.env.BACKEND_URL || 'http://back:4000';
-        await fetch(`${jobTrackingUrl}/track-media-file`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jobId,
-            mediaType: 'screenshot',
-            fileInfo: {
-              fileId,
-              screenshotId: objectName, // Use objectName as screenshotId
-              url: screenshotPath,
-              size: screenshot.length,
-              action,
-              step: context.step,
-              pageUrl: page.url(),
-              pageTitle: await page.title(),
-              ...context
-            }
-          })
-        });
-      } catch (trackingError) {
-        console.warn('[SCREENSHOT] ⚠️ Failed to track media file:', trackingError.message);
-      }
-      
-      return {
-        fileId,
-        screenshotId,
-        screenshotPath,
-        action,
-        timestamp: new Date().toISOString(),
-        pageUrl: page.url(),
-        pageTitle: await page.title()
-      };
+    if (!prepareResult.ok || !prepareResult.key || !prepareResult.uploadUrl) {
+      throw new Error('Failed to prepare screenshot upload - backend did not return key/uploadUrl');
     }
     
-    return null;
+    const { key, uploadUrl, publicUrl } = prepareResult;
+    
+    // Step 2: Upload directly to MinIO via presigned URL
+    const uploadSuccess = await backendLogger.uploadScreenshotToPresignedUrl(uploadUrl, screenshot);
+    
+    if (!uploadSuccess) {
+      throw new Error('Failed to upload screenshot to MinIO via presigned URL');
+    }
+    
+    // Step 3: Use backend-provided public URL (backend knows MinIO configuration)
+    const screenshotPath = publicUrl || key; // Fallback to key if publicUrl not provided
+    
+    // Step 4: Log the screenshot with backend-generated key
+    await sendLog(jobId, 'info', `📸 Screenshot captured: ${action}`, { 
+      page_url: pageUrl, // Add page_url to route to logs_pages
+      screenshotKey: key,
+      screenshotId: key, // Use backend-generated key as screenshotId
+      action: 'screenshot',
+      url: pageUrl,
+      title: await page.title(),
+      screenshotPath,
+      resolution: 'full_hd',
+      timestamp: new Date().toISOString(),
+      ...context
+    });
+
+    // Step 5: Track media file creation in job tracking
+    try {
+      const jobTrackingUrl = process.env.BACKEND_URL || 'http://back:4000';
+      await fetch(`${jobTrackingUrl}/track-media-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobId,
+          mediaType: 'screenshot',
+          fileInfo: {
+            screenshotId: key,
+            objectName: key,
+            url: screenshotPath,
+            size: screenshot.length,
+            action,
+            step: context.step,
+            pageUrl: pageUrl,
+            pageTitle: await page.title(),
+            ...context
+          }
+        })
+      });
+    } catch (trackingError) {
+      console.warn('[SCREENSHOT] ⚠️ Failed to track media file:', trackingError.message);
+    }
+    
+    return {
+      screenshotKey: key,
+      screenshotId: key,
+      screenshotPath,
+      action,
+      timestamp: new Date().toISOString(),
+      pageUrl: pageUrl,
+      pageTitle: await page.title()
+    };
   } catch (error) {
     // Get page URL safely
     let pageUrl = 'unknown';
@@ -777,86 +858,32 @@ async function validateLoginSuccessWithAI(page, context, openaiClient, approach)
 
 // Browser automation wrapper
 async function withBrowser(action, options = {}) {
-  const isCLIMode = process.env.CLI_MODE === 'true';
   const useRemoteBrowser = process.env.USE_REMOTE_BROWSER === 'true';
   
-  // In container, always use remote browser even in CLI mode
+  // Always use remote browser (crawler runs in Docker container)
   const inContainer = !!process.env.BACKEND_URL || useRemoteBrowser;
   
   // Debug environment variables
-  await sendLog(options.jobId || 'debug', 'info', `Browser config - CLI_MODE: ${isCLIMode}, USE_REMOTE_BROWSER: ${useRemoteBrowser}, inContainer: ${inContainer}`);
+  await sendLog(options.jobId || 'debug', 'info', `Browser config - USE_REMOTE_BROWSER: ${useRemoteBrowser}, inContainer: ${inContainer}`);
   
   let browser;
   
-  if (inContainer) {
-    // Container mode: ALWAYS use remote browsers
-    const browserServiceUrl = process.env.BROWSER_SERVICE_URL || 'http://browser-1:3000';
-    await sendLog(options.jobId || 'server', 'info', `Using remote browser service: ${browserServiceUrl}`);
-    
-    try {
-      // Use the base WebSocket URL for CDP connection with timeout parameter
-      // Browserless accepts timeout via query parameter (in milliseconds)
-      const wsUrl = browserServiceUrl.replace('http://', 'ws://') + '?timeout=900000'; // 15 minute timeout
-      await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket: ${wsUrl}`);
-      browser = await chromium.connectOverCDP(wsUrl);
-      await sendLog(options.jobId || 'server', 'info', 'Successfully connected to remote browser service via CDP (15min timeout)');
-    } catch (error) {
-      await sendLog(options.jobId || 'server', 'error', `Failed to connect to remote browser service: ${error.message}`);
-      throw new Error(`Remote browser connection failed: ${error.message}`);
-    }
-  } else {
-    // True local CLI mode (outside container): use system browser
-    await sendLog(options.jobId || 'cli', 'info', 'Launching local browser for CLI mode');
-    
-    // Try different executable paths
-    const chromiumPaths = [
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/google-chrome',
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', // macOS
-      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' // Windows
-    ];
-    
-    let executablePath = null;
-    for (const path of chromiumPaths) {
-      try {
-        const fs = await import('fs');
-        if (fs.existsSync(path)) {
-          executablePath = path;
-          break;
-        }
-      } catch (e) {
-        continue;
-      }
-    }
-    
-    browser = await chromium.launch({
-      headless: options.headless !== false,
-      executablePath: executablePath || undefined, // Use default if none found
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-gpu',
-        '--disable-dev-shm-usage',
-        '--disable-web-security',
-        '--disable-features=VizDisplayCompositor',
-        '--disable-software-rasterizer',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-background-timer-throttling',
-        '--disable-backgrounding-occluded-windows',
-        '--disable-breakpad',
-        '--disable-component-extensions-with-background-pages',
-        '--disable-features=TranslateUI',
-        '--disable-ipc-flooding-protection',
-        '--disable-renderer-backgrounding',
-        '--enable-features=NetworkService,NetworkServiceInProcess',
-        '--force-color-profile=srgb',
-        '--metrics-recording-only',
-        '--mute-audio',
-        '--no-first-run'
-      ]
-    });
+  // Container mode: ALWAYS use remote browsers
+  // Use backend-assigned browser endpoint if provided, otherwise use environment default
+  const browserServiceUrl = options.browserServiceUrl || process.env.BROWSER_SERVICE_URL || 'http://browser-1:3000';
+  const source = options.browserServiceUrl ? 'backend-assigned' : 'environment-default';
+  await sendLog(options.jobId || 'server', 'info', `Using remote browser: ${browserServiceUrl} (${source})`);
+  
+  try {
+    // Use the base WebSocket URL for CDP connection with timeout parameter
+    // Browserless accepts timeout via query parameter (in milliseconds)
+    const wsUrl = browserServiceUrl.replace('http://', 'ws://') + '?timeout=900000'; // 15 minute timeout
+    await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket: ${wsUrl}`);
+    browser = await chromium.connectOverCDP(wsUrl);
+    await sendLog(options.jobId || 'server', 'info', 'Successfully connected to remote browser service via CDP (15min timeout)');
+  } catch (error) {
+    await sendLog(options.jobId || 'server', 'error', `Failed to connect to remote browser service: ${error.message}`);
+    throw new Error(`Remote browser connection failed: ${error.message}`);
   }
   
   const contextOptions = {
@@ -865,13 +892,16 @@ async function withBrowser(action, options = {}) {
     viewport: options.viewport || { width: 1920, height: 1080 }
   };
   
-  // Add video recording only for local browsers (true CLI mode outside container)
-  // Disabled for remote browsers as they don't have ffmpeg
-  if (!inContainer && options.enable_video_recording) {
+  // Video recording is MANDATORY per rule 38-video-recording-mandatory.mdc
+  // Record for ALL browser interactions (local and remote)
+  const enableRecording = options.enable_video_recording !== false; // Default to true
+  
+  if (enableRecording) {
     contextOptions.recordVideo = { 
       dir: '/tmp/aionqa_videos',
       size: { width: 1920, height: 1080 }
     };
+    await sendLog(options.job_id || 'unknown', 'info', '🎥 Video recording enabled for this session');
   }
   
   const context = await browser.newContext(contextOptions);
@@ -890,32 +920,37 @@ async function withBrowser(action, options = {}) {
           type: 'png', 
           fullPage: true 
         });
-        const uploadResult = await uploadFileToBackend({
-          buffer: screenshot,
-          contentType: 'image/png',
-          type: 'screenshot',
-          jobId: options.job_id
-        });
-        // FIXED: Extract fileId from upload result object
-        if (uploadResult && uploadResult.fileId) {
-          screenshotFileId = uploadResult.fileId;
-          // Include screenshotId in metadata so UI can construct URL
-          await sendLog(options.job_id || 'unknown', 'info', `📸 Screenshot captured successfully: ${screenshotFileId}`, {
-            screenshotId: screenshotFileId,
-            fileId: screenshotFileId,
-            action: 'screenshot',
-            isScreenshot: true
-          });
+        
+        // Use presigned URL flow (architecture compliant)
+        const pageUrl = await page.url().catch(() => 'unknown');
+        const prepareResult = await backendLogger.prepareScreenshotUpload(options.job_id, pageUrl);
+        
+        if (prepareResult.ok && prepareResult.key && prepareResult.uploadUrl) {
+          const { key, uploadUrl } = prepareResult;
+          const uploadSuccess = await backendLogger.uploadScreenshotToPresignedUrl(uploadUrl, screenshot);
+          
+          if (uploadSuccess) {
+            screenshotFileId = key;
+            await sendLog(options.job_id || 'unknown', 'info', `📸 Screenshot captured successfully: ${key}`, {
+              screenshotKey: key,
+              screenshotId: key,
+              action: 'screenshot',
+              isScreenshot: true
+            });
+          } else {
+            await sendLog(options.job_id || 'unknown', 'warn', `📸 Screenshot upload to MinIO failed`);
+          }
         } else {
-          await sendLog(options.job_id || 'unknown', 'warn', `📸 Screenshot captured but upload returned no file ID`);
+          await sendLog(options.job_id || 'unknown', 'warn', `📸 Screenshot prepared but backend did not return presigned URL`);
         }
       } catch (error) {
         await sendLog(options.job_id || 'unknown', 'error', `📸 Screenshot capture failed: ${error.message}`);
       }
     }
     
-    // Handle video recording if enabled
-    if (options.enable_video_recording && page && page.video) {
+    // Handle video recording - MANDATORY per rule 38-video-recording-mandatory.mdc
+    // Upload asynchronously with proper logging
+    if (page && page.video) {
       try {
         await sendLog(options.job_id || 'unknown', 'info', '🎥 Processing video recording...');
         const video = page.video();
@@ -924,17 +959,22 @@ async function withBrowser(action, options = {}) {
           await video.saveAs(tempPath);
           
           const fs = await import('fs');
-          const buf = fs.readFileSync(tempPath);
-          videoFileId = await uploadFileToBackend({
-            buffer: buf,
-            contentType: 'video/webm',
-            type: 'video',
-            jobId: options.job_id
+          const videoBuffer = fs.readFileSync(tempPath);
+          const videoSize = videoBuffer.length;
+          
+          // Clean up temp file immediately
+          fs.unlinkSync(tempPath);
+          
+          // Upload video asynchronously (non-blocking per rule 38)
+          // Log upload start immediately
+          await sendLog(options.job_id || 'unknown', 'info', `🎥 Starting video upload (${(videoSize / 1024 / 1024).toFixed(2)} MB)...`);
+          
+          // Start async upload without awaiting
+          uploadVideoAsync(options.job_id, videoBuffer).catch(error => {
+            sendLog(options.job_id || 'unknown', 'error', `🎥 Video upload failed: ${error.message}`);
           });
           
-          // Clean up temp file
-          fs.unlinkSync(tempPath);
-          await sendLog(options.job_id || 'unknown', 'info', `🎥 Video recorded successfully: ${videoFileId}`);
+          videoFileId = `uploading-${Date.now()}`; // Placeholder while uploading
         }
       } catch (error) {
         await sendLog(options.job_id || 'unknown', 'error', `🎥 Video recording failed: ${error.message}`);
@@ -3269,8 +3309,9 @@ export async function attemptLogin(url, username, password, cookies, context, op
     }, {
       headless: context.options?.headless !== false,
       enable_screenshots: context.options?.enable_screenshots !== false,
-      enable_video_recording: context.options?.enable_video_recording || false,
-      job_id: jobId
+      enable_video_recording: true, // MANDATORY per rule 38-video-recording-mandatory.mdc
+      job_id: jobId,
+      browserServiceUrl: context.browserServiceUrl
     });
 
     // Create page context for final logs
@@ -3397,8 +3438,9 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     }, {
       headless: context.options?.headless !== false,
       enable_screenshots: context.options?.enable_screenshots !== false,
-      enable_video_recording: context.options?.enable_video_recording || false,
-      job_id: jobId
+      enable_video_recording: true, // MANDATORY per rule 38-video-recording-mandatory.mdc
+      job_id: jobId,
+      browserServiceUrl: context.browserServiceUrl
     });
 
     await sendLog(jobId, 'info', `✅ Crawl completed in ${result.duration_ms}ms`);
