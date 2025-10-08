@@ -966,17 +966,31 @@ async function withBrowser(action, options = {}) {
     
     browser = await chromium.connectOverCDP(wsUrl);
     
-    // Extract session ID from browser endpoint URL
-    // Browserless provides session ID in the CDP endpoint
-    try {
-      const cdpEndpoint = browser.wsEndpoint();
-      const sessionMatch = cdpEndpoint.match(/\/([a-f0-9-]{36})\/?$/);
-      if (sessionMatch) {
-        sessionId = sessionMatch[1];
-        await sendLog(options.jobId || 'server', 'info', `📹 Session ID: ${sessionId}`);
+    // Get session ID from browserless after connection
+    // Browserless creates a session ID that we need to retrieve via API
+    if (enableRecording) {
+      try {
+        // Query browserless for active sessions to find our session ID
+        const sessionsUrl = `${browserServiceUrl}/sessions`;
+        const sessionsResponse = await fetch(sessionsUrl);
+        
+        if (sessionsResponse.ok) {
+          const sessions = await sessionsResponse.json();
+          // Get the most recent session (should be ours)
+          // Browserless returns browserId which is used for video download
+          if (sessions && sessions.length > 0) {
+            const latestSession = sessions[sessions.length - 1];
+            sessionId = latestSession.browserId || latestSession.id;
+            await sendLog(options.jobId || 'server', 'info', `📹 Browser Session ID: ${sessionId}`);
+          } else {
+            await sendLog(options.jobId || 'server', 'warn', 'No active sessions found in browserless');
+          }
+        } else {
+          await sendLog(options.jobId || 'server', 'warn', `Could not query browserless sessions: ${sessionsResponse.status}`);
+        }
+      } catch (e) {
+        await sendLog(options.jobId || 'server', 'warn', `Session ID query error: ${e.message}`);
       }
-    } catch (e) {
-      await sendLog(options.jobId || 'server', 'warn', `Could not extract session ID: ${e.message}`);
     }
     
     await sendLog(options.jobId || 'server', 'info', `✅ Connected to remote browser service via CDP (15min timeout)${enableRecording ? ' with recording' : ''}`);
