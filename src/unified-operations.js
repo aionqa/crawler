@@ -529,6 +529,20 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
     // Ensure page is properly loaded and sized
     await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
     
+    // Scroll to bottom and back to top to ensure full page is loaded
+    try {
+      await page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight);
+      });
+      await page.waitForTimeout(100);
+      await page.evaluate(() => {
+        window.scrollTo(0, 0);
+      });
+      await page.waitForTimeout(100);
+    } catch (scrollError) {
+      // Ignore scroll errors
+    }
+    
     // Capture full HD screenshot
     const screenshot = await page.screenshot({ 
       type: 'png', 
@@ -872,7 +886,7 @@ Respond with JSON:
         }],
         response_format: { type: "json_object" }
       },
-      validationScreenshot?.fileId,
+      validationScreenshot?.screenshotId,
       currentUrl,
       {
         approach: approach,
@@ -999,14 +1013,19 @@ async function withBrowser(action, options = {}) {
     throw new Error(`Remote browser connection failed: ${error.message}`);
   }
   
+  // Disable default viewport so Chrome's window size becomes the viewport
+  // This is the key to getting true 1920x1080 screenshots in headless mode
   const contextOptions = {
     userAgent: options.userAgent,
     ignoreHTTPSErrors: true,
-    viewport: options.viewport || { width: 1920, height: 1080 }
+    viewport: null // Disable Playwright's default 800x600 viewport - use Chrome's window size instead
   };
   
   const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
+  
+  // Set viewport to match window size (1920x1080 from launch args)
+  await page.setViewportSize({ width: 1920, height: 1080 });
   
   let videoFileId = null;
   let screenshotFileId = null;
@@ -2509,17 +2528,32 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
         // MEDIA: Use vision API with screenshot
         await sendLog(jobId, 'info', `📸 Using AI vision to analyze screenshot...`, pageContext);
         
-        let screenshot, screenshotBase64;
+        // Take screenshot and upload to MinIO for proper logging
+        const screenshotResult = await takeScreenshot(page, jobId, 'ai_vision_analysis', {
+          approach: approach,
+          mode: approach,
+          analysis_type: 'ai_vision_analysis',
+          page_title: currentTitle,
+          full_hd_screenshot: true
+        });
+        
+        if (!screenshotResult) {
+          await sendLog(jobId, 'warn', `⚠️ Failed to capture screenshot for AI vision analysis`, pageContext);
+          return; // Skip AI analysis if screenshot fails
+        }
+        
+        // Get screenshot for base64 encoding for OpenAI Vision API
+        let screenshotBase64;
         try {
-          screenshot = await page.screenshot({ 
+          const screenshot = await page.screenshot({ 
             type: 'png', 
             fullPage: true,  // Capture full page for complete analysis
             animations: 'disabled'
           });
           screenshotBase64 = screenshot.toString('base64');
         } catch (screenshotError) {
-          await sendLog(jobId, 'warn', `⚠️ Failed to capture screenshot for AI: ${screenshotError.message}`, pageContext);
-          return; // Skip AI analysis if screenshot fails
+          await sendLog(jobId, 'warn', `⚠️ Failed to encode screenshot for AI: ${screenshotError.message}`, pageContext);
+          return; // Skip AI analysis if screenshot encoding fails
         }
         
         aiMessages = [{
@@ -2610,7 +2644,7 @@ Provide brief summary in JSON format with testing recommendations.`;
           response_format: { type: "json_object" },
           max_tokens: approach === 'media' ? 500 : 300
         },
-        screenshotResult?.fileId,
+        screenshotResult?.screenshotId,
         currentUrl,
         {
           approach: approach,
@@ -2620,7 +2654,9 @@ Provide brief summary in JSON format with testing recommendations.`;
           links_count: linksData.total,
           has_forms: forms.length > 0,
           has_internal_links: linksData.internal.length > 0,
-          analysis_mode: approach === 'media' ? 'vision' : 'text'
+          analysis_mode: approach === 'media' ? 'vision' : 'text',
+          screenshot_id: screenshotResult?.screenshotId,
+          full_hd_screenshot: approach === 'media'
         }
       );
       
