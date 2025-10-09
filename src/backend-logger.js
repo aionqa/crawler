@@ -324,3 +324,30 @@ export async function uploadVideoToPresignedUrl(uploadUrl, videoBuffer) {
     return false;
   }
 }
+
+/**
+ * Track media upload (screenshot or video) with backend
+ * @param {string} jobId - Job ID
+ * @param {string} mediaType - 'screenshot' or 'video'
+ * @param {object} fileInfo - File information
+ * @returns {Promise<object>} Response
+ */
+export async function trackMediaUpload(jobId, mediaType, fileInfo) {
+  try {
+    const response = await fetch(`${BACKEND_URL}/api/media/track`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId, mediaType, fileInfo })
+    });
+    
+    if (!response.ok) {
+      console.error(`❌ Failed to track ${mediaType} media: ${response.status}`);
+      return { ok: false, error: `HTTP ${response.status}` };
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error(`❌ Error tracking ${mediaType} media:`, error);
+    return { ok: false, error: error.message };
+  }
+}
