@@ -1,12 +1,13 @@
 FROM node:18-slim
 
-# Install system dependencies for Playwright (including ffmpeg for video recording)
+# Install system dependencies for Playwright and video recording
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     ca-certificates \
     procps \
     curl \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

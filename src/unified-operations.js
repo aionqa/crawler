@@ -7,6 +7,8 @@ import OpenAI from 'openai';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import * as backendLogger from './backend-logger.js';
+import fs from 'fs';
+import ffmpeg from 'fluent-ffmpeg';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -164,6 +166,9 @@ async function sendLog(jobId, level, message, data = {}, conversationId = null) 
     switch (data.action) {
       case 'screenshot':
         componentName = `CRAWLER-${componentMode.toUpperCase()}-SCREENSHOT`;
+        break;
+      case 'video':
+        componentName = `CRAWLER-${componentMode.toUpperCase()}-VIDEO`;
         break;
       case 'ai_analysis':
         componentName = `CRAWLER-${componentMode.toUpperCase()}-OPENAI`;
@@ -346,113 +351,282 @@ async function uploadVideoAsync(jobId, videoBuffer) {
   }
 }
 
-// Download video from browserless and upload to MinIO (rule 38-video-recording-mandatory.mdc)
-// Browserless native recording: browser records video, crawler downloads and uploads
-async function downloadAndUploadBrowserlessVideo(jobId, browserServiceUrl, sessionId) {
-  const startTime = Date.now();
+// Per-page video recording using CDP Page.startScreencast + ffmpeg
+async function recordPageVideo(page, jobId, pageUrl, action) {
+  let videoKey = null;
+  let cdpSession = null;
+  const frames = [];
+  const framesDir = `/tmp/aionqa_videos/${jobId}_${Date.now()}`;
   
   try {
-    // Wait for browserless to finalize the recording
-    // Browserless needs time after session ends to process video
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    
-    await sendLog(jobId, 'info', `🎥 Downloading video from browserless (session: ${sessionId.substring(0, 8)}...)`);
-    
-    // First, check what sessions/videos are available for debugging
-    try {
-      const sessionsUrl = `${browserServiceUrl}/sessions`;
-      const sessionsResponse = await fetch(sessionsUrl);
-      if (sessionsResponse.ok) {
-        const sessions = await sessionsResponse.json();
-        await sendLog(jobId, 'debug', `🔍 Available sessions: ${JSON.stringify(sessions.map(s => ({ id: s.id || s.browserId, hasVideo: !!s.video })))}`);
-      }
-    } catch (err) {
-      await sendLog(jobId, 'debug', `Could not query sessions: ${err.message}`);
+    // Ensure directory exists
+    if (!fs.existsSync(framesDir)) {
+      fs.mkdirSync(framesDir, { recursive: true });
     }
     
-    // Try multiple potential download endpoints
-    const downloadEndpoints = [
-      `${browserServiceUrl}/download?id=${sessionId}`,  // Try with query param
-      `${browserServiceUrl}/download/${sessionId}`,      // Try with path param
-      `${browserServiceUrl}/sessions/${sessionId}/download`, // Try REST-style endpoint
-      `${browserServiceUrl}/video/${sessionId}` // Alternative video endpoint
-    ];
+    // Create CDP session
+    cdpSession = await page.context().newCDPSession(page);
     
-    let videoBuffer = null;
-    let successfulEndpoint = null;
+    // Track start time for frame timing
+    const recordingStartTime = Date.now();
+    let frameWidth = null;
+    let frameHeight = null;
     
-    // Step 1: Try each endpoint until one works
-    for (const endpoint of downloadEndpoints) {
+    // Listen for screencast frames
+    cdpSession.on('Page.screencastFrame', async ({ data, metadata, sessionId }) => {
       try {
-        await sendLog(jobId, 'debug', `🔍 Trying video download from: ${endpoint}`);
-        const downloadResponse = await fetch(endpoint);
+        const frameIndex = frames.length;
+        const framePath = path.join(framesDir, `frame_${String(frameIndex).padStart(6, '0')}.jpg`);
+        const frameTimestamp = Date.now() - recordingStartTime;
         
-        if (downloadResponse.ok) {
-          videoBuffer = Buffer.from(await downloadResponse.arrayBuffer());
-          if (videoBuffer.length > 0) {
-            successfulEndpoint = endpoint;
-            await sendLog(jobId, 'info', `✅ Video download succeeded from: ${endpoint}`);
-            break;
+        // Capture actual frame dimensions from first frame
+        if (frameIndex === 0 && metadata) {
+          frameWidth = metadata.deviceWidth || metadata.pageScaleFactor * metadata.viewportWidth || 1920;
+          frameHeight = metadata.deviceHeight || metadata.pageScaleFactor * metadata.viewportHeight || 1080;
+          await sendLog(jobId, 'debug', `📐 Video dimensions: ${frameWidth}x${frameHeight}`, { page_url: pageUrl });
+        }
+        
+        // Save frame as JPEG
+        const frameBuffer = Buffer.from(data, 'base64');
+        fs.writeFileSync(framePath, frameBuffer);
+        
+        frames.push({ 
+          path: framePath, 
+          metadata, 
+          sessionId,
+          timestamp: frameTimestamp // milliseconds since recording start
+        });
+        
+        // Acknowledge frame receipt
+        await cdpSession.send('Page.screencastFrameAck', { sessionId });
+      } catch (e) {
+        console.error(`Error saving frame: ${e.message}`);
+      }
+    });
+    
+    // Start screencast with higher frame capture rate
+    // Note: everyNthFrame doesn't guarantee actual FPS, just reduces frame skipping
+    await cdpSession.send('Page.startScreencast', {
+      format: 'jpeg',
+      quality: 80,
+      maxWidth: 1920,
+      maxHeight: 1080,
+      everyNthFrame: 1 // Capture every frame (don't skip any)
+    });
+    
+    await sendLog(jobId, 'info', '🎥 Video recording started for page', { page_url: pageUrl });
+    
+    // Execute the action (navigate, analyze, etc.)
+    const result = await action();
+    
+    // Stop screencast
+    await sendLog(jobId, 'info', '🎥 Stopping video recording...', { page_url: pageUrl });
+    await cdpSession.send('Page.stopScreencast');
+    
+    // Give time for final frames to arrive
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Convert frames to video using ffmpeg
+    if (frames.length > 0) {
+      const recordingDuration = (Date.now() - recordingStartTime) / 1000;
+      const actualFPS = frames.length / recordingDuration;
+      
+      await sendLog(jobId, 'info', `📹 Captured ${frames.length} frames in ${recordingDuration.toFixed(1)}s (${actualFPS.toFixed(2)} FPS avg), encoding to video...`, { 
+        page_url: pageUrl,
+        frames_captured: frames.length,
+        duration_seconds: recordingDuration.toFixed(1),
+        avg_fps: actualFPS.toFixed(2)
+      });
+      
+      const videoPath = path.join('/tmp/aionqa_videos', `${jobId}_${Date.now()}.mp4`);
+      
+      // Create a concat file with proper timing for each frame
+      const concatFile = path.join(framesDir, 'concat.txt');
+      const concatContent = [];
+      
+      for (let i = 0; i < frames.length; i++) {
+        const frame = frames[i];
+        const nextFrame = frames[i + 1];
+        
+        // Calculate how long this frame should be shown (in seconds)
+        let duration;
+        if (nextFrame) {
+          duration = (nextFrame.timestamp - frame.timestamp) / 1000;
+        } else {
+          // Last frame - show for 1 second
+          duration = 1.0;
+        }
+        
+        // Minimum frame duration of 0.5 seconds for visibility
+        duration = Math.max(duration, 0.5);
+        
+        concatContent.push(`file '${path.basename(frame.path)}'`);
+        concatContent.push(`duration ${duration.toFixed(3)}`);
+      }
+      
+      // Add last frame again (concat demuxer requirement)
+      if (frames.length > 0) {
+        concatContent.push(`file '${path.basename(frames[frames.length - 1].path)}'`);
+      }
+      
+      fs.writeFileSync(concatFile, concatContent.join('\n'));
+      
+      // Use ffmpeg concat demuxer to preserve timing
+      await new Promise((resolve, reject) => {
+        const ffmpegCmd = ffmpeg()
+          .input(concatFile)
+          .inputOptions(['-f concat', '-safe 0'])
+          .videoCodec('libx264')
+          .outputOptions([
+            '-pix_fmt yuv420p',
+            '-crf 28',
+            '-preset faster',
+            '-vsync vfr' // Variable framerate to preserve timing
+          ]);
+        
+        // If we detected frame dimensions, scale video to match
+        if (frameWidth && frameHeight) {
+          // Ensure dimensions are even (required for h264)
+          const evenWidth = Math.floor(frameWidth / 2) * 2;
+          const evenHeight = Math.floor(frameHeight / 2) * 2;
+          ffmpegCmd.size(`${evenWidth}x${evenHeight}`);
+        }
+        
+        ffmpegCmd
+          .output(videoPath)
+          .on('end', () => resolve())
+          .on('error', (err) => reject(err))
+          .run();
+      });
+      
+      // Check if video file was created
+      if (fs.existsSync(videoPath)) {
+        const stats = fs.statSync(videoPath);
+        const videoSize = stats.size;
+        
+        if (videoSize > 0) {
+          await sendLog(jobId, 'info', `✅ Video encoded (${(videoSize / 1024 / 1024).toFixed(2)} MB)`, { page_url: pageUrl });
+        
+        // Read video file
+        const videoBuffer = fs.readFileSync(videoPath);
+        
+        // Upload to MinIO
+        const prepareResult = await backendLogger.prepareVideoUpload(jobId, {
+          size: videoSize,
+          format: 'mp4',
+          source: 'per_page_recording',
+          pageUrl: pageUrl
+        });
+        
+        if (prepareResult.ok && prepareResult.uploadUrl) {
+          const { key, uploadUrl, publicUrl } = prepareResult;
+          
+          const uploadSuccess = await backendLogger.uploadVideoToPresignedUrl(uploadUrl, videoBuffer);
+          
+          if (uploadSuccess) {
+            videoKey = key;
+            
+            // Track video media with backend
+            try {
+              await backendLogger.trackMediaUpload(
+                jobId,
+                'video',
+                {
+                  videoId: key,
+                  videoKey: key,
+                  objectName: key,
+                  url: publicUrl,
+                  size: videoSize,
+                  format: 'mp4',
+                  pageUrl: pageUrl
+                }
+              );
+            } catch (trackError) {
+              console.error(`Failed to track video media: ${trackError.message}`);
+            }
+            
+            // Log to JOB logs (without page_url) - matches screenshot pattern
+            await sendLog(jobId, 'info', `🎥 Video captured for page: ${pageUrl}`, {
+              videoKey: key,
+              videoId: key,
+              action: 'video',
+              isVideo: true,
+              video_url: publicUrl,
+              video_size_mb: (videoSize / 1024 / 1024).toFixed(2),
+              pageUrl: pageUrl,
+              frames_captured: frames.length,
+              duration_seconds: recordingDuration.toFixed(1),
+              avg_fps: actualFPS.toFixed(2),
+              frameWidth: frameWidth,
+              frameHeight: frameHeight,
+              format: 'mp4'
+            });
+            
+            // Also log to PAGE logs (with page_url) for page-specific context
+            await sendLog(jobId, 'info', `🎥 Video recorded successfully`, {
+              page_url: pageUrl,
+              videoKey: key,
+              videoId: key,
+              video_url: publicUrl,
+              video_size_mb: (videoSize / 1024 / 1024).toFixed(2),
+              action: 'video',
+              isVideo: true
+            });
           } else {
-            await sendLog(jobId, 'warn', `📹 Endpoint returned empty video: ${endpoint}`);
+            await sendLog(jobId, 'error', '❌ Video upload failed', { page_url: pageUrl });
+          }
+        }
+        
+          // Clean up temp files
+          try {
+            fs.unlinkSync(videoPath);
+            fs.rmSync(framesDir, { recursive: true, force: true });
+          } catch (e) {
+            // Ignore cleanup errors
           }
         } else {
-          await sendLog(jobId, 'debug', `❌ Endpoint failed (${downloadResponse.status}): ${endpoint}`);
+          await sendLog(jobId, 'warn', '⚠️ Video file is empty', { page_url: pageUrl });
         }
-      } catch (err) {
-        await sendLog(jobId, 'debug', `❌ Endpoint error: ${err.message} - ${endpoint}`);
+      } else {
+        await sendLog(jobId, 'warn', '⚠️ Video file was not created', { page_url: pageUrl });
       }
+    } else {
+      await sendLog(jobId, 'info', '⚠️ No frames captured - video not created', { page_url: pageUrl });
     }
     
-    if (!videoBuffer || videoBuffer.length === 0) {
-      throw new Error('All download endpoints failed or returned empty video. Session may not have video recording enabled. Check Browserless configuration (DEFAULT_RECORD_VIDEO=true).');
-    }
-    
-    const videoSize = videoBuffer.length;
-    await sendLog(jobId, 'info', `✅ Video downloaded (${(videoSize / 1024 / 1024).toFixed(2)} MB) from ${successfulEndpoint}`);
-    
-    // Step 2: Get presigned URL from backend
-    const prepareResult = await backendLogger.prepareVideoUpload(jobId, {
-      size: videoSize,
-      format: 'webm',
-      sessionId: sessionId
-    });
-    
-    if (!prepareResult.ok || !prepareResult.uploadUrl) {
-      throw new Error('Backend did not provide presigned URL');
-    }
-    
-    const { key, uploadUrl, publicUrl } = prepareResult;
-    
-    // Step 3: Upload to MinIO
-    await sendLog(jobId, 'info', `🎥 Uploading to MinIO...`);
-    
-    const uploadSuccess = await backendLogger.uploadVideoToPresignedUrl(uploadUrl, videoBuffer);
-    
-    if (!uploadSuccess) {
-      throw new Error('MinIO upload failed');
-    }
-    
-    const totalDuration = ((Date.now() - startTime) / 1000).toFixed(1);
-    
-    // Step 4: Log success
-    await sendLog(jobId, 'info', `✅ Video uploaded in ${totalDuration}s: ${publicUrl}`, {
-      video_key: key,
-      video_url: publicUrl,
-      video_size_mb: (videoSize / 1024 / 1024).toFixed(2),
-      duration_s: totalDuration,
-      session_id: sessionId,
-      isVideo: true
-    });
-    
-    return { success: true, key, publicUrl };
+    return { result, videoKey };
     
   } catch (error) {
-    await sendLog(jobId, 'error', `❌ Video processing failed: ${error.message}`, {
-      session_id: sessionId,
-      browserServiceUrl
+    await sendLog(jobId, 'warn', `⚠️ Video recording failed: ${error.message}`, { 
+      page_url: pageUrl,
+      errorStack: error.stack
     });
-    return { success: false, error: error.message };
+    
+    // Clean up temp files on error
+    try {
+      if (fs.existsSync(framesDir)) {
+        fs.rmSync(framesDir, { recursive: true, force: true });
+      }
+    } catch (e) {
+      // Ignore cleanup errors
+    }
+    
+    // Execute action anyway even if recording fails
+    try {
+      const result = await action();
+      return { result, videoKey: null };
+    } catch (actionError) {
+      throw actionError;
+    }
+  } finally {
+    // Cleanup CDP session
+    if (cdpSession) {
+      try {
+        await cdpSession.detach();
+      } catch (e) {
+        // Ignore detach errors
+      }
+    }
   }
 }
 
@@ -840,45 +1014,45 @@ async function validateActionSuccessWithAI(page, context, openaiClient, approach
     
     // Build operation-specific prompts
     let operationPrompts = {
-      login: `You are validating whether a login attempt was successful.
+      login: `You are examining data to determine if authentication was successful.
 
-IMPORTANT: Consider login SUCCESSFUL if the page content clearly shows success indicators,
-EVEN IF no cookies were collected. Many test/demo sites don't set authentication cookies.
+IMPORTANT: Consider authentication SUCCESSFUL if the content clearly shows success indicators,
+EVEN IF no authentication tokens were collected. Many test/demo sites don't set authentication cookies.
 
-SUCCESS INDICATORS (ANY of these means login succeeded):
-✅ Page title contains: "logged in", "success", "dashboard", "welcome", "home", "profile"
-✅ Page content contains: "logged in successfully", "welcome", "logout", "sign out"
-✅ URL changed from login page to different page
-✅ Cookies/tokens collected (bonus, but NOT required)`,
+SUCCESS INDICATORS (ANY of these means authentication succeeded):
+✅ Document title contains: "logged in", "success", "dashboard", "welcome", "home", "profile"
+✅ Content contains: "logged in successfully", "welcome", "logout", "sign out"
+✅ Navigation completed to different content
+✅ Authentication tokens collected (bonus, but NOT required)`,
 
-      crawl: `You are validating whether a page crawl/analysis was successful.
+      crawl: `You are examining data to determine if content extraction was successful.
 
 SUCCESS INDICATORS:
-✅ Page loaded completely (no errors)
-✅ Page content is accessible
+✅ Content loaded completely (no errors)
+✅ Data content is accessible
 ✅ Interactive elements are visible
 ✅ No access denied or error messages`,
 
-      form_test: `You are validating whether a form submission was successful.
+      form_test: `You are examining data to determine if form submission was successful.
 
 SUCCESS INDICATORS:
 ✅ Form submitted without errors
 ✅ Success message or confirmation displayed
-✅ Page changed or updated after submission
+✅ Content changed or updated after submission
 ✅ No validation errors shown`,
 
-      link_click: `You are validating whether a link click/navigation was successful.
+      link_click: `You are examining data to determine if navigation was successful.
 
 SUCCESS INDICATORS:
-✅ Navigation completed to new page
-✅ New page loaded successfully  
-✅ No 404 or error pages
-✅ Content is accessible`,
+✅ Navigation completed to new content
+✅ New content loaded successfully  
+✅ No 404 or error content
+✅ Data is accessible`,
 
-      page_analysis: `You are validating whether a page analysis was successful.
+      page_analysis: `You are examining data to determine if content analysis was successful.
 
 SUCCESS INDICATORS:
-✅ Page content extracted successfully
+✅ Content extracted successfully
 ✅ Interactive elements identified
 ✅ Forms and links detected
 ✅ No parsing or access errors`
@@ -886,17 +1060,18 @@ SUCCESS INDICATORS:
 
     const operationInstructions = operationPrompts[operation] || operationPrompts['page_analysis'];
     const expectedInfo = expectedOutcome ? `\n\nEXPECTED OUTCOME:\n${expectedOutcome}` : '';
+    const urlPath = new URL(currentUrl).pathname || '/';
     
     const aiPrompt = `${operationInstructions}
 
 CURRENT STATE:
-URL: ${currentUrl}
-TITLE: ${currentTitle}
+PAGE TITLE: ${currentTitle}
+PATH: ${urlPath}
 COOKIES: ${allCookies.length} total
 AUTH COOKIES: ${allCookies.filter(c => c.name.toLowerCase().includes('auth') || c.name.toLowerCase().includes('session')).length}
 
 PAGE CONTENT:
-${pageContent.substring(0, 1500)}${pageContent.length > 1500 ? '...[truncated]' : ''}${expectedInfo}
+${pageContent}${expectedInfo}
 
 Respond with JSON:
 {
@@ -920,12 +1095,11 @@ Respond with JSON:
       'unified-crawler',
       `${operation}_validation`,
       {
-        model: "gpt-4o-mini",
+        model: "gpt-5-mini",
         messages: [{ 
           role: "user", 
           content: aiPrompt 
         }],
-        response_format: { type: "json_object" }
       },
       validationScreenshot?.screenshotId,
       currentUrl,
@@ -1004,60 +1178,21 @@ async function withBrowser(action, options = {}) {
   await sendLog(options.jobId || 'server', 'info', `Using remote browser: ${browserServiceUrl} (${source})`);
   
   // Video recording via browserless native API (rule 38)
-  const enableRecording = options.enable_video_recording !== false; // Default to true
+  let enableRecording = options.enable_video_recording !== false; // Default to true
   let sessionId = null;
   
   try {
-    // NOTE: Video recording limitation with remote browsers
-    // Playwright's native video recording doesn't work with remote browser connections (connect/connectOverCDP)
-    // Browserless video recording via CDP also has limitations with the /download endpoint
-    // Current solution: Use enhanced screenshots instead of video for remote browsers
-    // Future: Implement screencast via CDP or use alternative recording method
-    
-    const wsUrl = browserServiceUrl.replace('http://', 'ws://') + '?timeout=900000';
+    // Use Browserless native CDP recording (via Browserless.startRecording/stopRecording)
+    const recordParam = enableRecording ? '&record=true' : '';
+    const wsUrl = browserServiceUrl.replace('http://', 'ws://') + `?timeout=900000${recordParam}`;
     
     if (enableRecording) {
-      await sendLog(options.jobId || 'server', 'warn', `⚠️ Video recording requested but not supported with remote CDP browsers. Using enhanced screenshot capture instead.`, {
-        recommendation: 'Screenshots will be captured at key moments to provide visual documentation',
-        futureImprovement: 'Implement CDP screencast or alternative recording solution'
-      });
-      // Still try to get session ID for potential future use
-      await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket (screenshots enabled): ${wsUrl}`);
+      await sendLog(options.jobId || 'server', 'info', `🎥 Connecting with Browserless CDP video recording enabled: ${wsUrl}`);
     } else {
       await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket: ${wsUrl}`);
     }
     
     browser = await chromium.connectOverCDP(wsUrl);
-    
-    // Try to get session ID for debugging/future use
-    if (enableRecording) {
-      try {
-        const sessionsUrl = `${browserServiceUrl}/sessions`;
-        await sendLog(options.jobId || 'server', 'debug', `🔍 Querying sessions from: ${sessionsUrl}`);
-        const sessionsResponse = await fetch(sessionsUrl);
-        
-        if (sessionsResponse.ok) {
-          const sessions = await sessionsResponse.json();
-          await sendLog(options.jobId || 'server', 'debug', `📹 Found ${sessions?.length || 0} active sessions`);
-          
-          if (sessions && sessions.length > 0) {
-            const latestSession = sessions[sessions.length - 1];
-            sessionId = latestSession.browserId || latestSession.id;
-            
-            await sendLog(options.jobId || 'server', 'debug', `Browser Session ID: ${sessionId}`, {
-              sessionData: {
-                browserId: latestSession.browserId,
-                id: latestSession.id,
-                url: latestSession.initialUrl,
-                trackingId: latestSession.trackingId
-              }
-            });
-          }
-        }
-      } catch (e) {
-        await sendLog(options.jobId || 'server', 'debug', `Session ID query error: ${e.message}`);
-      }
-    }
     
     await sendLog(options.jobId || 'server', 'info', `✅ Connected to remote browser service via CDP (15min timeout)${enableRecording ? ' with recording' : ''}`);
   } catch (error) {
@@ -1081,6 +1216,9 @@ async function withBrowser(action, options = {}) {
   
   let videoFileId = null;
   let screenshotFileId = null;
+  
+  // Note: Per-page video recording is handled within the crawl loop
+  // Not recording at browser session level anymore
   
   try {
     const result = await action({ page, context, browser });
@@ -1125,25 +1263,7 @@ async function withBrowser(action, options = {}) {
       }
     }
     
-    // Handle video recording - Note: Currently disabled for remote CDP browsers
-    // Per rule 38, video recording is mandatory, but technical limitations with remote browsers
-    // require us to use enhanced screenshots as an alternative until a proper solution is implemented
-    if (enableRecording) {
-      await sendLog(options.job_id || 'unknown', 'info', '📸 Enhanced screenshot capture enabled (video recording not available for remote browsers)', {
-        reason: 'Playwright video recording is not supported with remote CDP browser connections',
-        alternative: 'Multiple screenshots will be captured throughout the session',
-        futureWork: 'Implement CDP screencast or alternative video recording solution'
-      });
-      
-      // Don't attempt video download - it won't work with current CDP setup
-      // Future implementation could use:
-      // 1. CDP Page.screencastFrame for frame-by-frame recording
-      // 2. Browserless REST API instead of CDP
-      // 3. Local browser launch with Playwright video recording
-      videoFileId = null;
-    } else {
-      await sendLog(options.job_id || 'unknown', 'debug', 'Video recording is disabled for this job');
-    }
+    // Note: Video recording moved to per-page level in recursiveCrawl function
     
     return {
       ...result,
@@ -1158,18 +1278,60 @@ async function withBrowser(action, options = {}) {
 
 // Mode-specific operation handlers
 const modeHandlers = {
-  // Simplified mode - Comprehensive approach (best of all methods)
+  // Simplified mode - NOW uses new approach sequence  
   simplified: async (page, context, openaiClient, operation) => {
-    await sendLog(context.job_id, 'info', '🚀 Using simplified mode (comprehensive approach)');
-    if (operation === 'login') {
-      return await performStaticLogin(page, context, openaiClient);
-    } else {
-      return await performStaticCrawl(page, context, openaiClient);
-    }
+    const jobId = context.job_id || 'unknown-job';
+    await sendLog(jobId, 'info', '🚀 SIMPLIFIED MODE: Using NEW approach sequence (simplified → text → media → static)');
+    
+    const pageId = context.page_id || null;
+    const projectId = context.project_id || null;
+    
+    // Call the new approach sequence function
+    const result = await executeApproachSequence(page, jobId, context, openaiClient, pageId, projectId);
+    
+    return {
+      success: result.success,
+      approach: result.final_approach,
+      message: result.success ? `Completed with ${result.final_approach} approach` : result.reason,
+      details: {
+        final_approach: result.final_approach,
+        iterations: result.iterations,
+        depth: result.depth,
+        verification: result.verification,
+        result: result.result
+      }
+    };
   },
 
-  // Auto mode - Sequential approach selection (tries multiple approaches until one works)
+  // Auto mode - NEW: Uses approach sequence (simplified → text → media → static)
   auto: async (page, context, openaiClient, operation) => {
+    const jobId = context.job_id || 'unknown-job';
+    await sendLog(jobId, 'info', '🚀 AUTO MODE: Using NEW approach sequence (simplified → text → media → static)');
+    
+    // For login operations, we need pageId and projectId
+    // Extract from context or use placeholder for now
+    const pageId = context.page_id || null;
+    const projectId = context.project_id || null;
+    
+    // Call the new approach sequence function
+    const result = await executeApproachSequence(page, jobId, context, openaiClient, pageId, projectId);
+    
+    return {
+      success: result.success,
+      approach: result.final_approach,
+      message: result.success ? `Completed with ${result.final_approach} approach` : result.reason,
+      details: {
+        final_approach: result.final_approach,
+        iterations: result.iterations,
+        depth: result.depth,
+        verification: result.verification,
+        result: result.result
+      }
+    };
+  },
+  
+  // OLD AUTO MODE (backup) - Sequential approach selection (tries multiple approaches until one works)
+  auto_old: async (page, context, openaiClient, operation) => {
     const approachSequence = ['static', 'forms', 'text', 'media', 'script'];
     const currentUrl = page.url();
     const pageContext = { page_url: currentUrl, mode: 'auto' };
@@ -1241,7 +1403,7 @@ const modeHandlers = {
               action: `ai_${operation}_validation`
             });
             
-            const validationResult = await validateActionSuccessWithAI(page, context, openaiClient, approach, operation, expectedOutcome);
+            const validationResult = await validateActionSuccessWithAI(page, context, openaiClient, approach, operation, null);
             
             // Update result with validation information
             result.validation = validationResult;
@@ -1372,10 +1534,9 @@ async function performAutoLogin(page, context, openaiClient) {
       conversationId
     });
     
-    // Take a screenshot for analysis (reduced size to avoid token limits)
+    // Take a screenshot for analysis (full quality)
     const screenshot = await page.screenshot({ 
-      type: 'jpeg', 
-      quality: 30, 
+      type: 'png', 
       fullPage: true
     });
     
@@ -1383,19 +1544,19 @@ async function performAutoLogin(page, context, openaiClient) {
     const htmlContent = await page.content();
     const currentUrl = page.url();
     const currentTitle = await page.title();
+    const urlPath = new URL(currentUrl).pathname || '/';
     
-    const aiPrompt = `Analyze this login page and provide login instructions in JSON format.
+    const aiPrompt = `Given the following HTML content, identify form elements and their structure.
 
-URL: ${currentUrl}
-TITLE: ${currentTitle}
-Full HD Screenshot ID: ${screenshotResult?.screenshotId || 'N/A'}
+Document Title: ${currentTitle}
+Path Context: ${urlPath}
 HTML CONTENT:
-${htmlContent.substring(0, 2000)}${htmlContent.length > 2000 ? '...[truncated]' : ''}
+${htmlContent}
 
-Provide detailed instructions for logging in, including:
-1. Form field locations and types
-2. Button locations and text
-3. Step-by-step login process
+Extract and describe:
+1. Form field elements (input types, names, ids)
+2. Button elements (types, text content)
+3. Form structure and grouping
 
 Respond with JSON format:
 {
@@ -1410,14 +1571,13 @@ Respond with JSON format:
       'unified-crawler',
       'auto_login_analysis',
       {
-        model: "gpt-4o-mini",
+        model: "gpt-5-mini",
         messages: [{ role: "user", content: aiPrompt }],
-        response_format: { type: "json_object" }
       },
       screenshotResult?.screenshotId, // Pass screenshot ID to AI conversation logger
       currentUrl,
       {
-        html_content: htmlContent.substring(0, 2000),
+        html_content: htmlContent,
         screenshot_id: screenshotResult?.screenshotId,
         screenshot_path: screenshotResult?.screenshotPath,
         page_title: currentTitle,
@@ -1502,27 +1662,29 @@ async function performMediaLogin(page, context, openaiClient) {
     conversationId
   });
   
-  // Take screenshot for AI analysis (reduced size to avoid token limits)
+  // Take screenshot for AI analysis (full quality)
   const screenshot = await page.screenshot({ 
-    type: 'jpeg', 
-    quality: 30, 
+    type: 'png', 
     fullPage: true
   });
   const screenshotBase64 = screenshot.toString('base64');
   
+  const currentUrl = page.url();
+  const currentTitle = await page.title();
+  const urlPath = new URL(currentUrl).pathname || '/';
+  
   // Analyze screenshot with AI
-  const aiPrompt = `Analyze this login page screenshot and provide login instructions in JSON format.
+  const aiPrompt = `Given this screenshot image, identify visible form elements and interactive components.
 
 SCREENSHOT: data:image/png;base64,${screenshotBase64}
-URL: ${page.url()}
-TITLE: ${await page.title()}
-Full HD Screenshot ID: ${screenshotResult?.screenshotId || 'N/A'}
+Document Title: ${currentTitle}
+Path Context: ${urlPath}
 
-Provide detailed instructions for logging in, including:
-1. Form field locations and types
-2. Button locations and text
-3. Step-by-step login process
-4. Potential challenges or issues
+Extract and describe:
+1. Visible form field elements and their positions
+2. Button elements and their text content
+3. Interactive component layout
+4. Any visual indicators or labels
 
 Respond with JSON format:
 {
@@ -1537,7 +1699,7 @@ Respond with JSON format:
     'unified-crawler',
     'media_login_analysis',
     {
-      model: "gpt-4o-mini",
+      model: "gpt-5-mini",
       messages: [{ role: "user", content: aiPrompt }],
       response_format: { type: "json_object" }
     },
@@ -1650,17 +1812,17 @@ async function performTextLogin(page, context, openaiClient) {
   const htmlContent = await page.content();
   const currentUrl = page.url();
   const currentTitle = await page.title();
+  const urlPath = new URL(currentUrl).pathname || '/';
   
   // Analyze HTML content with AI
-  const aiPrompt = `Analyze this HTML page and provide login instructions in JSON format.
+  const aiPrompt = `Given the following HTML content, extract and describe form elements and their structure.
 
-URL: ${currentUrl}
-TITLE: ${currentTitle}
-Full HD Screenshot ID: ${screenshotResult?.screenshotId || 'N/A'}
+Document Title: ${currentTitle}
+Path Context: ${urlPath}
 HTML CONTENT:
-${htmlContent.substring(0, 2000)}${htmlContent.length > 2000 ? '...[truncated]' : ''}
+${htmlContent}
 
-Focus on text content, form structure, and login elements. Provide detailed instructions for logging in.
+Focus on text content, form structure, and interactive elements. Extract structural information.
 
 Respond with JSON format:
 {
@@ -1676,14 +1838,14 @@ Respond with JSON format:
     'unified-crawler',
     'text_login_analysis',
     {
-      model: "gpt-4o-mini",
+      model: "gpt-5-mini",
       messages: [{ role: "user", content: aiPrompt }],
       response_format: { type: "json_object" }
     },
     screenshotResult?.screenshotId, // Pass screenshot ID to AI conversation logger
     currentUrl,
     {
-      html_content: htmlContent.substring(0, 2000),
+        html_content: htmlContent,
       screenshot_id: screenshotResult?.screenshotId,
       screenshot_path: screenshotResult?.screenshotPath,
       page_title: currentTitle,
@@ -1800,14 +1962,17 @@ async function performFormsLogin(page, context, openaiClient) {
   })));
 
   // Analyze forms with AI
-  const aiPrompt = `Analyze these forms and provide login instructions in JSON format.
+  const currentUrl = page.url();
+  const currentTitle = await page.title();
+  const urlPath = new URL(currentUrl).pathname || '/';
+  
+  const aiPrompt = `Given these form element structures, identify field mappings and form characteristics.
 
 FORMS: ${JSON.stringify(forms, null, 2)}
-URL: ${page.url()}
-TITLE: ${await page.title()}
-Full HD Screenshot ID: ${screenshotResult?.screenshotId || 'N/A'}
+Document Title: ${currentTitle}
+Path Context: ${urlPath}
 
-Provide detailed instructions for logging in using the forms.
+Analyze the form structure and provide field mappings.
 
 Respond with JSON format:
 {
@@ -1823,7 +1988,7 @@ Respond with JSON format:
     'unified-crawler',
     'forms_login_analysis',
     {
-      model: "gpt-4o-mini",
+      model: "gpt-5-mini",
       messages: [{ role: "user", content: aiPrompt }],
       response_format: { type: "json_object" }
     },
@@ -1959,7 +2124,7 @@ async function performStaticLogin(page, context, openaiClient) {
   const currentUrl = page.url();
   const pageContext = { page_url: currentUrl, mode: 'static' };
   
-  await sendLog(jobId, 'info', '🔍 Performing static login with standard field matching', pageContext);
+  await sendLog(jobId, 'info', '🔍 Performing static login with standard field matching and post-action analysis', pageContext);
   
   // Detect captcha first
   const captchaInfo = await detectCaptcha(page, jobId);
@@ -2277,22 +2442,114 @@ async function performStaticLogin(page, context, openaiClient) {
       }
     }
 
+    // Always analyze the post-action page with AI
+    const currentUrl = page.url();
+    const currentTitle = await page.title();
+    const urlPath = new URL(currentUrl).pathname || '/';
+    const htmlContent = await page.content();
+    
+    // Take final screenshot for AI analysis
+    const finalScreenshot = await takeScreenshot(page, jobId, 'final_post_action', {
+      mode: 'static',
+      login_completed: true,
+      conversation_steps: conversationFlowSteps.length
+    });
+    
+    const screenshotBase64 = finalScreenshot ? Buffer.from(finalScreenshot.screenshotId, 'base64') : null;
+    
+    // Analyze post-action page with AI
+    const postActionPrompt = `Given this page after a login action, analyze the result and determine success or failure.
+
+Document Title: ${currentTitle}
+Path Context: ${urlPath}
+HTML CONTENT:
+${htmlContent}
+${screenshotBase64 ? `SCREENSHOT: data:image/png;base64,${screenshotBase64.toString('base64')}` : ''}
+
+Analyze the page content and visual elements to determine:
+1. Whether authentication was successful
+2. What type of page this is (dashboard, error, login form, etc.)
+3. Key indicators of success or failure
+4. Interactive elements available
+
+Respond with JSON format:
+{
+  "login_success": true/false,
+  "confidence": 0.0-1.0,
+  "page_type": "...",
+  "success_indicators": [...],
+  "failure_indicators": [...],
+  "next_actions": [...],
+  "analysis": "..."
+}`;
+
+    const postActionAnalysis = await aiConversationLogger.createChatCompletion(
+      openaiClient,
+      jobId,
+      'unified-crawler',
+      'static_post_action_analysis',
+      {
+        model: "gpt-5-mini",
+        messages: [
+          {
+            role: "user",
+            content: postActionPrompt
+          }
+        ],
+      },
+      finalScreenshot?.screenshotId,
+      currentUrl,
+      {
+        html_content: htmlContent,
+        screenshot_id: finalScreenshot?.screenshotId,
+        screenshot_path: finalScreenshot?.screenshotPath,
+        page_title: currentTitle,
+        mode: 'static',
+        approach: 'post_action_analysis',
+        username_field_found: true,
+        password_field_found: true,
+        submit_button_found: !!submitButton,
+        cookies_collected: allCookiesCollected.length,
+        conversation_flow_steps: conversationFlowSteps.length
+      }
+    );
+    
+    let loginSuccess = false;
+    let analysisResult = null;
+    
+    if (postActionAnalysis && postActionAnalysis.choices && postActionAnalysis.choices[0]) {
+      try {
+        analysisResult = JSON.parse(postActionAnalysis.choices[0].message.content);
+        loginSuccess = analysisResult.login_success === true;
+      } catch (parseError) {
+        console.error('Failed to parse post-action analysis:', parseError);
+        // Fallback to simple detection
+        loginSuccess = !currentUrl.includes('login') && !currentUrl.includes('sign-in');
+      }
+    } else {
+      // Fallback to simple detection
+      loginSuccess = !currentUrl.includes('login') && !currentUrl.includes('sign-in');
+    }
+
     return {
-      success: true,
+      success: loginSuccess,
       approach: 'static', // Tag with approach name
-      message: 'Login form submitted using enhanced conversation flow pattern',
+      message: loginSuccess ? 'Login successful (static mode with AI analysis)' : 'Login failed (static mode with AI analysis)',
       details: {
         usernameFieldFound: true,
         passwordFieldFound: true,
         submitButtonFound: !!submitButton,
-        finalUrl: page.url(),
-        finalTitle: await page.title(),
+        finalUrl: currentUrl,
+        finalTitle: currentTitle,
         screenshots: formScreenshots,
         screenshotCount: formScreenshots.length,
         conversationFlow: conversationFlowSteps,
         flowStepsCount: conversationFlowSteps.length,
         enhancedPayload: true,
-        separateScreenshots: true
+        separateScreenshots: true,
+        final_screenshot: finalScreenshot?.screenshotId,
+        ai_analysis: analysisResult,
+        analysis_confidence: analysisResult?.confidence || 0.0
       }
     };
   } catch (error) {
@@ -2565,7 +2822,7 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
     // Continue with empty content
   }
   
-  // Approach-specific AI analysis
+  // Approach-specific AI analysis - ALWAYS analyze, even in static mode
   if (aiConversationLogger && openaiClient && pageContent) {
     try {
       let aiPrompt, aiMessages;
@@ -2602,19 +2859,21 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
           return; // Skip AI analysis if screenshot encoding fails
         }
         
+        const urlPath = new URL(currentUrl).pathname || '/';
+        
         aiMessages = [{
           role: "user",
           content: [
             {
               type: "text",
-              text: `Analyze this webpage screenshot and provide insights in JSON format:
+              text: `Given this screenshot, identify and catalog visual elements, forms, and interactive components.
 
-URL: ${currentUrl}
-Title: ${currentTitle}
-Approach: MEDIA (Screenshot Analysis)
+Document Title: ${currentTitle}
+Path Context: ${urlPath}
+Analysis Method: Visual screenshot examination
 
-Focus on visual elements, layout, forms, and interactive elements you can see.
-Provide brief analysis and testing recommendations.
+Extract visible elements including layout, forms, and interactive components.
+Provide structural analysis and element catalog.
 
 Required JSON format:
 {
@@ -2637,23 +2896,22 @@ Required JSON format:
       } else if (approach === 'text') {
         // TEXT: HTML analysis only
         await sendLog(jobId, 'info', `📝 Using AI to analyze HTML content...`, pageContext);
-        const htmlSnippet = pageContent.length > 15000 
-          ? pageContent.substring(0, 15000) + '...[truncated]' 
-          : pageContent;
+        const htmlSnippet = pageContent;
+        const urlPath = new URL(currentUrl).pathname || '/';
           
-        aiPrompt = `Analyze this webpage HTML and provide insights in JSON format:
+        aiPrompt = `Given this HTML content, extract and catalog structural elements and their relationships.
 
-URL: ${currentUrl}
-Title: ${currentTitle}
-Approach: TEXT (HTML Analysis)
+Document Title: ${currentTitle}
+Path Context: ${urlPath}
+Analysis Method: HTML structure examination
 
 HTML Content:
-${htmlSnippet}
+${htmlContent}
 
 Forms found: ${forms.length}
 Links found: ${linksData.total}
 
-Provide brief analysis and testing recommendations.
+Provide structural analysis and element catalog.
 
 Required JSON format:
 {
@@ -2665,16 +2923,36 @@ Required JSON format:
         aiMessages = [{ role: "user", content: aiPrompt }];
         
       } else {
-        // STATIC/OTHER: Basic summary
-        await sendLog(jobId, 'info', `⚡ Using ${approach} approach - AI logging page summary...`, pageContext);
-        aiPrompt = `Page analyzed with ${approach} approach:
+        // STATIC/OTHER: Full AI analysis with HTML content
+        await sendLog(jobId, 'info', `⚡ Using ${approach} approach - Full AI analysis with HTML content...`, pageContext);
+        const urlPath = new URL(currentUrl).pathname || '/';
+        
+        aiPrompt = `Given this HTML content, analyze the page structure and provide comprehensive insights.
 
-URL: ${currentUrl}
-Title: ${currentTitle}
+Document Title: ${currentTitle}
+Path Context: ${urlPath}
 Forms: ${forms.length}
 Links: ${linksData.total} (${linksData.internal.length} internal)
 
-Provide brief summary in JSON format with testing recommendations.`;
+HTML CONTENT:
+${pageContent}
+
+Analyze and provide:
+1. Page purpose and functionality
+2. Form elements and their structure
+3. Interactive components and navigation
+4. Content organization and layout
+5. Testing recommendations
+
+Respond with JSON format:
+{
+  "page_analysis": "...",
+  "forms_analysis": [...],
+  "interactive_elements": [...],
+  "content_structure": "...",
+  "testing_recommendations": [...],
+  "confidence": 0.0-1.0
+}`;
 
         aiMessages = [{ role: "user", content: aiPrompt }];
       }
@@ -2685,10 +2963,9 @@ Provide brief summary in JSON format with testing recommendations.`;
         'unified-crawler',
         `page_analysis_${approach}`,
         {
-          model: approach === 'media' ? "gpt-4o" : "gpt-4o-mini",  // Use vision model for media
+          model: "gpt-5-mini",  // Use gpt-5-mini for all approaches as per requirement
           messages: aiMessages,
-          response_format: { type: "json_object" },
-          max_tokens: approach === 'media' ? 500 : 300
+          max_completion_tokens: approach === 'media' ? 500 : 300
         },
         screenshotResult?.screenshotId,
         currentUrl,
@@ -2798,52 +3075,67 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         break; // Exit the while loop
       }
       
-      // Navigate to URL
-      await page.goto(currentUrl, { 
-        waitUntil: 'domcontentloaded', 
-        timeout: 30000 
+      // Wrap navigation and analysis with per-page video recording
+      const { result: pageData, videoKey } = await recordPageVideo(page, jobId, currentUrl, async () => {
+        // Navigate to URL
+        await page.goto(currentUrl, { 
+          waitUntil: 'domcontentloaded', 
+          timeout: 30000 
+        });
+        
+        await sendLog(jobId, 'info', `⏳ Waiting for page to fully load...`, currentPageContext);
+        
+        // Wait for page to settle
+        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+        await page.waitForTimeout(1000);
+        
+        await sendLog(jobId, 'info', `✓ Page loaded successfully`, currentPageContext);
+        
+        // Get basic page info first
+        let pageTitle, pageUrl;
+        try {
+          pageTitle = await page.title();
+          pageUrl = await page.url();
+          await sendLog(jobId, 'info', `📄 Page loaded: ${pageTitle}`, currentPageContext);
+        } catch (error) {
+          await sendLog(jobId, 'error', `❌ Failed to get page info: ${error.message}`, currentPageContext);
+          throw error;
+        }
+        
+        // Create basic page document in backend FIRST
+        let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle);
+        
+        // Update page context with pageId for all subsequent logs
+        if (pageId) {
+          currentPageContext.pageId = pageId;
+          currentPageContext.page_id = pageId;
+        }
+        
+        // Log that basic page was created
+        if (pageId) {
+          await sendLog(jobId, 'info', `✓ Basic page created in database`, {
+            ...currentPageContext,
+            pageId: pageId
+          });
+        }
+        
+        // Now analyze this page with detailed logging (pageId available for all logs)
+        const pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient, pageId);
+        
+        return { pageAnalysis, pageId, pageTitle, pageUrl };
       });
       
-      await sendLog(jobId, 'info', `⏳ Waiting for page to fully load...`, currentPageContext);
-      
-      // Wait for page to settle
-      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-      await page.waitForTimeout(1000);
-      
-      await sendLog(jobId, 'info', `✓ Page loaded successfully`, currentPageContext);
-      
-      // Get basic page info first
-      let pageTitle, pageUrl;
+      // Handle the results
+      let pageAnalysis, pageId;
       try {
-        pageTitle = await page.title();
-        pageUrl = await page.url();
-        await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl} - ${pageTitle}`, currentPageContext);
-      } catch (error) {
-        await sendLog(jobId, 'error', `❌ Failed to get page info: ${error.message}`, currentPageContext);
-        continue;
-      }
-      
-      // Create basic page document in backend FIRST
-      let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle);
-      
-      // Update page context with pageId for all subsequent logs
-      if (pageId) {
-        currentPageContext.pageId = pageId;
-        currentPageContext.page_id = pageId;
-      }
-      
-      // Log that basic page was created
-      if (pageId) {
-        await sendLog(jobId, 'info', `✓ Basic page created in database`, {
-          ...currentPageContext,
-          pageId: pageId
-        });
-      }
-      
-      // Now analyze this page with detailed logging (pageId available for all logs)
-      let pageAnalysis;
-      try {
-        pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient, pageId);
+        pageAnalysis = pageData.pageAnalysis;
+        pageId = pageData.pageId;
+        
+        // Add video key to page analysis if available
+        if (videoKey) {
+          pageAnalysis.video_file_id = videoKey;
+        }
+        
         analyzedPages.push(pageAnalysis);
         
         // Update the page with full analysis data
@@ -2851,11 +3143,12 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           await sendDiscoveredPageToBackend(jobId, pageAnalysis);
           await sendLog(jobId, 'info', `✓ Page analysis complete and stored`, {
             ...currentPageContext,
-            pageId: pageId
+            pageId: pageId,
+            video_key: videoKey || null
           });
         }
       } catch (analysisError) {
-        await sendLog(jobId, 'error', `❌ Failed to analyze page: ${analysisError.message}`, currentPageContext);
+        await sendLog(jobId, 'error', `❌ Failed to process page results: ${analysisError.message}`, currentPageContext);
         
         // Check if browser is still alive
         try {
@@ -2929,7 +3222,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
 
 async function performStaticCrawl(page, context, openaiClient) {
   const jobId = context.job_id;
-  await sendLog(jobId, 'info', '🚀 Starting STATIC mode recursive crawl');
+  await sendLog(jobId, 'info', '🚀 Starting STATIC mode recursive crawl with post-action analysis');
   
   const startUrl = page.url();
   
@@ -3324,11 +3617,818 @@ async function executeCrawlFromAnalysis(page, analysis, context) {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════
+// APPROACH SEQUENCE IMPLEMENTATION
+// Rule: 42-crawl-approaches-sequence.mdc
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Approach 1: Simplified
+ * Uses Playwright to analyze page and provides structured JSON to OpenAI
+ */
+async function executeSimplifiedApproach(page, jobId, context, openaiClient) {
+  const pageUrl = page.url();
+  const pageTitle = await page.title();
+  
+  await sendLog(jobId, 'info', '🎯 APPROACH 1: Simplified (Playwright JSON Analysis)', { page_url: pageUrl });
+  
+  try {
+    // Step 1: Extract forms with Playwright
+    const forms = await extractFormsAndLogicalGroups(page, jobId);
+    const links = await extractAllLinks(page, jobId, pageUrl);
+    
+    // Step 2: Build structured JSON for OpenAI
+    const structuredData = {
+      title: pageTitle,
+      url: pageUrl,
+      forms: forms.map(f => ({
+        type: f.type,
+        id: f.id || null,
+        fields: f.inputs.map(input => ({
+          type: input.type,
+          name: input.name,
+          label: input.label || input.placeholder || '',
+          selector: input.selector,
+          required: input.required
+        })),
+        submit: f.buttons && f.buttons[0] ? {
+          text: f.buttons[0].text,
+          selector: f.buttons[0].selector
+        } : null
+      })),
+      links: links.internal.slice(0, 10).map(l => ({
+        text: l.text,
+        href: l.href,
+        selector: `a[href="${l.href}"]`
+      })),
+      buttons: []
+    };
+    
+    await sendLog(jobId, 'info', `📊 Extracted: ${forms.length} forms, ${links.total} links`, { page_url: pageUrl });
+    
+    // Step 3: Send to OpenAI for action decision
+    const aiPrompt = `You are analyzing a web page using structured JSON data from Playwright.
+
+PAGE DATA:
+${JSON.stringify(structuredData, null, 2)}
+
+TASK: Based on this structure, what actions should be performed on this page?
+
+If this is a login page, provide steps to login.
+If this is a form, provide steps to fill and submit.
+If this is a content page, provide navigation recommendations.
+
+CRITICAL: Respond with comprehensive JSON containing human-readable summaries AND structured data.
+
+RESPOND WITH THIS EXACT FORMAT:
+{
+  "code": "{\"action_type\": \"login|form_fill|navigate|none\", \"confidence\": 0.0-1.0, \"steps\": [{\"action\": \"fill\", \"selector\": \"...\", \"value\": \"{parameter_name}\"}, {\"action\": \"click\", \"selector\": \"...\"}], \"reasoning\": \"Why these steps are appropriate\"}",
+  "page_summary": "Human-readable summary of what was found on this page and what actions will be taken",
+  "chat_message": "Conversational message explaining the analysis and next steps for the user"
+}`;
+
+    const completion = await aiConversationLogger.createChatCompletion(
+      openaiClient,
+      jobId,
+      'unified-crawler',
+      'simplified_approach_analysis',
+      {
+        model: "gpt-5-mini",
+        messages: [{ role: "user", content: aiPrompt }],
+      },
+      null,
+      pageUrl,
+      { approach: 'simplified', structured_data_size: JSON.stringify(structuredData).length }
+    );
+    
+    // Parse AI response with validation and retry logic
+    let aiResponse;
+    let retryCount = 0;
+    const maxRetries = 2;
+    
+    while (retryCount <= maxRetries) {
+      try {
+        const rawContent = completion.content;
+        await sendLog(jobId, 'info', `🔍 Parsing AI response (attempt ${retryCount + 1})`, { 
+          page_url: pageUrl, 
+          response_length: rawContent.length,
+          response_preview: rawContent.substring(0, 200)
+        });
+        
+        // Try to parse the response
+        let parsedContent;
+        try {
+          parsedContent = JSON.parse(rawContent);
+        } catch (parseError) {
+          await sendLog(jobId, 'warn', `❌ JSON parse failed: ${parseError.message}`, { 
+            page_url: pageUrl,
+            raw_content: rawContent.substring(0, 500)
+          });
+          throw new Error(`Invalid JSON: ${parseError.message}`);
+        }
+        
+        // Check if response has "code" field
+        if (parsedContent.code) {
+          aiResponse = JSON.parse(parsedContent.code);
+        } else {
+          // Fallback: try to parse the content directly
+          aiResponse = parsedContent;
+        }
+        
+        // Validate required fields
+        if (!aiResponse.action_type || typeof aiResponse.confidence !== 'number') {
+          throw new Error(`Missing required fields: action_type=${aiResponse.action_type}, confidence=${aiResponse.confidence}`);
+        }
+        
+        // Log human-readable summaries
+        if (parsedContent.page_summary) {
+          await sendLog(jobId, 'info', `📄 Page Analysis: ${parsedContent.page_summary}`, { page_url: pageUrl });
+        }
+        
+        if (parsedContent.chat_message) {
+          await sendLog(jobId, 'info', `💬 AI Chat: ${parsedContent.chat_message}`, { page_url: pageUrl });
+        }
+        
+        break; // Success, exit retry loop
+        
+      } catch (error) {
+        retryCount++;
+        await sendLog(jobId, 'warn', `❌ AI response parsing failed (attempt ${retryCount}): ${error.message}`, { 
+          page_url: pageUrl,
+          retry_count: retryCount,
+          max_retries: maxRetries
+        });
+        
+        if (retryCount > maxRetries) {
+          throw new Error(`Failed to parse AI response after ${maxRetries + 1} attempts: ${error.message}`);
+        }
+        
+        // Retry with corrected prompt
+        const retryPrompt = `The previous response was invalid JSON. Please fix the format.
+
+ERROR: ${error.message}
+
+CRITICAL: Respond with comprehensive JSON containing human-readable summaries AND structured data.
+
+RESPOND WITH THIS EXACT FORMAT:
+{
+  "code": "{\"action_type\": \"login|form_fill|navigate|none\", \"confidence\": 0.0-1.0, \"steps\": [{\"action\": \"fill\", \"selector\": \"...\", \"value\": \"{parameter_name}\"}, {\"action\": \"click\", \"selector\": \"...\"}], \"reasoning\": \"Why these steps are appropriate\"}",
+  "page_summary": "Human-readable summary of what was found on this page and what actions will be taken",
+  "chat_message": "Conversational message explaining the analysis and next steps for the user"
+}`;
+        
+        const retryCompletion = await aiConversationLogger.createChatCompletion(
+          openaiClient,
+          jobId,
+          'unified-crawler',
+          'simplified_approach_retry',
+          {
+            model: "gpt-5-mini",
+            messages: [{ role: "user", content: retryPrompt }],
+          },
+          null,
+          pageUrl,
+          { approach: 'simplified', retry_attempt: retryCount }
+        );
+        
+        completion.content = retryCompletion.content;
+      }
+    }
+    
+    await sendLog(jobId, 'info', `🤖 AI Decision: ${aiResponse.action_type} (confidence: ${aiResponse.confidence})`, { page_url: pageUrl });
+    
+    return {
+      success: aiResponse.confidence > 0.7,
+      approach: 'simplified',
+      ai_response: aiResponse,
+      structured_data: structuredData
+    };
+    
+  } catch (error) {
+    await sendLog(jobId, 'error', `❌ Simplified approach failed: ${error.message}`, { page_url: pageUrl });
+    return {
+      success: false,
+      approach: 'simplified',
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Approach 2: Text
+ * Sends full HTML to OpenAI, gets action list, then iterates per action
+ */
+async function executeTextApproach(page, jobId, context, openaiClient) {
+  const pageUrl = page.url();
+  const pageTitle = await page.title();
+  
+  await sendLog(jobId, 'info', '🎯 APPROACH 2: Text (Full HTML + Iteration)', { page_url: pageUrl });
+  
+  try {
+    // Step 1: Get full HTML (truncate to prevent rate limit errors)
+    const htmlContent = await page.content();
+    // Limit to 20KB to stay under rate limits (10K tokens ~= 40KB text)
+    const htmlSnippet = htmlContent.length > 20000 ? htmlContent.substring(0, 20000) + '\n\n[...truncated for rate limits]' : htmlContent;
+    
+    await sendLog(jobId, 'info', `📝 HTML extracted (${htmlContent.length} chars, using ${htmlSnippet.length} chars)`, { page_url: pageUrl });
+    
+    // Step 2: Get action list from OpenAI
+    const listPrompt = `You are analyzing a web page's HTML to determine what actions should be performed.
+
+PAGE TITLE: ${pageTitle}
+PAGE URL: ${pageUrl}
+
+HTML CONTENT:
+${htmlSnippet}
+
+TASK: List all actions that should be performed on this page (login, form fill, navigation, etc.)
+
+RESPOND WITH JSON:
+{
+  "actions": [
+    "Action 1 description",
+    "Action 2 description"
+  ],
+  "page_type": "login" | "form" | "content" | "dashboard",
+  "confidence": 0.0-1.0
+}`;
+
+    const listCompletion = await aiConversationLogger.createChatCompletion(
+      openaiClient,
+      jobId,
+      'unified-crawler',
+      'text_approach_action_list',
+      {
+        model: "gpt-5-mini",
+        messages: [{ role: "user", content: listPrompt }],
+      },
+      null,
+      pageUrl,
+      { approach: 'text', html_length: htmlContent.length }
+    );
+    
+    const actionList = JSON.parse(listCompletion.content);
+    await sendLog(jobId, 'info', `📋 AI identified ${actionList.actions.length} actions (${actionList.page_type})`, { page_url: pageUrl });
+    
+    // Step 3: Iterate through each action
+    const executedActions = [];
+    for (let i = 0; i < actionList.actions.length && i < 5; i++) {
+      const actionDesc = actionList.actions[i];
+      await sendLog(jobId, 'info', `🔄 Action ${i + 1}/${actionList.actions.length}: ${actionDesc}`, { page_url: pageUrl });
+      
+      // Ask OpenAI how to execute this specific action
+      const execPrompt = `How to execute this action on the page?
+
+ACTION: ${actionDesc}
+
+HTML SNIPPET (relevant sections):
+${htmlSnippet.substring(0, 5000)}
+
+RESPOND WITH JSON:
+{
+  "method": "fill" | "click" | "wait",
+  "selector": "CSS selector to target",
+  "value": "value to use (if fill)" | null,
+  "reasoning": "Why this selector"
+}`;
+
+      const execCompletion = await aiConversationLogger.createChatCompletion(
+        openaiClient,
+        jobId,
+        'unified-crawler',
+        `text_approach_action_${i + 1}`,
+        {
+          model: "gpt-5-mini",
+          messages: [{ role: "user", content: execPrompt }],
+        },
+        null,
+        pageUrl,
+        { approach: 'text', action_index: i + 1, action_description: actionDesc }
+      );
+      
+      const execDetails = JSON.parse(execCompletion.content);
+      executedActions.push({ action: actionDesc, execution: execDetails });
+      
+      await sendLog(jobId, 'info', `  ✓ Method: ${execDetails.method}, Selector: ${execDetails.selector}`, { page_url: pageUrl });
+    }
+    
+    return {
+      success: actionList.confidence > 0.7,
+      approach: 'text',
+      action_list: actionList,
+      executed_actions: executedActions
+    };
+    
+  } catch (error) {
+    await sendLog(jobId, 'error', `❌ Text approach failed: ${error.message}`, { page_url: pageUrl });
+    return {
+      success: false,
+      approach: 'text',
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Approach 3: Media
+ * Uses screenshots for visual analysis, iterates with fresh screenshots
+ */
+async function executeMediaApproach(page, jobId, context, openaiClient) {
+  const pageUrl = page.url();
+  const pageTitle = await page.title();
+  
+  await sendLog(jobId, 'info', '🎯 APPROACH 3: Media (Screenshot-Based Visual Analysis)', { page_url: pageUrl });
+  
+  try {
+    // Step 1: Take initial screenshot
+    const initialScreenshot = await page.screenshot({ 
+      type: 'png', 
+      fullPage: true,
+      animations: 'disabled'
+    });
+    const screenshotBase64 = initialScreenshot.toString('base64');
+    
+    await sendLog(jobId, 'info', `📸 Screenshot captured (Full HD 1920x1080)`, { page_url: pageUrl });
+    
+    // Step 2: Get visual action list from OpenAI
+    const listPrompt = `Analyze this screenshot visually and identify all actions that should be performed.
+
+PAGE TITLE: ${pageTitle}
+PAGE URL: ${pageUrl}`;
+
+    const listCompletion = await aiConversationLogger.createChatCompletion(
+      openaiClient,
+      jobId,
+      'unified-crawler',
+      'media_approach_visual_analysis',
+      {
+        model: "gpt-5-mini",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: listPrompt },
+            { 
+              type: "image_url", 
+              image_url: { 
+                url: `data:image/png;base64,${screenshotBase64}`,
+                detail: "high"
+              } 
+            }
+          ]
+        }],
+        max_completion_tokens: 1000
+      },
+      null,
+      pageUrl,
+      { approach: 'media', screenshot_size: initialScreenshot.length }
+    );
+    
+    const visualAnalysis = JSON.parse(listCompletion.content);
+    await sendLog(jobId, 'info', `👁️ Visual analysis complete`, { page_url: pageUrl });
+    
+    // Step 3: Iterate through visual actions
+    const executedActions = [];
+    const actions = visualAnalysis.actions || [];
+    
+    for (let i = 0; i < actions.length && i < 3; i++) {
+      const actionDesc = actions[i];
+      await sendLog(jobId, 'info', `🔄 Visual Action ${i + 1}/${actions.length}: ${actionDesc}`, { page_url: pageUrl });
+      
+      // Take fresh screenshot for this action
+      const freshScreenshot = await page.screenshot({ type: 'png', fullPage: false });
+      const freshBase64 = freshScreenshot.toString('base64');
+      
+      // Ask OpenAI where the element is
+      const locatePrompt = `Looking at this screenshot, where is the element for: "${actionDesc}"?
+
+Provide coordinates or description.
+
+RESPOND WITH JSON:
+{
+  "location_strategy": "coordinates" | "selector",
+  "coordinates": { "x": number, "y": number } | null,
+  "selector_suggestion": "CSS selector" | null,
+  "description": "Visual description of element location"
+}`;
+
+      const locateCompletion = await aiConversationLogger.createChatCompletion(
+        openaiClient,
+        jobId,
+        'unified-crawler',
+        `media_approach_locate_${i + 1}`,
+        {
+          model: "gpt-5-mini",
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: locatePrompt },
+              { 
+                type: "image_url", 
+                image_url: { url: `data:image/png;base64,${freshBase64}`, detail: "high" } 
+              }
+            ]
+          }],
+          max_completion_tokens: 300
+        },
+        null,
+        pageUrl,
+        { approach: 'media', action_index: i + 1 }
+      );
+      
+      const locationData = JSON.parse(locateCompletion.content);
+      executedActions.push({ action: actionDesc, location: locationData });
+      
+      await sendLog(jobId, 'info', `  ✓ Location: ${locationData.location_strategy}`, { page_url: pageUrl });
+    }
+    
+    return {
+      success: true,
+      approach: 'media',
+      visual_analysis: visualAnalysis,
+      executed_actions: executedActions
+    };
+    
+  } catch (error) {
+    await sendLog(jobId, 'error', `❌ Media approach failed: ${error.message}`, { page_url: pageUrl });
+    return {
+      success: false,
+      approach: 'media',
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Approach 4: Static (AI QA Automation)
+ * Generates Playwright test scripts using metadata and common selectors
+ */
+async function executeStaticApproach(page, jobId, context, openaiClient, pageId, projectId) {
+  const pageUrl = page.url();
+  const pageTitle = await page.title();
+  
+  await sendLog(jobId, 'info', '🎯 APPROACH 4: Static (AI Script Generation for QA Automation)', { page_url: pageUrl });
+  
+  try {
+    // Step 1: Extract metadata ONLY (no deep analysis)
+    const metadata = await page.evaluate(() => {
+      return {
+        title: document.title,
+        description: document.querySelector('meta[name="description"]')?.content || '',
+        keywords: document.querySelector('meta[name="keywords"]')?.content || '',
+        h1: document.querySelector('h1')?.textContent || '',
+        h2: Array.from(document.querySelectorAll('h2')).map(h => h.textContent).slice(0, 3)
+      };
+    });
+    
+    // Step 2: Detect common selectors present on page
+    const commonSelectors = await page.evaluate(() => {
+      const selectors = [
+        'input[type="email"]',
+        'input[type="text"]',
+        'input[type="password"]',
+        'button[type="submit"]',
+        'input[type="submit"]',
+        '#username',
+        '#email',
+        '#password',
+        '#login',
+        '[name="username"]',
+        '[name="email"]',
+        '[name="password"]'
+      ];
+      
+      return selectors.filter(sel => {
+        try {
+          return document.querySelector(sel) !== null;
+        } catch {
+          return false;
+        }
+      });
+    });
+    
+    await sendLog(jobId, 'info', `📋 Metadata extracted, ${commonSelectors.length} common selectors found`, { page_url: pageUrl });
+    
+    // Step 3: Send to OpenAI for Playwright script generation
+    const scriptPrompt = `You are a QA automation engineer using the STATIC approach. Generate Playwright test scripts using ONLY the provided metadata and common selectors.
+
+PAGE METADATA ONLY:
+- Title: ${metadata.title}
+- URL: ${pageUrl}
+- Description: ${metadata.description}
+- Keywords: ${metadata.keywords}
+- Main Heading: ${metadata.h1}
+- Subheadings: ${metadata.h2.join(', ')}
+
+AVAILABLE COMMON SELECTORS (use ONLY these):
+${commonSelectors.map(s => `- ${s}`).join('\n')}
+
+TASK:
+Based on the page metadata and common selectors, generate Playwright test scripts for likely scenarios.
+
+REQUIREMENTS:
+- Scripts must be async functions: async (page, context) => { ... }
+- Use ONLY the provided common selectors
+- Include robust error handling (try/catch)
+- Add meaningful comments
+- Return result object: { success: true/false, message: "...", data: {...} }
+- Assume context contains: { username, password, testData }
+
+RESPOND WITH JSON:
+{
+  "scenarios": [
+    {
+      "name": "Test scenario name",
+      "description": "What this test validates",
+      "playwright_script": "async (page, context) => { /* complete script code here */ }",
+      "expected_outcome": "What should happen if test passes",
+      "validation_rules": ["rule 1", "rule 2"],
+      "parameters": { "username": "context.username", "password": "context.password" }
+    }
+  ],
+  "analysis": "Testing strategy based on metadata and common patterns"
+}`;
+
+    const scriptCompletion = await aiConversationLogger.createChatCompletion(
+      openaiClient,
+      jobId,
+      'unified-crawler',
+      'static_approach_script_generation',
+      {
+        model: "gpt-5-mini",
+        messages: [{ role: "user", content: scriptPrompt }],
+        max_completion_tokens: 2000
+      },
+      null,
+      pageUrl,
+      { approach: 'static', common_selectors_count: commonSelectors.length }
+    );
+    
+    const aiResponse = JSON.parse(scriptCompletion.content);
+    await sendLog(jobId, 'info', `🤖 AI generated ${aiResponse.scenarios?.length || 0} test scenarios`, { page_url: pageUrl });
+    
+    // Step 4: Save each script to scripts collection
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const savedScripts = [];
+    
+    for (const scenario of (aiResponse.scenarios || [])) {
+      try {
+        const scriptResponse = await fetch(`${backendUrl}/scripts`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            project_id: projectId,
+            page_id: pageId,
+            name: scenario.name,
+            description: scenario.description,
+            script_type: 'playwright',
+            script_code: scenario.playwright_script,
+            parameters: scenario.parameters,
+            generated_by: 'ai',
+            ai_prompt: scriptPrompt,
+            ai_model: 'gpt-5-mini',
+            expected_outcome: scenario.expected_outcome,
+            validation_rules: scenario.validation_rules || [],
+            status: 'active'
+          })
+        });
+        
+        if (scriptResponse.ok) {
+          const savedScript = await scriptResponse.json();
+          savedScripts.push(savedScript);
+          await sendLog(jobId, 'info', `  ✓ Script saved: ${scenario.name} (ID: ${savedScript._id})`, { page_url: pageUrl });
+          
+          // Step 5: Create action record
+          const actionResponse = await fetch(`${backendUrl}/actions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              project_id: projectId,
+              page_id: pageId,
+              script_id: savedScript._id,
+              type: 'ai_test_script',
+              description: `AI-generated test: ${scenario.name}`,
+              execution_count: 0
+            })
+          });
+          
+          if (actionResponse.ok) {
+            const action = await actionResponse.json();
+            await sendLog(jobId, 'info', `  ✓ Action created (ID: ${action._id})`, { page_url: pageUrl });
+          }
+        }
+      } catch (saveError) {
+        await sendLog(jobId, 'error', `  ❌ Failed to save script: ${saveError.message}`, { page_url: pageUrl });
+      }
+    }
+    
+    return {
+      success: savedScripts.length > 0,
+      approach: 'static',
+      ai_response: aiResponse,
+      saved_scripts: savedScripts,
+      metadata: metadata,
+      common_selectors: commonSelectors
+    };
+    
+  } catch (error) {
+    await sendLog(jobId, 'error', `❌ Static approach failed: ${error.message}`, { page_url: pageUrl });
+    return {
+      success: false,
+      approach: 'static',
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Verify action completion with OpenAI
+ */
+async function verifyActionWithOpenAI(page, jobId, approach, openaiClient) {
+  const pageUrl = page.url();
+  const pageTitle = await page.title();
+  
+  try {
+    let verificationPrompt;
+    let messages;
+    
+    if (approach === 'media') {
+      // Use screenshot for verification
+      const screenshot = await page.screenshot({ type: 'png', fullPage: false });
+      const screenshotBase64 = screenshot.toString('base64');
+      
+      verificationPrompt = `Analyze this screenshot to determine if the previous action was successful.
+
+Current URL: ${pageUrl}
+Current Title: ${pageTitle}
+
+RESPOND WITH JSON:
+{
+  "status": "success" | "failure" | "in_progress",
+  "confidence": 0.0-1.0,
+  "reason": "Explanation of status",
+  "next_action": "What should happen next" | null
+}`;
+
+      messages = [{
+        role: "user",
+        content: [
+          { type: "text", text: verificationPrompt },
+          { type: "image_url", image_url: { url: `data:image/png;base64,${screenshotBase64}`, detail: "low" } }
+        ]
+      }];
+    } else {
+      // Use HTML for verification
+      const htmlContent = await page.content();
+      const htmlSnippet = htmlContent.substring(0, 10000);
+      
+      verificationPrompt = `Analyze this page to determine if the previous action was successful.
+
+Current URL: ${pageUrl}
+Current Title: ${pageTitle}
+
+HTML SNIPPET:
+${htmlSnippet}
+
+RESPOND WITH JSON:
+{
+  "status": "success" | "failure" | "in_progress",
+  "confidence": 0.0-1.0,
+  "reason": "Explanation of status",
+  "next_action": "What should happen next" | null
+}`;
+
+      messages = [{ role: "user", content: verificationPrompt }];
+    }
+    
+    const verification = await aiConversationLogger.createChatCompletion(
+      openaiClient,
+      jobId,
+      'unified-crawler',
+      'action_verification',
+      {
+        model: "gpt-5-mini",
+        messages: messages,
+      },
+      null,
+      pageUrl,
+      { verification_approach: approach }
+    );
+    
+    return JSON.parse(verification.content);
+  } catch (error) {
+    return {
+      status: "in_progress",
+      confidence: 0.5,
+      reason: `Verification failed: ${error.message}`,
+      next_action: "continue"
+    };
+  }
+}
+
+/**
+ * Execute approach sequence with iteration
+ * Implements rule 42-crawl-approaches-sequence.mdc
+ */
+async function executeApproachSequence(page, jobId, context, openaiClient, pageId, projectId) {
+  const approaches = ['simplified', 'text', 'media', 'static'];
+  const maxDepth = context.options?.max_depth || 5;
+  const maxTries = context.options?.max_tries || 10;
+  const startTime = Date.now();
+  const maxTime = 15 * 60 * 1000; // 15 minutes
+  
+  let depth = 0;
+  let tries = 0;
+  let currentApproachIndex = 0;
+  
+  await sendLog(jobId, 'info', `🔄 Starting approach sequence: ${approaches.join(' → ')}`, { page_url: page.url() });
+  await sendLog(jobId, 'info', `📊 Limits: depth=${maxDepth}, tries=${maxTries}, time=15min`, { page_url: page.url() });
+  
+  while (depth < maxDepth && tries < maxTries && (Date.now() - startTime) < maxTime) {
+    const currentApproach = approaches[currentApproachIndex];
+    depth++;
+    tries++;
+    
+    await sendLog(jobId, 'info', `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, { page_url: page.url() });
+    await sendLog(jobId, 'info', `🔄 Iteration ${tries}: Approach ${currentApproachIndex + 1}/4 (${currentApproach})`, { page_url: page.url() });
+    await sendLog(jobId, 'info', `📊 Depth: ${depth}/${maxDepth}, Tries: ${tries}/${maxTries}`, { page_url: page.url() });
+    
+    // Execute approach
+    let result;
+    switch (currentApproach) {
+      case 'simplified':
+        result = await executeSimplifiedApproach(page, jobId, context, openaiClient);
+        break;
+      case 'text':
+        result = await executeTextApproach(page, jobId, context, openaiClient);
+        break;
+      case 'media':
+        result = await executeMediaApproach(page, jobId, context, openaiClient);
+        break;
+      case 'static':
+        result = await executeStaticApproach(page, jobId, context, openaiClient, pageId, projectId);
+        break;
+    }
+    
+    await sendLog(jobId, 'info', `${result.success ? '✅' : '❌'} Approach result: ${result.success ? 'Success' : 'Failed'}`, { page_url: page.url() });
+    
+    // Verify with OpenAI
+    const verification = await verifyActionWithOpenAI(page, jobId, currentApproach, openaiClient);
+    await sendLog(jobId, 'info', `🤖 Verification: ${verification.status} (confidence: ${verification.confidence})`, { page_url: page.url() });
+    await sendLog(jobId, 'info', `   Reason: ${verification.reason}`, { page_url: page.url() });
+    
+    // Decision logic
+    if (verification.status === 'success' && verification.confidence > 0.8) {
+      await sendLog(jobId, 'info', `\n✅ SUCCESS: Action completed with ${currentApproach} approach!`, { page_url: page.url() });
+      return {
+        success: true,
+        final_approach: currentApproach,
+        iterations: tries,
+        depth: depth,
+        verification: verification,
+        result: result
+      };
+    }
+    
+    if (verification.status === 'failure' && verification.confidence > 0.8) {
+      await sendLog(jobId, 'info', `\n❌ FAILURE: Action failed with ${currentApproach} approach`, { page_url: page.url() });
+      return {
+        success: false,
+        final_approach: currentApproach,
+        iterations: tries,
+        depth: depth,
+        verification: verification,
+        result: result
+      };
+    }
+    
+    // Move to next approach
+    currentApproachIndex = (currentApproachIndex + 1) % approaches.length;
+    
+    if (currentApproachIndex === 0) {
+      await sendLog(jobId, 'info', `🔄 Completed full cycle, starting next depth level...`, { page_url: page.url() });
+    }
+    
+    // Small delay between attempts
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  
+  // Limits reached
+  await sendLog(jobId, 'warn', `\n⚠️ Limits reached: depth=${depth}, tries=${tries}, time=${(Date.now() - startTime) / 1000}s`, { page_url: page.url() });
+  return {
+    success: false,
+    final_approach: null,
+    iterations: tries,
+    depth: depth,
+    reason: 'Limits exceeded'
+  };
+}
+
 // Main exported functions
 export async function attemptLogin(url, username, password, cookies, context, openaiApiKey = null) {
   const startTime = Date.now();
   const jobId = context.job_id || 'unknown-job';
-  const mode = context.mode || 'auto';
+  // Use approach_mode if provided, otherwise fall back to mode
+  const mode = context.approach_mode || context.mode || 'auto';
   
   await sendLog(jobId, 'info', `${mode.toUpperCase()}: Login ${url}`, { mode });
   
@@ -3336,50 +4436,52 @@ export async function attemptLogin(url, username, password, cookies, context, op
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
     
     const result = await withBrowser(async ({ page, context: browserContext }) => {
-      // Navigate first to get the URL
-      await sendLog(jobId, 'info', 'Browser session started', { mode });
-      
-      // Set initial cookies if provided
-      if (cookies && cookies.length > 0) {
-        await sendLog(jobId, 'info', `🍪 Setting ${cookies.length} cookies...`);
-        await browserContext.addCookies(cookies);
-      }
+      // Wrap entire login operation with video recording
+      const { result: loginData, videoKey } = await recordPageVideo(page, jobId, url, async () => {
+        // Navigate first to get the URL
+        await sendLog(jobId, 'info', 'Browser session started', { mode });
+        
+        // Set initial cookies if provided
+        if (cookies && cookies.length > 0) {
+          await sendLog(jobId, 'info', `🍪 Setting ${cookies.length} cookies...`);
+          await browserContext.addCookies(cookies);
+        }
 
-      // Navigate to URL
-      await sendLog(jobId, 'info', `Navigate: ${url}`, { mode });
-      await page.goto(url, { 
-        waitUntil: 'domcontentloaded', 
-        timeout: 30000 
-      });
-      
-      // Now we have the page URL, create pageContext
-      const currentUrl = page.url();
-      const pageContext = { page_url: currentUrl, mode };
-      
-      // Wait for navigation if DOM is loaded, otherwise wait for timeout then analyze
-      try {
-        await page.waitForLoadState('networkidle', { timeout: 10000 });
-        await sendLog(jobId, 'info', '✅ Page fully loaded', pageContext);
-      } catch (error) {
-        await sendLog(jobId, 'warn', '⚠️ Page not fully loaded, proceeding with analysis', pageContext);
-        // Wait for timeout then analyze the page with AI
-        await page.waitForTimeout(5000);
-        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', pageContext);
-      }
+        // Navigate to URL
+        await sendLog(jobId, 'info', `Navigate: ${url}`, { mode });
+        await page.goto(url, { 
+          waitUntil: 'domcontentloaded', 
+          timeout: 30000 
+        });
+        
+        // Now we have the page URL, create pageContext
+        const currentUrl = page.url();
+        const pageContext = { page_url: currentUrl, mode };
+        
+        // Wait for navigation if DOM is loaded, otherwise wait for timeout then analyze
+        try {
+          await page.waitForLoadState('networkidle', { timeout: 10000 });
+          await sendLog(jobId, 'info', '✅ Page fully loaded', pageContext);
+        } catch (error) {
+          await sendLog(jobId, 'warn', '⚠️ Page not fully loaded, proceeding with analysis', pageContext);
+          // Wait for timeout then analyze the page with AI
+          await page.waitForTimeout(5000);
+          await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', pageContext);
+        }
 
-      // Set credentials in context
-      const enhancedContext = {
-        ...context,
-        credentials: { username, password }
-      };
+        // Set credentials in context
+        const enhancedContext = {
+          ...context,
+          credentials: { username, password }
+        };
 
-      // Execute mode-specific operation
-      const modeHandler = modeHandlers[mode];
-      if (!modeHandler) {
-        throw new Error(`Unknown mode: ${mode}`);
-      }
+        // Execute mode-specific operation
+        const modeHandler = modeHandlers[mode];
+        if (!modeHandler) {
+          throw new Error(`Unknown mode: ${mode}`);
+        }
 
-      const operationResult = await modeHandler(page, enhancedContext, openaiClient, 'login');
+        const operationResult = await modeHandler(page, enhancedContext, openaiClient, 'login');
       
       // Extract authentication tokens from browser context
       const extractedCookies = await page.context().cookies();
@@ -3453,30 +4555,37 @@ export async function attemptLogin(url, username, password, cookies, context, op
         });
       }
       
+        return {
+          ...operationResult,
+          startTime,
+          duration_ms: Date.now() - startTime,
+          finalUrl: page.url(),
+          finalTitle: await page.title(),
+          // ALL cookies for storage with project
+          cookies: extractedCookies,
+          // Authentication tokens for crawling (filtered subset)
+          authTokens: authTokens,
+          tokenCount: {
+            cookies: authTokens.cookies.length,
+            localStorage: Object.keys(authTokens.localStorage).length,
+            sessionStorage: Object.keys(authTokens.sessionStorage).length,
+            total: authTokens.cookies.length + Object.keys(authTokens.localStorage).length + Object.keys(authTokens.sessionStorage).length
+          },
+          // Summary for project storage
+          storageReady: {
+            totalCookies: extractedCookies.length,
+            authCookies: authTokens.cookies.length,
+            localStorageItems: Object.keys(authTokens.localStorage).length,
+            sessionStorageItems: Object.keys(authTokens.sessionStorage).length,
+            readyForStorage: extractedCookies.length > 0
+          }
+        };
+      });
+      
+      // Add video key to login result
       return {
-        ...operationResult,
-        startTime,
-        duration_ms: Date.now() - startTime,
-        finalUrl: page.url(),
-        finalTitle: await page.title(),
-        // ALL cookies for storage with project
-        cookies: extractedCookies,
-        // Authentication tokens for crawling (filtered subset)
-        authTokens: authTokens,
-        tokenCount: {
-          cookies: authTokens.cookies.length,
-          localStorage: Object.keys(authTokens.localStorage).length,
-          sessionStorage: Object.keys(authTokens.sessionStorage).length,
-          total: authTokens.cookies.length + Object.keys(authTokens.localStorage).length + Object.keys(authTokens.sessionStorage).length
-        },
-        // Summary for project storage
-        storageReady: {
-          totalCookies: extractedCookies.length,
-          authCookies: authTokens.cookies.length,
-          localStorageItems: Object.keys(authTokens.localStorage).length,
-          sessionStorageItems: Object.keys(authTokens.sessionStorage).length,
-          readyForStorage: extractedCookies.length > 0
-        }
+        ...loginData,
+        videoKey: videoKey
       };
     }, {
       headless: context.options?.headless !== false,
@@ -3511,7 +4620,8 @@ export async function attemptLogin(url, username, password, cookies, context, op
 export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   const startTime = Date.now();
   const jobId = context.job_id || 'unknown';
-  const mode = context.mode || 'auto';
+  // Use approach_mode if provided, otherwise fall back to mode
+  const mode = context.approach_mode || context.mode || 'auto';
   
   await sendLog(jobId, 'info', `🚀 Starting ${mode} mode crawl process for ${url}`, { mode });
   
