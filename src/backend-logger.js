@@ -251,6 +251,8 @@ export async function prepareScreenshotUpload(jobId, pageUrl = null, metadata = 
  */
 export async function uploadScreenshotToPresignedUrl(uploadUrl, screenshotBuffer) {
   try {
+    console.log(`[SCREENSHOT-UPLOAD] Starting upload to presigned URL (${screenshotBuffer.length} bytes)...`);
+    
     const response = await fetch(uploadUrl, {
       method: 'PUT',
       headers: { 'Content-Type': 'image/png' },
@@ -258,13 +260,15 @@ export async function uploadScreenshotToPresignedUrl(uploadUrl, screenshotBuffer
     });
     
     if (!response.ok) {
-      console.error(`❌ Failed to upload screenshot to presigned URL: ${response.status}`);
+      const errorText = await response.text();
+      console.error(`❌ Screenshot upload failed: ${response.status} - ${errorText}`);
       return false;
     }
     
+    console.log(`✅ Screenshot uploaded successfully (${screenshotBuffer.length} bytes)`);
     return true;
   } catch (error) {
-    console.error(`❌ Error uploading screenshot to presigned URL:`, error);
+    console.error(`❌ Error uploading screenshot:`, error.message);
     return false;
   }
 }
