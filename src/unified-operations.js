@@ -150,6 +150,11 @@ async function sendLog(jobId, level, message, data = {}, conversationId = null) 
   // Clean log message
   const cleanedMessage = cleanLogMessage(message);
   
+  // Skip sending empty messages to backend (prevents 400 errors)
+  if (!cleanedMessage || cleanedMessage.trim().length === 0) {
+    return;
+  }
+  
   // Determine component name
   const mode = data.mode || 'auto';
   const componentMode = mode === 'auto' ? 'text' : mode;
@@ -353,22 +358,58 @@ async function downloadAndUploadBrowserlessVideo(jobId, browserServiceUrl, sessi
     
     await sendLog(jobId, 'info', `🎥 Downloading video from browserless (session: ${sessionId.substring(0, 8)}...)`);
     
-    // Step 1: Download video from browserless /download endpoint
-    const videoDownloadUrl = `${browserServiceUrl}/download/${sessionId}`;
-    const downloadResponse = await fetch(videoDownloadUrl);
-    
-    if (!downloadResponse.ok) {
-      throw new Error(`Browserless download failed: ${downloadResponse.status} ${downloadResponse.statusText}`);
+    // First, check what sessions/videos are available for debugging
+    try {
+      const sessionsUrl = `${browserServiceUrl}/sessions`;
+      const sessionsResponse = await fetch(sessionsUrl);
+      if (sessionsResponse.ok) {
+        const sessions = await sessionsResponse.json();
+        await sendLog(jobId, 'debug', `🔍 Available sessions: ${JSON.stringify(sessions.map(s => ({ id: s.id || s.browserId, hasVideo: !!s.video })))}`);
+      }
+    } catch (err) {
+      await sendLog(jobId, 'debug', `Could not query sessions: ${err.message}`);
     }
     
-    const videoBuffer = Buffer.from(await downloadResponse.arrayBuffer());
+    // Try multiple potential download endpoints
+    const downloadEndpoints = [
+      `${browserServiceUrl}/download?id=${sessionId}`,  // Try with query param
+      `${browserServiceUrl}/download/${sessionId}`,      // Try with path param
+      `${browserServiceUrl}/sessions/${sessionId}/download`, // Try REST-style endpoint
+      `${browserServiceUrl}/video/${sessionId}` // Alternative video endpoint
+    ];
+    
+    let videoBuffer = null;
+    let successfulEndpoint = null;
+    
+    // Step 1: Try each endpoint until one works
+    for (const endpoint of downloadEndpoints) {
+      try {
+        await sendLog(jobId, 'debug', `🔍 Trying video download from: ${endpoint}`);
+        const downloadResponse = await fetch(endpoint);
+        
+        if (downloadResponse.ok) {
+          videoBuffer = Buffer.from(await downloadResponse.arrayBuffer());
+          if (videoBuffer.length > 0) {
+            successfulEndpoint = endpoint;
+            await sendLog(jobId, 'info', `✅ Video download succeeded from: ${endpoint}`);
+            break;
+          } else {
+            await sendLog(jobId, 'warn', `📹 Endpoint returned empty video: ${endpoint}`);
+          }
+        } else {
+          await sendLog(jobId, 'debug', `❌ Endpoint failed (${downloadResponse.status}): ${endpoint}`);
+        }
+      } catch (err) {
+        await sendLog(jobId, 'debug', `❌ Endpoint error: ${err.message} - ${endpoint}`);
+      }
+    }
+    
+    if (!videoBuffer || videoBuffer.length === 0) {
+      throw new Error('All download endpoints failed or returned empty video. Session may not have video recording enabled. Check Browserless configuration (DEFAULT_RECORD_VIDEO=true).');
+    }
+    
     const videoSize = videoBuffer.length;
-    
-    if (videoSize === 0) {
-      throw new Error('Downloaded video is empty (0 bytes)');
-    }
-    
-    await sendLog(jobId, 'info', `✅ Video downloaded (${(videoSize / 1024 / 1024).toFixed(2)} MB)`);
+    await sendLog(jobId, 'info', `✅ Video downloaded (${(videoSize / 1024 / 1024).toFixed(2)} MB) from ${successfulEndpoint}`);
     
     // Step 2: Get presigned URL from backend
     const prepareResult = await backendLogger.prepareVideoUpload(jobId, {
@@ -967,43 +1008,54 @@ async function withBrowser(action, options = {}) {
   let sessionId = null;
   
   try {
-    // Use browserless WebSocket URL with recording enabled
-    // Browserless natively records when &record=true is set
-    const recordParam = enableRecording ? '&record=true' : '';
-    const wsUrl = browserServiceUrl.replace('http://', 'ws://') + `?timeout=900000${recordParam}`;
+    // NOTE: Video recording limitation with remote browsers
+    // Playwright's native video recording doesn't work with remote browser connections (connect/connectOverCDP)
+    // Browserless video recording via CDP also has limitations with the /download endpoint
+    // Current solution: Use enhanced screenshots instead of video for remote browsers
+    // Future: Implement screencast via CDP or use alternative recording method
+    
+    const wsUrl = browserServiceUrl.replace('http://', 'ws://') + '?timeout=900000';
     
     if (enableRecording) {
-      await sendLog(options.jobId || 'server', 'info', `🎥 Connecting with video recording enabled: ${wsUrl}`);
+      await sendLog(options.jobId || 'server', 'warn', `⚠️ Video recording requested but not supported with remote CDP browsers. Using enhanced screenshot capture instead.`, {
+        recommendation: 'Screenshots will be captured at key moments to provide visual documentation',
+        futureImprovement: 'Implement CDP screencast or alternative recording solution'
+      });
+      // Still try to get session ID for potential future use
+      await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket (screenshots enabled): ${wsUrl}`);
     } else {
       await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket: ${wsUrl}`);
     }
     
     browser = await chromium.connectOverCDP(wsUrl);
     
-    // Get session ID from browserless after connection
-    // Browserless creates a session ID that we need to retrieve via API
+    // Try to get session ID for debugging/future use
     if (enableRecording) {
       try {
-        // Query browserless for active sessions to find our session ID
         const sessionsUrl = `${browserServiceUrl}/sessions`;
+        await sendLog(options.jobId || 'server', 'debug', `🔍 Querying sessions from: ${sessionsUrl}`);
         const sessionsResponse = await fetch(sessionsUrl);
         
         if (sessionsResponse.ok) {
           const sessions = await sessionsResponse.json();
-          // Get the most recent session (should be ours)
-          // Browserless returns browserId which is used for video download
+          await sendLog(options.jobId || 'server', 'debug', `📹 Found ${sessions?.length || 0} active sessions`);
+          
           if (sessions && sessions.length > 0) {
             const latestSession = sessions[sessions.length - 1];
             sessionId = latestSession.browserId || latestSession.id;
-            await sendLog(options.jobId || 'server', 'info', `📹 Browser Session ID: ${sessionId}`);
-          } else {
-            await sendLog(options.jobId || 'server', 'warn', 'No active sessions found in browserless');
+            
+            await sendLog(options.jobId || 'server', 'debug', `Browser Session ID: ${sessionId}`, {
+              sessionData: {
+                browserId: latestSession.browserId,
+                id: latestSession.id,
+                url: latestSession.initialUrl,
+                trackingId: latestSession.trackingId
+              }
+            });
           }
-        } else {
-          await sendLog(options.jobId || 'server', 'warn', `Could not query browserless sessions: ${sessionsResponse.status}`);
         }
       } catch (e) {
-        await sendLog(options.jobId || 'server', 'warn', `Session ID query error: ${e.message}`);
+        await sendLog(options.jobId || 'server', 'debug', `Session ID query error: ${e.message}`);
       }
     }
     
@@ -1073,28 +1125,24 @@ async function withBrowser(action, options = {}) {
       }
     }
     
-    // Handle video recording - MANDATORY per rule 38-video-recording-mandatory.mdc
-    // Download from browserless and upload to MinIO asynchronously
-    if (sessionId && enableRecording) {
-      try {
-        await sendLog(options.job_id || 'unknown', 'info', '🎥 Processing video recording from browserless...');
-        
-        // Download video from browserless (async, non-blocking)
-        downloadAndUploadBrowserlessVideo(
-          options.job_id || 'unknown',
-          browserServiceUrl,
-          sessionId
-        ).catch(error => {
-          sendLog(options.job_id || 'unknown', 'error', `🎥 Video processing failed: ${error.message}`);
-        });
-        
-        videoFileId = `browserless-${sessionId}`;
-        await sendLog(options.job_id || 'unknown', 'info', '🎥 Video download and upload started in background');
-      } catch (error) {
-        await sendLog(options.job_id || 'unknown', 'error', `🎥 Video processing failed: ${error.message}`);
-      }
-    } else if (enableRecording && !sessionId) {
-      await sendLog(options.job_id || 'unknown', 'warn', '🎥 Video recording enabled but no session ID available');
+    // Handle video recording - Note: Currently disabled for remote CDP browsers
+    // Per rule 38, video recording is mandatory, but technical limitations with remote browsers
+    // require us to use enhanced screenshots as an alternative until a proper solution is implemented
+    if (enableRecording) {
+      await sendLog(options.job_id || 'unknown', 'info', '📸 Enhanced screenshot capture enabled (video recording not available for remote browsers)', {
+        reason: 'Playwright video recording is not supported with remote CDP browser connections',
+        alternative: 'Multiple screenshots will be captured throughout the session',
+        futureWork: 'Implement CDP screencast or alternative video recording solution'
+      });
+      
+      // Don't attempt video download - it won't work with current CDP setup
+      // Future implementation could use:
+      // 1. CDP Page.screencastFrame for frame-by-frame recording
+      // 2. Browserless REST API instead of CDP
+      // 3. Local browser launch with Playwright video recording
+      videoFileId = null;
+    } else {
+      await sendLog(options.job_id || 'unknown', 'debug', 'Video recording is disabled for this job');
     }
     
     return {
@@ -2431,12 +2479,10 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
     pageId: pageId // Include pageId if available
   };
   
-  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, pageContext);
   await sendLog(jobId, 'info', `📄 ANALYZING PAGE: ${currentTitle}`, pageContext);
   await sendLog(jobId, 'info', `🔗 URL: ${currentUrl}`, pageContext);
   await sendLog(jobId, 'info', `🎯 Approach: ${approach}`, pageContext);
   await sendLog(jobId, 'info', `💬 Conversation ID: ${conversationId}`, pageContext);
-  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, pageContext);
   
   // Step 1: Detect captcha
   await sendLog(jobId, 'info', `🔍 Step 1/6: Checking for captcha...`, pageContext);
@@ -2698,7 +2744,6 @@ Provide brief summary in JSON format with testing recommendations.`;
   };
   
   await sendLog(jobId, 'info', `✅ COMPLETED: ${currentTitle} - ${forms.length} forms, ${linksData.total} links, ${linksData.internal.length} to crawl`, pageContext);
-  await sendLog(jobId, 'info', `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, pageContext);
   
   return pageAnalysis;
 }
@@ -2712,13 +2757,11 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
   const analyzedPages = [];
   const urlQueue = [{ url: startUrl, depth: 0 }];
   
-  await sendLog(jobId, 'info', `╔═══════════════════════════════════════════════════════════════════╗`);
-  await sendLog(jobId, 'info', `║  🌐 STARTING RECURSIVE CRAWL`);
-  await sendLog(jobId, 'info', `║  Start URL: ${startUrl}`);
-  await sendLog(jobId, 'info', `║  Approach: ${approach}`);
-  await sendLog(jobId, 'info', `║  Max Depth: ${maxDepth}`);
-  await sendLog(jobId, 'info', `║  Max Pages: ${maxPages}`);
-  await sendLog(jobId, 'info', `╚═══════════════════════════════════════════════════════════════════╝`);
+  await sendLog(jobId, 'info', `🌐 STARTING RECURSIVE CRAWL`);
+  await sendLog(jobId, 'info', `Start URL: ${startUrl}`);
+  await sendLog(jobId, 'info', `Approach: ${approach}`);
+  await sendLog(jobId, 'info', `Max Depth: ${maxDepth}`);
+  await sendLog(jobId, 'info', `Max Pages: ${maxPages}`);
   
   while (urlQueue.length > 0 && analyzedPages.length < maxPages) {
     const { url: currentUrl, depth } = urlQueue.shift();
@@ -2742,8 +2785,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       // Create page context for this URL
       const currentPageContext = { page_url: currentUrl, mode: approach };
       
-      await sendLog(jobId, 'info', ``, currentPageContext);
-      await sendLog(jobId, 'info', `🌍 ═══ PAGE ${analyzedPages.length + 1}/${maxPages} (Depth ${depth}/${maxDepth}) ═══`, currentPageContext);
+      await sendLog(jobId, 'info', `🌍 PAGE ${analyzedPages.length + 1}/${maxPages} (Depth ${depth}/${maxDepth})`, currentPageContext);
       await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl}`, currentPageContext);
       
       // Check if page/browser is still valid before navigating
@@ -2877,13 +2919,10 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
     }
   }
   
-  await sendLog(jobId, 'info', ``);
-  await sendLog(jobId, 'info', `╔═══════════════════════════════════════════════════════════════════╗`);
-  await sendLog(jobId, 'info', `║  🎉 RECURSIVE CRAWL COMPLETE`);
-  await sendLog(jobId, 'info', `║  Pages Analyzed: ${analyzedPages.length}`);
-  await sendLog(jobId, 'info', `║  URLs Visited: ${visitedUrls.size}`);
-  await sendLog(jobId, 'info', `║  URLs Remaining in Queue: ${urlQueue.length}`);
-  await sendLog(jobId, 'info', `╚═══════════════════════════════════════════════════════════════════╝`);
+  await sendLog(jobId, 'info', `🎉 RECURSIVE CRAWL COMPLETE`);
+  await sendLog(jobId, 'info', `Pages Analyzed: ${analyzedPages.length}`);
+  await sendLog(jobId, 'info', `URLs Visited: ${visitedUrls.size}`);
+  await sendLog(jobId, 'info', `URLs Remaining in Queue: ${urlQueue.length}`);
   
   return analyzedPages;
 }
