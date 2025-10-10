@@ -9,6 +9,8 @@ import { fileURLToPath } from 'url';
 import * as backendLogger from './backend-logger.js';
 import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
+import WorkflowAnalyzer from './workflow-analyzer.js';
+import WorkflowExecutor from './workflow-executor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,6 +22,8 @@ try {
   // Try to import shared modules (works in container)
   const aiModule = await import('/app/shared/ai-conversation-logger.js');
   aiConversationLogger = aiModule.aiConversationLogger;
+  
+  console.log('[UNIFIED-CRAWLER] ✅ AI conversation logger loaded');
 } catch (error) {
   // Fallback for CLI mode (shared modules not available)
   console.log('[CLI] Shared modules not available, using CLI mode');
@@ -1278,6 +1282,128 @@ async function withBrowser(action, options = {}) {
 
 // Mode-specific operation handlers
 const modeHandlers = {
+  // Workflow mode - NEW: Uses workflow-based analysis and testing
+  workflow: async (page, context, openaiClient, operation) => {
+    const jobId = context.job_id || 'unknown-job';
+    const projectId = context.project_id || null;
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const maxPages = context.options?.max_pages || 10;
+    const maxDepth = context.options?.max_depth || 2;
+    
+    await sendLog(jobId, 'info', `🔄 WORKFLOW MODE: Multi-page crawl (max ${maxPages} pages, depth ${maxDepth})`);
+    
+    // Initialize workflow analyzer and executor
+    const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger);
+    const workflowExecutor = new WorkflowExecutor(backendUrl, aiConversationLogger, backendLogger);
+    
+    const visitedUrls = new Set();
+    const urlQueue = [{ url: page.url(), depth: 0 }];
+    let pagesAnalyzed = 0;
+    const allWorkflows = [];
+    
+    try {
+      while (urlQueue.length > 0 && pagesAnalyzed < maxPages) {
+        const { url: currentUrl, depth } = urlQueue.shift();
+        
+        // Skip if already visited or too deep
+        if (visitedUrls.has(currentUrl) || depth > maxDepth) {
+          continue;
+        }
+        
+        visitedUrls.add(currentUrl);
+        pagesAnalyzed++;
+        
+        await sendLog(jobId, 'info', `📄 Page ${pagesAnalyzed}/${maxPages} (depth ${depth}): ${currentUrl}`);
+        
+        // Navigate to page if it's not the current page
+        if (page.url() !== currentUrl) {
+          await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+        }
+        
+        // Create basic page document first
+        const pageTitle = await page.title();
+        const createdPageId = await sendBasicPageToBackend(jobId, currentUrl, pageTitle);
+        
+        // Step 1: Analyze page and create workflow
+        await sendLog(jobId, 'info', `📊 Analyzing page with Playwright and OpenAI...`);
+        const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, createdPageId, projectId);
+        
+        await sendLog(jobId, 'info', `✅ Workflow created with ${analysisResult.legs_count} testable legs`);
+        await sendLog(jobId, 'info', `📝 ${analysisResult.page_description}`);
+        
+        allWorkflows.push(analysisResult);
+        
+        // Step 2: Execute workflow legs  
+        if (context.execute_workflow !== false) {
+          await sendLog(jobId, 'info', `▶️ Executing ${analysisResult.legs_count} workflow legs...`);
+          try {
+            const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
+            
+            const successful = executionResult.results.filter(r => r.result === 'success').length;
+            const failed = executionResult.results.filter(r => r.result === 'failure').length;
+            
+            await sendLog(jobId, 'info', `✅ Workflow complete: ${successful} succeeded, ${failed} failed`);
+          } catch (execError) {
+            await sendLog(jobId, 'warn', `⚠️ Workflow execution partially completed: ${execError.message}`);
+            // Continue to next page even if this one had issues
+          }
+        }
+        
+        // Step 3: Extract links from page for crawling (if not at max depth)
+        if (depth < maxDepth) {
+          const links = await page.$$eval('a[href]', anchors => 
+            anchors
+              .map(a => a.href)
+              .filter(href => href && !href.startsWith('javascript:') && !href.startsWith('#') && !href.startsWith('mailto:'))
+          );
+          
+          const baseUrl = new URL(currentUrl).origin;
+          const internalLinks = links.filter(link => link.startsWith(baseUrl));
+          
+          // Add internal links to queue
+          for (const link of internalLinks.slice(0, 20)) {  // Limit to 20 links per page
+            if (!visitedUrls.has(link)) {
+              urlQueue.push({ url: link, depth: depth + 1 });
+            }
+          }
+          
+          await sendLog(jobId, 'info', `🔗 Found ${internalLinks.length} internal links, queued ${Math.min(20, internalLinks.length)} for crawling`);
+        }
+      }
+      
+      // Return comprehensive results
+      return {
+        success: true,
+        approach: 'workflow',
+        message: `Analyzed ${pagesAnalyzed} pages with workflow-based testing`,
+        url: page.url(),
+        title: await page.title(),
+        details: {
+          total_pages: pagesAnalyzed,
+          total_workflows: allWorkflows.length,
+          workflows: allWorkflows.map(w => ({
+            workflow_id: w.workflow_id,
+            legs_count: w.legs_count,
+            page_description: w.page_description
+          }))
+        }
+      };
+    } catch (error) {
+      console.error('[WORKFLOW-MODE] Full error:', error);
+      console.error('[WORKFLOW-MODE] Stack trace:', error.stack);
+      await sendLog(jobId, 'error', `❌ Workflow mode failed: ${error.message}`);
+      await sendLog(jobId, 'error', `Stack: ${error.stack}`);
+      return {
+        success: false,
+        approach: 'workflow',
+        message: `Workflow failed: ${error.message}`,
+        error: error.message,
+        stack: error.stack
+      };
+    }
+  },
+
   // Simplified mode - NOW uses new approach sequence  
   simplified: async (page, context, openaiClient, operation) => {
     const jobId = context.job_id || 'unknown-job';
@@ -1303,13 +1429,18 @@ const modeHandlers = {
     };
   },
 
-  // Auto mode - NEW: Uses approach sequence (simplified → text → media → static)
+  // Auto mode - Uses approach sequence for crawling
+  // NOTE: Login is handled by separate login-service
   auto: async (page, context, openaiClient, operation) => {
     const jobId = context.job_id || 'unknown-job';
-    await sendLog(jobId, 'info', '🚀 AUTO MODE: Using NEW approach sequence (simplified → text → media → static)');
     
-    // For login operations, we need pageId and projectId
-    // Extract from context or use placeholder for now
+    // Unified-crawler does NOT handle login operations
+    if (operation === 'login') {
+      throw new Error('Login operations must be handled by login-service, not unified-crawler');
+    }
+    
+    await sendLog(jobId, 'info', '🚀 AUTO MODE: Using approach sequence (simplified → text → media → static)');
+    
     const pageId = context.page_id || null;
     const projectId = context.project_id || null;
     
@@ -1330,8 +1461,13 @@ const modeHandlers = {
     };
   },
   
-  // OLD AUTO MODE (backup) - Sequential approach selection (tries multiple approaches until one works)
+  // DEPRECATED: OLD AUTO MODE - Sequential approach selection
+  // This mode is deprecated in favor of the comprehensive first request approach.
+  // Kept for backward compatibility only.
+  // NEW APPROACH: Use 'workflow' mode which sends ALL context (HTML, screenshot, Playwright analysis) in first request
+  // with intelligent 2-attempt retry instead of trying multiple sequential approaches.
   auto_old: async (page, context, openaiClient, operation) => {
+    console.warn('[DEPRECATED] auto_old mode is deprecated. Use workflow mode instead.');
     const approachSequence = ['static', 'forms', 'text', 'media', 'script'];
     const currentUrl = page.url();
     const pageContext = { page_url: currentUrl, mode: 'auto' };
@@ -3708,7 +3844,7 @@ RESPOND WITH THIS EXACT FORMAT:
     
     while (retryCount <= maxRetries) {
       try {
-        const rawContent = completion.content;
+        const rawContent = completion.choices?.[0]?.message?.content || completion.content || '';
         await sendLog(jobId, 'info', `🔍 Parsing AI response (attempt ${retryCount + 1})`, { 
           page_url: pageUrl, 
           response_length: rawContent.length,
@@ -3791,7 +3927,8 @@ RESPOND WITH THIS EXACT FORMAT:
           { approach: 'simplified', retry_attempt: retryCount }
         );
         
-        completion.content = retryCompletion.content;
+        completion.choices = retryCompletion.choices;
+        completion.content = retryCompletion.choices?.[0]?.message?.content || retryCompletion.content;
       }
     }
     
@@ -3843,14 +3980,13 @@ ${htmlSnippet}
 
 TASK: List all actions that should be performed on this page (login, form fill, navigation, etc.)
 
-RESPOND WITH JSON:
+CRITICAL: Respond with comprehensive JSON containing human-readable summaries AND structured data.
+
+RESPOND WITH THIS EXACT FORMAT:
 {
-  "actions": [
-    "Action 1 description",
-    "Action 2 description"
-  ],
-  "page_type": "login" | "form" | "content" | "dashboard",
-  "confidence": 0.0-1.0
+  "code": "{\"actions\": [\"Action 1 description\", \"Action 2 description\"], \"page_type\": \"login|form|content|dashboard\", \"confidence\": 0.0-1.0}",
+  "page_summary": "Human-readable summary of what was found on this page and what actions will be taken",
+  "chat_message": "Conversational message explaining the analysis and next steps for the user"
 }`;
 
     const listCompletion = await aiConversationLogger.createChatCompletion(
@@ -3867,8 +4003,26 @@ RESPOND WITH JSON:
       { approach: 'text', html_length: htmlContent.length }
     );
     
-    const actionList = JSON.parse(listCompletion.content);
+    // Parse the comprehensive response format
+    const rawContent = listCompletion.choices?.[0]?.message?.content || listCompletion.content || '';
+    let parsedContent;
+    try {
+      parsedContent = JSON.parse(rawContent);
+    } catch (error) {
+      throw new Error(`Failed to parse OpenAI response: ${error.message}`);
+    }
+    
+    const actionList = JSON.parse(parsedContent.code);
     await sendLog(jobId, 'info', `📋 AI identified ${actionList.actions.length} actions (${actionList.page_type})`, { page_url: pageUrl });
+    
+    // Log human-readable summaries
+    if (parsedContent.page_summary) {
+      await sendLog(jobId, 'info', `📄 Page Analysis: ${parsedContent.page_summary}`, { page_url: pageUrl });
+    }
+    
+    if (parsedContent.chat_message) {
+      await sendLog(jobId, 'info', `💬 AI Chat: ${parsedContent.chat_message}`, { page_url: pageUrl });
+    }
     
     // Step 3: Iterate through each action
     const executedActions = [];
@@ -3954,7 +4108,16 @@ async function executeMediaApproach(page, jobId, context, openaiClient) {
     const listPrompt = `Analyze this screenshot visually and identify all actions that should be performed.
 
 PAGE TITLE: ${pageTitle}
-PAGE URL: ${pageUrl}`;
+PAGE URL: ${pageUrl}
+
+CRITICAL: Respond with comprehensive JSON containing human-readable summaries AND structured data.
+
+RESPOND WITH THIS EXACT FORMAT:
+{
+  "code": "{\"actions\": [\"Action 1 description\", \"Action 2 description\"], \"page_type\": \"login|form|content|dashboard\", \"confidence\": 0.0-1.0}",
+  "page_summary": "Human-readable summary of what was found on this page and what actions will be taken",
+  "chat_message": "Conversational message explaining the analysis and next steps for the user"
+}`;
 
     const listCompletion = await aiConversationLogger.createChatCompletion(
       openaiClient,
@@ -3983,8 +4146,26 @@ PAGE URL: ${pageUrl}`;
       { approach: 'media', screenshot_size: initialScreenshot.length }
     );
     
-    const visualAnalysis = JSON.parse(listCompletion.content);
+    // Parse the comprehensive response format
+    const rawContent = listCompletion.choices?.[0]?.message?.content || listCompletion.content || '';
+    let parsedContent;
+    try {
+      parsedContent = JSON.parse(rawContent);
+    } catch (error) {
+      throw new Error(`Failed to parse OpenAI response: ${error.message}`);
+    }
+    
+    const visualAnalysis = JSON.parse(parsedContent.code);
     await sendLog(jobId, 'info', `👁️ Visual analysis complete`, { page_url: pageUrl });
+    
+    // Log human-readable summaries
+    if (parsedContent.page_summary) {
+      await sendLog(jobId, 'info', `📄 Page Analysis: ${parsedContent.page_summary}`, { page_url: pageUrl });
+    }
+    
+    if (parsedContent.chat_message) {
+      await sendLog(jobId, 'info', `💬 AI Chat: ${parsedContent.chat_message}`, { page_url: pageUrl });
+    }
     
     // Step 3: Iterate through visual actions
     const executedActions = [];
@@ -4133,19 +4314,13 @@ REQUIREMENTS:
 - Return result object: { success: true/false, message: "...", data: {...} }
 - Assume context contains: { username, password, testData }
 
-RESPOND WITH JSON:
+CRITICAL: Respond with comprehensive JSON containing human-readable summaries AND structured data.
+
+RESPOND WITH THIS EXACT FORMAT:
 {
-  "scenarios": [
-    {
-      "name": "Test scenario name",
-      "description": "What this test validates",
-      "playwright_script": "async (page, context) => { /* complete script code here */ }",
-      "expected_outcome": "What should happen if test passes",
-      "validation_rules": ["rule 1", "rule 2"],
-      "parameters": { "username": "context.username", "password": "context.password" }
-    }
-  ],
-  "analysis": "Testing strategy based on metadata and common patterns"
+  "code": "{\"scenarios\": [{\"name\": \"Test scenario name\", \"description\": \"What this test validates\", \"playwright_script\": \"async (page, context) => { /* complete script code here */ }\", \"expected_outcome\": \"What should happen if test passes\", \"validation_rules\": [\"rule 1\", \"rule 2\"], \"parameters\": {\"username\": \"context.username\", \"password\": \"context.password\"}}], \"analysis\": \"Testing strategy based on metadata and common patterns\"}",
+  "page_summary": "Human-readable summary of what was found on this page and what test scripts will be generated",
+  "chat_message": "Conversational message explaining the analysis and test generation strategy for the user"
 }`;
 
     const scriptCompletion = await aiConversationLogger.createChatCompletion(
@@ -4163,8 +4338,26 @@ RESPOND WITH JSON:
       { approach: 'static', common_selectors_count: commonSelectors.length }
     );
     
-    const aiResponse = JSON.parse(scriptCompletion.content);
+    // Parse the comprehensive response format
+    const rawContent = scriptCompletion.choices?.[0]?.message?.content || scriptCompletion.content || '';
+    let parsedContent;
+    try {
+      parsedContent = JSON.parse(rawContent);
+    } catch (error) {
+      throw new Error(`Failed to parse OpenAI response: ${error.message}`);
+    }
+    
+    const aiResponse = JSON.parse(parsedContent.code);
     await sendLog(jobId, 'info', `🤖 AI generated ${aiResponse.scenarios?.length || 0} test scenarios`, { page_url: pageUrl });
+    
+    // Log human-readable summaries
+    if (parsedContent.page_summary) {
+      await sendLog(jobId, 'info', `📄 Page Analysis: ${parsedContent.page_summary}`, { page_url: pageUrl });
+    }
+    
+    if (parsedContent.chat_message) {
+      await sendLog(jobId, 'info', `💬 AI Chat: ${parsedContent.chat_message}`, { page_url: pageUrl });
+    }
     
     // Step 4: Save each script to scripts collection
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
@@ -4329,7 +4522,15 @@ RESPOND WITH JSON:
  * Execute approach sequence with iteration
  * Implements rule 42-crawl-approaches-sequence.mdc
  */
+/**
+ * DEPRECATED: Sequential approach execution
+ * This function is deprecated in favor of the comprehensive first request approach.
+ * Kept for backward compatibility only.
+ * NEW APPROACH: WorkflowAnalyzer and WorkflowExecutor send ALL context in first request
+ * with intelligent 2-attempt retry instead of trying multiple sequential approaches.
+ */
 async function executeApproachSequence(page, jobId, context, openaiClient, pageId, projectId) {
+  console.warn('[DEPRECATED] executeApproachSequence is deprecated. Use WorkflowAnalyzer/WorkflowExecutor instead.');
   const approaches = ['simplified', 'text', 'media', 'static'];
   const maxDepth = context.options?.max_depth || 5;
   const maxTries = context.options?.max_tries || 10;
