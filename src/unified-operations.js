@@ -79,11 +79,34 @@ function cleanLogMessage(message) {
   return message;
 }
 
+// Helper function to check if URL is within the same domain
+function isWithinDomain(pageUrl, baseUrl) {
+  try {
+    const pageUrlObj = new URL(pageUrl);
+    const baseUrlObj = new URL(baseUrl);
+    
+    // Check if hostname matches (including www vs non-www)
+    const pageHostname = pageUrlObj.hostname.replace(/^www\./, '');
+    const baseHostname = baseUrlObj.hostname.replace(/^www\./, '');
+    
+    return pageHostname === baseHostname;
+  } catch (error) {
+    // If URL parsing fails, treat as external
+    return false;
+  }
+}
+
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
-async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null) {
+async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null) {
   try {
+    // Domain filtering: Only send internal pages to backend
+    if (baseUrl && !isWithinDomain(pageUrl, baseUrl)) {
+      console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageUrl}`);
+      return null;
+    }
+    
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
     console.log(`[INCREMENTAL-STORAGE] Creating basic page document: ${pageUrl}`);
     
@@ -119,8 +142,14 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
 
 // Send discovered page to backend immediately (incremental storage)
 // Returns the pageId from the backend
-async function sendDiscoveredPageToBackend(jobId, pageData) {
+async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null) {
   try {
+    // Domain filtering: Only send internal pages to backend
+    if (baseUrl && !isWithinDomain(pageData.url, baseUrl)) {
+      console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageData.url}`);
+      return null;
+    }
+    
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
     console.log(`[INCREMENTAL-STORAGE] Sending page to backend: ${pageData.url}`);
     const response = await fetch(`${backendUrl}/jobs/${jobId}/discovered-page`, {
@@ -1325,7 +1354,8 @@ const modeHandlers = {
         
         // Create basic page document first
         const pageTitle = await page.title();
-        const createdPageId = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId);
+        const startUrl = page.url(); // Get the original start URL for domain filtering
+        const createdPageId = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId, startUrl);
         
         // Step 1: Analyze page and create workflow
         await sendLog(jobId, 'info', `📊 Analyzing page with Playwright and OpenAI...`);
@@ -3225,7 +3255,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         }
         
         // Create basic page document in backend FIRST
-        let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle);
+        let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, null, startUrl);
         
         // Update page context with pageId for all subsequent logs
         if (pageId) {
@@ -3262,7 +3292,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         
         // Update the page with full analysis data
         if (pageId) {
-          await sendDiscoveredPageToBackend(jobId, pageAnalysis);
+          await sendDiscoveredPageToBackend(jobId, pageAnalysis, startUrl);
           await sendLog(jobId, 'info', `✓ Page analysis complete and stored`, {
             ...currentPageContext,
             pageId: pageId,
