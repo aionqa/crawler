@@ -25,7 +25,7 @@ class WorkflowExecutor {
     console.log(`[WorkflowExecutor] Executing leg: ${leg.leg_id} - ${leg.description}`);
 
     // Mark leg as in progress
-    await this.updateLegStatus(workflowId, leg.leg_id, 'in_progress');
+    await this.updateLegStatus(workflowId, leg.leg_id, 'in_progress', jobId);
 
     let iteration = 0;
     let completed = false;
@@ -156,7 +156,10 @@ class WorkflowExecutor {
           playwrightScript = scriptResponse.playwright_script;
           
           // Update leg with script
-          await this.updateLeg(workflowId, leg.leg_id, { playwright_script: playwrightScript });
+          await this.updateLeg(workflowId, leg.leg_id, { 
+            playwright_script: playwrightScript,
+            update_action: true  // Signal backend to also update action document
+          });
         }
 
         console.log(`[WorkflowExecutor] Executing script for leg ${leg.leg_id}`);
@@ -261,7 +264,7 @@ class WorkflowExecutor {
     }
 
     // Mark leg as completed
-    await this.completeLeg(workflowId, leg.leg_id, finalResult, lastError);
+    await this.completeLeg(workflowId, leg.leg_id, finalResult, lastError, jobId);
 
     return {
       leg_id: leg.leg_id,
@@ -386,18 +389,23 @@ class WorkflowExecutor {
   /**
    * Update leg status
    */
-  async updateLegStatus(workflowId, legId, status) {
-    return await this.updateLeg(workflowId, legId, { status });
+  async updateLegStatus(workflowId, legId, status, jobId = null) {
+    return await this.updateLeg(workflowId, legId, { status }, jobId);
   }
 
   /**
    * Update leg fields
    */
-  async updateLeg(workflowId, legId, updates) {
+  async updateLeg(workflowId, legId, updates, jobId = null) {
     try {
+      const payload = { ...updates };
+      if (jobId) {
+        payload.job_id = jobId;
+      }
+      
       await axios.put(
         `${this.backendUrl}/api/workflows/${workflowId}/legs/${legId}`,
-        updates
+        payload
       );
     } catch (error) {
       console.error('[WorkflowExecutor] Error updating leg:', error.message);
@@ -421,11 +429,16 @@ class WorkflowExecutor {
   /**
    * Mark leg as completed
    */
-  async completeLeg(workflowId, legId, finalResult, error = null) {
+  async completeLeg(workflowId, legId, finalResult, error = null, jobId = null) {
     try {
+      const payload = { final_result: finalResult, error };
+      if (jobId) {
+        payload.job_id = jobId;
+      }
+      
       await axios.post(
         `${this.backendUrl}/api/workflows/${workflowId}/legs/${legId}/complete`,
-        { final_result: finalResult, error }
+        payload
       );
     } catch (error) {
       console.error('[WorkflowExecutor] Error completing leg:', error.message);
