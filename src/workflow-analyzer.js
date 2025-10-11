@@ -35,6 +35,16 @@ class WorkflowAnalyzer {
     // Step 3: Get HTML content (FULL - no trimming)
     const htmlContent = await page.content();
     const pageTitle = await page.title();
+    
+    // Step 3.5: Send initial page discovery update (real-time)
+    await this.updatePageDiscovery(jobId, pageId, projectId, page.url(), {
+      title: pageTitle,
+      content: htmlContent,
+      forms: playwrightAnalysis.forms,
+      links: playwrightAnalysis.links,
+      interactive_elements: playwrightAnalysis.interactive_elements,
+      analyzed: false
+    });
 
     // Step 4: Create workflow document in backend
     const workflow = await this.createWorkflow(pageId, projectId, page.url(), playwrightAnalysis);
@@ -82,6 +92,17 @@ class WorkflowAnalyzer {
     await this.updateWorkflowWithAnalysis(workflow._id, aiAnalysisResult.page_description, aiAnalysisResult.legs);
 
     console.log(`[WorkflowAnalyzer] Workflow ready for testing`);
+    
+    // Step 7: Send final page update with AI analysis and workflow (real-time)
+    await this.updatePageDiscovery(jobId, pageId, projectId, page.url(), {
+      workflow_id: workflow._id,
+      ai_analysis: {
+        page_description: aiAnalysisResult.page_description,
+        legs_count: aiAnalysisResult.legs.length,
+        analyzed_at: new Date().toISOString()
+      },
+      analyzed: true
+    });
 
     return {
       workflow_id: workflow._id,
@@ -226,6 +247,7 @@ class WorkflowAnalyzer {
 
   /**
    * Update workflow with AI analysis and legs
+   * Also creates action documents for each leg
    */
   async updateWorkflowWithAnalysis(workflowId, pageDescription, legs) {
     try {
@@ -236,7 +258,8 @@ class WorkflowAnalyzer {
             page_description: pageDescription,
             analyzed_at: new Date().toISOString()
           },
-          legs: legs
+          legs: legs,
+          create_actions: true  // Signal backend to create action documents
         }
       );
 
@@ -244,6 +267,50 @@ class WorkflowAnalyzer {
     } catch (error) {
       console.error('[WorkflowAnalyzer] Error updating workflow:', error.message);
       throw error;
+    }
+  }
+  
+  /**
+   * Send real-time page discovery/update to backend
+   * @param {string} jobId - Job ID
+   * @param {string} pageId - Page ID
+   * @param {string} projectId - Project ID
+   * @param {string} url - Page URL
+   * @param {Object} data - Page data to update
+   */
+  async updatePageDiscovery(jobId, pageId, projectId, url, data) {
+    try {
+      const payload = {
+        project_id: projectId,
+        job_id: jobId,
+        url: url,
+        ...data
+      };
+      
+      // Validate required fields
+      if (!projectId || !jobId || !url) {
+        console.error('[WorkflowAnalyzer] Missing required fields for page discovery:', {
+          projectId: !!projectId,
+          jobId: !!jobId,
+          url: !!url
+        });
+        return;
+      }
+      
+      const response = await axios.post(
+        `${this.backendUrl}/api/pages/discover`,
+        payload
+      );
+      
+      console.log(`[WorkflowAnalyzer] Page discovery updated: ${url} (${response.data.isNew ? 'new' : 'updated'})`);
+      return response.data;
+    } catch (error) {
+      console.error('[WorkflowAnalyzer] Error updating page discovery:', error.message);
+      if (error.response) {
+        console.error('[WorkflowAnalyzer] Response status:', error.response.status);
+        console.error('[WorkflowAnalyzer] Response data:', error.response.data);
+      }
+      // Don't throw - page discovery updates are non-critical
     }
   }
 }

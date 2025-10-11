@@ -82,33 +82,35 @@ function cleanLogMessage(message) {
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
-async function sendBasicPageToBackend(jobId, pageUrl, pageTitle) {
+async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null) {
   try {
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
     console.log(`[INCREMENTAL-STORAGE] Creating basic page document: ${pageUrl}`);
-    const response = await fetch(`${backendUrl}/jobs/${jobId}/discovered-page`, {
+    
+    const response = await fetch(`${backendUrl}/api/pages/discover`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        jobId,
-        page: {
-          url: pageUrl,
-          title: pageTitle,
-          content: '', // Will be filled later
-          analyzed: false // Will be updated after analysis
-        }
+        project_id: projectId,
+        job_id: jobId,
+        url: pageUrl,
+        title: pageTitle,
+        analyzed: false // Will be updated after analysis
       })
     });
+    
     if (!response.ok) {
-      console.error(`[INCREMENTAL-STORAGE] Backend returned ${response.status}`);
+      const errorText = await response.text();
+      console.error(`[INCREMENTAL-STORAGE] Backend returned ${response.status}: ${errorText}`);
       return null;
-    } else {
-      const result = await response.json();
-      console.log(`[INCREMENTAL-STORAGE] ✅ Basic page created: ${pageUrl} (ID: ${result.pageId})`);
-      return result.pageId; // Return the MongoDB page ID
     }
+    
+    const result = await response.json();
+    const pageId = result.page?._id;
+    console.log(`[INCREMENTAL-STORAGE] ✅ Basic page created: ${pageUrl} (ID: ${pageId})`);
+    return pageId; // Return the MongoDB page ID
   } catch (error) {
     console.error(`[INCREMENTAL-STORAGE] Failed to create basic page: ${error.message}`);
     return null;
@@ -1323,7 +1325,7 @@ const modeHandlers = {
         
         // Create basic page document first
         const pageTitle = await page.title();
-        const createdPageId = await sendBasicPageToBackend(jobId, currentUrl, pageTitle);
+        const createdPageId = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId);
         
         // Step 1: Analyze page and create workflow
         await sendLog(jobId, 'info', `📊 Analyzing page with Playwright and OpenAI...`);
@@ -1439,26 +1441,10 @@ const modeHandlers = {
       throw new Error('Login operations must be handled by login-service, not unified-crawler');
     }
     
-    await sendLog(jobId, 'info', '🚀 AUTO MODE: Using approach sequence (simplified → text → media → static)');
+    await sendLog(jobId, 'info', '🚀 AUTO MODE: Using workflow-based analysis (comprehensive first request)');
     
-    const pageId = context.page_id || null;
-    const projectId = context.project_id || null;
-    
-    // Call the new approach sequence function
-    const result = await executeApproachSequence(page, jobId, context, openaiClient, pageId, projectId);
-    
-    return {
-      success: result.success,
-      approach: result.final_approach,
-      message: result.success ? `Completed with ${result.final_approach} approach` : result.reason,
-      details: {
-        final_approach: result.final_approach,
-        iterations: result.iterations,
-        depth: result.depth,
-        verification: result.verification,
-        result: result.result
-      }
-    };
+    // AUTO mode now delegates to WORKFLOW mode (comprehensive approach)
+    return await modeHandlers.workflow(page, context, openaiClient, operation);
   },
   
   // DEPRECATED: OLD AUTO MODE - Sequential approach selection
