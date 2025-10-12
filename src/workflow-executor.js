@@ -139,6 +139,14 @@ class WorkflowExecutor {
 
           console.log(`[WorkflowExecutor] Requesting script from OpenAI (HTML: ${htmlContent.length} chars, screenshot: ${screenshotBeforeBase64.length} chars, iteration: ${iteration})`);
 
+          // Update sub-status with descriptive information
+          const legDescription = leg.description || 'Unknown workflow step';
+          await this.updateJobSubstatus(jobId, `Generating test script for: ${legDescription}`, {
+            current_page: page.url(),
+            workflow_leg: leg.leg_id,
+            iteration: iteration
+          });
+
           const scriptResponse = await this.aiLogger.makeAICallWithPrompt(
             'generate-workflow-script',
             scriptRequest,
@@ -442,6 +450,25 @@ class WorkflowExecutor {
       );
     } catch (error) {
       console.error('[WorkflowExecutor] Error completing leg:', error.message);
+    }
+  }
+
+  /**
+   * Update job substatus in real-time
+   * @param {string} jobId - Job ID
+   * @param {string} substatus - Current substatus
+   * @param {object} progress - Progress details (optional)
+   */
+  async updateJobSubstatus(jobId, substatus, progress = {}) {
+    try {
+      await axios.post(`${this.backendUrl}/jobs/${jobId}/substatus`, {
+        substatus, 
+        ...progress,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      // Silent fail - don't block execution
+      console.error(`Failed to update substatus: ${error.message}`);
     }
   }
 }

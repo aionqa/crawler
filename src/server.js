@@ -108,8 +108,22 @@ async function sendLogToBackend(jobId, level, message, data = {}) {
 function updateJobStatus(jobId, status, result = null, error = null) {
   const job = activeJobs.get(jobId);
   if (job) {
+    const now = new Date();
+    const startTime = job.start_time || job.created_at;
+    const duration = now.getTime() - startTime.getTime();
+    const minimumDuration = 60000; // 1 minute minimum
+    
+    console.log(`[UNIFIED-CRAWLER] Job ${jobId} duration: ${duration}ms, minimum required: ${minimumDuration}ms`);
+    
+    // If trying to mark as completed but duration is too short, mark as failed instead
+    if (status === 'completed' && duration < minimumDuration) {
+      console.log(`[UNIFIED-CRAWLER] Job ${jobId} completed too quickly (${duration}ms), marking as failed`);
+      status = 'failed';
+      error = error || `Job completed too quickly (${duration}ms) - likely didn't perform real crawling work`;
+    }
+    
     job.status = status;
-    job.updated_at = new Date();
+    job.updated_at = now;
     if (result) job.result = result;
     if (error) job.error = error;
     activeJobs.set(jobId, job);

@@ -177,6 +177,31 @@ async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null) {
 }
 
 /**
+ * Update job substatus in real-time
+ * @param {string} jobId - Job ID
+ * @param {string} substatus - Current substatus (e.g., "openai_calculation", "playwright_execution", "collecting_info")
+ * @param {object} progress - Progress details (optional)
+ */
+async function updateJobSubstatus(jobId, substatus, progress = {}) {
+  try {
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    await fetch(`${backendUrl}/jobs/${jobId}/substatus`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        substatus, 
+        ...progress,
+        timestamp: new Date().toISOString()
+      })
+    }).catch(err => {
+      console.error(`Failed to update substatus: ${err.message}`);
+    });
+  } catch (error) {
+    // Silent fail - don't block execution
+  }
+}
+
+/**
  * Send log to backend - SINGLE ENDPOINT ONLY
  * Backend determines collection based on metadata:
  * - No page_url & no conversationId → logs_jobs
@@ -2722,12 +2747,19 @@ Respond with JSON format:
 // Comprehensive link extraction
 async function extractAllLinks(page, jobId, baseUrl) {
   try {
-    await sendLog(jobId, 'info', '🔗 Extracting all links from page...');
+    await sendLog(jobId, 'info', '🔗 Extracting all links from page (comprehensive scan)...');
     
-    const links = await page.$$eval('a[href]', (anchors, baseUrl) => {
-      return anchors.map(link => {
-        const href = link.href;
-        const text = link.textContent?.trim() || '';
+    const links = await page.$$eval('a[href], area[href], [data-href], [data-url]', (elements, baseUrl) => {
+      const linkSet = new Set();
+      const links = [];
+      
+      elements.forEach(el => {
+        const href = el.href || el.getAttribute('data-href') || el.getAttribute('data-url') || '';
+        if (!href || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:') || href === '#') {
+          return;
+        }
+        
+        const text = el.textContent?.trim() || el.alt || el.title || '';
         
         // Parse URL to check if it's within domain
         let isInternal = false;
@@ -2735,11 +2767,13 @@ async function extractAllLinks(page, jobId, baseUrl) {
         try {
           const linkUrl = new URL(href);
           const baseUrlObj = new URL(baseUrl);
-          isInternal = linkUrl.hostname === baseUrlObj.hostname;
+          // Check both hostname and origin for more accurate domain matching
+          isInternal = linkUrl.hostname === baseUrlObj.hostname || 
+                       linkUrl.origin === baseUrlObj.origin;
           fullUrl = linkUrl.href;
         } catch (e) {
           // Relative URL or invalid
-          if (href.startsWith('/') || href.startsWith('./') || !href.includes('://')) {
+          if (href.startsWith('/') || href.startsWith('./') || href.startsWith('../') || !href.includes('://')) {
             isInternal = true;
             try {
               fullUrl = new URL(href, baseUrl).href;
@@ -2749,21 +2783,36 @@ async function extractAllLinks(page, jobId, baseUrl) {
           }
         }
         
-        return {
-          text: text,
-          href: fullUrl,
-          title: link.title || '',
-          isInternal: isInternal,
-          target: link.target || '',
-          rel: link.rel || ''
-        };
-      }).filter(link => link.href && !link.href.startsWith('javascript:') && !link.href.startsWith('#'));
+        // Remove hash fragments for deduplication
+        const urlWithoutHash = fullUrl.split('#')[0];
+        
+        // Deduplicate URLs
+        if (!linkSet.has(urlWithoutHash)) {
+          linkSet.add(urlWithoutHash);
+          links.push({
+            text: text.substring(0, 200), // Limit text length
+            href: fullUrl,
+            urlWithoutHash: urlWithoutHash,
+            title: el.title || '',
+            isInternal: isInternal,
+            target: el.target || '',
+            rel: el.rel || ''
+          });
+        }
+      });
+      
+      return links;
     }, baseUrl);
     
     const internalLinks = links.filter(l => l.isInternal);
     const externalLinks = links.filter(l => !l.isInternal);
     
-    await sendLog(jobId, 'info', `📊 Found ${links.length} total links (${internalLinks.length} internal, ${externalLinks.length} external)`);
+    await sendLog(jobId, 'info', `📊 Found ${links.length} unique links (${internalLinks.length} internal, ${externalLinks.length} external)`);
+    
+    // Log internal links for debugging
+    if (internalLinks.length > 0) {
+      await sendLog(jobId, 'info', `  Internal links: ${internalLinks.slice(0, 10).map(l => l.urlWithoutHash).join(', ')}${internalLinks.length > 10 ? ` ... and ${internalLinks.length - 10} more` : ''}`);
+    }
     
     return {
       all: links,
@@ -2965,10 +3014,12 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
   
   // Step 6: Approach-specific AI analysis
   await sendLog(jobId, 'info', `🔍 Step 6/6: Analyzing with ${approach} approach...`, pageContext);
+  await updateJobSubstatus(jobId, 'collecting_page_content', { current_page: currentUrl, current_step: '6/6' });
   
   let pageContent = '';
   try {
     pageContent = await page.content();
+    await sendLog(jobId, 'info', `✓ Page content collected (${Math.round(pageContent.length / 1024)}KB)`, pageContext);
   } catch (error) {
     await sendLog(jobId, 'warn', `⚠️ Failed to get page content: ${error.message}`, pageContext);
     // Continue with empty content
@@ -2976,12 +3027,14 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
   
   // Approach-specific AI analysis - ALWAYS analyze, even in static mode
   if (aiConversationLogger && openaiClient && pageContent) {
+    await updateJobSubstatus(jobId, 'openai_calculation', { current_page: currentUrl, approach: approach });
     try {
       let aiPrompt, aiMessages;
       
       if (approach === 'media') {
         // MEDIA: Use vision API with screenshot
         await sendLog(jobId, 'info', `📸 Using AI vision to analyze screenshot...`, pageContext);
+        await updateJobSubstatus(jobId, 'ai_vision_analysis', { current_page: currentUrl });
         
         // Take screenshot and upload to MinIO for proper logging
         const screenshotResult = await takeScreenshot(page, jobId, 'ai_vision_analysis', {
@@ -3048,6 +3101,7 @@ Required JSON format:
       } else if (approach === 'text') {
         // TEXT: HTML analysis only
         await sendLog(jobId, 'info', `📝 Using AI to analyze HTML content...`, pageContext);
+        await updateJobSubstatus(jobId, 'ai_text_analysis', { current_page: currentUrl });
         const htmlSnippet = pageContent;
         const urlPath = new URL(currentUrl).pathname || '/';
           
@@ -3077,6 +3131,7 @@ Required JSON format:
       } else {
         // STATIC/OTHER: Full AI analysis with HTML content
         await sendLog(jobId, 'info', `⚡ Using ${approach} approach - Full AI analysis with HTML content...`, pageContext);
+        await updateJobSubstatus(jobId, 'ai_full_analysis', { current_page: currentUrl, approach: approach });
         const urlPath = new URL(currentUrl).pathname || '/';
         
         aiPrompt = `Given this HTML content, analyze the page structure and provide comprehensive insights.
@@ -3109,6 +3164,8 @@ Respond with JSON format:
         aiMessages = [{ role: "user", content: aiPrompt }];
       }
 
+      await sendLog(jobId, 'info', `🤖 Sending request to OpenAI (${approach} analysis)...`, pageContext);
+      
       const completion = await aiConversationLogger.createChatCompletion(
         openaiClient,
         jobId,
@@ -3135,6 +3192,7 @@ Respond with JSON format:
         }
       );
       
+      await updateJobSubstatus(jobId, 'processing_ai_response', { current_page: currentUrl });
       await sendLog(jobId, 'info', `✓ AI ${approach} analysis complete (ID: ${conversationId})`, pageContext);
     } catch (aiError) {
       await sendLog(jobId, 'warn', `⚠️  AI conversation logging failed: ${aiError.message}`, pageContext);
@@ -3195,9 +3253,12 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
   while (urlQueue.length > 0 && analyzedPages.length < maxPages) {
     const { url: currentUrl, depth } = urlQueue.shift();
     
+    // Normalize URL by removing hash fragment for deduplication
+    const normalizedUrl = currentUrl.split('#')[0];
+    
     // Skip if already visited
-    if (visitedUrls.has(currentUrl)) {
-      await sendLog(jobId, 'info', `⏭️  Skipping (already visited): ${currentUrl}`, { page_url: currentUrl, mode: approach });
+    if (visitedUrls.has(normalizedUrl)) {
+      await sendLog(jobId, 'info', `⏭️  Skipping (already visited): ${normalizedUrl}`, { page_url: currentUrl, mode: approach });
       continue;
     }
     
@@ -3208,14 +3269,25 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
     }
     
     try {
-      // Mark as visited
-      visitedUrls.add(currentUrl);
+      // Mark as visited (using normalized URL without hash)
+      visitedUrls.add(normalizedUrl);
       
       // Create page context for this URL
       const currentPageContext = { page_url: currentUrl, mode: approach };
       
       await sendLog(jobId, 'info', `🌍 PAGE ${analyzedPages.length + 1}/${maxPages} (Depth ${depth}/${maxDepth})`, currentPageContext);
       await sendLog(jobId, 'info', `📍 Navigating to: ${currentUrl}`, currentPageContext);
+      
+      // Update substatus with current progress
+      await updateJobSubstatus(jobId, 'navigating_to_page', { 
+        current_page: currentUrl,
+        page_number: analyzedPages.length + 1,
+        total_pages: maxPages,
+        depth: depth,
+        max_depth: maxDepth,
+        queue_size: urlQueue.length,
+        visited_count: visitedUrls.size
+      });
       
       // Check if page/browser is still valid before navigating
       try {
@@ -3230,12 +3302,14 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       // Wrap navigation and analysis with per-page video recording
       const { result: pageData, videoKey } = await recordPageVideo(page, jobId, currentUrl, async () => {
         // Navigate to URL
+        await updateJobSubstatus(jobId, 'loading_page', { current_page: currentUrl });
         await page.goto(currentUrl, { 
           waitUntil: 'domcontentloaded', 
           timeout: 30000 
         });
         
         await sendLog(jobId, 'info', `⏳ Waiting for page to fully load...`, currentPageContext);
+        await updateJobSubstatus(jobId, 'waiting_for_page_ready', { current_page: currentUrl });
         
         // Wait for page to settle
         await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
@@ -3271,7 +3345,37 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           });
         }
         
+        // Check if this page is within the target domain before AI analysis
+        const isWithinTargetDomain = isWithinDomain(currentUrl, startUrl);
+        
+        if (!isWithinTargetDomain) {
+          // Skip AI analysis for external domains - just collect basic info
+          await sendLog(jobId, 'info', `⏭️ Skipping AI analysis for external domain: ${currentUrl}`, currentPageContext);
+          await updateJobSubstatus(jobId, 'skipping_external_domain', { 
+            current_page: currentUrl,
+            page_title: pageTitle,
+            page_number: analyzedPages.length + 1
+          });
+          
+          // Create minimal analysis for external pages (no AI processing)
+          const pageAnalysis = {
+            url: currentUrl,
+            title: pageTitle,
+            pageId: pageId,
+            isExternal: true,
+            analysis_skipped: true,
+            reason: 'External domain - AI analysis skipped to save time and resources'
+          };
+          
+          return { pageAnalysis, pageId, pageTitle, pageUrl };
+        }
+        
         // Now analyze this page with detailed logging (pageId available for all logs)
+        await updateJobSubstatus(jobId, 'analyzing_page', { 
+          current_page: currentUrl,
+          page_title: pageTitle,
+          page_number: analyzedPages.length + 1
+        });
         const pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient, pageId);
         
         return { pageAnalysis, pageId, pageTitle, pageUrl };
@@ -3317,15 +3421,24 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       // Add internal links to queue for next depth level
       if (depth < maxDepth && pageAnalysis.internal_links && pageAnalysis.internal_links.length > 0) {
         let newLinksAdded = 0;
+        await sendLog(jobId, 'info', `🔍 Checking ${pageAnalysis.internal_links.length} internal links for crawling...`);
+        
         for (const link of pageAnalysis.internal_links) {
-          if (!visitedUrls.has(link.href) && !urlQueue.find(item => item.url === link.href)) {
-            urlQueue.push({ url: link.href, depth: depth + 1 });
+          // Use urlWithoutHash for deduplication to avoid processing same page multiple times with different hash fragments
+          const urlToCheck = link.urlWithoutHash || link.href;
+          
+          if (!visitedUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
+            urlQueue.push({ url: urlToCheck, depth: depth + 1 });
             newLinksAdded++;
+            await sendLog(jobId, 'info', `  ➕ Added to queue: ${urlToCheck} (depth ${depth + 1})`);
+          } else {
+            await sendLog(jobId, 'info', `  ⏭️  Skipped (already in queue or visited): ${urlToCheck}`);
           }
         }
-        await sendLog(jobId, 'info', `📋 Queue updated: +${newLinksAdded} new links | Total in queue: ${urlQueue.length} | Visited: ${visitedUrls.size}`);
+        await sendLog(jobId, 'info', `📋 Queue updated: +${newLinksAdded} new links | Total in queue: ${urlQueue.length} | Visited: ${visitedUrls.size}/${maxPages}`);
       } else if (depth >= maxDepth) {
-        await sendLog(jobId, 'info', `⚠️  Max depth reached - not adding more links from this page`);
+        await sendLog(jobId, 'info', `⚠️  Max depth ${maxDepth} reached - not adding more links from this page`);
+        await sendLog(jobId, 'info', `   Found ${pageAnalysis.internal_links?.length || 0} internal links that won't be crawled due to depth limit`);
       }
       
       // Cleanup: Clear any dialogs or popups
