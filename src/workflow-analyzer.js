@@ -62,6 +62,14 @@ class WorkflowAnalyzer {
     
     console.log(`[WorkflowAnalyzer] Sending FULL context to OpenAI (HTML: ${htmlContent.length} chars, Elements: ${playwrightAnalysis.interactive_elements.length})`);
     
+    // Update sub-status with descriptive information
+    await this.updateJobSubstatus(jobId, `Analyzing page structure for testing: ${pageTitle}`, {
+      current_page: page.url(),
+      page_title: pageTitle,
+      forms_count: playwrightAnalysis.forms.length,
+      interactive_elements_count: playwrightAnalysis.interactive_elements.length
+    });
+    
     // Build complete payload with all data
     const fullPayload = {
       page_url: page.url(),
@@ -313,7 +321,27 @@ class WorkflowAnalyzer {
       // Don't throw - page discovery updates are non-critical
     }
   }
+
+  /**
+   * Update job substatus in real-time
+   * @param {string} jobId - Job ID
+   * @param {string} substatus - Current substatus
+   * @param {object} progress - Progress details (optional)
+   */
+  async updateJobSubstatus(jobId, substatus, progress = {}) {
+    try {
+      await axios.post(`${this.backendUrl}/jobs/${jobId}/substatus`, {
+        substatus, 
+        ...progress,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      // Silent fail - don't block execution
+      console.error(`Failed to update substatus: ${error.message}`);
+    }
+  }
 }
 
 export default WorkflowAnalyzer;
+
 
