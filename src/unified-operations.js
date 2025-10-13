@@ -1221,58 +1221,58 @@ async function validateLoginSuccessWithAI(page, context, openaiClient, approach)
 
 // Browser automation wrapper
 async function withBrowser(action, options = {}) {
-  const useRemoteBrowser = process.env.USE_REMOTE_BROWSER === 'true';
-  
-  // Always use remote browser (crawler runs in Docker container)
-  const inContainer = !!process.env.BACKEND_URL || useRemoteBrowser;
-  
-  // Debug environment variables
-  await sendLog(options.jobId || 'debug', 'info', `Browser config - USE_REMOTE_BROWSER: ${useRemoteBrowser}, inContainer: ${inContainer}`);
+  await sendLog(options.jobId || 'debug', 'info', `🌐 Launching embedded Chromium browser (runner mode)`);
   
   let browser;
   
-  // Container mode: ALWAYS use remote browsers
-  // Use backend-assigned browser endpoint if provided, otherwise use environment default
-  const browserServiceUrl = options.browserServiceUrl || process.env.BROWSER_SERVICE_URL || 'http://browser-1:3000';
-  const source = options.browserServiceUrl ? 'backend-assigned' : 'environment-default';
-  await sendLog(options.jobId || 'server', 'info', `Using remote browser: ${browserServiceUrl} (${source})`);
-  
-  // Video recording via browserless native API (rule 38)
-  let enableRecording = options.enable_video_recording !== false; // Default to true
-  let sessionId = null;
-  
   try {
-    // Use Browserless native CDP recording (via Browserless.startRecording/stopRecording)
-    const recordParam = enableRecording ? '&record=true' : '';
-    const wsUrl = browserServiceUrl.replace('http://', 'ws://') + `?timeout=900000${recordParam}`;
+    // Launch local embedded browser (no remote browser needed)
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-dev-shm-usage',
+        '--window-size=1920,1080',
+        '--force-device-scale-factor=1'
+      ]
+    });
     
-    if (enableRecording) {
-      await sendLog(options.jobId || 'server', 'info', `🎥 Connecting with Browserless CDP video recording enabled: ${wsUrl}`);
-    } else {
-      await sendLog(options.jobId || 'server', 'info', `Connecting to WebSocket: ${wsUrl}`);
-    }
-    
-    browser = await chromium.connectOverCDP(wsUrl);
-    
-    await sendLog(options.jobId || 'server', 'info', `✅ Connected to remote browser service via CDP (15min timeout)${enableRecording ? ' with recording' : ''}`);
+    await sendLog(options.jobId || 'server', 'info', `✅ Embedded browser launched successfully`);
   } catch (error) {
-    await sendLog(options.jobId || 'server', 'error', `Failed to connect to remote browser service: ${error.message}`);
-    throw new Error(`Remote browser connection failed: ${error.message}`);
+    await sendLog(options.jobId || 'server', 'error', `Failed to launch embedded browser: ${error.message}`);
+    throw new Error(`Embedded browser launch failed: ${error.message}`);
   }
   
-  // Disable default viewport so Chrome's window size becomes the viewport
-  // This is the key to getting true 1920x1080 screenshots in headless mode
+  // Configure browser context with video recording support
+  const enableRecording = options.enable_video_recording !== false;
   const contextOptions = {
     userAgent: options.userAgent,
     ignoreHTTPSErrors: true,
-    viewport: null // Disable Playwright's default 800x600 viewport - use Chrome's window size instead
+    viewport: null, // Disable Playwright's default 800x600 viewport - use Chrome's window size instead
+    recordVideo: enableRecording ? {
+      dir: '/tmp/aionqa_videos',
+      size: { width: 1920, height: 1080 }
+    } : undefined
   };
+  
+  if (enableRecording) {
+    await sendLog(options.jobId || 'server', 'info', `🎥 Video recording enabled for session`);
+  }
   
   const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
   
   // Set viewport to match window size (1920x1080 from launch args)
   await page.setViewportSize({ width: 1920, height: 1080 });
+  
+  // Call onPageReady callback for streaming (if provided)
+  if (options.onPageReady && typeof options.onPageReady === 'function') {
+    try {
+      options.onPageReady(page);
+    } catch (e) {
+      console.error(`[CRAWLER] onPageReady callback error:`, e);
+    }
+  }
   
   let videoFileId = null;
   let screenshotFileId = null;
@@ -5052,7 +5052,9 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       enable_screenshots: context.options?.enable_screenshots !== false,
       enable_video_recording: true, // MANDATORY per rule 38-video-recording-mandatory.mdc
       job_id: jobId,
-      browserServiceUrl: context.browserServiceUrl
+      jobId: jobId,
+      browserServiceUrl: context.browserServiceUrl,
+      onPageReady: context.onPageReady // Pass callback for browser streaming
     });
 
     await sendLog(jobId, 'info', `✅ Crawl completed in ${result.duration_ms}ms`);

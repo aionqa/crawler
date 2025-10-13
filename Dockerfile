@@ -32,12 +32,7 @@ COPY shared/ ./shared/
 # Create directories for temporary files
 RUN mkdir -p /tmp/aionqa_videos /tmp/aionqa_screenshots
 
-# Expose port
-EXPOSE 3000
+# No port exposure - runner mode (connects to backend, doesn't expose HTTP server)
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3000/health || exit 1
-
-# Start the application
-CMD ["npm", "start"]
+# Start the runner (polls backend for jobs)
+CMD ["node", "src/runner.js"]
