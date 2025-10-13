@@ -147,6 +147,7 @@ class WorkflowExecutor {
             iteration: iteration
           });
 
+          console.log(`[WorkflowExecutor] DEBUG: About to call makeAICallWithPrompt`);
           const scriptResponse = await this.aiLogger.makeAICallWithPrompt(
             'generate-workflow-script',
             scriptRequest,
@@ -156,12 +157,27 @@ class WorkflowExecutor {
             screenshotBeforeKey,  // screenshotId for tracking
             scriptRequest  // Pass scriptRequest as sourcePayload for full attachment logging
           );
+          console.log(`[WorkflowExecutor] DEBUG: makeAICallWithPrompt completed successfully`);
 
-          if (!scriptResponse || !scriptResponse.playwright_script) {
+          console.log(`[WorkflowExecutor] DEBUG: scriptResponse type: ${typeof scriptResponse}`);
+          console.log(`[WorkflowExecutor] DEBUG: scriptResponse keys: ${scriptResponse ? Object.keys(scriptResponse) : 'null'}`);
+          console.log(`[WorkflowExecutor] DEBUG: has playwright_script: ${!!scriptResponse?.playwright_script}`);
+          console.log(`[WorkflowExecutor] DEBUG: has code: ${!!scriptResponse?.code}`);
+          
+          console.log(`[WorkflowExecutor] DEBUG: Validation check:`);
+          console.log(`[WorkflowExecutor] DEBUG: !scriptResponse = ${!scriptResponse}`);
+          console.log(`[WorkflowExecutor] DEBUG: !scriptResponse.playwright_script = ${!scriptResponse?.playwright_script}`);
+          console.log(`[WorkflowExecutor] DEBUG: !scriptResponse.code = ${!scriptResponse?.code}`);
+          console.log(`[WorkflowExecutor] DEBUG: (!scriptResponse.playwright_script && !scriptResponse.code) = ${(!scriptResponse?.playwright_script && !scriptResponse?.code)}`);
+          console.log(`[WorkflowExecutor] DEBUG: Full validation result = ${!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code)}`);
+          
+          if (!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code)) {
+            console.warn(`[WorkflowExecutor] OpenAI did not return a valid Playwright script. Response: ${JSON.stringify(scriptResponse)}`);
             throw new Error('OpenAI did not return a valid Playwright script');
           }
 
-          playwrightScript = scriptResponse.playwright_script;
+          // Check for playwright_script field first, then fallback to code field
+          playwrightScript = scriptResponse.playwright_script || scriptResponse.code;
           
           // Update leg with script
           await this.updateLeg(workflowId, leg.leg_id, { 
@@ -363,18 +379,24 @@ class WorkflowExecutor {
    */
   async uploadScreenshot(jobId, screenshotBuffer, suffix) {
     try {
-      const prepareResponse = await axios.post(
-        `${this.backendUrl}/api/files/prepare-screenshot`,
-        { job_id: jobId, suffix }
+      // Use the correct upload endpoint
+      const response = await axios.post(
+        `${this.backendUrl}/upload/screenshot`,
+        {
+          jobId: jobId,
+          data: screenshotBuffer.toString('base64'),
+          type: 'image/png',
+          metadata: {
+            suffix: suffix,
+            action: 'workflow_executor'
+          }
+        },
+        {
+          headers: { 'Content-Type': 'application/json' }
+        }
       );
 
-      const { uploadUrl, key } = prepareResponse.data;
-
-      await axios.put(uploadUrl, screenshotBuffer, {
-        headers: { 'Content-Type': 'image/png' }
-      });
-
-      return key;
+      return response.data.file_id;
     } catch (error) {
       console.error('[WorkflowExecutor] Screenshot upload failed:', error.message);
       return null;
