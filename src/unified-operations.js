@@ -11,12 +11,29 @@ import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import WorkflowAnalyzer from './workflow-analyzer.js';
 import WorkflowExecutor from './workflow-executor.js';
+import axios from 'axios';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // Conditional imports for shared modules
 let aiConversationLogger = null;
+
+/**
+ * Check job status from backend
+ */
+async function checkJobStatus(jobId) {
+  try {
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const response = await axios.get(`${backendUrl}/jobs/${jobId}`, {
+      timeout: 5000
+    });
+    return response.data?.status || 'unknown';
+  } catch (error) {
+    console.error(`❌ [UNIFIED-OPERATIONS] Error checking job status:`, error.message);
+    return 'unknown';
+  }
+}
 
 try {
   // Try to import shared modules (works in container)
@@ -132,8 +149,9 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
     
     const result = await response.json();
     const pageId = result.page?._id;
-    console.log(`[INCREMENTAL-STORAGE] ✅ Basic page created: ${pageUrl} (ID: ${pageId})`);
-    return pageId; // Return the MongoDB page ID
+    const isNewPage = result.isNew;
+    console.log(`[INCREMENTAL-STORAGE] ✅ Basic page ${isNewPage ? 'created' : 'found'}: ${pageUrl} (ID: ${pageId})`);
+    return { pageId, isNewPage }; // Return both page ID and whether it's new
   } catch (error) {
     console.error(`[INCREMENTAL-STORAGE] Failed to create basic page: ${error.message}`);
     return null;
@@ -1265,9 +1283,27 @@ async function withBrowser(action, options = {}) {
   // Set viewport to match window size (1920x1080 from launch args)
   await page.setViewportSize({ width: 1920, height: 1080 });
   
+  console.log('[CRAWLER] Context and page created, calling callbacks...');
+  console.log('[CRAWLER] options.onContextReady exists:', !!options.onContextReady);
+  console.log('[CRAWLER] options.onContextReady type:', typeof options.onContextReady);
+  console.log('[CRAWLER] options.onPageReady exists:', !!options.onPageReady);
+  
+  // Call onContextReady callback for video recording (if provided)
+  if (options.onContextReady && typeof options.onContextReady === 'function') {
+    try {
+      console.log('[CRAWLER] Calling onContextReady callback');
+      options.onContextReady(context, page);
+    } catch (e) {
+      console.error(`[CRAWLER] onContextReady callback error:`, e);
+    }
+  } else {
+    console.log('[CRAWLER] ⚠️ onContextReady callback not available or not a function');
+  }
+  
   // Call onPageReady callback for streaming (if provided)
   if (options.onPageReady && typeof options.onPageReady === 'function') {
     try {
+      console.log('[CRAWLER] Calling onPageReady callback');
       options.onPageReady(page);
     } catch (e) {
       console.error(`[CRAWLER] onPageReady callback error:`, e);
@@ -1380,30 +1416,40 @@ const modeHandlers = {
         // Create basic page document first
         const pageTitle = await page.title();
         const startUrl = page.url(); // Get the original start URL for domain filtering
-        const createdPageId = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId, startUrl);
+        const pageResult = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId, startUrl);
+        const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
-        // Step 1: Analyze page and create workflow
-        await sendLog(jobId, 'info', `📊 Analyzing page with Playwright and OpenAI...`);
-        const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, createdPageId, projectId);
+        // Check if we should skip AI analysis
+        const skipAIAnalysis = context.options?.skip_ai_analysis || false;
+        const disableAICompletely = context.options?.disable_ai_completely || false;
         
-        await sendLog(jobId, 'info', `✅ Workflow created with ${analysisResult.legs_count} testable legs`);
-        await sendLog(jobId, 'info', `📝 ${analysisResult.page_description}`);
-        
-        allWorkflows.push(analysisResult);
-        
-        // Step 2: Execute workflow legs  
-        if (context.execute_workflow !== false) {
-          await sendLog(jobId, 'info', `▶️ Executing ${analysisResult.legs_count} workflow legs...`);
-          try {
-            const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
-            
-            const successful = executionResult.results.filter(r => r.result === 'success').length;
-            const failed = executionResult.results.filter(r => r.result === 'failure').length;
-            
-            await sendLog(jobId, 'info', `✅ Workflow complete: ${successful} succeeded, ${failed} failed`);
-          } catch (execError) {
-            await sendLog(jobId, 'warn', `⚠️ Workflow execution partially completed: ${execError.message}`);
-            // Continue to next page even if this one had issues
+        if (skipAIAnalysis || disableAICompletely) {
+          // Skip AI analysis - just collect page structure and links
+          await sendLog(jobId, 'info', `⏭️ Skipping AI analysis and test generation (collecting links only)`);
+        } else {
+          // Step 1: Analyze page and create workflow with AI
+          await sendLog(jobId, 'info', `📊 Analyzing page with Playwright and OpenAI...`);
+          const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, createdPageId, projectId);
+          
+          await sendLog(jobId, 'info', `✅ Workflow created with ${analysisResult.legs_count} testable legs`);
+          await sendLog(jobId, 'info', `📝 ${analysisResult.page_description}`);
+          
+          allWorkflows.push(analysisResult);
+          
+          // Step 2: Execute workflow legs  
+          if (context.execute_workflow !== false) {
+            await sendLog(jobId, 'info', `▶️ Executing ${analysisResult.legs_count} workflow legs...`);
+            try {
+              const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
+              
+              const successful = executionResult.results.filter(r => r.result === 'success').length;
+              const failed = executionResult.results.filter(r => r.result === 'failure').length;
+              
+              await sendLog(jobId, 'info', `✅ Workflow complete: ${successful} succeeded, ${failed} failed`);
+            } catch (execError) {
+              await sendLog(jobId, 'warn', `⚠️ Workflow execution partially completed: ${execError.message}`);
+              // Continue to next page even if this one had issues
+            }
           }
         }
         
@@ -2909,7 +2955,7 @@ async function extractFormsAndLogicalGroups(page, jobId) {
 }
 
 // Analyze a single page and extract all data with detailed logging
-async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, pageId = null) {
+async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, pageId = null, options = {}) {
   // Verify page is still valid before analysis
   try {
     if (!page || page.isClosed()) {
@@ -3025,8 +3071,52 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
     // Continue with empty content
   }
   
-  // Approach-specific AI analysis - ALWAYS analyze, even in static mode
-  if (aiConversationLogger && openaiClient && pageContent) {
+  // Check if we should skip AI analysis based on options
+  const skipAIAnalysis = options.skip_ai_analysis || false;
+  const skipAlreadyAnalyzed = options.skip_already_analyzed || false;
+  const disableAICompletely = options.disable_ai_completely || false;
+  
+  let shouldAnalyzeWithAI = true;
+  let skipReason = '';
+  
+  // If AI is completely disabled, skip everything
+  if (disableAICompletely) {
+    shouldAnalyzeWithAI = false;
+    skipReason = 'AI completely disabled';
+    await sendLog(jobId, 'info', `⏭️ AI disabled: Only collecting page structure`, pageContext);
+  }
+  // If skip_ai_analysis is enabled, skip AI but still collect links
+  else if (skipAIAnalysis) {
+    shouldAnalyzeWithAI = false;
+    skipReason = 'Skip AI analysis enabled (collecting links only)';
+    await sendLog(jobId, 'info', `⏭️ Skipping AI analysis: ${skipReason}`, pageContext);
+  }
+  // If skip_already_analyzed is enabled, check if page was already analyzed
+  else if (skipAlreadyAnalyzed && pageId) {
+    try {
+      const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+      const checkResponse = await fetch(`${backendUrl}/api/pages/check-analyzed`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pageId })
+      });
+      
+      if (checkResponse.ok) {
+        const checkResult = await checkResponse.json();
+        if (checkResult.analyzed) {
+          shouldAnalyzeWithAI = false;
+          skipReason = 'Page already analyzed (skip_already_analyzed enabled)';
+          await sendLog(jobId, 'info', `⏭️ Skipping AI analysis: ${skipReason}`, pageContext);
+        }
+      }
+    } catch (error) {
+      await sendLog(jobId, 'warn', `⚠️ Failed to check if page is analyzed: ${error.message}`, pageContext);
+      // Continue with AI analysis if check fails
+    }
+  }
+  
+  // Approach-specific AI analysis - Skip if page already analyzed and option enabled
+  if (shouldAnalyzeWithAI && aiConversationLogger && openaiClient && pageContent) {
     await updateJobSubstatus(jobId, 'openai_calculation', { current_page: currentUrl, approach: approach });
     try {
       let aiPrompt, aiMessages;
@@ -3376,7 +3466,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           page_title: pageTitle,
           page_number: analyzedPages.length + 1
         });
-        const pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient, pageId);
+        const pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient, pageId, options);
         
         return { pageAnalysis, pageId, pageTitle, pageUrl };
       });
@@ -3494,7 +3584,8 @@ async function performStaticCrawl(page, context, openaiClient) {
   // Perform recursive crawl with approach name
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'static', openaiClient, {
     max_depth: context.options?.max_depth ?? 3,
-    max_pages: context.options?.max_pages ?? 50
+    max_pages: context.options?.max_pages ?? 50,
+    skip_crawled_pages: context.options?.skip_crawled_pages ?? false
   });
   
   // Build overall conclusion
@@ -4954,6 +5045,13 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   const mode = context.approach_mode || context.mode || 'auto';
   
   await sendLog(jobId, 'info', `🚀 Starting ${mode} mode crawl process for ${url}`, { mode });
+  
+  // Check job status before starting
+  const jobStatus = await checkJobStatus(jobId);
+  if (jobStatus !== 'running') {
+    await sendLog(jobId, 'warn', `⚠️ Job status is ${jobStatus}, stopping crawl execution`, { mode, jobStatus });
+    throw new Error(`Job status is ${jobStatus}, cannot start crawl`);
+  }
   
   try {
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
