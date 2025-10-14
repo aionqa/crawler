@@ -11,6 +11,24 @@ class WorkflowExecutor {
     this.aiLogger = aiLogger;
     this.backendLogger = backendLogger;
     this.maxIterations = 2; // Maximum iterations per leg (reduced for faster execution)
+    this.maxAiRequestsPerLeg = 4; // Maximum AI requests per leg (2 iterations × 2 requests each)
+  }
+
+  /**
+   * Check job status from backend
+   * @param {string} jobId - Job ID to check
+   * @returns {string} Job status (running, failed, paused, etc.)
+   */
+  async checkJobStatus(jobId) {
+    try {
+      const response = await axios.get(`${this.backendUrl}/jobs/${jobId}`, {
+        timeout: 5000
+      });
+      return response.data?.status || 'unknown';
+    } catch (error) {
+      console.error(`[WorkflowExecutor] Error checking job status:`, error.message);
+      return 'unknown';
+    }
   }
 
   /**
@@ -24,6 +42,18 @@ class WorkflowExecutor {
   async executeLeg(page, jobId, workflowId, leg) {
     console.log(`[WorkflowExecutor] Executing leg: ${leg.leg_id} - ${leg.description}`);
 
+    // Check job status before starting
+    const jobStatus = await this.checkJobStatus(jobId);
+    if (jobStatus !== 'running') {
+      console.log(`[WorkflowExecutor] Job ${jobId} status is ${jobStatus}, stopping leg execution`);
+      return {
+        leg_id: leg.leg_id,
+        result: 'cancelled',
+        iterations: 0,
+        error: `Job status is ${jobStatus}`
+      };
+    }
+
     // Mark leg as in progress
     await this.updateLegStatus(workflowId, leg.leg_id, 'in_progress', jobId);
 
@@ -31,10 +61,21 @@ class WorkflowExecutor {
     let completed = false;
     let finalResult = 'failure';
     let lastError = null;
+    let aiRequestCount = 0;
 
-    while (iteration < this.maxIterations && !completed) {
+    while (iteration < this.maxIterations && !completed && aiRequestCount < this.maxAiRequestsPerLeg) {
       iteration++;
-      console.log(`[WorkflowExecutor] Leg ${leg.leg_id} - Iteration ${iteration}/${this.maxIterations}`);
+      console.log(`[WorkflowExecutor] Leg ${leg.leg_id} - Iteration ${iteration}/${this.maxIterations} (AI requests: ${aiRequestCount}/${this.maxAiRequestsPerLeg})`);
+
+      // Check job status before each iteration
+      const jobStatus = await this.checkJobStatus(jobId);
+      if (jobStatus !== 'running') {
+        console.log(`[WorkflowExecutor] Job ${jobId} status changed to ${jobStatus}, stopping leg execution`);
+        finalResult = 'cancelled';
+        completed = true;
+        lastError = `Job status changed to ${jobStatus}`;
+        break;
+      }
 
       // Refetch workflow to get latest leg state with iterations
       if (iteration > 1) {
@@ -148,6 +189,12 @@ class WorkflowExecutor {
           });
 
           console.log(`[WorkflowExecutor] DEBUG: About to call makeAICallWithPrompt`);
+          aiRequestCount++;
+          if (aiRequestCount > this.maxAiRequestsPerLeg) {
+            console.log(`[WorkflowExecutor] AI request limit reached (${this.maxAiRequestsPerLeg}), stopping leg execution`);
+            throw new Error(`AI request limit exceeded: ${aiRequestCount}/${this.maxAiRequestsPerLeg}`);
+          }
+          
           const scriptResponse = await this.aiLogger.makeAICallWithPrompt(
             'generate-workflow-script',
             scriptRequest,
@@ -171,13 +218,13 @@ class WorkflowExecutor {
           console.log(`[WorkflowExecutor] DEBUG: (!scriptResponse.playwright_script && !scriptResponse.code) = ${(!scriptResponse?.playwright_script && !scriptResponse?.code)}`);
           console.log(`[WorkflowExecutor] DEBUG: Full validation result = ${!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code)}`);
           
-          if (!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code)) {
+          if (!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code && !scriptResponse.script)) {
             console.warn(`[WorkflowExecutor] OpenAI did not return a valid Playwright script. Response: ${JSON.stringify(scriptResponse)}`);
             throw new Error('OpenAI did not return a valid Playwright script');
           }
 
-          // Check for playwright_script field first, then fallback to code field
-          playwrightScript = scriptResponse.playwright_script || scriptResponse.code;
+          // Check for script field first (most common), then playwright_script, then code field
+          playwrightScript = scriptResponse.script || scriptResponse.playwright_script || scriptResponse.code;
           
           // Update leg with script
           await this.updateLeg(workflowId, leg.leg_id, { 
@@ -222,6 +269,12 @@ class WorkflowExecutor {
         };
 
         console.log(`[WorkflowExecutor] Verifying with OpenAI (HTML before: ${htmlContent.length} chars, after: ${htmlAfter.length} chars, screenshot: ${screenshotAfterBase64.length} chars)`);
+
+        aiRequestCount++;
+        if (aiRequestCount > this.maxAiRequestsPerLeg) {
+          console.log(`[WorkflowExecutor] AI request limit reached (${this.maxAiRequestsPerLeg}), stopping leg execution`);
+          throw new Error(`AI request limit exceeded: ${aiRequestCount}/${this.maxAiRequestsPerLeg}`);
+        }
 
         const verificationResponse = await this.aiLogger.makeAICallWithPrompt(
           'verify-workflow-leg',

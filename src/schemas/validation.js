@@ -28,7 +28,10 @@ const OptionsSchema = z.object({
   enable_screenshots: z.boolean().default(true),
   enable_video_recording: z.boolean().default(false), // Rule 38: Disabled due to browserless limitation (see rule for solutions)
   max_pages: z.number().min(1).max(1000).default(100),
-  max_depth: z.number().min(0).max(10).default(3) // Changed min from 1 to 0 to allow single-page analysis
+  max_depth: z.number().min(0).max(10).default(3), // Changed min from 1 to 0 to allow single-page analysis
+  skip_ai_analysis: z.boolean().default(false), // Skip AI analysis but still collect links
+  skip_already_analyzed: z.boolean().default(false), // Skip already analyzed pages
+  disable_ai_completely: z.boolean().default(false) // Disable all AI processing
 });
 
 const ContextSchema = z.object({
