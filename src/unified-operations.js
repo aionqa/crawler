@@ -5152,7 +5152,8 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       job_id: jobId,
       jobId: jobId,
       browserServiceUrl: context.browserServiceUrl,
-      onPageReady: context.onPageReady // Pass callback for browser streaming
+      onPageReady: context.onPageReady, // Pass callback for browser streaming
+      onContextReady: context.onContextReady // Pass callback for video recording
     });
 
     await sendLog(jobId, 'info', `✅ Crawl completed in ${result.duration_ms}ms`);
