@@ -1,7 +1,7 @@
 import axios from 'axios';
 
 /**
- * WorkflowAnalyzer
+ * WorkflowAnalyzer - Updated 2025-10-15
  * Handles initial page analysis using Playwright + OpenAI
  * Creates workflow structure with testable legs
  */
@@ -36,6 +36,87 @@ class WorkflowAnalyzer {
     const htmlContent = await page.content();
     const pageTitle = await page.title();
     
+    // Step 3.1: Extract visible text content (for page description)
+    const visibleText = await page.evaluate(() => {
+      // Remove scripts, styles, and hidden elements
+      const clone = document.body.cloneNode(true);
+      clone.querySelectorAll('script, style, noscript, meta, link').forEach(el => el.remove());
+      
+      // Get visible text
+      const walker = document.createTreeWalker(
+        document.body,
+        NodeFilter.SHOW_TEXT,
+        {
+          acceptNode: function(node) {
+            const parent = node.parentElement;
+            if (!parent) return NodeFilter.FILTER_REJECT;
+            const style = window.getComputedStyle(parent);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+              return NodeFilter.FILTER_REJECT;
+            }
+            const text = node.textContent?.trim();
+            if (!text || text.length < 2) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+          }
+        }
+      );
+      
+      const textNodes = [];
+      let node;
+      while (node = walker.nextNode()) {
+        textNodes.push(node.textContent.trim());
+      }
+      
+      return textNodes.join(' ').replace(/\s+/g, ' ').trim().substring(0, 2000);
+    });
+    
+    // Step 3.2: Generate page description using AI (minimal token usage)
+    console.log(`[WorkflowAnalyzer] Generating page description with visible text (${visibleText.length} chars)`);
+    let pageDescription = null;
+    let conversationHistory = [];
+    try {
+      const descriptionPayload = {
+        page_title: pageTitle,
+        page_url: page.url(),
+        visible_text: visibleText
+      };
+      
+      pageDescription = await this.aiLogger.makeAICallWithPrompt(
+        'generate-page-description',
+        descriptionPayload,
+        jobId,
+        'page-descriptor',
+        page.url(),
+        null,
+        descriptionPayload
+      );
+      
+      console.log(`[WorkflowAnalyzer] Page description generated: ${pageDescription.short_description}`);
+      
+      // Add to conversation history
+      conversationHistory.push({
+        timestamp: new Date().toISOString(),
+        action: 'page-description-generated',
+        description: pageDescription.short_description
+      });
+      
+      // Step 3.3: Log page description to job history with attachments (appears ABOVE AI chats)
+      await this.logPageDescription(jobId, page.url(), pageTitle, pageDescription, {
+        visible_text_length: visibleText.length,
+        forms_count: playwrightAnalysis.forms.length,
+        interactive_elements_count: playwrightAnalysis.interactive_elements.length
+      }, htmlContent, screenshotBase64);
+      
+    } catch (error) {
+      console.warn(`[WorkflowAnalyzer] Failed to generate page description: ${error.message}`);
+      pageDescription = {
+        short_description: `Page: ${pageTitle}`,
+        full_description: `Analysis of ${page.url()}`,
+        purpose: 'Information page',
+        conversation_context: 'Analyzing page structure and content'
+      };
+    }
+    
     // Step 3.5: Send initial page discovery update (real-time)
     await this.updatePageDiscovery(jobId, pageId, projectId, page.url(), {
       title: pageTitle,
@@ -43,6 +124,8 @@ class WorkflowAnalyzer {
       forms: playwrightAnalysis.forms,
       links: playwrightAnalysis.links,
       interactive_elements: playwrightAnalysis.interactive_elements,
+      page_description: pageDescription,
+      visible_text: visibleText,
       analyzed: false
     });
 
@@ -51,7 +134,7 @@ class WorkflowAnalyzer {
     
     console.log(`[WorkflowAnalyzer] Created workflow: ${workflow._id}`);
 
-    // Step 5: Send to OpenAI for analysis with FULL context
+    // Step 5: Send to OpenAI for analysis with OPTIMIZED context (interactive elements only)
     // Prepare interactive elements as JSON string
     // NOTE: Links are excluded - they are for page discovery only, NOT testable legs
     const interactiveElementsJson = JSON.stringify({
@@ -60,7 +143,7 @@ class WorkflowAnalyzer {
       interactive_elements: playwrightAnalysis.interactive_elements
     }, null, 2);
     
-    console.log(`[WorkflowAnalyzer] Sending FULL context to OpenAI (HTML: ${htmlContent.length} chars, Elements: ${playwrightAnalysis.interactive_elements.length})`);
+    console.log(`[WorkflowAnalyzer] Sending OPTIMIZED context to OpenAI (Interactive elements only, no HTML/screenshot)`);
     
     // Update sub-status with descriptive information
     await this.updateJobSubstatus(jobId, `Analyzing page structure for testing: ${pageTitle}`, {
@@ -70,24 +153,25 @@ class WorkflowAnalyzer {
       interactive_elements_count: playwrightAnalysis.interactive_elements.length
     });
     
-    // Build complete payload with all data
-    const fullPayload = {
+    // Build OPTIMIZED payload - only interactive elements + description + history
+    const optimizedPayload = {
       page_url: page.url(),
       page_title: pageTitle,
-      html_content: htmlContent,  // FULL HTML - no trimming
-      interactive_elements_json: interactiveElementsJson,
-      playwright_analysis: playwrightAnalysis,
-      screenshot_base64: screenshotBase64  // For vision API
+      page_description: pageDescription,  // AI-generated description
+      interactive_elements_json: interactiveElementsJson,  // Only interactive elements
+      conversation_history: conversationHistory  // History of analysis
+      // NO html_content - saved in PAGE-ANALYZER attachments
+      // NO screenshot_base64 - saved in PAGE-ANALYZER attachments
     };
     
     const aiAnalysisResult = await this.aiLogger.makeAICallWithPrompt(
       'analyze-page-for-workflow',
-      fullPayload,
+      optimizedPayload,
       jobId,
       'workflow-analyzer',
       page.url(),
       null,  // screenshotId
-      fullPayload  // Pass as sourcePayload for attachment logging
+      optimizedPayload  // Pass as sourcePayload for attachment logging
     );
 
     if (!aiAnalysisResult || !aiAnalysisResult.legs) {
@@ -235,6 +319,71 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Log page description to job history with attachments (appears above AI chats)
+   */
+  async logPageDescription(jobId, pageUrl, pageTitle, pageDescription, metadata = {}, htmlContent = null, screenshotBase64 = null) {
+    try {
+      const message = `📄 Page Analysis: ${pageDescription.short_description}`;
+      
+      const logMetadata = {
+        page_analysis: true,
+        page_title: pageTitle,
+        page_url: pageUrl,
+        short_description: pageDescription.short_description,
+        full_description: pageDescription.full_description,
+        purpose: pageDescription.purpose,
+        conversation_context: pageDescription.conversation_context,
+        ...metadata
+      };
+      
+      // Create attachments for full data (with content for display)
+      const attachments = [];
+      
+      // 1. HTML content attachment
+      if (htmlContent) {
+        attachments.push({
+          type: 'html_content',
+          filename: `page_content_${Date.now()}.html`,
+          content: htmlContent,  // Full HTML for display
+          mimeType: 'text/html',
+          size: htmlContent.length,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // 2. Screenshot attachment (store reference, not full base64)
+      if (screenshotBase64) {
+        attachments.push({
+          type: 'screenshot',
+          filename: `page_screenshot_${Date.now()}.png`,
+          content: screenshotBase64,  // Full base64 for display
+          mimeType: 'image/png',
+          size: screenshotBase64.length,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      // Use backend logger to append job log with attachments
+      console.log(`[WorkflowAnalyzer] Sending ${attachments.length} attachments:`, attachments.map(a => `${a.type} (${a.size} bytes)`));
+      
+      const response = await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: message,
+        component: 'PAGE-ANALYZER',
+        metadata: logMetadata,
+        attachments: attachments
+      });
+      
+      console.log(`[WorkflowAnalyzer] Page description logged to job history with ${attachments.length} attachments`);
+      return response.data;
+    } catch (error) {
+      console.error('[WorkflowAnalyzer] Error logging page description:', error.message);
+      // Don't throw - this is not critical
+    }
+  }
+
+  /**
    * Create workflow document via backend API
    */
   async createWorkflow(pageId, projectId, url, playwrightAnalysis) {
@@ -345,3 +494,4 @@ class WorkflowAnalyzer {
 export default WorkflowAnalyzer;
 
 
+// Force rebuild Wed 15 Oct 2025 23:26:24 AEDT
