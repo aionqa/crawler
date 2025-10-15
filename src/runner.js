@@ -127,6 +127,16 @@ async function executeJob(job) {
   const initialStatus = await checkJobStatus(job.id);
   if (initialStatus !== 'running') {
     console.log(`⚠️  [UNIFIED-RUNNER] Job ${job.id} status is ${initialStatus}, skipping execution`);
+    // Report to backend to release the assignment
+    try {
+      await axios.post(`${BACKEND_URL}/api/runner/jobs/${job.id}/skip`, {
+        runnerId: RUNNER_ID,
+        reason: `Job status is ${initialStatus}, not running`
+      });
+      console.log(`✅ [UNIFIED-RUNNER] Reported skipped job ${job.id} to backend`);
+    } catch (error) {
+      console.error(`❌ [UNIFIED-RUNNER] Error reporting skipped job:`, error.message);
+    }
     return false;
   }
 

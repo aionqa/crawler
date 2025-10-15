@@ -118,14 +118,14 @@ class VideoRecorder {
     try {
       // Request presigned URL from backend
       const response = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
-        filename: `job-${jobId}-full-recording.webm`,
-        contentType: 'video/webm',
-        folder: `videos/${jobId}`
+        type: 'video',
+        jobId: jobId,
+        contentType: 'video/webm'
       }, {
         timeout: 10000
       });
 
-      const { url: presignedUrl, key } = response.data;
+      const { url: presignedUrl, key, publicUrl } = response.data;
       
       console.log(`[VIDEO-RECORDER] Got presigned URL for upload`);
 
@@ -147,10 +147,14 @@ class VideoRecorder {
 
       console.log(`✅ [VIDEO-RECORDER] Video uploaded successfully`);
 
-      // Notify backend about the video
+      // Construct backend proxy URL for video access (use localhost for external access)
+      const publicBackendUrl = this.backendUrl.replace('http://back:', 'http://localhost:');
+      const backendVideoUrl = `${publicBackendUrl}/stream-video?key=${encodeURIComponent(key)}`;
+      
+      // Notify backend about the video with backend proxy URL
       await axios.post(`${this.backendUrl}/api/jobs/${jobId}/video`, {
         video_key: key,
-        video_url: presignedUrl.split('?')[0], // Remove query params
+        video_url: backendVideoUrl, // Use backend proxy URL for external access
         duration,
         size_bytes: fileSize,
         format: 'webm',
@@ -164,7 +168,7 @@ class VideoRecorder {
       console.log(`✅ [VIDEO-RECORDER] Video metadata saved to job`);
 
       return {
-        url: presignedUrl.split('?')[0],
+        url: publicUrl || presignedUrl.split('?')[0],
         key,
         duration,
         size: fileSize
@@ -197,4 +201,5 @@ class VideoRecorder {
 }
 
 export default VideoRecorder;
+
 
