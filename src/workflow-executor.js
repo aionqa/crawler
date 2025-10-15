@@ -32,6 +32,44 @@ class WorkflowExecutor {
   }
 
   /**
+   * Mark an action as started
+   * @param {string} actionId - Action ID to mark as started
+   * @param {string} jobId - Job ID that started this action
+   */
+  async markActionStarted(actionId, jobId) {
+    try {
+      await axios.post(`${this.backendUrl}/actions/${actionId}/start`, {
+        job_id: jobId
+      }, {
+        timeout: 5000
+      });
+      console.log(`[WorkflowExecutor] Marked action ${actionId} as started`);
+    } catch (error) {
+      console.error(`[WorkflowExecutor] Error marking action as started:`, error.message);
+    }
+  }
+
+  /**
+   * Mark an action as completed
+   * @param {string} actionId - Action ID to mark as completed
+   * @param {boolean} success - Whether the action was successful
+   * @param {string} error - Error message if action failed
+   */
+  async markActionCompleted(actionId, success = true, error = null) {
+    try {
+      await axios.post(`${this.backendUrl}/actions/${actionId}/complete`, {
+        success,
+        error
+      }, {
+        timeout: 5000
+      });
+      console.log(`[WorkflowExecutor] Marked action ${actionId} as ${success ? 'completed' : 'failed'}`);
+    } catch (error) {
+      console.error(`[WorkflowExecutor] Error marking action as completed:`, error.message);
+    }
+  }
+
+  /**
    * Execute a single workflow leg
    * @param {Page} page - Playwright page object
    * @param {string} jobId - Job ID for logging
@@ -56,6 +94,11 @@ class WorkflowExecutor {
 
     // Mark leg as in progress
     await this.updateLegStatus(workflowId, leg.leg_id, 'in_progress', jobId);
+
+    // Mark associated action as started if it exists
+    if (leg.action_id) {
+      await this.markActionStarted(leg.action_id, jobId);
+    }
 
     let iteration = 0;
     let completed = false;
@@ -342,6 +385,12 @@ class WorkflowExecutor {
 
     // Mark leg as completed
     await this.completeLeg(workflowId, leg.leg_id, finalResult, lastError, jobId);
+
+    // Mark associated action as completed if it exists
+    if (leg.action_id) {
+      const success = finalResult === 'success';
+      await this.markActionCompleted(leg.action_id, success, lastError);
+    }
 
     return {
       leg_id: leg.leg_id,

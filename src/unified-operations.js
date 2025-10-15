@@ -11,6 +11,7 @@ import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import WorkflowAnalyzer from './workflow-analyzer.js';
 import WorkflowExecutor from './workflow-executor.js';
+import OptimizedWorkflowAnalyzer from './optimized-workflow-analyzer.js';
 import axios from 'axios';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1374,6 +1375,53 @@ async function withBrowser(action, options = {}) {
 
 // Mode-specific operation handlers
 const modeHandlers = {
+  // Optimized mode - NEW: QA-like testing with minimal token usage
+  optimized: async (page, context, openaiClient, operation) => {
+    const jobId = context.job_id || 'unknown-job';
+    const projectId = context.project_id || null;
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    
+    await sendLog(jobId, 'info', `🚀 OPTIMIZED MODE: QA-like testing with minimal token usage`);
+    
+    try {
+      // Initialize optimized workflow analyzer
+      const optimizedAnalyzer = new OptimizedWorkflowAnalyzer(backendUrl);
+      
+      // Get or create page ID
+      const pageUrl = page.url();
+      const pageTitle = await page.title();
+      const pageResult = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId, pageUrl);
+      const pageId = pageResult?.pageId || pageResult;
+      
+      // Analyze page with optimized approach
+      const analysisResult = await optimizedAnalyzer.analyzePage(page, jobId, pageId, projectId, openaiClient);
+      
+      return {
+        success: true,
+        approach: 'optimized',
+        message: `Optimized QA-like analysis completed`,
+        details: {
+          total_interactions: analysisResult.total_interactions,
+          page_data_collected: true,
+          ax_tree_collected: !!analysisResult.page_data.ax_tree,
+          dom_snapshot_collected: !!analysisResult.page_data.dom_snapshot,
+          visible_text_length: analysisResult.page_data.visible_text.length,
+          interactive_elements_count: analysisResult.page_data.interactive_elements.interactive_count
+        }
+      };
+      
+    } catch (error) {
+      console.error('[OPTIMIZED-MODE] Error:', error);
+      await sendLog(jobId, 'error', `❌ Optimized mode failed: ${error.message}`);
+      return {
+        success: false,
+        approach: 'optimized',
+        message: `Optimized mode failed: ${error.message}`,
+        error: error.message
+      };
+    }
+  },
+
   // Workflow mode - NEW: Uses workflow-based analysis and testing
   workflow: async (page, context, openaiClient, operation) => {
     const jobId = context.job_id || 'unknown-job';
