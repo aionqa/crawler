@@ -585,17 +585,135 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
         const axios = (await import('axios')).default;
         const response = await axios.get(`${BACKEND_URL}/api/workflow-templates/${workflowTemplateId}`);
         workflowTemplate = response.data;
-        console.log(`[LOGIN-WORKFLOW] Loaded workflow template: ${workflowTemplate.name}`);
+        console.log(`[LOGIN-WORKFLOW] ✅ Loaded workflow template: "${workflowTemplate.name}" (ID: ${workflowTemplateId})`);
+        console.log(`[LOGIN-WORKFLOW] 📄 Template contains ${workflowTemplate.prompts?.length || 0} custom prompts`);
+        
+        // Log workflow decision to job history
+        await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+          jobId: jobId,
+          level: 'info',
+          message: `🔄 WORKFLOW DECISION: Using workflow template "${workflowTemplate.name}"`,
+          component: 'LOGIN-WORKFLOW',
+          metadata: {
+            workflow_decision: true,
+            decision: `Using workflow template: ${workflowTemplate.name}`,
+            details: `Template ID: ${workflowTemplateId}, Prompts: ${workflowTemplate.prompts?.length || 0}`,
+            template_id: workflowTemplateId,
+            template_name: workflowTemplate.name,
+            timestamp: new Date().toISOString()
+          }
+        });
       } catch (error) {
-        console.warn(`[LOGIN-WORKFLOW] Failed to load workflow template, using default prompts: ${error.message}`);
+        console.warn(`[LOGIN-WORKFLOW] ⚠️ Failed to load workflow template, using default prompts: ${error.message}`);
+        
+        // Log fallback to defaults
+        try {
+          const axios = (await import('axios')).default;
+          await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'info',
+            message: `🔄 WORKFLOW DECISION: Using default prompts (template load failed)`,
+            component: 'LOGIN-WORKFLOW',
+            metadata: {
+              workflow_decision: true,
+              decision: 'Using default prompts',
+              details: `Template load failed: ${error.message}`,
+              template_id: null,
+              template_name: 'Default Prompts',
+              timestamp: new Date().toISOString()
+            }
+          });
+        } catch (logError) {
+          console.error(`[LOGIN-WORKFLOW] Error logging workflow decision: ${logError.message}`);
+        }
+      }
+    } else {
+      console.log(`[LOGIN-WORKFLOW] 📋 No workflow template specified, using default prompts from database`);
+      
+      // Log default prompts usage
+      try {
+        const axios = (await import('axios')).default;
+        await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+          jobId: jobId,
+          level: 'info',
+          message: `🔄 WORKFLOW DECISION: Using default prompts from database`,
+          component: 'LOGIN-WORKFLOW',
+          metadata: {
+            workflow_decision: true,
+            decision: 'Using default prompts',
+            details: 'No workflow template ID provided',
+            template_id: null,
+            template_name: 'Default Prompts',
+            timestamp: new Date().toISOString()
+          }
+        });
+      } catch (logError) {
+        console.error(`[LOGIN-WORKFLOW] Error logging workflow decision: ${logError.message}`);
       }
     }
     
-    // Helper to get custom template
-    const getCustomTemplate = (promptName) => {
-      if (!workflowTemplate || !workflowTemplate.prompts) return null;
+    // Helper to get custom template with logging
+    const getCustomTemplate = async (promptName) => {
+      if (!workflowTemplate || !workflowTemplate.prompts) {
+        console.log(`[LOGIN-WORKFLOW] 📋 Using DEFAULT prompt from database: "${promptName}"`);
+        return null;
+      }
+      
       const prompt = workflowTemplate.prompts.find(p => p.name === promptName);
-      return prompt ? prompt.template : null;
+      if (prompt) {
+        console.log(`[LOGIN-WORKFLOW] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
+        console.log(`[LOGIN-WORKFLOW] 📝 Prompt text: ${prompt.template.substring(0, 100)}...`);
+        
+        // Log prompt usage
+        try {
+          const axios = (await import('axios')).default;
+          await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'info',
+            message: `📝 PROMPT USAGE: "${promptName}" from workflow-template`,
+            component: 'LOGIN-WORKFLOW',
+            metadata: {
+              prompt_usage: true,
+              prompt_name: promptName,
+              prompt_source: 'workflow-template',
+              prompt_text_preview: prompt.template.substring(0, 200),
+              workflow_template_id: workflowTemplateId,
+              workflow_template_name: workflowTemplate.name,
+              timestamp: new Date().toISOString()
+            }
+          });
+        } catch (logError) {
+          console.error(`[LOGIN-WORKFLOW] Error logging prompt usage: ${logError.message}`);
+        }
+        
+        return prompt.template;
+      } else {
+        console.log(`[LOGIN-WORKFLOW] 📋 Prompt "${promptName}" not found in template, using DEFAULT from database`);
+        
+        // Log default usage
+        try {
+          const axios = (await import('axios')).default;
+          await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'info',
+            message: `📝 PROMPT USAGE: "${promptName}" from database (not in template)`,
+            component: 'LOGIN-WORKFLOW',
+            metadata: {
+              prompt_usage: true,
+              prompt_name: promptName,
+              prompt_source: 'database',
+              prompt_text_preview: 'Default from database',
+              workflow_template_id: workflowTemplateId,
+              workflow_template_name: workflowTemplate.name,
+              timestamp: new Date().toISOString()
+            }
+          });
+        } catch (logError) {
+          console.error(`[LOGIN-WORKFLOW] Error logging prompt usage: ${logError.message}`);
+        }
+        
+        return null;
+      }
     };
     
     // Navigate to login page
@@ -606,7 +724,7 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
     const htmlContent = await page.content();
     
-    const findFormTemplate = getCustomTemplate('find-login-form');
+    const findFormTemplate = await getCustomTemplate('find-login-form');
     const formAnalysis = await aiLogger.makeAICallWithPrompt(
       'find-login-form',
       {
@@ -642,7 +760,7 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
     const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
     const htmlAfter = await page.content();
     
-    const validateTemplate = getCustomTemplate('validate-login-success');
+    const validateTemplate = await getCustomTemplate('validate-login-success');
     const validationResult = await aiLogger.makeAICallWithPrompt(
       'validate-login-success',
       {

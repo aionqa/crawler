@@ -21,17 +21,32 @@ class WorkflowExecutor {
    */
   async loadWorkflowTemplate() {
     if (!this.context.workflow_template_id) {
-      console.log(`[WorkflowExecutor] No workflow template specified, using default prompts`);
+      console.log(`[WorkflowExecutor] 📋 No workflow template specified, using default prompts from database`);
+      await this.logWorkflowDecision('Using default prompts', 'No workflow template ID provided');
       return null;
     }
 
     try {
       const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`);
       this.workflowTemplate = response.data;
-      console.log(`[WorkflowExecutor] Loaded workflow template: ${this.workflowTemplate.name}`);
+      console.log(`[WorkflowExecutor] ✅ Loaded workflow template: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`);
+      console.log(`[WorkflowExecutor] 📄 Template contains ${this.workflowTemplate.prompts?.length || 0} custom prompts`);
+      
+      // Log template details
+      if (this.workflowTemplate.prompts && this.workflowTemplate.prompts.length > 0) {
+        console.log(`[WorkflowExecutor] 📝 Custom prompts in template:`);
+        this.workflowTemplate.prompts.forEach(p => {
+          console.log(`[WorkflowExecutor]    - ${p.name}: ${p.template?.substring(0, 80)}...`);
+        });
+      }
+      
+      await this.logWorkflowDecision(`Using workflow template: ${this.workflowTemplate.name}`, 
+        `Template ID: ${this.context.workflow_template_id}, Prompts: ${this.workflowTemplate.prompts?.length || 0}`);
+      
       return this.workflowTemplate;
     } catch (error) {
-      console.warn(`[WorkflowExecutor] Failed to load workflow template: ${error.message}`);
+      console.warn(`[WorkflowExecutor] ⚠️ Failed to load workflow template: ${error.message}`);
+      await this.logWorkflowDecision('Failed to load template, using defaults', error.message);
       return null;
     }
   }
@@ -41,11 +56,19 @@ class WorkflowExecutor {
    */
   getPromptTemplate(promptName) {
     if (!this.workflowTemplate || !this.workflowTemplate.prompts) {
+      console.log(`[WorkflowExecutor] 📋 Using DEFAULT prompt from database: "${promptName}"`);
       return null;
     }
 
     const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName);
-    return prompt ? prompt.template : null;
+    if (prompt) {
+      console.log(`[WorkflowExecutor] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
+      console.log(`[WorkflowExecutor] 📝 Prompt text: ${prompt.template.substring(0, 100)}...`);
+      return prompt.template;
+    } else {
+      console.log(`[WorkflowExecutor] 📋 Prompt "${promptName}" not found in template, using DEFAULT from database`);
+      return null;
+    }
   }
 
   /**
@@ -280,6 +303,10 @@ class WorkflowExecutor {
           // Use custom prompt template if available
           const scriptPromptName = 'generate-workflow-script';
           const customScriptTemplate = this.getPromptTemplate(scriptPromptName);
+          const scriptPromptSource = customScriptTemplate ? 'workflow-template' : 'database';
+          
+          // Log prompt usage
+          await this.logPromptUsage(scriptPromptName, scriptPromptSource, customScriptTemplate || 'Default from database', scriptRequest);
           
           const scriptResponse = await this.aiLogger.makeAICallWithPrompt(
             scriptPromptName,
@@ -366,6 +393,10 @@ class WorkflowExecutor {
         // Use custom prompt template if available
         const verifyPromptName = 'verify-workflow-leg';
         const customVerifyTemplate = this.getPromptTemplate(verifyPromptName);
+        const verifyPromptSource = customVerifyTemplate ? 'workflow-template' : 'database';
+        
+        // Log prompt usage
+        await this.logPromptUsage(verifyPromptName, verifyPromptSource, customVerifyTemplate || 'Default from database', verificationRequest);
         
         const verificationResponse = await this.aiLogger.makeAICallWithPrompt(
           verifyPromptName,
@@ -642,6 +673,68 @@ class WorkflowExecutor {
     } catch (error) {
       // Silent fail - don't block execution
       console.error(`Failed to update substatus: ${error.message}`);
+    }
+  }
+
+  /**
+   * Log workflow decision to job history
+   * Shows whether workflow template or default prompts are used
+   */
+  async logWorkflowDecision(decision, details) {
+    try {
+      const jobId = this.context.job_id;
+      if (!jobId) return;
+      
+      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: `🔄 WORKFLOW DECISION: ${decision}`,
+        component: 'WORKFLOW-EXECUTOR',
+        metadata: {
+          workflow_decision: true,
+          decision: decision,
+          details: details,
+          template_id: this.context.workflow_template_id || null,
+          template_name: this.workflowTemplate?.name || 'Default Prompts',
+          timestamp: new Date().toISOString()
+        }
+      });
+      
+      console.log(`[WorkflowExecutor] 📝 Logged workflow decision: ${decision}`);
+    } catch (error) {
+      console.error('[WorkflowExecutor] Error logging workflow decision:', error.message);
+    }
+  }
+  
+  /**
+   * Log prompt usage to job history
+   * Shows which prompt was used (custom from template or default from database)
+   */
+  async logPromptUsage(promptName, source, promptText, payload) {
+    try {
+      const jobId = this.context.job_id;
+      if (!jobId) return;
+      
+      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: `📝 PROMPT USAGE: "${promptName}" from ${source}`,
+        component: 'WORKFLOW-EXECUTOR',
+        metadata: {
+          prompt_usage: true,
+          prompt_name: promptName,
+          prompt_source: source, // 'workflow-template' or 'database'
+          prompt_text_preview: promptText ? promptText.substring(0, 200) : 'N/A',
+          workflow_template_id: this.context.workflow_template_id || null,
+          workflow_template_name: this.workflowTemplate?.name || null,
+          payload_keys: Object.keys(payload || {}),
+          timestamp: new Date().toISOString()
+        }
+      });
+      
+      console.log(`[WorkflowExecutor] 📝 Logged prompt usage: ${promptName} (${source})`);
+    } catch (error) {
+      console.error('[WorkflowExecutor] Error logging prompt usage:', error.message);
     }
   }
 }
