@@ -18,17 +18,32 @@ class WorkflowAnalyzer {
    */
   async loadWorkflowTemplate() {
     if (!this.context.workflow_template_id) {
-      console.log(`[WorkflowAnalyzer] No workflow template specified, using default prompts`);
+      console.log(`[WorkflowAnalyzer] 📋 No workflow template specified, using default prompts from database`);
+      await this.logWorkflowDecision('Using default prompts', 'No workflow template ID provided');
       return null;
     }
 
     try {
       const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`);
       this.workflowTemplate = response.data;
-      console.log(`[WorkflowAnalyzer] Loaded workflow template: ${this.workflowTemplate.name}`);
+      console.log(`[WorkflowAnalyzer] ✅ Loaded workflow template: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`);
+      console.log(`[WorkflowAnalyzer] 📄 Template contains ${this.workflowTemplate.prompts?.length || 0} custom prompts`);
+      
+      // Log template details
+      if (this.workflowTemplate.prompts && this.workflowTemplate.prompts.length > 0) {
+        console.log(`[WorkflowAnalyzer] 📝 Custom prompts in template:`);
+        this.workflowTemplate.prompts.forEach(p => {
+          console.log(`[WorkflowAnalyzer]    - ${p.name}: ${p.template?.substring(0, 80)}...`);
+        });
+      }
+      
+      await this.logWorkflowDecision(`Using workflow template: ${this.workflowTemplate.name}`, 
+        `Template ID: ${this.context.workflow_template_id}, Prompts: ${this.workflowTemplate.prompts?.length || 0}`);
+      
       return this.workflowTemplate;
     } catch (error) {
-      console.warn(`[WorkflowAnalyzer] Failed to load workflow template: ${error.message}`);
+      console.warn(`[WorkflowAnalyzer] ⚠️ Failed to load workflow template: ${error.message}`);
+      await this.logWorkflowDecision('Failed to load template, using defaults', error.message);
       return null;
     }
   }
@@ -38,11 +53,19 @@ class WorkflowAnalyzer {
    */
   getPromptTemplate(promptName) {
     if (!this.workflowTemplate || !this.workflowTemplate.prompts) {
+      console.log(`[WorkflowAnalyzer] 📋 Using DEFAULT prompt from database: "${promptName}"`);
       return null;
     }
 
     const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName);
-    return prompt ? prompt.template : null;
+    if (prompt) {
+      console.log(`[WorkflowAnalyzer] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
+      console.log(`[WorkflowAnalyzer] 📝 Prompt text: ${prompt.template.substring(0, 100)}...`);
+      return prompt.template;
+    } else {
+      console.log(`[WorkflowAnalyzer] 📋 Prompt "${promptName}" not found in template, using DEFAULT from database`);
+      return null;
+    }
   }
 
   /**
@@ -121,6 +144,10 @@ class WorkflowAnalyzer {
       // Use custom prompt template if available
       const promptName = 'generate-page-description';
       const customTemplate = this.getPromptTemplate(promptName);
+      const promptSource = customTemplate ? 'workflow-template' : 'database';
+      
+      // Log prompt usage
+      await this.logPromptUsage(promptName, promptSource, customTemplate || 'Default from database', descriptionPayload);
       
       pageDescription = await this.aiLogger.makeAICallWithPrompt(
         promptName,
@@ -209,6 +236,10 @@ class WorkflowAnalyzer {
       // Use custom prompt template if available
       const workflowPromptName = 'analyze-page-for-workflow';
       const customWorkflowTemplate = this.getPromptTemplate(workflowPromptName);
+      const workflowPromptSource = customWorkflowTemplate ? 'workflow-template' : 'database';
+      
+      // Log prompt usage
+      await this.logPromptUsage(workflowPromptName, workflowPromptSource, customWorkflowTemplate || 'Default from database', optimizedPayload);
       
       const aiAnalysisResult = await this.aiLogger.makeAICallWithPrompt(
         workflowPromptName,
@@ -534,6 +565,68 @@ class WorkflowAnalyzer {
     } catch (error) {
       // Silent fail - don't block execution
       console.error(`Failed to update substatus: ${error.message}`);
+    }
+  }
+
+  /**
+   * Log workflow decision to job history
+   * Shows whether workflow template or default prompts are used
+   */
+  async logWorkflowDecision(decision, details) {
+    try {
+      const jobId = this.context.job_id;
+      if (!jobId) return;
+      
+      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: `🔄 WORKFLOW DECISION: ${decision}`,
+        component: 'WORKFLOW-ANALYZER',
+        metadata: {
+          workflow_decision: true,
+          decision: decision,
+          details: details,
+          template_id: this.context.workflow_template_id || null,
+          template_name: this.workflowTemplate?.name || 'Default Prompts',
+          timestamp: new Date().toISOString()
+        }
+      });
+      
+      console.log(`[WorkflowAnalyzer] 📝 Logged workflow decision: ${decision}`);
+    } catch (error) {
+      console.error('[WorkflowAnalyzer] Error logging workflow decision:', error.message);
+    }
+  }
+  
+  /**
+   * Log prompt usage to job history
+   * Shows which prompt was used (custom from template or default from database)
+   */
+  async logPromptUsage(promptName, source, promptText, payload) {
+    try {
+      const jobId = this.context.job_id;
+      if (!jobId) return;
+      
+      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: `📝 PROMPT USAGE: "${promptName}" from ${source}`,
+        component: 'WORKFLOW-ANALYZER',
+        metadata: {
+          prompt_usage: true,
+          prompt_name: promptName,
+          prompt_source: source, // 'workflow-template' or 'database'
+          prompt_text_preview: promptText ? promptText.substring(0, 200) : 'N/A',
+          workflow_template_id: this.context.workflow_template_id || null,
+          workflow_template_name: this.workflowTemplate?.name || null,
+          payload_keys: Object.keys(payload || {}),
+          timestamp: new Date().toISOString()
+        }
+      });
+      
+      console.log(`[WorkflowAnalyzer] 📝 Logged prompt usage: ${promptName} (${source})`);
+    } catch (error) {
+      console.error('[WorkflowAnalyzer] Error logging prompt usage:', error.message);
     }
   }
 }
