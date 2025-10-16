@@ -6,12 +6,46 @@ import axios from 'axios';
  * Each leg is tested until OpenAI confirms completion or failure
  */
 class WorkflowExecutor {
-  constructor(backendUrl, aiLogger, backendLogger) {
+  constructor(backendUrl, aiLogger, backendLogger, context = {}) {
     this.backendUrl = backendUrl;
     this.aiLogger = aiLogger;
     this.backendLogger = backendLogger;
+    this.context = context;
+    this.workflowTemplate = null;
     this.maxIterations = 2; // Maximum iterations per leg (reduced for faster execution)
     this.maxAiRequestsPerLeg = 4; // Maximum AI requests per leg (2 iterations × 2 requests each)
+  }
+
+  /**
+   * Load workflow template from backend
+   */
+  async loadWorkflowTemplate() {
+    if (!this.context.workflow_template_id) {
+      console.log(`[WorkflowExecutor] No workflow template specified, using default prompts`);
+      return null;
+    }
+
+    try {
+      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`);
+      this.workflowTemplate = response.data;
+      console.log(`[WorkflowExecutor] Loaded workflow template: ${this.workflowTemplate.name}`);
+      return this.workflowTemplate;
+    } catch (error) {
+      console.warn(`[WorkflowExecutor] Failed to load workflow template: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get prompt template by name from workflow template
+   */
+  getPromptTemplate(promptName) {
+    if (!this.workflowTemplate || !this.workflowTemplate.prompts) {
+      return null;
+    }
+
+    const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName);
+    return prompt ? prompt.template : null;
   }
 
   /**
@@ -79,6 +113,11 @@ class WorkflowExecutor {
    */
   async executeLeg(page, jobId, workflowId, leg) {
     console.log(`[WorkflowExecutor] Executing leg: ${leg.leg_id} - ${leg.description}`);
+
+    // Load workflow template if not already loaded
+    if (!this.workflowTemplate) {
+      await this.loadWorkflowTemplate();
+    }
 
     // Check job status before starting
     const jobStatus = await this.checkJobStatus(jobId);
@@ -238,14 +277,19 @@ class WorkflowExecutor {
             throw new Error(`AI request limit exceeded: ${aiRequestCount}/${this.maxAiRequestsPerLeg}`);
           }
           
+          // Use custom prompt template if available
+          const scriptPromptName = 'generate-workflow-script';
+          const customScriptTemplate = this.getPromptTemplate(scriptPromptName);
+          
           const scriptResponse = await this.aiLogger.makeAICallWithPrompt(
-            'generate-workflow-script',
+            scriptPromptName,
             scriptRequest,
             jobId,
             'workflow-executor',
             page.url(),
             screenshotBeforeKey,  // screenshotId for tracking
-            scriptRequest  // Pass scriptRequest as sourcePayload for full attachment logging
+            scriptRequest,  // Pass scriptRequest as sourcePayload for full attachment logging
+            customScriptTemplate // Pass custom template if available
           );
           console.log(`[WorkflowExecutor] DEBUG: makeAICallWithPrompt completed successfully`);
 
@@ -319,14 +363,19 @@ class WorkflowExecutor {
           throw new Error(`AI request limit exceeded: ${aiRequestCount}/${this.maxAiRequestsPerLeg}`);
         }
 
+        // Use custom prompt template if available
+        const verifyPromptName = 'verify-workflow-leg';
+        const customVerifyTemplate = this.getPromptTemplate(verifyPromptName);
+        
         const verificationResponse = await this.aiLogger.makeAICallWithPrompt(
-          'verify-workflow-leg',
+          verifyPromptName,
           verificationRequest,
           jobId,
           'workflow-executor',
           page.url(),
           screenshotAfterKey,  // screenshotId for tracking
-          verificationRequest  // Pass verificationRequest as sourcePayload for full attachment logging
+          verificationRequest,  // Pass verificationRequest as sourcePayload for full attachment logging
+          customVerifyTemplate // Pass custom template if available
         );
 
         // Step 8: Record iteration with FULL data (no trimming)

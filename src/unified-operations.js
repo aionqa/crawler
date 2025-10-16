@@ -1432,9 +1432,9 @@ const modeHandlers = {
     
     await sendLog(jobId, 'info', `🔄 WORKFLOW MODE: Multi-page crawl (max ${maxPages} pages, depth ${maxDepth})`);
     
-    // Initialize workflow analyzer and executor
-    const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger);
-    const workflowExecutor = new WorkflowExecutor(backendUrl, aiConversationLogger, backendLogger);
+    // Initialize workflow analyzer and executor with context
+    const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger, context);
+    const workflowExecutor = new WorkflowExecutor(backendUrl, aiConversationLogger, backendLogger, context);
     
     const visitedUrls = new Set();
     const urlQueue = [{ url: page.url(), depth: 0 }];
@@ -1463,8 +1463,9 @@ const modeHandlers = {
         
         // Create basic page document first
         const pageTitle = await page.title();
-        const startUrl = page.url(); // Get the original start URL for domain filtering
-        const pageResult = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId, startUrl);
+        // Use project's start_url for domain filtering, not the current page URL
+        const projectStartUrl = context.start_url || page.url(); // Fallback to current URL if not provided
+        const pageResult = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId, projectStartUrl);
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
         // Check if we should skip AI analysis
