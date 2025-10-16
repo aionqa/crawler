@@ -564,11 +564,127 @@ export async function performLogin(page, jobId, pageUrl, username, password, max
   };
 }
 
+/**
+ * NEW: Workflow-based login using same architecture as WorkflowAnalyzer
+ * Integrates login into unified-crawler using workflow templates
+ */
+export async function performLoginWithWorkflow(page, jobId, pageUrl, username, password, openaiApiKey, workflowTemplateId = null) {
+  const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
+  
+  try {
+    console.log(`[LOGIN-WORKFLOW] Starting workflow-based login for ${pageUrl}`);
+    
+    // Initialize AI logger with workflow support
+    const { AIConversationLogger } = await import('/app/shared/ai-conversation-logger.js');
+    const aiLogger = new AIConversationLogger(BACKEND_URL);
+    
+    // Load workflow template if provided
+    let workflowTemplate = null;
+    if (workflowTemplateId) {
+      try {
+        const axios = (await import('axios')).default;
+        const response = await axios.get(`${BACKEND_URL}/api/workflow-templates/${workflowTemplateId}`);
+        workflowTemplate = response.data;
+        console.log(`[LOGIN-WORKFLOW] Loaded workflow template: ${workflowTemplate.name}`);
+      } catch (error) {
+        console.warn(`[LOGIN-WORKFLOW] Failed to load workflow template, using default prompts: ${error.message}`);
+      }
+    }
+    
+    // Helper to get custom template
+    const getCustomTemplate = (promptName) => {
+      if (!workflowTemplate || !workflowTemplate.prompts) return null;
+      const prompt = workflowTemplate.prompts.find(p => p.name === promptName);
+      return prompt ? prompt.template : null;
+    };
+    
+    // Navigate to login page
+    await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+    console.log(`[LOGIN-WORKFLOW] Navigated to login page`);
+    
+    // Step 1: Find login form using AI
+    const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
+    const htmlContent = await page.content();
+    
+    const findFormTemplate = getCustomTemplate('find-login-form');
+    const formAnalysis = await aiLogger.makeAICallWithPrompt(
+      'find-login-form',
+      {
+        page_url: pageUrl,
+        page_title: await page.title(),
+        html_content: htmlContent.substring(0, 50000)
+      },
+      jobId,
+      'login-workflow',
+      pageUrl,
+      null,
+      null,
+      findFormTemplate
+    );
+    
+    if (!formAnalysis || !formAnalysis.form_found) {
+      throw new Error('No login form found on page');
+    }
+    
+    console.log(`[LOGIN-WORKFLOW] Form found - Username: ${formAnalysis.username_selector}, Password: ${formAnalysis.password_selector}`);
+    
+    // Step 2: Fill the form
+    await page.fill(formAnalysis.username_selector, username);
+    await page.waitForTimeout(500);
+    await page.fill(formAnalysis.password_selector, password);
+    await page.waitForTimeout(500);
+    
+    // Step 3: Submit
+    await page.click(formAnalysis.submit_selector);
+    await page.waitForTimeout(3000); // Wait for login response
+    
+    // Step 4: Validate success using AI
+    const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
+    const htmlAfter = await page.content();
+    
+    const validateTemplate = getCustomTemplate('validate-login-success');
+    const validationResult = await aiLogger.makeAICallWithPrompt(
+      'validate-login-success',
+      {
+        page_url: page.url(),
+        page_title: await page.title(),
+        html_after_login: htmlAfter.substring(0, 50000)
+      },
+      jobId,
+      'login-workflow',
+      page.url(),
+      null,
+      null,
+      validateTemplate
+    );
+    
+    console.log(`[LOGIN-WORKFLOW] Login validation: ${validationResult.success ? 'SUCCESS' : 'FAILED'} - ${validationResult.reason}`);
+    
+    return {
+      success: validationResult.success,
+      finalUrl: page.url(),
+      finalTitle: await page.title(),
+      reason: validationResult.reason,
+      evidence: validationResult.evidence
+    };
+    
+  } catch (error) {
+    console.error(`[LOGIN-WORKFLOW] Login failed: ${error.message}`);
+    return {
+      success: false,
+      error: error.message,
+      finalUrl: page.url(),
+      finalTitle: await page.title().catch(() => 'Unknown')
+    };
+  }
+}
+
 export default {
   findLoginForm,
   fillFieldWithRetry,
   detectAndHandleCaptcha,
   validateLoginSuccess,
-  performLogin
+  performLogin,
+  performLoginWithWorkflow
 };
 

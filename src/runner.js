@@ -175,13 +175,18 @@ async function executeJob(job) {
  * Execute a login job
  */
 async function executeLoginJob(job, streamInterval) {
-  const { url, username, password, maxAttempts = 2 } = job;
+  const { url, username, password, maxAttempts = 2, context: jobContext = {} } = job;
 
   if (!url || !username || !password) {
     throw new Error('Missing required fields: url, username, password');
   }
 
-  // Launch local browser (embedded)
+  const openaiApiKey = jobContext.openai_api_key || process.env.OPENAI_API_KEY;
+  if (!openaiApiKey) {
+    throw new Error('OpenAI API key not provided');
+  }
+
+  // Launch local browser (embedded) - SAME as crawl jobs
   console.log(`🌐 [UNIFIED-RUNNER] Launching local Chromium browser for login`);
   const { chromium } = await import('playwright');
   const browser = await chromium.launch({ 
@@ -207,8 +212,18 @@ async function executeLoginJob(job, streamInterval) {
   startVideoStream(page, job.id);
 
   try {
-    // Perform login using existing function
-    const result = await performLogin(page, job.id, url, username, password, maxAttempts);
+    // Use workflow-based login (NEW - using WorkflowAnalyzer approach)
+    const { performLoginWithWorkflow } = await import('./login-operations.js');
+    
+    const result = await performLoginWithWorkflow(
+      page, 
+      job.id, 
+      url, 
+      username, 
+      password,
+      openaiApiKey,
+      jobContext.workflow_template_id // Pass workflow template ID
+    );
 
     // Extract auth tokens if successful
     if (result.success) {
