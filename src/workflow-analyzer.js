@@ -6,9 +6,43 @@ import axios from 'axios';
  * Creates workflow structure with testable legs
  */
 class WorkflowAnalyzer {
-  constructor(backendUrl, aiLogger) {
+  constructor(backendUrl, aiLogger, context = {}) {
     this.backendUrl = backendUrl;
     this.aiLogger = aiLogger;
+    this.context = context;
+    this.workflowTemplate = null;
+  }
+
+  /**
+   * Load workflow template from backend
+   */
+  async loadWorkflowTemplate() {
+    if (!this.context.workflow_template_id) {
+      console.log(`[WorkflowAnalyzer] No workflow template specified, using default prompts`);
+      return null;
+    }
+
+    try {
+      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`);
+      this.workflowTemplate = response.data;
+      console.log(`[WorkflowAnalyzer] Loaded workflow template: ${this.workflowTemplate.name}`);
+      return this.workflowTemplate;
+    } catch (error) {
+      console.warn(`[WorkflowAnalyzer] Failed to load workflow template: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get prompt template by name from workflow template
+   */
+  getPromptTemplate(promptName) {
+    if (!this.workflowTemplate || !this.workflowTemplate.prompts) {
+      return null;
+    }
+
+    const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName);
+    return prompt ? prompt.template : null;
   }
 
   /**
@@ -21,6 +55,9 @@ class WorkflowAnalyzer {
    */
   async analyzePage(page, jobId, pageId, projectId) {
     console.log(`[WorkflowAnalyzer] Analyzing page: ${page.url()}`);
+
+    // Load workflow template if specified
+    await this.loadWorkflowTemplate();
 
     // Step 1: Playwright Analysis - collect forms, links, interactive elements
     // NOTE: Links are collected for PAGE DISCOVERY (crawling), but NOT for workflow legs (testing)
@@ -81,14 +118,19 @@ class WorkflowAnalyzer {
         visible_text: visibleText
       };
       
+      // Use custom prompt template if available
+      const promptName = 'generate-page-description';
+      const customTemplate = this.getPromptTemplate(promptName);
+      
       pageDescription = await this.aiLogger.makeAICallWithPrompt(
-        'generate-page-description',
+        promptName,
         descriptionPayload,
         jobId,
         'page-descriptor',
         page.url(),
         null,
-        descriptionPayload
+        descriptionPayload,
+        customTemplate // Pass custom template if available
       );
       
       console.log(`[WorkflowAnalyzer] Page description generated: ${pageDescription.short_description}`);
@@ -164,15 +206,20 @@ class WorkflowAnalyzer {
       // NO screenshot_base64 - saved in PAGE-ANALYZER attachments
     };
     
-    const aiAnalysisResult = await this.aiLogger.makeAICallWithPrompt(
-      'analyze-page-for-workflow',
-      optimizedPayload,
-      jobId,
-      'workflow-analyzer',
-      page.url(),
-      null,  // screenshotId
-      optimizedPayload  // Pass as sourcePayload for attachment logging
-    );
+      // Use custom prompt template if available
+      const workflowPromptName = 'analyze-page-for-workflow';
+      const customWorkflowTemplate = this.getPromptTemplate(workflowPromptName);
+      
+      const aiAnalysisResult = await this.aiLogger.makeAICallWithPrompt(
+        workflowPromptName,
+        optimizedPayload,
+        jobId,
+        'workflow-analyzer',
+        page.url(),
+        null,  // screenshotId
+        optimizedPayload,  // Pass as sourcePayload for attachment logging
+        customWorkflowTemplate // Pass custom template if available
+      );
 
     if (!aiAnalysisResult || !aiAnalysisResult.legs) {
       throw new Error('OpenAI did not return valid workflow legs');
