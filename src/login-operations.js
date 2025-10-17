@@ -572,7 +572,26 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
   const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
   
   try {
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    console.log(`[LOGIN-WORKFLOW] 🔐 LOGIN STEP 1: INITIALIZE WORKFLOW`);
     console.log(`[LOGIN-WORKFLOW] Starting workflow-based login for ${pageUrl}`);
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    
+    // Log step 1
+    const axios = (await import('axios')).default;
+    await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+      jobId: jobId,
+      level: 'info',
+      message: `🔐 LOGIN STEP 1: Initializing workflow-based login for ${pageUrl}`,
+      component: 'LOGIN-WORKFLOW',
+      metadata: {
+        login_step: 1,
+        step_name: 'INITIALIZE_WORKFLOW',
+        page_url: pageUrl,
+        workflow_template_id: workflowTemplateId,
+        timestamp: new Date().toISOString()
+      }
+    });
     
     // Initialize AI logger with workflow support
     const { AIConversationLogger } = await import('/app/shared/ai-conversation-logger.js');
@@ -660,7 +679,7 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
       }
       
       const prompt = workflowTemplate.prompts.find(p => p.name === promptName);
-      if (prompt) {
+      if (prompt && prompt.template) {
         console.log(`[LOGIN-WORKFLOW] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
         console.log(`[LOGIN-WORKFLOW] 📝 Prompt text: ${prompt.template.substring(0, 100)}...`);
         
@@ -717,10 +736,30 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
     };
     
     // Navigate to login page
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    console.log(`[LOGIN-WORKFLOW] 🔐 LOGIN STEP 2: NAVIGATE TO LOGIN PAGE`);
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
     await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 30000 });
     console.log(`[LOGIN-WORKFLOW] Navigated to login page`);
     
-    // Step 1: Find login form using AI
+    await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+      jobId: jobId,
+      level: 'info',
+      message: `🔐 LOGIN STEP 2: Successfully navigated to login page ${pageUrl}`,
+      component: 'LOGIN-WORKFLOW',
+      metadata: {
+        login_step: 2,
+        step_name: 'NAVIGATE_TO_LOGIN_PAGE',
+        page_url: pageUrl,
+        page_title: await page.title(),
+        timestamp: new Date().toISOString()
+      }
+    });
+    
+    // Step 3: Find login form using AI
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    console.log(`[LOGIN-WORKFLOW] 🔐 LOGIN STEP 3: FIND LOGIN FORM USING AI`);
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
     const htmlContent = await page.content();
     
@@ -746,17 +785,101 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
     
     console.log(`[LOGIN-WORKFLOW] Form found - Username: ${formAnalysis.username_selector}, Password: ${formAnalysis.password_selector}`);
     
-    // Step 2: Fill the form
-    await page.fill(formAnalysis.username_selector, username);
+    await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+      jobId: jobId,
+      level: 'info',
+      message: `🔐 LOGIN STEP 3: Login form found successfully - Username field: ${formAnalysis.username_selector}, Password field: ${formAnalysis.password_selector}`,
+      component: 'LOGIN-WORKFLOW',
+      metadata: {
+        login_step: 3,
+        step_name: 'FIND_LOGIN_FORM_COMPLETE',
+        username_selector: formAnalysis.username_selector,
+        password_selector: formAnalysis.password_selector,
+        submit_selector: formAnalysis.submit_selector,
+        timestamp: new Date().toISOString()
+      }
+    });
+    
+    // Step 4: Fill the form
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    console.log(`[LOGIN-WORKFLOW] 🔐 LOGIN STEP 4: FILL LOGIN CREDENTIALS`);
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    
+    // Extract first selector if AI returned multiple with commas, then simplify
+    let usernameSelector = formAnalysis.username_selector.split(',')[0].trim();
+    let passwordSelector = formAnalysis.password_selector.split(',')[0].trim();
+    let submitSelector = formAnalysis.submit_selector.split(',')[0].trim();
+    
+    // If selector is complex (contains spaces or attributes), try to extract just the ID or simple selector
+    if (usernameSelector.includes(' ') || usernameSelector.includes('[')) {
+      const match = usernameSelector.match(/#[\w-]+/);
+      if (match) usernameSelector = match[0];
+    }
+    if (passwordSelector.includes(' ') || passwordSelector.includes('[')) {
+      const match = passwordSelector.match(/#[\w-]+/);
+      if (match) passwordSelector = match[0];
+    }
+    if (submitSelector.includes(' ') || submitSelector.includes('[')) {
+      const match = submitSelector.match(/#[\w-]+/);
+      if (match) {
+        submitSelector = match[0];
+      } else {
+        // If no ID found, try simple button selector or keep as is
+        submitSelector = 'button[type="submit"], #submit, button';
+      }
+    }
+    
+    console.log(`[LOGIN-WORKFLOW] Using username selector: ${usernameSelector}`);
+    console.log(`[LOGIN-WORKFLOW] Using password selector: ${passwordSelector}`);
+    console.log(`[LOGIN-WORKFLOW] Using submit selector: ${submitSelector}`);
+    
+    await page.fill(usernameSelector, username);
+    console.log(`[LOGIN-WORKFLOW] ✓ Username filled`);
     await page.waitForTimeout(500);
-    await page.fill(formAnalysis.password_selector, password);
+    await page.fill(passwordSelector, password);
+    console.log(`[LOGIN-WORKFLOW] ✓ Password filled`);
     await page.waitForTimeout(500);
     
-    // Step 3: Submit
-    await page.click(formAnalysis.submit_selector);
+    await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+      jobId: jobId,
+      level: 'info',
+      message: `🔐 LOGIN STEP 4: Credentials filled successfully (username and password)`,
+      component: 'LOGIN-WORKFLOW',
+      metadata: {
+        login_step: 4,
+        step_name: 'FILL_CREDENTIALS_COMPLETE',
+        username_filled: true,
+        password_filled: true,
+        timestamp: new Date().toISOString()
+      }
+    });
+    
+    // Step 5: Submit
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    console.log(`[LOGIN-WORKFLOW] 🔐 LOGIN STEP 5: SUBMIT LOGIN FORM`);
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    
+    await page.click(submitSelector);
+    console.log(`[LOGIN-WORKFLOW] ✓ Form submitted`);
     await page.waitForTimeout(3000); // Wait for login response
     
-    // Step 4: Validate success using AI
+    await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+      jobId: jobId,
+      level: 'info',
+      message: `🔐 LOGIN STEP 5: Login form submitted successfully`,
+      component: 'LOGIN-WORKFLOW',
+      metadata: {
+        login_step: 5,
+        step_name: 'SUBMIT_FORM_COMPLETE',
+        submit_selector: submitSelector,
+        timestamp: new Date().toISOString()
+      }
+    });
+    
+    // Step 6: Validate success using AI
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    console.log(`[LOGIN-WORKFLOW] 🔐 LOGIN STEP 6: VALIDATE LOGIN SUCCESS WITH AI`);
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
     const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
     const htmlAfter = await page.content();
     
@@ -777,6 +900,62 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
     );
     
     console.log(`[LOGIN-WORKFLOW] Login validation: ${validationResult.success ? 'SUCCESS' : 'FAILED'} - ${validationResult.reason}`);
+    
+    await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+      jobId: jobId,
+      level: validationResult.success ? 'info' : 'error',
+      message: `🔐 LOGIN STEP 6: Validation complete - ${validationResult.success ? '✅ LOGIN SUCCESSFUL' : '❌ LOGIN FAILED'} - ${validationResult.reason}`,
+      component: 'LOGIN-WORKFLOW',
+      metadata: {
+        login_step: 6,
+        step_name: 'VALIDATE_LOGIN_COMPLETE',
+        success: validationResult.success,
+        reason: validationResult.reason,
+        evidence: validationResult.evidence,
+        final_url: page.url(),
+        final_title: await page.title(),
+        timestamp: new Date().toISOString()
+      }
+    });
+    
+    if (validationResult.success) {
+      console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+      console.log(`[LOGIN-WORKFLOW] ✅ LOGIN WORKFLOW COMPLETED SUCCESSFULLY!`);
+      console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+      
+      await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: `✅ LOGIN WORKFLOW COMPLETED SUCCESSFULLY - User is now authenticated`,
+        component: 'LOGIN-WORKFLOW',
+        metadata: {
+          workflow_complete: true,
+          success: true,
+          final_url: page.url(),
+          final_title: await page.title(),
+          timestamp: new Date().toISOString()
+        }
+      });
+    } else {
+      console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+      console.log(`[LOGIN-WORKFLOW] ❌ LOGIN WORKFLOW FAILED`);
+      console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+      
+      await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'error',
+        message: `❌ LOGIN WORKFLOW FAILED - ${validationResult.reason}`,
+        component: 'LOGIN-WORKFLOW',
+        metadata: {
+          workflow_complete: true,
+          success: false,
+          reason: validationResult.reason,
+          final_url: page.url(),
+          final_title: await page.title(),
+          timestamp: new Date().toISOString()
+        }
+      });
+    }
     
     return {
       success: validationResult.success,

@@ -58,12 +58,12 @@ class WorkflowAnalyzer {
     }
 
     const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName);
-    if (prompt) {
+    if (prompt && prompt.template) {
       console.log(`[WorkflowAnalyzer] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
       console.log(`[WorkflowAnalyzer] 📝 Prompt text: ${prompt.template.substring(0, 100)}...`);
       return prompt.template;
     } else {
-      console.log(`[WorkflowAnalyzer] 📋 Prompt "${promptName}" not found in template, using DEFAULT from database`);
+      console.log(`[WorkflowAnalyzer] 📋 Prompt "${promptName}" not found in template or template is empty, using DEFAULT from database`);
       return null;
     }
   }
@@ -91,6 +91,61 @@ class WorkflowAnalyzer {
     // Step 2: Take screenshot
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
     const screenshotBase64 = screenshot.toString('base64');
+
+    // Step 2.1: Upload screenshot to MinIO IMMEDIATELY and link to page as icon
+    // CRITICAL: This ensures pages have screenshots as icons in the UI
+    let screenshotUrl = null;
+    let screenshotFileId = null;
+    try {
+      const axios = (await import('axios')).default;
+      
+      console.log(`[WorkflowAnalyzer] 📸 Requesting presigned URL for screenshot upload...`);
+      
+      // Request presigned URL from backend
+      const presignedResponse = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
+        type: 'screenshot',
+        jobId: jobId,
+        contentType: 'image/png'
+      }, {
+        timeout: 10000
+      });
+      
+      console.log(`[WorkflowAnalyzer] ✅ Got presigned URL from backend`);
+      
+      const { url: presignedUrl, key, publicUrl } = presignedResponse.data;
+      screenshotFileId = key;
+      screenshotUrl = publicUrl;
+      
+      console.log(`[WorkflowAnalyzer] 📤 Uploading screenshot to MinIO (${screenshot.length} bytes)...`);
+      
+      // Upload screenshot to MinIO using presigned URL
+      await axios.put(presignedUrl, screenshot, {
+        headers: {
+          'Content-Type': 'image/png'
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 30000
+      });
+      
+      console.log(`[WorkflowAnalyzer] ✅ Screenshot uploaded to MinIO: ${publicUrl}`);
+      
+      // Update page document with screenshot URL IMMEDIATELY
+      console.log(`[WorkflowAnalyzer] 📝 Updating page ${pageId} with screenshot file ID...`);
+      
+      const updateResponse = await axios.post(`${this.backendUrl}/api/pages/${pageId}/screenshot`, {
+        fileId: screenshotFileId,
+        jobId: jobId
+      }, {
+        timeout: 10000
+      });
+      
+      console.log(`[WorkflowAnalyzer] ✅ Page ${pageId} updated with screenshot (icon set) - Response:`, updateResponse.status);
+    } catch (screenshotError) {
+      console.error(`[WorkflowAnalyzer] ❌ Failed to upload screenshot: ${screenshotError.message}`);
+      console.error(`[WorkflowAnalyzer] Error stack:`, screenshotError.stack);
+      // Continue anyway - screenshot is nice to have but not critical for analysis
+    }
 
     // Step 3: Get HTML content (FULL - no trimming)
     const htmlContent = await page.content();
