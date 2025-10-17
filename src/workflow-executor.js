@@ -61,12 +61,12 @@ class WorkflowExecutor {
     }
 
     const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName);
-    if (prompt) {
+    if (prompt && prompt.template) {
       console.log(`[WorkflowExecutor] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
       console.log(`[WorkflowExecutor] 📝 Prompt text: ${prompt.template.substring(0, 100)}...`);
       return prompt.template;
     } else {
-      console.log(`[WorkflowExecutor] 📋 Prompt "${promptName}" not found in template, using DEFAULT from database`);
+      console.log(`[WorkflowExecutor] 📋 Prompt "${promptName}" not found in template or template is empty, using DEFAULT from database`);
       return null;
     }
   }
