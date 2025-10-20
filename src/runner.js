@@ -123,15 +123,15 @@ async function executeJob(job) {
   console.log(`\n🎯 [UNIFIED-RUNNER] Executing ${job.jobType} job ${job.id}`);
   console.log(`📍 [UNIFIED-RUNNER] URL: ${job.url}`);
 
-  // Check job status before starting
+  // Check job status before starting - accept both 'pending' and 'running'
   const initialStatus = await checkJobStatus(job.id);
-  if (initialStatus !== 'running') {
+  if (initialStatus !== 'running' && initialStatus !== 'pending') {
     console.log(`⚠️  [UNIFIED-RUNNER] Job ${job.id} status is ${initialStatus}, skipping execution`);
     // Report to backend to release the assignment
     try {
       await axios.post(`${BACKEND_URL}/api/runner/jobs/${job.id}/skip`, {
         runnerId: RUNNER_ID,
-        reason: `Job status is ${initialStatus}, not running`
+        reason: `Job status is ${initialStatus}, expected 'pending' or 'running'`
       });
       console.log(`✅ [UNIFIED-RUNNER] Reported skipped job ${job.id} to backend`);
     } catch (error) {
@@ -141,6 +141,18 @@ async function executeJob(job) {
   }
 
   try {
+    // Update job status from 'pending' to 'running' when runner picks it up
+    try {
+      await fetch(`${BACKEND_URL}/jobs/${job.id}/status`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'running' })
+      });
+      console.log(`🔄 [UNIFIED-RUNNER] Updated job ${job.id} status to 'running'`);
+    } catch (statusError) {
+      console.warn(`⚠️  [UNIFIED-RUNNER] Failed to update job status: ${statusError.message}`);
+    }
+
     if (job.jobType === 'login') {
       // Execute login job
       const result = await executeLoginJob(job, streamInterval);

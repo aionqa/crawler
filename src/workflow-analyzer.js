@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { StaticNodeExecutor } from './static-node-executor.js';
 
 /**
  * WorkflowAnalyzer - Updated 2025-10-15
@@ -81,6 +82,32 @@ class WorkflowAnalyzer {
 
     // Load workflow template if specified
     await this.loadWorkflowTemplate();
+
+    // EXECUTE STATIC WORKFLOW NODES (screenshot, wait, print, navigate, click, fill, etc.)
+    if (this.workflowTemplate && this.workflowTemplate.staticNodes && this.workflowTemplate.staticNodes.length > 0) {
+      console.log(`[WorkflowAnalyzer] 🎯 Executing static workflow nodes for: "${this.workflowTemplate.name}"`);
+      
+      try {
+        const staticExecutor = new StaticNodeExecutor(
+          page,
+          jobId,
+          this.workflowTemplate
+        );
+        
+        const executionResult = await staticExecutor.execute();
+        
+        if (executionResult.success) {
+          console.log(`[WorkflowAnalyzer] ✅ Static workflow completed successfully: ${executionResult.stepsExecuted} steps executed`);
+        } else {
+          console.log(`[WorkflowAnalyzer] ❌ Static workflow failed: ${executionResult.error}`);
+        }
+      } catch (staticError) {
+        console.error(`[WorkflowAnalyzer] ❌ Static workflow execution error:`, staticError);
+        // Continue with page analysis even if static workflow fails
+      }
+    } else {
+      console.log(`[WorkflowAnalyzer] ℹ️ No static nodes in workflow, proceeding with AI-driven analysis`);
+    }
 
     // Step 1: Playwright Analysis - collect forms, links, interactive elements
     // NOTE: Links are collected for PAGE DISCOVERY (crawling), but NOT for workflow legs (testing)
