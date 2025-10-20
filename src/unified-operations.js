@@ -1450,6 +1450,20 @@ const modeHandlers = {
           continue;
         }
         
+        // Check if job has been cancelled
+        try {
+          const axios = (await import('axios')).default;
+          const jobStatusResponse = await axios.get(`${backendUrl}/jobs/${jobId}`, { timeout: 5000 });
+          const jobStatus = jobStatusResponse.data?.status;
+          if (jobStatus === 'cancelled' || jobStatus === 'failed') {
+            await sendLog(jobId, 'info', `⏹️ Job ${jobStatus}, stopping crawl`);
+            break;
+          }
+        } catch (statusCheckError) {
+          // Continue if status check fails (don't block crawl)
+          console.warn(`[CRAWLER] Failed to check job status: ${statusCheckError.message}`);
+        }
+        
         visitedUrls.add(currentUrl);
         pagesAnalyzed++;
         
@@ -3405,6 +3419,21 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
     if (depth > maxDepth) {
       await sendLog(jobId, 'info', `⏭️  Skipping (max depth ${maxDepth} reached): ${currentUrl}`, { page_url: currentUrl, mode: approach });
       continue;
+    }
+    
+    // Check if job has been cancelled
+    try {
+      const axios = (await import('axios')).default;
+      const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+      const jobStatusResponse = await axios.get(`${backendUrl}/jobs/${jobId}`, { timeout: 5000 });
+      const jobStatus = jobStatusResponse.data?.status;
+      if (jobStatus === 'cancelled' || jobStatus === 'failed') {
+        await sendLog(jobId, 'info', `⏹️ Job ${jobStatus}, stopping crawl`);
+        break;
+      }
+    } catch (statusCheckError) {
+      // Continue if status check fails (don't block crawl)
+      console.warn(`[CRAWLER] Failed to check job status: ${statusCheckError.message}`);
     }
     
     try {
