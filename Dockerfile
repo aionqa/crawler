@@ -1,4 +1,4 @@
-FROM node:18-slim
+FROM node:20-bookworm-slim
 
 # Install system dependencies for Playwright and video recording
 RUN apt-get update && apt-get install -y \
