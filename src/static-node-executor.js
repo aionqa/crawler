@@ -10,10 +10,11 @@ import * as backendLogger from './backend-logger.js';
  * StaticNodeExecutor - Executes static workflow nodes
  */
 export class StaticNodeExecutor {
-  constructor(page, jobId, workflow) {
+  constructor(page, jobId, workflow, context = {}) {
     this.page = page;
     this.jobId = jobId;
     this.workflow = workflow;
+    this.context = context; // project_id, backendUrl, etc.
     this.executedNodes = new Set();
     this.nodeResults = new Map();
   }
@@ -150,6 +151,10 @@ export class StaticNodeExecutor {
 
         case 'collect':
           result = await this.executeCollect(node);
+          break;
+
+        case 'populate_history':
+          result = await this.executePopulateHistory(node);
           break;
 
         case 'success':
@@ -499,6 +504,205 @@ export class StaticNodeExecutor {
       message: `Cycle executed ${iterations} times`,
       data: { iterations }
     };
+  }
+
+  /**
+   * Execute populate_history node
+   * Compares current page/element state with previous state and logs changes
+   */
+  async executePopulateHistory(node) {
+    try {
+      const backendUrl = this.context.backendUrl || process.env.BACKEND_URL || 'http://localhost:4000';
+      const projectId = this.context.project_id;
+      
+      if (!projectId) {
+        console.warn('[POPULATE_HISTORY] No project_id in context, skipping');
+        return { success: true, skipped: true, message: 'No project_id available' };
+      }
+
+      const currentUrl = this.page.url();
+      const currentTitle = await this.page.title();
+
+      // Get all interactive elements on the page
+      const elements = await this.page.evaluate(() => {
+        const results = [];
+        
+        // Forms
+        document.querySelectorAll('form').forEach((form, index) => {
+          const name = form.name || form.id || form.getAttribute('action') || `form-${index}`;
+          const fields = Array.from(form.querySelectorAll('input, select, textarea')).map(f => ({
+            name: f.name || f.id,
+            type: f.type || f.tagName.toLowerCase()
+          }));
+          results.push({
+            type: 'form',
+            name,
+            selector: form.name ? `form[name="${form.name}"]` : (form.id ? `#${form.id}` : null),
+            fieldCount: fields.length,
+            fields
+          });
+        });
+
+        // Buttons
+        document.querySelectorAll('button, input[type="button"], input[type="submit"]').forEach((btn, index) => {
+          const name = btn.textContent?.trim() || btn.value || btn.id || `button-${index}`;
+          results.push({
+            type: 'button',
+            name,
+            selector: btn.id ? `#${btn.id}` : null,
+            text: btn.textContent?.trim() || btn.value
+          });
+        });
+
+        return results;
+      });
+
+      // Fetch previous state from backend
+      const axios = (await import('axios')).default;
+      let previousElements = [];
+      try {
+        const response = await axios.get(`${backendUrl}/api/pages`, {
+          params: { 
+            project_id: projectId,
+            url: currentUrl 
+          }
+        });
+        
+        if (response.data && response.data.length > 0) {
+          const existingPage = response.data[0];
+          previousElements = existingPage.interactive_elements || [];
+        }
+      } catch (error) {
+        console.log('[POPULATE_HISTORY] Page not found in database (first discovery)');
+      }
+
+      const changes = [];
+
+      // Compare elements
+      for (const currentElement of elements) {
+        const previous = previousElements.find(
+          p => p.name === currentElement.name && p.type === currentElement.type
+        );
+
+        if (!previous) {
+          // New element discovered
+          changes.push({
+            element_name: currentElement.name,
+            element_type: currentElement.type,
+            element_selector: currentElement.selector,
+            change_type: 'discovery',
+            description: `New ${currentElement.type} discovered: "${currentElement.name}"`,
+            previous_state: null,
+            current_state: currentElement
+          });
+        } else {
+          // Check for changes
+          const differences = [];
+          
+          if (currentElement.type === 'form') {
+            if (currentElement.fieldCount !== previous.fieldCount) {
+              differences.push(`Field count changed from ${previous.fieldCount} to ${currentElement.fieldCount}`);
+            }
+            
+            // Check for missing or added fields
+            const prevFieldNames = new Set((previous.fields || []).map(f => f.name));
+            const currFieldNames = new Set((currentElement.fields || []).map(f => f.name));
+            
+            const addedFields = [...currFieldNames].filter(n => !prevFieldNames.has(n));
+            const removedFields = [...prevFieldNames].filter(n => !currFieldNames.has(n));
+            
+            if (addedFields.length > 0) {
+              differences.push(`Added fields: ${addedFields.join(', ')}`);
+            }
+            if (removedFields.length > 0) {
+              differences.push(`Removed fields: ${removedFields.join(', ')}`);
+            }
+          }
+
+          if (currentElement.type === 'button' && currentElement.text !== previous.text) {
+            differences.push(`Button text changed from "${previous.text}" to "${currentElement.text}"`);
+          }
+
+          if (differences.length > 0) {
+            changes.push({
+              element_name: currentElement.name,
+              element_type: currentElement.type,
+              element_selector: currentElement.selector,
+              change_type: 'change',
+              description: differences.join('; '),
+              previous_state: previous,
+              current_state: currentElement
+            });
+          }
+        }
+      }
+
+      // Check for removed elements
+      for (const previousElement of previousElements) {
+        const current = elements.find(
+          e => e.name === previousElement.name && e.type === previousElement.type
+        );
+        
+        if (!current) {
+          changes.push({
+            element_name: previousElement.name,
+            element_type: previousElement.type,
+            element_selector: previousElement.selector,
+            change_type: 'error',
+            description: `${previousElement.type} "${previousElement.name}" is no longer present on the page`,
+            previous_state: previousElement,
+            current_state: null
+          });
+        }
+      }
+
+      // Send changes to backend
+      for (const change of changes) {
+        try {
+          await axios.post(`${backendUrl}/api/history`, {
+            project_id: projectId,
+            job_id: this.jobId,
+            page_url: currentUrl,
+            page_title: currentTitle,
+            ...change
+          });
+          
+          console.log(`[POPULATE_HISTORY] 📝 Logged change: ${change.description}`);
+          
+          await this.logWorkflowStep(
+            'populate_history',
+            `📝 ${change.change_type.toUpperCase()}: ${change.description}`,
+            {
+              element_name: change.element_name,
+              element_type: change.element_type,
+              change_type: change.change_type
+            }
+          );
+        } catch (error) {
+          console.error('[POPULATE_HISTORY] Failed to create history record:', error.message);
+        }
+      }
+
+      return {
+        success: true,
+        message: `Analyzed ${elements.length} elements, found ${changes.length} changes`,
+        data: { 
+          elementsAnalyzed: elements.length,
+          changesFound: changes.length,
+          changes: changes.map(c => ({ 
+            type: c.change_type, 
+            element: c.element_name,
+            description: c.description 
+          }))
+        }
+      };
+    } catch (error) {
+      console.error('[POPULATE_HISTORY] Error:', error);
+      return {
+        success: false,
+        error: `Failed to populate history: ${error.message}`
+      };
+    }
   }
 
   /**

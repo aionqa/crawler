@@ -19,18 +19,17 @@ class WorkflowAnalyzer {
    */
   async loadWorkflowTemplate() {
     if (!this.context.workflow_template_id) {
-      console.log(`[WorkflowAnalyzer] 📋 No workflow template specified, using default prompts from database`);
-      await this.logWorkflowDecision('Using default prompts', 'No workflow template ID provided');
-      return null;
+      console.error(`[WorkflowAnalyzer] ❌ No workflow template ID provided - workflows are mandatory!`);
+      throw new Error('workflow_template_id is required - all jobs must use workflows stored in MongoDB');
     }
 
     try {
       const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`);
       this.workflowTemplate = response.data;
-      console.log(`[WorkflowAnalyzer] ✅ Loaded workflow template: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`);
-      console.log(`[WorkflowAnalyzer] 📄 Template contains ${this.workflowTemplate.prompts?.length || 0} custom prompts`);
+      console.log(`[WorkflowAnalyzer] ✅ Loaded workflow: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`);
+      console.log(`[WorkflowAnalyzer] 📄 Workflow contains ${this.workflowTemplate.prompts?.length || 0} prompts`);
       
-      // Log template details
+      // Log workflow usage
       if (this.workflowTemplate.prompts && this.workflowTemplate.prompts.length > 0) {
         console.log(`[WorkflowAnalyzer] 📝 Custom prompts in template:`);
         this.workflowTemplate.prompts.forEach(p => {
@@ -38,14 +37,15 @@ class WorkflowAnalyzer {
         });
       }
       
-      await this.logWorkflowDecision(`Using workflow template: ${this.workflowTemplate.name}`, 
-        `Template ID: ${this.context.workflow_template_id}, Prompts: ${this.workflowTemplate.prompts?.length || 0}`);
+      await this.logWorkflowDecision(
+        `Using workflow: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`,
+        `Workflow contains ${this.workflowTemplate.prompts?.length || 0} prompts`
+      );
       
       return this.workflowTemplate;
     } catch (error) {
-      console.warn(`[WorkflowAnalyzer] ⚠️ Failed to load workflow template: ${error.message}`);
-      await this.logWorkflowDecision('Failed to load template, using defaults', error.message);
-      return null;
+      console.error(`[WorkflowAnalyzer] ❌ Failed to load workflow template: ${error.message}`);
+      throw new Error(`Failed to load workflow template ${this.context.workflow_template_id}: ${error.message}`);
     }
   }
 
@@ -91,7 +91,11 @@ class WorkflowAnalyzer {
         const staticExecutor = new StaticNodeExecutor(
           page,
           jobId,
-          this.workflowTemplate
+          this.workflowTemplate,
+          {
+            ...this.context,
+            backendUrl: this.backendUrl
+          }
         );
         
         const executionResult = await staticExecutor.execute();
@@ -652,7 +656,7 @@ class WorkflowAnalyzer {
 
   /**
    * Log workflow decision to job history
-   * Shows whether workflow template or default prompts are used
+   * Shows which workflow from MongoDB is being used (ID and name)
    */
   async logWorkflowDecision(decision, details) {
     try {
@@ -662,19 +666,19 @@ class WorkflowAnalyzer {
       await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
         jobId: jobId,
         level: 'info',
-        message: `🔄 WORKFLOW DECISION: ${decision}`,
+        message: `🔄 WORKFLOW: ${decision}`,
         component: 'WORKFLOW-ANALYZER',
         metadata: {
           workflow_decision: true,
-          decision: decision,
+          workflow_id: this.context.workflow_template_id,
+          workflow_name: this.workflowTemplate?.name,
           details: details,
-          template_id: this.context.workflow_template_id || null,
-          template_name: this.workflowTemplate?.name || 'Default Prompts',
+          prompts_count: this.workflowTemplate?.prompts?.length || 0,
           timestamp: new Date().toISOString()
         }
       });
       
-      console.log(`[WorkflowAnalyzer] 📝 Logged workflow decision: ${decision}`);
+      console.log(`[WorkflowAnalyzer] 📝 Logged workflow: ${decision}`);
     } catch (error) {
       console.error('[WorkflowAnalyzer] Error logging workflow decision:', error.message);
     }

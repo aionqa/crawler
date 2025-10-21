@@ -597,78 +597,38 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
     const { AIConversationLogger } = await import('/app/shared/ai-conversation-logger.js');
     const aiLogger = new AIConversationLogger(BACKEND_URL);
     
-    // Load workflow template if provided
+    // Load workflow template (MANDATORY - no default prompts)
     let workflowTemplate = null;
-    if (workflowTemplateId) {
-      try {
-        const axios = (await import('axios')).default;
-        const response = await axios.get(`${BACKEND_URL}/api/workflow-templates/${workflowTemplateId}`);
-        workflowTemplate = response.data;
-        console.log(`[LOGIN-WORKFLOW] ✅ Loaded workflow template: "${workflowTemplate.name}" (ID: ${workflowTemplateId})`);
-        console.log(`[LOGIN-WORKFLOW] 📄 Template contains ${workflowTemplate.prompts?.length || 0} custom prompts`);
-        
-        // Log workflow decision to job history
-        await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-          jobId: jobId,
-          level: 'info',
-          message: `🔄 WORKFLOW DECISION: Using workflow template "${workflowTemplate.name}"`,
-          component: 'LOGIN-WORKFLOW',
-          metadata: {
-            workflow_decision: true,
-            decision: `Using workflow template: ${workflowTemplate.name}`,
-            details: `Template ID: ${workflowTemplateId}, Prompts: ${workflowTemplate.prompts?.length || 0}`,
-            template_id: workflowTemplateId,
-            template_name: workflowTemplate.name,
-            timestamp: new Date().toISOString()
-          }
-        });
-      } catch (error) {
-        console.warn(`[LOGIN-WORKFLOW] ⚠️ Failed to load workflow template, using default prompts: ${error.message}`);
-        
-        // Log fallback to defaults
-        try {
-          const axios = (await import('axios')).default;
-          await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'info',
-            message: `🔄 WORKFLOW DECISION: Using default prompts (template load failed)`,
-            component: 'LOGIN-WORKFLOW',
-            metadata: {
-              workflow_decision: true,
-              decision: 'Using default prompts',
-              details: `Template load failed: ${error.message}`,
-              template_id: null,
-              template_name: 'Default Prompts',
-              timestamp: new Date().toISOString()
-            }
-          });
-        } catch (logError) {
-          console.error(`[LOGIN-WORKFLOW] Error logging workflow decision: ${logError.message}`);
-        }
-      }
-    } else {
-      console.log(`[LOGIN-WORKFLOW] 📋 No workflow template specified, using default prompts from database`);
+    if (!workflowTemplateId) {
+      console.error(`[LOGIN-WORKFLOW] ❌ No workflow template ID provided - workflows are mandatory!`);
+      throw new Error('login_workflow_id is required - all jobs must use workflows stored in MongoDB');
+    }
+    
+    try {
+      const axios = (await import('axios')).default;
+      const response = await axios.get(`${BACKEND_URL}/api/workflow-templates/${workflowTemplateId}`);
+      workflowTemplate = response.data;
+      console.log(`[LOGIN-WORKFLOW] ✅ Loaded workflow: "${workflowTemplate.name}" (ID: ${workflowTemplateId})`);
+      console.log(`[LOGIN-WORKFLOW] 📄 Workflow contains ${workflowTemplate.prompts?.length || 0} prompts`);
       
-      // Log default prompts usage
-      try {
-        const axios = (await import('axios')).default;
-        await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-          jobId: jobId,
-          level: 'info',
-          message: `🔄 WORKFLOW DECISION: Using default prompts from database`,
-          component: 'LOGIN-WORKFLOW',
-          metadata: {
-            workflow_decision: true,
-            decision: 'Using default prompts',
-            details: 'No workflow template ID provided',
-            template_id: null,
-            template_name: 'Default Prompts',
-            timestamp: new Date().toISOString()
-          }
-        });
-      } catch (logError) {
-        console.error(`[LOGIN-WORKFLOW] Error logging workflow decision: ${logError.message}`);
-      }
+      // Log workflow usage
+      await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: `🔄 WORKFLOW: Using workflow "${workflowTemplate.name}" (ID: ${workflowTemplateId})`,
+        component: 'LOGIN-WORKFLOW',
+        metadata: {
+          workflow_decision: true,
+          workflow_id: workflowTemplateId,
+          workflow_name: workflowTemplate.name,
+          details: `Workflow contains ${workflowTemplate.prompts?.length || 0} prompts`,
+          prompts_count: workflowTemplate.prompts?.length || 0,
+          timestamp: new Date().toISOString()
+        }
+      });
+    } catch (error) {
+      console.error(`[LOGIN-WORKFLOW] ❌ Failed to load workflow template: ${error.message}`);
+      throw new Error(`Failed to load workflow template ${workflowTemplateId}: ${error.message}`);
     }
     
     // Helper to get custom template with logging
