@@ -11,6 +11,7 @@ import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import WorkflowAnalyzer from './workflow-analyzer.js';
 import WorkflowExecutor from './workflow-executor.js';
+import EnhancedWorkflowExecutor from './enhanced-workflow-executor.js';
 import OptimizedWorkflowAnalyzer from './optimized-workflow-analyzer.js';
 import axios from 'axios';
 
@@ -1432,9 +1433,9 @@ const modeHandlers = {
     
     await sendLog(jobId, 'info', `🔄 WORKFLOW MODE: Multi-page crawl (max ${maxPages} pages, depth ${maxDepth})`);
     
-    // Initialize workflow analyzer and executor with context
+    // Initialize workflow analyzer and enhanced executor with context
     const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger, context);
-    const workflowExecutor = new WorkflowExecutor(backendUrl, aiConversationLogger, backendLogger, context);
+    const workflowExecutor = new EnhancedWorkflowExecutor(backendUrl, aiConversationLogger, backendLogger, context);
     
     const visitedUrls = new Set();
     const urlQueue = [{ url: page.url(), depth: 0 }];
@@ -4926,10 +4927,16 @@ async function executeApproachSequence(page, jobId, context, openaiClient, pageI
 export async function attemptLogin(url, username, password, cookies, context, openaiApiKey = null) {
   const startTime = Date.now();
   const jobId = context.job_id || 'unknown-job';
-  // Use approach_mode if provided, otherwise fall back to mode
-  const mode = context.approach_mode || context.mode || 'auto';
   
-  await sendLog(jobId, 'info', `${mode.toUpperCase()}: Login ${url}`, { mode });
+  // MANDATORY: All login jobs must use workflow templates
+  if (!context.workflow_template_id) {
+    throw new Error('workflow_template_id is required - all jobs must use workflows stored in MongoDB');
+  }
+  
+  // Force workflow mode - ignore deprecated approach_mode
+  const mode = 'workflow';
+  
+  await sendLog(jobId, 'info', `🚀 Starting WORKFLOW mode login process for ${url} (template: ${context.workflow_template_id})`, { mode, workflow_template_id: context.workflow_template_id });
   
   try {
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
@@ -5119,10 +5126,16 @@ export async function attemptLogin(url, username, password, cookies, context, op
 export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   const startTime = Date.now();
   const jobId = context.job_id || 'unknown';
-  // Use approach_mode if provided, otherwise fall back to mode
-  const mode = context.approach_mode || context.mode || 'auto';
   
-  await sendLog(jobId, 'info', `🚀 Starting ${mode} mode crawl process for ${url}`, { mode });
+  // MANDATORY: All crawl jobs must use workflow templates
+  if (!context.workflow_template_id) {
+    throw new Error('workflow_template_id is required - all jobs must use workflows stored in MongoDB');
+  }
+  
+  // Force workflow mode - ignore deprecated approach_mode
+  const mode = 'workflow';
+  
+  await sendLog(jobId, 'info', `🚀 Starting WORKFLOW mode crawl process for ${url} (template: ${context.workflow_template_id})`, { mode, workflow_template_id: context.workflow_template_id });
   
   // Check job status before starting
   const jobStatus = await checkJobStatus(jobId);

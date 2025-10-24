@@ -419,13 +419,20 @@ class WorkflowAnalyzer {
         analysis.forms.push(formData);
       }
 
-      // Extract links
+      // Extract links (excluding anchors - they should not be separate pages)
       const links = await page.$$('a[href]');
       for (const link of links.slice(0, 50)) { // Limit to first 50 links
         const href = await link.getAttribute('href');
         const text = await link.textContent();
         
-        if (href && !href.startsWith('javascript:') && !href.startsWith('#')) {
+        // FIXED: Exclude anchor links (#) - they should not be treated as separate pages
+        // Only include external links and internal page links, not anchors
+        if (href && 
+            !href.startsWith('javascript:') && 
+            !href.startsWith('#') && 
+            !href.startsWith('mailto:') &&
+            !href.startsWith('tel:') &&
+            href.trim() !== '') {
           analysis.links.push({
             href,
             text: text?.trim(),
