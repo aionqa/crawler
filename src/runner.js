@@ -122,6 +122,7 @@ async function executeJob(job) {
   
   console.log(`\n🎯 [UNIFIED-RUNNER] Executing ${job.jobType} job ${job.id}`);
   console.log(`📍 [UNIFIED-RUNNER] URL: ${job.url}`);
+  console.log(`[DEBUG] Job object at start:`, JSON.stringify(job, null, 2));
 
   // Check job status before starting - accept both 'pending' and 'running'
   const initialStatus = await checkJobStatus(job.id);
@@ -155,6 +156,8 @@ async function executeJob(job) {
 
     if (job.jobType === 'login') {
       // Execute login job
+      console.log(`[DEBUG] About to execute login job, job object keys:`, Object.keys(job));
+      console.log(`[DEBUG] job.url=${job.url}, job.username=${job.username}, job.login_data=`, job.login_data);
       const result = await executeLoginJob(job, streamInterval);
       await reportJobComplete(job.id, result);
       console.log(`✅ [UNIFIED-RUNNER] Login job ${job.id} completed successfully`);
@@ -187,7 +190,20 @@ async function executeJob(job) {
  * Execute a login job
  */
 async function executeLoginJob(job, streamInterval) {
-  const { url, username, password, maxAttempts = 2, context: jobContext = {} } = job;
+  // Debug: Log the job object to see what we're receiving
+  console.log(`[DEBUG] Received job object:`, JSON.stringify(job, null, 2));
+  
+  // Extract login credentials from job.login_data or fallback to top-level fields
+  const loginData = job.login_data || {};
+  const { url, username, password, maxAttempts = 2, context: jobContext = {} } = {
+    url: loginData.url || job.url,
+    username: loginData.username || job.username,
+    password: loginData.password || job.password,
+    maxAttempts: job.maxAttempts || 2,
+    context: job.context || {}
+  };
+
+  console.log(`[DEBUG] Extracted credentials: url=${url}, username=${username}, password=${password ? '***' : 'undefined'}`);
 
   if (!url || !username || !password) {
     throw new Error('Missing required fields: url, username, password');

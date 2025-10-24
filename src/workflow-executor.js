@@ -100,7 +100,7 @@ class WorkflowExecutor {
       }, {
         timeout: 5000
       });
-      console.log(`[WorkflowExecutor] Marked action ${actionId} as started`);
+      console.log(`[WorkflowExecutor] Marked action ${actionId} as started for job ${jobId}`);
     } catch (error) {
       console.error(`[WorkflowExecutor] Error marking action as started:`, error.message);
     }
