@@ -103,7 +103,12 @@ class EnhancedWorkflowExecutor {
       });
       console.log(`[EnhancedWorkflowExecutor] Marked action ${actionId} as started`);
     } catch (error) {
-      console.error(`[EnhancedWorkflowExecutor] Error marking action as started:`, error.message);
+      // Silently ignore 404 errors (action doesn't exist, which is fine for workflow-based testing)
+      if (error.response && error.response.status === 404) {
+        console.log(`[EnhancedWorkflowExecutor] Action ${actionId} not found (workflow-based testing, no action needed)`);
+      } else {
+        console.error(`[EnhancedWorkflowExecutor] Error marking action as started:`, error.message);
+      }
     }
   }
 
@@ -122,8 +127,13 @@ class EnhancedWorkflowExecutor {
         timeout: 5000
       });
       console.log(`[EnhancedWorkflowExecutor] Marked action ${actionId} as ${success ? 'completed' : 'failed'}`);
-    } catch (error) {
-      console.error(`[EnhancedWorkflowExecutor] Error marking action as completed:`, error.message);
+    } catch (err) {
+      // Silently ignore 404 errors (action doesn't exist, which is fine for workflow-based testing)
+      if (err.response && err.response.status === 404) {
+        console.log(`[EnhancedWorkflowExecutor] Action ${actionId} not found (workflow-based testing, no action needed)`);
+      } else {
+        console.error(`[EnhancedWorkflowExecutor] Error marking action as completed:`, err.message);
+      }
     }
   }
 
@@ -157,6 +167,12 @@ class EnhancedWorkflowExecutor {
 
     // Mark leg as in progress
     await this.updateLegStatus(workflowId, leg.leg_id, 'in_progress', jobId);
+
+    // Update job statistics - page being processed
+    await this.updateJobStatistics(jobId, {
+      pages_processed: 1,
+      pages_added: 1
+    });
 
     // Mark associated action as started if it exists
     if (leg.action_id) {
@@ -212,6 +228,12 @@ class EnhancedWorkflowExecutor {
         ).catch(() => []);
         
         const interactiveElementsJson = JSON.stringify(interactiveElements, null, 2);
+        
+        // Update job statistics - elements processed
+        await this.updateJobStatistics(jobId, {
+          elements_processed: interactiveElements.length,
+          elements_added: interactiveElements.length
+        });
         
         // Get Playwright analysis (form structure, inputs, buttons)
         const playwrightAnalysis = await page.evaluate(() => {
@@ -674,6 +696,20 @@ class EnhancedWorkflowExecutor {
     } catch (error) {
       // Silent fail - don't block execution
       console.error(`Failed to update substatus: ${error.message}`);
+    }
+  }
+
+  /**
+   * Update job statistics
+   * @param {string} jobId - Job ID
+   * @param {object} stats - Statistics to update
+   */
+  async updateJobStatistics(jobId, stats) {
+    try {
+      await axios.post(`${this.backendUrl}/jobs/${jobId}/counts`, stats);
+      console.log(`[EnhancedWorkflowExecutor] Updated job statistics: ${JSON.stringify(stats)}`);
+    } catch (error) {
+      console.error(`[EnhancedWorkflowExecutor] Failed to update job statistics: ${error.message}`);
     }
   }
 
