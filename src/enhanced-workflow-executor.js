@@ -117,16 +117,20 @@ class EnhancedWorkflowExecutor {
    * @param {string} actionId - Action ID to mark as completed
    * @param {boolean} success - Whether the action was successful
    * @param {string} error - Error message if action failed
+   * @param {string} screenshotBefore - Screenshot before action
+   * @param {string} screenshotAfter - Screenshot after action
    */
-  async markActionCompleted(actionId, success = true, error = null) {
+  async markActionCompleted(actionId, success = true, error = null, screenshotBefore = null, screenshotAfter = null) {
     try {
       await axios.post(`${this.backendUrl}/actions/${actionId}/complete`, {
         success,
-        error
+        error,
+        screenshot_before: screenshotBefore,
+        screenshot_after: screenshotAfter
       }, {
         timeout: 5000
       });
-      console.log(`[EnhancedWorkflowExecutor] Marked action ${actionId} as ${success ? 'completed' : 'failed'}`);
+      console.log(`[EnhancedWorkflowExecutor] Marked action ${actionId} as ${success ? 'completed' : 'failed'} with screenshots`);
     } catch (err) {
       // Silently ignore 404 errors (action doesn't exist, which is fine for workflow-based testing)
       if (err.response && err.response.status === 404) {
@@ -390,6 +394,17 @@ class EnhancedWorkflowExecutor {
 
         // Step 7: Ask OpenAI to verify with FULL context and previous logs
         const verificationRequest = {
+          // Map to template field names
+          leg_name: leg.description,
+          leg_action: leg.type,
+          expected_outcome: leg.test_instructions,
+          before_url: page.url(),
+          before_title: await page.title(),
+          after_url: page.url(),
+          after_title: await page.title(),
+          after_visible_text: await page.evaluate(() => document.body.innerText),
+          dom_snapshot: htmlAfter,  // Use HTML after action as DOM snapshot
+          // Additional context for AI
           page_url: page.url(),
           html_before: htmlContent,  // FULL HTML - no trimming
           html_after: htmlAfter,     // FULL HTML - no trimming
@@ -446,19 +461,20 @@ class EnhancedWorkflowExecutor {
         });
 
         // Step 9: Check if OpenAI says we're done
-        if (verificationResponse.status === 'completed' || verificationResponse.completed === true) {
+        // FIX: Handle both old format (status/completed) and new format (success/confidence)
+        if (verificationResponse.success === true || verificationResponse.status === 'completed' || verificationResponse.completed === true) {
           console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} completed successfully`);
           completed = true;
           finalResult = 'success';
-        } else if (verificationResponse.status === 'failed' && verificationResponse.can_retry === false) {
+        } else if (verificationResponse.success === false || (verificationResponse.status === 'failed' && verificationResponse.can_retry === false)) {
           console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} failed permanently`);
           completed = true;
           finalResult = 'failure';
-          lastError = verificationResponse.reason || 'Unknown failure';
+          lastError = verificationResponse.description || verificationResponse.reason || 'Unknown failure';
         } else {
           // Continue to next iteration
-          console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} incomplete, continuing... Reason: ${verificationResponse.reason || 'Unknown'}`);
-          lastError = verificationResponse.reason;
+          console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} incomplete, continuing... Reason: ${verificationResponse.description || verificationResponse.reason || 'Unknown'}`);
+          lastError = verificationResponse.description || verificationResponse.reason;
         }
 
       } catch (error) {
@@ -492,7 +508,17 @@ class EnhancedWorkflowExecutor {
     // Mark associated action as completed if it exists
     if (leg.action_id) {
       const success = finalResult === 'success';
-      await this.markActionCompleted(leg.action_id, success, lastError);
+      // Get screenshot keys from the last successful iteration
+      let screenshotBefore = null;
+      let screenshotAfter = null;
+      
+      if (leg.iterations && leg.iterations.length > 0) {
+        const lastIteration = leg.iterations[leg.iterations.length - 1];
+        screenshotBefore = lastIteration.screenshot_before;
+        screenshotAfter = lastIteration.screenshot_after;
+      }
+      
+      await this.markActionCompleted(leg.action_id, success, lastError, screenshotBefore, screenshotAfter);
     }
 
     return {
