@@ -367,6 +367,17 @@ class WorkflowExecutor {
 
         // Step 7: Ask OpenAI to verify with FULL context and previous logs
         const verificationRequest = {
+          // Map to template field names
+          leg_name: leg.description,
+          leg_action: leg.type,
+          expected_outcome: leg.test_instructions,
+          before_url: page.url(),
+          before_title: await page.title(),
+          after_url: page.url(),
+          after_title: await page.title(),
+          after_visible_text: await page.evaluate(() => document.body.innerText),
+          dom_snapshot: htmlAfter,  // Use HTML after action as DOM snapshot
+          // Additional context for AI
           page_url: page.url(),
           html_before: htmlContent,  // FULL HTML - no trimming
           html_after: htmlAfter,     // FULL HTML - no trimming
@@ -423,19 +434,20 @@ class WorkflowExecutor {
         });
 
         // Step 9: Check if OpenAI says we're done
-        if (verificationResponse.status === 'completed' || verificationResponse.completed === true) {
+        // FIX: Handle both old format (status/completed) and new format (success/confidence)
+        if (verificationResponse.success === true || verificationResponse.status === 'completed' || verificationResponse.completed === true) {
           console.log(`[WorkflowExecutor] Leg ${leg.leg_id} completed successfully`);
           completed = true;
           finalResult = 'success';
-        } else if (verificationResponse.status === 'failed' && verificationResponse.can_retry === false) {
+        } else if (verificationResponse.success === false || (verificationResponse.status === 'failed' && verificationResponse.can_retry === false)) {
           console.log(`[WorkflowExecutor] Leg ${leg.leg_id} failed permanently`);
           completed = true;
           finalResult = 'failure';
-          lastError = verificationResponse.reason || 'Unknown failure';
+          lastError = verificationResponse.description || verificationResponse.reason || 'Unknown failure';
         } else {
           // Continue to next iteration
-          console.log(`[WorkflowExecutor] Leg ${leg.leg_id} incomplete, continuing... Reason: ${verificationResponse.reason || 'Unknown'}`);
-          lastError = verificationResponse.reason;
+          console.log(`[WorkflowExecutor] Leg ${leg.leg_id} incomplete, continuing... Reason: ${verificationResponse.description || verificationResponse.reason || 'Unknown'}`);
+          lastError = verificationResponse.description || verificationResponse.reason;
         }
 
       } catch (error) {
