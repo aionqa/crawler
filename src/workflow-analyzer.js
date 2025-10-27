@@ -385,8 +385,11 @@ class WorkflowAnalyzer {
         const inputs = await form.$$('input, textarea, select');
         const buttons = await form.$$('button, input[type="submit"]');
         
+        // Get selectors with all strategies
+        const formSelectors = await this.getElementSelector(form);
         const formData = {
-          selector: await this.getElementSelector(form),
+          selector: formSelectors[0]?.selector, // Use primary selector for backward compatibility
+          selectors: formSelectors, // Store all strategies for robust matching
           action: await form.getAttribute('action'),
           method: await form.getAttribute('method'),
           fields: []
@@ -398,21 +401,25 @@ class WorkflowAnalyzer {
           const id = await input.getAttribute('id');
           const placeholder = await input.getAttribute('placeholder');
           
+          const inputSelectors = await this.getElementSelector(input);
           formData.fields.push({
             type,
             name,
             id,
             placeholder,
-            selector: await this.getElementSelector(input)
+            selector: inputSelectors[0]?.selector, // Primary selector
+            selectors: inputSelectors // All strategies
           });
         }
 
         formData.buttons = [];
         for (const button of buttons) {
           const text = await button.textContent();
+          const buttonSelectors = await this.getElementSelector(button);
           formData.buttons.push({
             text: text?.trim(),
-            selector: await this.getElementSelector(button)
+            selector: buttonSelectors[0]?.selector, // Primary selector
+            selectors: buttonSelectors // All strategies
           });
         }
 
@@ -433,10 +440,12 @@ class WorkflowAnalyzer {
             !href.startsWith('mailto:') &&
             !href.startsWith('tel:') &&
             href.trim() !== '') {
+          const linkSelectors = await this.getElementSelector(link);
           analysis.links.push({
             href,
             text: text?.trim(),
-            selector: await this.getElementSelector(link)
+            selector: linkSelectors[0]?.selector, // Primary selector
+            selectors: linkSelectors // All strategies
           });
         }
       }
@@ -448,12 +457,14 @@ class WorkflowAnalyzer {
         const role = await button.getAttribute('role');
         const onclick = await button.getAttribute('onclick');
         
+        const buttonSelectors = await this.getElementSelector(button);
         analysis.interactive_elements.push({
           type: 'button',
           text: text?.trim(),
           role,
           onclick: onclick ? 'yes' : 'no',
-          selector: await this.getElementSelector(button)
+          selector: buttonSelectors[0]?.selector, // Primary selector
+          selectors: buttonSelectors // All strategies
         });
       }
 
@@ -466,27 +477,125 @@ class WorkflowAnalyzer {
 
   /**
    * Get a reliable selector for an element
+   * Returns multiple selector strategies for robust element matching
    */
   async getElementSelector(element) {
+    const selectors = [];
+    
     try {
-      // Try ID first
-      const id = await element.getAttribute('id');
-      if (id) return `#${id}`;
-
-      // Try name
-      const name = await element.getAttribute('name');
       const tagName = await element.evaluate(el => el.tagName.toLowerCase());
-      if (name) return `${tagName}[name="${name}"]`;
+      
+      // Strategy 1: ID selector (most reliable if stable)
+      const id = await element.getAttribute('id');
+      if (id) {
+        selectors.push({
+          strategy: 'id',
+          selector: `#${id}`,
+          priority: 1,
+          stability: 'high'
+        });
+      }
 
-      // Try type for inputs
+      // Strategy 2: Name + type selector
+      const name = await element.getAttribute('name');
+      if (name) {
+        selectors.push({
+          strategy: 'name',
+          selector: `${tagName}[name="${name}"]`,
+          priority: 2,
+          stability: 'high'
+        });
+      }
+
+      // Strategy 3: Type selector for inputs
       const type = await element.getAttribute('type');
-      if (type) return `${tagName}[type="${type}"]`;
+      if (type) {
+        selectors.push({
+          strategy: 'type',
+          selector: `${tagName}[type="${type}"]`,
+          priority: 3,
+          stability: 'medium'
+        });
+      }
 
-      // Fallback to nth-child
-      return tagName;
+      // Strategy 4: Text-based selector (for buttons, links)
+      const text = await element.textContent();
+      if (text && text.trim()) {
+        const cleanText = text.trim().substring(0, 50);
+        selectors.push({
+          strategy: 'text',
+          selector: `text="${cleanText}"`,
+          priority: 4,
+          stability: 'medium',
+          text_content: cleanText
+        });
+      }
+
+      // Strategy 5: Role selector
+      const role = await element.getAttribute('role');
+      if (role) {
+        selectors.push({
+          strategy: 'role',
+          selector: `[role="${role}"]`,
+          priority: 5,
+          stability: 'medium'
+        });
+      }
+
+      // Strategy 6: Placeholder selector for inputs
+      const placeholder = await element.getAttribute('placeholder');
+      if (placeholder) {
+        selectors.push({
+          strategy: 'placeholder',
+          selector: `${tagName}[placeholder="${placeholder}"]`,
+          priority: 6,
+          stability: 'low'
+        });
+      }
+
+      // Strategy 7: Class selector (if few classes, stable)
+      const className = await element.getAttribute('class');
+      if (className) {
+        const classes = className.trim().split(/\s+/).filter(c => c);
+        if (classes.length <= 3 && classes.length > 0) {
+          selectors.push({
+            strategy: 'class',
+            selector: `.${classes.join('.')}`,
+            priority: 7,
+            stability: classes.length === 1 ? 'medium' : 'low',
+            classes: classes
+          });
+        }
+      }
+
+      // Strategy 8: Fallback to tag
+      selectors.push({
+        strategy: 'tag',
+        selector: tagName,
+        priority: 8,
+        stability: 'very-low'
+      });
+
     } catch (error) {
-      return 'unknown';
+      console.error('[WorkflowAnalyzer] Error generating selectors:', error);
+      return [{
+        strategy: 'fallback',
+        selector: 'unknown',
+        priority: 9,
+        stability: 'none'
+      }];
     }
+
+    return selectors;
+  }
+
+  /**
+   * Get element selector in legacy format (backward compatibility)
+   */
+  async getElementSelectorLegacy(element) {
+    const selectors = await this.getElementSelector(element);
+    // Return the first (highest priority) selector
+    return selectors[0]?.selector || 'unknown';
   }
 
   /**

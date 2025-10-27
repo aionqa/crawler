@@ -118,7 +118,7 @@ function isWithinDomain(pageUrl, baseUrl) {
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
-async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null) {
+async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null) {
   try {
     // Domain filtering: Only send internal pages to backend
     if (baseUrl && !isWithinDomain(pageUrl, baseUrl)) {
@@ -129,18 +129,47 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
     console.log(`[INCREMENTAL-STORAGE] Creating basic page document: ${pageUrl}`);
     
+    // Prepare request body with Lighthouse data if available
+    const requestBody = {
+      project_id: projectId,
+      job_id: jobId,
+      url: pageUrl,
+      title: pageTitle,
+      analyzed: false // Will be updated after analysis
+    };
+    
+    // Add performance metrics if available
+    if (lighthouseResults && lighthouseResults.success) {
+      requestBody.lighthouse_metrics = {
+        performance_score: lighthouseResults.metrics.performance,
+        accessibility_score: lighthouseResults.metrics.accessibility || 0,
+        best_practices_score: lighthouseResults.metrics.bestPractices || 0,
+        seo_score: lighthouseResults.metrics.seo || 0,
+        first_contentful_paint: lighthouseResults.metrics.firstContentfulPaint,
+        largest_contentful_paint: lighthouseResults.metrics.largestContentfulPaint,
+        speed_index: lighthouseResults.metrics.speedIndex,
+        cumulative_layout_shift: lighthouseResults.metrics.cumulativeLayoutShift || 0,
+        total_blocking_time: lighthouseResults.metrics.totalBlockingTime || 0,
+        interactive: lighthouseResults.metrics.interactive,
+        server_response_time: lighthouseResults.metrics.serverResponseTime,
+        dom_size: lighthouseResults.metrics.domSize,
+        page_load_time: lighthouseResults.metrics.pageLoadTime,
+        dns_time: lighthouseResults.metrics.dnsTime,
+        tcp_time: lighthouseResults.metrics.tcpTime,
+        ssl_time: lighthouseResults.metrics.sslTime,
+        download_time: lighthouseResults.metrics.downloadTime,
+        resource_count: lighthouseResults.metrics.resourceCount,
+        analysis_duration: lighthouseResults.analysisDuration,
+        timestamp: lighthouseResults.timestamp
+      };
+    }
+    
     const response = await fetch(`${backendUrl}/api/pages/discover`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        project_id: projectId,
-        job_id: jobId,
-        url: pageUrl,
-        title: pageTitle,
-        analyzed: false // Will be updated after analysis
-      })
+      body: JSON.stringify(requestBody)
     });
     
     if (!response.ok) {
@@ -1476,11 +1505,41 @@ const modeHandlers = {
           await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
         }
         
+        // Run Lighthouse analysis on the page
+        let lighthouseResults = null;
+        try {
+          await sendLog(jobId, 'info', `🔍 Running performance analysis...`);
+          const { analyzePageWithLighthouse } = await import('./lighthouse-analyzer.js');
+          lighthouseResults = await analyzePageWithLighthouse(page, jobId, currentUrl);
+          
+          if (lighthouseResults.success) {
+            await sendLog(jobId, 'info', `✅ Lighthouse analysis completed - Performance: ${lighthouseResults.metrics.performance}/100`, {
+              page_url: currentUrl,
+              performance_score: lighthouseResults.metrics.performance,
+              accessibility_score: lighthouseResults.metrics.accessibility,
+              best_practices_score: lighthouseResults.metrics.bestPractices,
+              seo_score: lighthouseResults.metrics.seo,
+              first_contentful_paint: lighthouseResults.metrics.firstContentfulPaint,
+              largest_contentful_paint: lighthouseResults.metrics.largestContentfulPaint,
+              speed_index: lighthouseResults.metrics.speedIndex,
+              cumulative_layout_shift: lighthouseResults.metrics.cumulativeLayoutShift,
+              total_blocking_time: lighthouseResults.metrics.totalBlockingTime,
+              interactive: lighthouseResults.metrics.interactive
+            });
+          } else if (lighthouseResults.skipped) {
+            await sendLog(jobId, 'info', `ℹ️ Lighthouse analysis skipped: ${lighthouseResults.error}`);
+          } else {
+            await sendLog(jobId, 'warn', `⚠️ Lighthouse analysis failed: ${lighthouseResults.error}`);
+          }
+        } catch (lighthouseError) {
+          await sendLog(jobId, 'warn', `⚠️ Lighthouse analysis error: ${lighthouseError.message}`);
+        }
+        
         // Create basic page document first
         const pageTitle = await page.title();
         // Use project's start_url for domain filtering, not the current page URL
         const projectStartUrl = context.start_url || page.url(); // Fallback to current URL if not provided
-        const pageResult = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId, projectStartUrl);
+        const pageResult = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId, projectStartUrl, lighthouseResults);
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
         // Check if we should skip AI analysis
