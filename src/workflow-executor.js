@@ -280,7 +280,8 @@ class WorkflowExecutor {
             test_instructions: leg.test_instructions,
             previous_error: lastError,
             previous_logs: previousLogs,
-            iteration_number: iteration
+            iteration_number: iteration,
+            additional_prompt_text: this.context.additional_prompt_text || ''  // Project-specific additional context
           };
 
           console.log(`[WorkflowExecutor] Requesting script from OpenAI (HTML: ${htmlContent.length} chars, screenshot: ${screenshotBeforeBase64.length} chars, iteration: ${iteration})`);
@@ -390,7 +391,8 @@ class WorkflowExecutor {
           screenshot_before: screenshotBeforeKey,
           screenshot_after: screenshotAfterKey,
           previous_logs: verificationLogs,
-          iteration_number: iteration
+          iteration_number: iteration,
+          additional_prompt_text: this.context.additional_prompt_text || ''  // Project-specific additional context
         };
 
         console.log(`[WorkflowExecutor] Verifying with OpenAI (HTML before: ${htmlContent.length} chars, after: ${htmlAfter.length} chars, screenshot: ${screenshotAfterBase64.length} chars)`);

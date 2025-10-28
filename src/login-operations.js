@@ -303,16 +303,30 @@ export async function validateLoginSuccess(page, jobId, beforeState, credentials
         cookies: []
       };
 
-      // Get localStorage
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i);
-        tokens.localStorage[key] = localStorage.getItem(key);
+      // Get localStorage safely
+      try {
+        const storage = {};
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const key = window.localStorage.key(i);
+          storage[key] = window.localStorage.getItem(key);
+        }
+        tokens.localStorage = storage;
+      } catch (error) {
+        console.warn('localStorage access denied:', error.message);
+        tokens.localStorage = {};
       }
 
-      // Get sessionStorage
-      for (let i = 0; i < sessionStorage.length; i++) {
-        const key = sessionStorage.key(i);
-        tokens.sessionStorage[key] = sessionStorage.getItem(key);
+      // Get sessionStorage safely
+      try {
+        const storage = {};
+        for (let i = 0; i < window.sessionStorage.length; i++) {
+          const key = window.sessionStorage.key(i);
+          storage[key] = window.sessionStorage.getItem(key);
+        }
+        tokens.sessionStorage = storage;
+      } catch (error) {
+        console.warn('sessionStorage access denied:', error.message);
+        tokens.sessionStorage = {};
       }
 
       return tokens;
@@ -527,21 +541,39 @@ export async function performLogin(page, jobId, pageUrl, username, password, max
         console.log(`[LOGIN-SERVICE] ✅ Login successful! Confidence: ${validation.confidence || 'N/A'}`);
 
         // Extract auth tokens
-        const authTokens = await page.evaluate(() => {
-          const tokens = {
-            localStorage: {},
-            sessionStorage: {}
-          };
-          for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            tokens.localStorage[key] = localStorage.getItem(key);
+        // Get localStorage and sessionStorage safely
+        const localStorage = await page.evaluate(() => {
+          try {
+            const storage = {};
+            for (let i = 0; i < window.localStorage.length; i++) {
+              const key = window.localStorage.key(i);
+              storage[key] = window.localStorage.getItem(key);
+            }
+            return storage;
+          } catch (error) {
+            console.warn('localStorage access denied:', error.message);
+            return {};
           }
-          for (let i = 0; i < sessionStorage.length; i++) {
-            const key = sessionStorage.key(i);
-            tokens.sessionStorage[key] = sessionStorage.getItem(key);
-          }
-          return tokens;
         });
+        
+        const sessionStorage = await page.evaluate(() => {
+          try {
+            const storage = {};
+            for (let i = 0; i < window.sessionStorage.length; i++) {
+              const key = window.sessionStorage.key(i);
+              storage[key] = window.sessionStorage.getItem(key);
+            }
+            return storage;
+          } catch (error) {
+            console.warn('sessionStorage access denied:', error.message);
+            return {};
+          }
+        });
+        
+        const authTokens = {
+          localStorage,
+          sessionStorage
+        };
         authTokens.cookies = cookies;
 
         return {

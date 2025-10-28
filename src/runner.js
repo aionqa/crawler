@@ -8,13 +8,25 @@ import { startCrawl } from './unified-operations.js';
 import { performLogin } from './login-operations.js';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
+import { hostname } from 'os';
 import VideoStreamManager from './video-stream-manager.js';
 import VideoRecorder from './video-recorder.js';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
-const RUNNER_ID = process.env.RUNNER_ID || `unified-runner-${randomUUID().substring(0, 8)}`;
+const RUNNER_TOKEN = process.env.RUNNER_TOKEN; // GitHub Actions-style runner token
+// Generate unique runner ID if not provided (includes hostname and UUID for uniqueness)
+const RUNNER_ID = process.env.RUNNER_ID || `unified-runner-${hostname()}-${randomUUID().substring(0, 8)}`;
 const STREAM_INTERVAL = 2000; // Stream browser frame every 2 seconds
+
+// Validate runner token is configured
+if (!RUNNER_TOKEN) {
+  console.error('❌ [UNIFIED-RUNNER] RUNNER_TOKEN environment variable is required');
+  console.error('    Generate a token in the UI: Settings > Runners > Generate Token');
+  process.exit(1);
+}
+
+console.log(`🤖 [UNIFIED-RUNNER] Runner ID: ${RUNNER_ID}`);
 
 // Initialize video stream manager for real-time streaming
 const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID);
@@ -39,13 +51,23 @@ export const runnerContext = {
 };
 
 /**
+ * Get axios headers with authentication
+ */
+function getAuthHeaders() {
+  return {
+    'Authorization': `Bearer ${RUNNER_TOKEN}`
+  };
+}
+
+/**
  * Poll backend for next available job (login or crawl)
  */
 async function pollForJob() {
   // Try to get a crawl job first
   try {
     const response = await axios.get(`${BACKEND_URL}/api/runner/jobs/next`, {
-      params: { type: 'crawl', runnerId: RUNNER_ID },
+      params: { type: 'crawl', runner_id: RUNNER_ID },
+      headers: getAuthHeaders(),
       timeout: 5000
     });
 
@@ -62,7 +84,8 @@ async function pollForJob() {
   // If no crawl job, try to get a login job
   try {
     const response = await axios.get(`${BACKEND_URL}/api/runner/jobs/next`, {
-      params: { type: 'login', runnerId: RUNNER_ID },
+      params: { type: 'login', runner_id: RUNNER_ID },
+      headers: getAuthHeaders(),
       timeout: 5000
     });
 
@@ -131,8 +154,10 @@ async function executeJob(job) {
     // Report to backend to release the assignment
     try {
       await axios.post(`${BACKEND_URL}/api/runner/jobs/${job.id}/skip`, {
-        runnerId: RUNNER_ID,
-        reason: `Job status is ${initialStatus}, expected 'pending' or 'running'`
+        reason: `Job status is ${initialStatus}, expected 'pending' or 'running'`,
+        runner_id: RUNNER_ID
+      }, {
+        headers: getAuthHeaders()
       });
       console.log(`✅ [UNIFIED-RUNNER] Reported skipped job ${job.id} to backend`);
     } catch (error) {
@@ -256,22 +281,11 @@ async function executeLoginJob(job, streamInterval) {
     // Extract auth tokens if successful
     if (result.success) {
       const cookies = await context.cookies();
-      const localStorage = await page.evaluate(() => {
-        const items = {};
-        for (let i = 0; i < window.localStorage.length; i++) {
-          const key = window.localStorage.key(i);
-          items[key] = window.localStorage.getItem(key);
-        }
-        return items;
-      });
-      const sessionStorage = await page.evaluate(() => {
-        const items = {};
-        for (let i = 0; i < window.sessionStorage.length; i++) {
-          const key = window.sessionStorage.key(i);
-          items[key] = window.sessionStorage.getItem(key);
-        }
-        return items;
-      });
+      // Import safe storage functions
+      const { safeGetLocalStorage, safeGetSessionStorage } = await import('./unified-operations.js');
+      
+      const localStorage = await safeGetLocalStorage(page);
+      const sessionStorage = await safeGetSessionStorage(page);
 
       result.authTokens = {
         cookies,
@@ -351,9 +365,11 @@ async function executeCrawlJob(job, streamInterval) {
 async function reportJobComplete(jobId, result) {
   try {
     await axios.post(`${BACKEND_URL}/api/runner/jobs/${jobId}/complete`, {
-      runnerId: RUNNER_ID,
       result,
+      runner_id: RUNNER_ID,
       timestamp: new Date().toISOString()
+    }, {
+      headers: getAuthHeaders()
     });
   } catch (error) {
     console.error(`❌ [UNIFIED-RUNNER] Error reporting job completion:`, error.message);
@@ -366,10 +382,12 @@ async function reportJobComplete(jobId, result) {
 async function reportJobFailed(jobId, errorMessage, errorStack) {
   try {
     await axios.post(`${BACKEND_URL}/api/runner/jobs/${jobId}/fail`, {
-      runnerId: RUNNER_ID,
       error: errorMessage,
       stack: errorStack,
+      runner_id: RUNNER_ID,
       timestamp: new Date().toISOString()
+    }, {
+      headers: getAuthHeaders()
     });
   } catch (error) {
     console.error(`❌ [UNIFIED-RUNNER] Error reporting job failure:`, error.message);

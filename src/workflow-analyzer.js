@@ -314,7 +314,8 @@ class WorkflowAnalyzer {
       page_title: pageTitle,
       page_description: pageDescription,  // AI-generated description
       interactive_elements_json: interactiveElementsJson,  // Only interactive elements
-      conversation_history: conversationHistory  // History of analysis
+      conversation_history: conversationHistory,  // History of analysis
+      additional_prompt_text: this.context.additional_prompt_text || ''  // Project-specific additional context
       // NO html_content - saved in PAGE-ANALYZER attachments
       // NO screenshot_base64 - saved in PAGE-ANALYZER attachments
     };
