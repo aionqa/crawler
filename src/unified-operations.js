@@ -1102,24 +1102,9 @@ async function validateActionSuccessWithAI(page, context, openaiClient, approach
     // Extract all cookies
     const allCookies = await page.context().cookies();
     
-    // Get localStorage and sessionStorage
-    const localStorage = await page.evaluate(() => {
-      const storage = {};
-      for (let i = 0; i < window.localStorage.length; i++) {
-        const key = window.localStorage.key(i);
-        storage[key] = window.localStorage.getItem(key);
-      }
-      return storage;
-    });
-    
-    const sessionStorage = await page.evaluate(() => {
-      const storage = {};
-      for (let i = 0; i < window.sessionStorage.length; i++) {
-        const key = window.sessionStorage.key(i);
-        storage[key] = window.sessionStorage.getItem(key);
-      }
-      return storage;
-    });
+    // Get localStorage and sessionStorage safely
+    const localStorage = await safeGetLocalStorage(page);
+    const sessionStorage = await safeGetSessionStorage(page);
     
     // Build operation-specific prompts
     let operationPrompts = {
@@ -3902,6 +3887,210 @@ async function performScriptCrawl(page, context, openaiClient) {
 }
 
 // Helper functions
+
+/**
+ * Safely access localStorage with error handling
+ */
+async function safeGetLocalStorage(page) {
+  try {
+    return await page.evaluate(() => {
+      try {
+        // Check if localStorage is available
+        if (typeof window === 'undefined' || !window.localStorage) {
+          console.warn('localStorage not available in this context');
+          return {};
+        }
+        
+        const storage = {};
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const key = window.localStorage.key(i);
+          storage[key] = window.localStorage.getItem(key);
+        }
+        return storage;
+      } catch (error) {
+        console.warn('localStorage access denied:', error.message);
+        return {};
+      }
+    });
+  } catch (error) {
+    console.warn('Failed to access localStorage:', error.message);
+    return {};
+  }
+}
+
+/**
+ * Safely access sessionStorage with error handling
+ */
+async function safeGetSessionStorage(page) {
+  try {
+    return await page.evaluate(() => {
+      try {
+        // Check if sessionStorage is available
+        if (typeof window === 'undefined' || !window.sessionStorage) {
+          console.warn('sessionStorage not available in this context');
+          return {};
+        }
+        
+        const storage = {};
+        for (let i = 0; i < window.sessionStorage.length; i++) {
+          const key = window.sessionStorage.key(i);
+          storage[key] = window.sessionStorage.getItem(key);
+        }
+        return storage;
+      } catch (error) {
+        console.warn('sessionStorage access denied:', error.message);
+        return {};
+      }
+    });
+  } catch (error) {
+    console.warn('Failed to access sessionStorage:', error.message);
+    return {};
+  }
+}
+
+/**
+ * Safely set localStorage with error handling
+ */
+async function safeSetLocalStorage(page, tokens) {
+  // Validate tokens parameter
+  if (!tokens || typeof tokens !== 'object' || Object.keys(tokens).length === 0) {
+    console.warn('No valid tokens provided for localStorage');
+    return false;
+  }
+
+  try {
+    await page.evaluate((tokens) => {
+      try {
+        if (!tokens || typeof tokens !== 'object') {
+          console.warn('Invalid tokens object in page context');
+          return false;
+        }
+        
+        // Check if localStorage is available
+        if (typeof window === 'undefined' || !window.localStorage) {
+          console.warn('localStorage not available in this context');
+          return false;
+        }
+        
+        Object.entries(tokens).forEach(([key, value]) => {
+          if (key && value !== undefined && value !== null) {
+            window.localStorage.setItem(key, value);
+          }
+        });
+        return true;
+      } catch (error) {
+        console.warn('localStorage write denied:', error.message);
+        return false;
+      }
+    }, tokens);
+    return true;
+  } catch (error) {
+    console.warn('Failed to set localStorage:', error.message);
+    return false;
+  }
+}
+
+/**
+ * Safely set sessionStorage with error handling
+ */
+async function safeSetSessionStorage(page, tokens) {
+  // Validate tokens parameter
+  if (!tokens || typeof tokens !== 'object' || Object.keys(tokens).length === 0) {
+    console.warn('No valid tokens provided for sessionStorage');
+    return false;
+  }
+
+  try {
+    await page.evaluate((tokens) => {
+      try {
+        if (!tokens || typeof tokens !== 'object') {
+          console.warn('Invalid tokens object in page context');
+          return false;
+        }
+        
+        // Check if sessionStorage is available
+        if (typeof window === 'undefined' || !window.sessionStorage) {
+          console.warn('sessionStorage not available in this context');
+          return false;
+        }
+        
+        Object.entries(tokens).forEach(([key, value]) => {
+          if (key && value !== undefined && value !== null) {
+            window.sessionStorage.setItem(key, value);
+          }
+        });
+        return true;
+      } catch (error) {
+        console.warn('sessionStorage write denied:', error.message);
+        return false;
+      }
+    }, tokens);
+    return true;
+  } catch (error) {
+    console.warn('Failed to set sessionStorage:', error.message);
+    return false;
+  }
+}
+
+// Export safe storage functions for use in other modules
+export { safeGetLocalStorage, safeGetSessionStorage, safeSetLocalStorage, safeSetSessionStorage };
+
+/**
+ * Collect all cookies from current page and send to backend
+ */
+async function collectAndSendCookies(page, jobId, currentUrl, context) {
+  try {
+    const allCookies = await page.context().cookies();
+    const currentDomain = new URL(currentUrl).hostname;
+    
+    // Enrich cookies with metadata
+    const enrichedCookies = allCookies.map(cookie => ({
+      ...cookie,
+      _metadata: {
+        source: 'page-visit',
+        collectedAt: new Date().toISOString(),
+        targetDomain: currentDomain,
+        originalDomain: cookie.domain || 'unknown',
+        pageUrl: currentUrl
+      }
+    }));
+    
+    console.log(`🍪 Collected ${enrichedCookies.length} cookies from ${currentUrl}`);
+    
+    // Send cookies to backend for real-time update
+    if (context.project_id && enrichedCookies.length > 0) {
+      try {
+        const response = await fetch(`${process.env.BACKEND_URL || 'http://172.19.0.1:4000'}/api/projects/${context.project_id}/cookies`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${context.runner_token || ''}`
+          },
+          body: JSON.stringify({
+            cookies: enrichedCookies,
+            source: 'crawling'
+          })
+        });
+        
+        if (response.ok) {
+          const result = await response.json();
+          console.log(`🍪 Updated project cookies: +${result.addedCount} new, ~${result.updatedCount} updated`);
+          await sendLog(jobId, 'info', `🍪 Updated project cookies: +${result.addedCount} new, ~${result.updatedCount} updated`);
+        } else {
+          console.warn(`🍪 Failed to update project cookies: ${response.status}`);
+        }
+      } catch (error) {
+        console.warn(`🍪 Error sending cookies to backend:`, error.message);
+      }
+    }
+    
+    return enrichedCookies;
+  } catch (error) {
+    console.error('Error collecting cookies:', error);
+    return [];
+  }
+}
+
 async function executeLoginFromAnalysis(page, analysis, context) {
   const jobId = context.job_id || 'unknown-job';
   const currentUrl = page.url();
@@ -4000,23 +4189,8 @@ async function executeLoginFromAnalysis(page, analysis, context) {
     
     // Extract authentication tokens (cookies, localStorage, sessionStorage)
     const extractedCookies = await page.context().cookies();
-    const localStorage = await page.evaluate(() => {
-      const storage = {};
-      for (let i = 0; i < window.localStorage.length; i++) {
-        const key = window.localStorage.key(i);
-        storage[key] = window.localStorage.getItem(key);
-      }
-      return storage;
-    });
-    
-    const sessionStorage = await page.evaluate(() => {
-      const storage = {};
-      for (let i = 0; i < window.sessionStorage.length; i++) {
-        const key = window.sessionStorage.key(i);
-        storage[key] = window.sessionStorage.getItem(key);
-      }
-      return storage;
-    });
+    const localStorage = await safeGetLocalStorage(page);
+    const sessionStorage = await safeGetSessionStorage(page);
     
     // Check for authentication tokens in common locations
     const authTokens = {
@@ -5008,8 +5182,11 @@ export async function attemptLogin(url, username, password, cookies, context, op
         
         // Set initial cookies if provided
         if (cookies && cookies.length > 0) {
-          await sendLog(jobId, 'info', `🍪 Setting ${cookies.length} cookies...`);
+          await sendLog(jobId, 'info', `🍪 Setting ${cookies.length} cookies for authentication...`);
           await browserContext.addCookies(cookies);
+          await sendLog(jobId, 'info', `✅ Successfully set ${cookies.length} cookies in browser context`);
+        } else {
+          await sendLog(jobId, 'info', `ℹ️ No cookies provided, proceeding without authentication`);
         }
 
         // Navigate to URL
@@ -5034,6 +5211,9 @@ export async function attemptLogin(url, username, password, cookies, context, op
           await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', pageContext);
         }
 
+        // Collect all cookies from this page visit
+        await collectAndSendCookies(page, jobId, currentUrl, context);
+
         // Set credentials in context
         const enhancedContext = {
           ...context,
@@ -5050,23 +5230,8 @@ export async function attemptLogin(url, username, password, cookies, context, op
       
       // Extract authentication tokens from browser context
       const extractedCookies = await page.context().cookies();
-      const localStorage = await page.evaluate(() => {
-        const storage = {};
-        for (let i = 0; i < window.localStorage.length; i++) {
-          const key = window.localStorage.key(i);
-          storage[key] = window.localStorage.getItem(key);
-        }
-        return storage;
-      });
-      
-      const sessionStorage = await page.evaluate(() => {
-        const storage = {};
-        for (let i = 0; i < window.sessionStorage.length; i++) {
-          const key = window.sessionStorage.key(i);
-          storage[key] = window.sessionStorage.getItem(key);
-        }
-        return storage;
-      });
+      const localStorage = await safeGetLocalStorage(page);
+      const sessionStorage = await safeGetSessionStorage(page);
       
       // Filter for authentication-related tokens
       const authTokens = {
@@ -5211,8 +5376,11 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {
-        await sendLog(jobId, 'info', `🍪 Setting ${cookies.length} cookies...`);
+        await sendLog(jobId, 'info', `🍪 Setting ${cookies.length} cookies for authentication...`);
         await browserContext.addCookies(cookies);
+        await sendLog(jobId, 'info', `✅ Successfully set ${cookies.length} cookies in browser context`);
+      } else {
+        await sendLog(jobId, 'info', `ℹ️ No cookies provided, proceeding without authentication`);
       }
       
       // Set authentication tokens from login if provided
@@ -5220,23 +5388,23 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         await sendLog(jobId, 'info', '🔑 Setting authentication tokens from login...');
         
         // Set localStorage tokens
-        if (context.authTokens.localStorage && Object.keys(context.authTokens.localStorage).length > 0) {
-          await page.evaluate((tokens) => {
-            Object.entries(tokens).forEach(([key, value]) => {
-              window.localStorage.setItem(key, value);
-            });
-          }, context.authTokens.localStorage);
-          await sendLog(jobId, 'info', `📦 Set ${Object.keys(context.authTokens.localStorage).length} localStorage tokens`);
+        if (context.authTokens && context.authTokens.localStorage && typeof context.authTokens.localStorage === 'object' && Object.keys(context.authTokens.localStorage).length > 0) {
+          const localStorageSuccess = await safeSetLocalStorage(page, context.authTokens.localStorage);
+          if (localStorageSuccess) {
+            await sendLog(jobId, 'info', `📦 Set ${Object.keys(context.authTokens.localStorage).length} localStorage tokens`);
+          } else {
+            await sendLog(jobId, 'warn', `⚠️ Failed to set localStorage tokens (access denied or invalid data)`);
+          }
         }
         
         // Set sessionStorage tokens
-        if (context.authTokens.sessionStorage && Object.keys(context.authTokens.sessionStorage).length > 0) {
-          await page.evaluate((tokens) => {
-            Object.entries(tokens).forEach(([key, value]) => {
-              window.sessionStorage.setItem(key, value);
-            });
-          }, context.authTokens.sessionStorage);
-          await sendLog(jobId, 'info', `📦 Set ${Object.keys(context.authTokens.sessionStorage).length} sessionStorage tokens`);
+        if (context.authTokens && context.authTokens.sessionStorage && typeof context.authTokens.sessionStorage === 'object' && Object.keys(context.authTokens.sessionStorage).length > 0) {
+          const sessionStorageSuccess = await safeSetSessionStorage(page, context.authTokens.sessionStorage);
+          if (sessionStorageSuccess) {
+            await sendLog(jobId, 'info', `📦 Set ${Object.keys(context.authTokens.sessionStorage).length} sessionStorage tokens`);
+          } else {
+            await sendLog(jobId, 'warn', `⚠️ Failed to set sessionStorage tokens (access denied or invalid data)`);
+          }
         }
         
         // Set additional cookies from authTokens
@@ -5263,6 +5431,9 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         await page.waitForTimeout(5000);
         await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', { mode });
       }
+
+      // Collect all cookies from this page visit
+      await collectAndSendCookies(page, jobId, url, context);
 
       // Execute mode-specific operation
       const modeHandler = modeHandlers[mode];
