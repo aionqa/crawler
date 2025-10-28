@@ -2470,7 +2470,15 @@ async function performStaticLogin(page, context, openaiClient) {
     }
   }
   
-  // Standard field selectors
+  // DEPRECATED: Hardcoded selectors removed - use AI workflows in MongoDB instead
+  await sendLog(jobId, 'error', '❌ Hardcoded login selectors deprecated - use AI workflows in MongoDB instead', pageContext);
+  return {
+    success: false,
+    message: 'Hardcoded login logic deprecated - use AI workflows in MongoDB instead',
+    details: { workflowRequired: true }
+  };
+  
+  // Standard field selectors (DEPRECATED)
   const usernameSelectors = [
     'input[name="username"]',
     'input[name="user"]',

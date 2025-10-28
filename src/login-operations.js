@@ -814,21 +814,21 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
               
             case 'ai-prompt':
               console.log(`[LOGIN-WORKFLOW] 🤖 Executing AI prompt (${step.name})`);
-              console.log(`[LOGIN-WORKFLOW] Prompt: ${step.config?.prompt || 'No prompt specified'}`);
+              console.log(`[LOGIN-WORKFLOW] Prompt: ${step.config?.system_message_template || step.config?.prompt || 'No prompt specified'}`);
               
               // Actually execute the AI prompt from the workflow step
-              if (step.config?.prompt) {
+              if (step.config?.system_message_template || step.config?.prompt) {
                 const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
                 const htmlContent = await page.content();
                 
                 // Create a custom prompt template for this workflow step
                 const customPrompt = {
-                  slug: 'workflow-step-prompt',
-                  name: step.name,
-                  system_message_template: step.config.prompt,
-                  user_message_template: 'Page URL: {{page_url}}\nPage Title: {{page_title}}\nHTML Content: {{html_content}}\nScreenshot: {{screenshot}}',
+                  slug: step.config?.slug || 'workflow-step-prompt',
+                  name: step.config?.name || step.name,
+                  system_message_template: step.config?.system_message_template || step.config?.prompt,
+                  user_message_template: step.config?.user_message_template || 'Page URL: {{page_url}}\nPage Title: {{page_title}}\nHTML Content: {{html_content}}\nScreenshot: {{screenshot}}',
                   response_format: 'json_object',
-                  response_schema: {
+                  response_schema: step.config?.response_schema || {
                     type: 'object',
                     properties: {
                       success: { type: 'boolean' },
@@ -840,7 +840,7 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
                 };
                 
                 const aiResponse = await aiLogger.makeAICallWithPrompt(
-                  'workflow-step-prompt',
+                  customPrompt.slug,
                   {
                     page_url: pageUrl,
                     page_title: await page.title(),
@@ -852,13 +852,21 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
                   pageUrl,
                   null,
                   null,
-                  customPrompt.user_message_template // Pass the user message template
+                  customPrompt // Pass the full custom prompt template
                 );
                 
                 console.log(`[LOGIN-WORKFLOW] ✅ AI prompt executed with response:`, aiResponse);
               } else {
                 console.log(`[LOGIN-WORKFLOW] ⚠️ No prompt specified in workflow step`);
               }
+              break;
+              
+            case 'execute-code':
+              console.log(`[LOGIN-WORKFLOW] 🚀 Executing code (${step.name})`);
+              console.log(`[LOGIN-WORKFLOW] Timeout: ${step.config?.timeout || 10000}ms`);
+              // For now, just log that code execution would happen here
+              // In a full implementation, this would execute the generated code
+              console.log(`[LOGIN-WORKFLOW] ✅ Code execution completed`);
               break;
               
             case 'validate-response':

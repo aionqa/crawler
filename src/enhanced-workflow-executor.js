@@ -357,8 +357,9 @@ class EnhancedWorkflowExecutor {
           console.log(`[EnhancedWorkflowExecutor] DEBUG: !scriptResponse = ${!scriptResponse}`);
           console.log(`[EnhancedWorkflowExecutor] DEBUG: !scriptResponse.playwright_script = ${!scriptResponse?.playwright_script}`);
           console.log(`[EnhancedWorkflowExecutor] DEBUG: !scriptResponse.code = ${!scriptResponse?.code}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: (!scriptResponse.playwright_script && !scriptResponse.code) = ${(!scriptResponse?.playwright_script && !scriptResponse?.code)}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: Full validation result = ${!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code)}`);
+          console.log(`[EnhancedWorkflowExecutor] DEBUG: !scriptResponse.script = ${!scriptResponse?.script}`);
+          console.log(`[EnhancedWorkflowExecutor] DEBUG: (!scriptResponse.playwright_script && !scriptResponse.code && !scriptResponse.script) = ${(!scriptResponse?.playwright_script && !scriptResponse?.code && !scriptResponse?.script)}`);
+          console.log(`[EnhancedWorkflowExecutor] DEBUG: Full validation result = ${!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code && !scriptResponse.script)}`);
           
           if (!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code && !scriptResponse.script)) {
             console.warn(`[EnhancedWorkflowExecutor] OpenAI did not return a valid Playwright script. Response: ${JSON.stringify(scriptResponse)}`);
@@ -468,13 +469,20 @@ class EnhancedWorkflowExecutor {
           console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} completed successfully`);
           completed = true;
           finalResult = 'success';
-        } else if (verificationResponse.success === false || (verificationResponse.status === 'failed' && verificationResponse.can_retry === false)) {
-          console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} failed permanently`);
+        } else if (verificationResponse.success === false && verificationResponse.can_retry === false) {
+          // Only fail permanently if explicitly marked as non-retryable
+          console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} failed permanently (explicitly marked as non-retryable)`);
           completed = true;
           finalResult = 'failure';
           lastError = verificationResponse.description || verificationResponse.reason || 'Unknown failure';
+        } else if (verificationResponse.success === false && iteration >= this.maxIterations) {
+          // Fail permanently only after max iterations
+          console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} failed permanently (max iterations reached)`);
+          completed = true;
+          finalResult = 'failure';
+          lastError = verificationResponse.description || verificationResponse.reason || 'Max iterations reached';
         } else {
-          // Continue to next iteration
+          // Continue to next iteration (including success: false with can_retry: true/undefined)
           console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} incomplete, continuing... Reason: ${verificationResponse.description || verificationResponse.reason || 'Unknown'}`);
           lastError = verificationResponse.description || verificationResponse.reason;
         }
