@@ -1,0 +1,827 @@
+import { chromium } from 'playwright';
+import axios from 'axios';
+import { AIConversationLogger } from '../shared/ai-conversation-logger.js';
+import * as BackendLogger from './backend-logger.js';
+
+/**
+ * WorkflowStepExecutor
+ * Contains all executable functions for workflow steps
+ * Each function is stateless and can be called independently
+ */
+export class WorkflowStepExecutor {
+  constructor() {
+    this.backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    this.aiLogger = new AIConversationLogger(this.backendUrl);
+    this.activeBrowsers = new Map(); // Track active browser instances per job
+  }
+
+  /**
+   * Get or create browser instance for job
+   */
+  async getBrowserForJob(jobId) {
+    if (!this.activeBrowsers.has(jobId)) {
+      const browser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-dev-shm-usage']
+      });
+      this.activeBrowsers.set(jobId, browser);
+    }
+    return this.activeBrowsers.get(jobId);
+  }
+
+  /**
+   * Get or create page for job
+   */
+  async getPageForJob(jobId, context) {
+    const browser = await this.getBrowserForJob(jobId);
+    const page = await browser.newPage();
+    
+    // Navigate to URL if provided
+    if (context.pageUrl) {
+      try {
+        await page.goto(context.pageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      } catch (error) {
+        console.warn(`[WorkflowStepExecutor] Navigation failed: ${error.message}`);
+        // Continue without navigation for testing
+      }
+    }
+    
+    return page;
+  }
+
+  /**
+   * Execute Screenshot Step
+   */
+  async executeScreenshotStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing screenshot step for job ${jobId}`);
+    
+    try {
+      const page = await this.getPageForJob(jobId, context);
+      
+      const screenshotOptions = {
+        fullPage: parameters.fullPage || true,
+        type: 'png'
+      };
+      
+      const screenshotBuffer = await page.screenshot(screenshotOptions);
+      const screenshotBase64 = screenshotBuffer.toString('base64');
+      
+      // Upload to MinIO if requested
+      let screenshotUrl = null;
+      let screenshotFileId = null;
+      
+      if (parameters.upload !== false) {
+        try {
+          const uploadResponse = await BackendLogger.prepareScreenshotUpload(jobId, 'workflow-screenshot');
+          screenshotUrl = uploadResponse.url;
+          screenshotFileId = uploadResponse.fileId;
+          
+          // Upload the screenshot
+          await fetch(uploadResponse.uploadUrl, {
+            method: 'PUT',
+            body: screenshotBuffer,
+            headers: { 'Content-Type': 'image/png' }
+          });
+        } catch (uploadError) {
+          console.warn(`[WorkflowStepExecutor] Screenshot upload failed: ${uploadError.message}`);
+        }
+      }
+      
+      const result = {
+        screenshotBase64,
+        screenshotUrl,
+        screenshotFileId,
+        dimensions: {
+          width: await page.viewportSize()?.width || 1920,
+          height: await page.viewportSize()?.height || 1080
+        }
+      };
+      
+      return {
+        ...result,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Screenshot step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Playwright Analysis Step
+   */
+  async executePlaywrightAnalysisStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing playwright analysis step for job ${jobId}`);
+    
+    try {
+      const page = await this.getPageForJob(jobId, context);
+      
+      const analysis = {
+        forms: [],
+        links: [],
+        interactive_elements: []
+      };
+      
+      // Collect forms if requested
+      if (parameters.collectForms !== false) {
+        const forms = await page.$$('form');
+        for (const form of forms) {
+          const inputs = await form.$$('input, textarea, select');
+          const buttons = await form.$$('button, input[type="submit"]');
+          
+          const formData = {
+            selector: await this.getElementSelector(form),
+            action: await form.getAttribute('action'),
+            method: await form.getAttribute('method'),
+            inputs: await Promise.all(inputs.map(async input => ({
+              name: await input.getAttribute('name'),
+              type: await input.getAttribute('type'),
+              placeholder: await input.getAttribute('placeholder'),
+              selector: await this.getElementSelector(input)
+            }))),
+            buttons: await Promise.all(buttons.map(async button => ({
+              text: await button.textContent(),
+              type: await button.getAttribute('type'),
+              selector: await this.getElementSelector(button)
+            })))
+          };
+          
+          analysis.forms.push(formData);
+        }
+      }
+      
+      // Collect links if requested
+      if (parameters.collectLinks !== false) {
+        const links = await page.$$('a[href]');
+        for (const link of links) {
+          const href = await link.getAttribute('href');
+          const text = await link.textContent();
+          const selector = await this.getElementSelector(link);
+          
+          analysis.links.push({
+            text: text?.trim(),
+            href,
+            selector
+          });
+        }
+      }
+      
+      // Collect interactive elements if requested
+      if (parameters.collectInteractiveElements !== false) {
+        const interactiveSelectors = [
+          'button', 'input', 'select', 'textarea', 'a[href]',
+          '[onclick]', '[role="button"]', '[tabindex]'
+        ];
+        
+        for (const selector of interactiveSelectors) {
+          const elements = await page.$$(selector);
+          for (const element of elements) {
+            const isVisible = await element.isVisible();
+            if (isVisible) {
+              const elementData = {
+                tag: await element.evaluate(el => el.tagName.toLowerCase()),
+                text: await element.textContent(),
+                selector: await this.getElementSelector(element),
+                attributes: await this.getElementAttributes(element),
+                visible: isVisible
+              };
+              
+              analysis.interactive_elements.push(elementData);
+            }
+          }
+        }
+      }
+      
+      return {
+        ...analysis,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Playwright analysis step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Page Description Step
+   */
+  async executePageDescriptionStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing page description step for job ${jobId}`);
+    
+    try {
+      const page = await this.getPageForJob(jobId, context);
+      
+      // Get page information
+      const pageTitle = await page.title();
+      const pageUrl = page.url();
+      const visibleText = await page.evaluate(() => {
+        return document.body.innerText || document.body.textContent || '';
+      });
+      
+      // Prepare AI request
+      const promptName = parameters.prompt || 'universal-page-description';
+      const attachments = parameters.attachments || ['visible_text'];
+      
+      const descriptionPayload = {
+        page_title: pageTitle,
+        page_url: pageUrl,
+        visible_text: visibleText.substring(0, 2000) // Limit text length
+      };
+      
+      // Make AI call
+      const aiResponse = await this.aiLogger.makeAICallWithPrompt(
+        promptName,
+        descriptionPayload,
+        jobId,
+        `Page description for ${pageUrl}`
+      );
+      
+      return {
+        pageDescription: aiResponse,
+        aiRequestId: aiResponse.requestId,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Page description step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Workflow Analysis Step
+   */
+  async executeWorkflowAnalysisStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing workflow analysis step for job ${jobId}`);
+    
+    try {
+      const page = await this.getPageForJob(jobId, context);
+      
+      // Get page information
+      const pageTitle = await page.title();
+      const pageUrl = page.url();
+      
+      // Prepare AI request
+      const promptName = parameters.prompt || 'universal-workflow-analysis';
+      const attachments = parameters.attachments || ['page_description', 'interactive_elements'];
+      
+      const analysisPayload = {
+        page_title: pageTitle,
+        page_url: pageUrl,
+        page_description: context.pageDescription || 'No description available',
+        interactive_elements_json: JSON.stringify(context.interactiveElements || []),
+        conversation_history: context.conversationHistory || []
+      };
+      
+      // Make AI call
+      const aiResponse = await this.aiLogger.makeAICallWithPrompt(
+        promptName,
+        analysisPayload,
+        jobId,
+        `Workflow analysis for ${pageUrl}`
+      );
+      
+      return {
+        workflowAnalysis: aiResponse,
+        legsCount: aiResponse.legs?.length || 0,
+        aiRequestId: aiResponse.requestId,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Workflow analysis step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Code Step
+   */
+  async executeCodeStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing code step for job ${jobId}`);
+    
+    try {
+      const page = await this.getPageForJob(jobId, context);
+      
+      const code = parameters.code;
+      if (!code) {
+        throw new Error('Code parameter is required for execute-code step');
+      }
+      
+      // Execute code in browser context
+      const result = await page.evaluate(new Function('return ' + code));
+      
+      return {
+        executionResult: result,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Execute code step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Collect Elements Step
+   */
+  async executeCollectElementsStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing collect elements step for job ${jobId}`);
+    
+    try {
+      const page = await this.getPageForJob(jobId, context);
+      
+      const selectors = parameters.selectors || ['button', 'input', 'select', 'textarea'];
+      const includeText = parameters.includeText !== false;
+      const includeAttributes = parameters.includeAttributes !== false;
+      
+      const elements = [];
+      
+      for (const selector of selectors) {
+        const foundElements = await page.$$(selector);
+        
+        for (const element of foundElements) {
+          const isVisible = await element.isVisible();
+          if (isVisible) {
+            const elementData = {
+              tag: await element.evaluate(el => el.tagName.toLowerCase()),
+              selector: await this.getElementSelector(element)
+            };
+            
+            if (includeText) {
+              elementData.text = await element.textContent();
+            }
+            
+            if (includeAttributes) {
+              elementData.attributes = await this.getElementAttributes(element);
+            }
+            
+            elementData.visible = isVisible;
+            elements.push(elementData);
+          }
+        }
+      }
+      
+      return {
+        elements,
+        totalElements: elements.length,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Collect elements step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Create Workflow Step
+   */
+  async executeCreateWorkflowStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing create workflow step for job ${jobId}`);
+    
+    try {
+      // This step creates a workflow document in the backend
+      const workflowData = {
+        page_id: context.pageId,
+        project_id: context.projectId,
+        url: context.pageUrl,
+        page_description: context.pageDescription || '',
+        playwright_analysis: context.playwrightAnalysis || {},
+        ai_analysis: context.aiAnalysis || null,
+        legs: context.legs || [],
+        status: 'pending'
+      };
+      
+      // Send to backend to create workflow
+      const response = await axios.post(`${this.backendUrl}/api/workflows`, workflowData);
+      
+      return {
+        workflowId: response.data._id,
+        workflowUrl: `${this.backendUrl}/workflows/${response.data._id}`,
+        legsCount: workflowData.legs.length,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Create workflow step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Update Workflow Step
+   */
+  async executeUpdateWorkflowStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing update workflow step for job ${jobId}`);
+    
+    try {
+      const workflowId = context.workflowId;
+      if (!workflowId) {
+        throw new Error('workflowId is required for update-workflow step');
+      }
+      
+      const updateData = {};
+      
+      if (parameters.useAIAnalysis && context.aiAnalysis) {
+        updateData.ai_analysis = context.aiAnalysis;
+        updateData.legs = context.legs || [];
+      }
+      
+      // Send to backend to update workflow
+      const response = await axios.put(`${this.backendUrl}/api/workflows/${workflowId}`, updateData);
+      
+      return {
+        workflowId: response.data._id,
+        updatedLegsCount: response.data.legs?.length || 0,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Update workflow step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Page Discovery Step
+   */
+  async executePageDiscoveryStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing page discovery step for job ${jobId}`);
+    
+    try {
+      const pageData = {
+        url: context.pageUrl,
+        project_id: context.projectId,
+        analyzed: parameters.analyzed || false,
+        workflow_id: parameters.includeWorkflowId ? context.workflowId : null,
+        ai_analysis: parameters.includeAIAnalysis ? context.aiAnalysis : null
+      };
+      
+      // Send to backend to update page discovery
+      const response = await axios.post(`${this.backendUrl}/api/pages`, pageData);
+      
+      return {
+        pageId: response.data._id,
+        workflowId: pageData.workflow_id,
+        analysisComplete: pageData.analyzed,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Page discovery step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute AI Prompt Step
+   */
+  async executeAIPromptStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing AI prompt step for job ${jobId}`);
+    
+    try {
+      const promptName = parameters.prompt;
+      if (!promptName) {
+        throw new Error('prompt parameter is required for ai-prompt step');
+      }
+      
+      const attachments = parameters.attachments || [];
+      const promptPayload = {
+        page_url: context.pageUrl,
+        page_title: context.pageTitle || ''
+      };
+      
+      // Add attachments to payload
+      if (attachments.includes('visible_text') && context.visibleText) {
+        promptPayload.visible_text = context.visibleText;
+      }
+      if (attachments.includes('interactive_elements') && context.interactiveElements) {
+        promptPayload.interactive_elements_json = JSON.stringify(context.interactiveElements);
+      }
+      
+      // Make AI call
+      const aiResponse = await this.aiLogger.makeAICallWithPrompt(
+        promptName,
+        promptPayload,
+        jobId,
+        `Custom AI prompt: ${promptName}`
+      );
+      
+      return {
+        aiResponse: aiResponse,
+        aiRequestId: aiResponse.requestId,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] AI prompt step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Cycle Start Step
+   */
+  async executeCycleStartStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing cycle start step for job ${jobId}`);
+    
+    try {
+      const maxIterations = parameters.maxIterations || 1;
+      const iterationVariable = parameters.iterationVariable || 'currentIteration';
+      
+      // Initialize cycle state
+      const cycleState = {
+        maxIterations,
+        currentIteration: 0,
+        iterationVariable,
+        cycleStarted: true
+      };
+      
+      return {
+        ...cycleState,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Cycle start step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Cycle End Step
+   */
+  async executeCycleEndStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing cycle end step for job ${jobId}`);
+    
+    try {
+      const nextIteration = parameters.nextIteration;
+      const currentIteration = context.workflowState?.currentIteration || 0;
+      const maxIterations = context.workflowState?.maxIterations || 1;
+      
+      const shouldContinue = currentIteration < maxIterations - 1;
+      
+      return {
+        cycleEnded: !shouldContinue,
+        nextIteration: shouldContinue ? nextIteration : null,
+        currentIteration: currentIteration + 1,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Cycle end step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Conditional Step
+   */
+  async executeConditionalStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing conditional step for job ${jobId}`);
+    
+    try {
+      const condition = parameters.condition;
+      const onTrue = parameters.onTrue;
+      const onFalse = parameters.onFalse;
+      
+      if (!condition) {
+        throw new Error('condition parameter is required for conditional step');
+      }
+      
+      // Evaluate condition using workflow state
+      const workflowState = context.workflowState || {};
+      const conditionMet = this.evaluateCondition(condition, workflowState);
+      
+      return {
+        conditionMet,
+        nextStep: conditionMet ? onTrue : onFalse,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Conditional step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Validate Response Step
+   */
+  async executeValidateResponseStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing validate response step for job ${jobId}`);
+    
+    try {
+      const responseField = parameters.responseField;
+      const schema = parameters.schema;
+      
+      if (!responseField || !schema) {
+        throw new Error('responseField and schema parameters are required for validate-response step');
+      }
+      
+      // Get response data from workflow state
+      const workflowState = context.workflowState || {};
+      const responseData = this.getNestedValue(workflowState, responseField);
+      
+      // Validate against schema
+      const validationResult = this.validateAgainstSchema(responseData, schema);
+      
+      return {
+        validationPassed: validationResult.valid,
+        validationErrors: validationResult.errors,
+        validatedField: responseField,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Validate response step failed:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute Filter Response Step
+   */
+  async executeFilterResponseStep(jobId, stepId, parameters, context) {
+    const startTime = Date.now();
+    console.log(`[WorkflowStepExecutor] Executing filter response step for job ${jobId}`);
+    
+    try {
+      const inputField = parameters.inputField;
+      const outputField = parameters.outputField;
+      const filter = parameters.filter;
+      
+      if (!inputField || !outputField) {
+        throw new Error('inputField and outputField parameters are required for filter-response step');
+      }
+      
+      // Get input data from workflow state
+      const workflowState = context.workflowState || {};
+      const inputData = this.getNestedValue(workflowState, inputField);
+      
+      // Apply filter
+      const filteredData = this.applyFilter(inputData, filter);
+      
+      return {
+        filteredCount: Array.isArray(filteredData) ? filteredData.length : 0,
+        originalCount: Array.isArray(inputData) ? inputData.length : 0,
+        filteredField: outputField,
+        executionTime: Date.now() - startTime
+      };
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Filter response step failed:`, error);
+      throw error;
+    }
+  }
+
+  // Helper methods
+
+  /**
+   * Get element selector using multiple strategies
+   */
+  async getElementSelector(element) {
+    try {
+      // Try ID first
+      const id = await element.getAttribute('id');
+      if (id) return `#${id}`;
+      
+      // Try class
+      const className = await element.getAttribute('class');
+      if (className) {
+        const classes = className.split(' ').filter(c => c.trim());
+        if (classes.length > 0) {
+          return `.${classes[0]}`;
+        }
+      }
+      
+      // Try data attributes
+      const dataTestId = await element.getAttribute('data-testid');
+      if (dataTestId) return `[data-testid="${dataTestId}"]`;
+      
+      // Fallback to tag + text
+      const tagName = await element.evaluate(el => el.tagName.toLowerCase());
+      const text = await element.textContent();
+      if (text && text.trim()) {
+        return `${tagName}:has-text("${text.trim().substring(0, 50)}")`;
+      }
+      
+      // Last resort
+      return tagName;
+    } catch (error) {
+      return 'unknown';
+    }
+  }
+
+  /**
+   * Get element attributes
+   */
+  async getElementAttributes(element) {
+    try {
+      return await element.evaluate(el => {
+        const attrs = {};
+        for (const attr of el.attributes) {
+          attrs[attr.name] = attr.value;
+        }
+        return attrs;
+      });
+    } catch (error) {
+      return {};
+    }
+  }
+
+  /**
+   * Evaluate condition string
+   */
+  evaluateCondition(condition, workflowState) {
+    try {
+      // Simple condition evaluation
+      // Replace variables with actual values
+      let evaluatedCondition = condition;
+      for (const [key, value] of Object.entries(workflowState)) {
+        evaluatedCondition = evaluatedCondition.replace(new RegExp(`workflowState\\.${key}`, 'g'), JSON.stringify(value));
+      }
+      
+      // Evaluate the condition
+      return eval(evaluatedCondition);
+    } catch (error) {
+      console.error(`[WorkflowStepExecutor] Condition evaluation failed:`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Get nested value from object
+   */
+  getNestedValue(obj, path) {
+    return path.split('.').reduce((current, key) => current?.[key], obj);
+  }
+
+  /**
+   * Validate data against JSON schema
+   */
+  validateAgainstSchema(data, schema) {
+    // Simple validation - in production, use a proper JSON schema validator
+    const errors = [];
+    
+    if (schema.required) {
+      for (const field of schema.required) {
+        if (data[field] === undefined) {
+          errors.push(`Missing required field: ${field}`);
+        }
+      }
+    }
+    
+    if (schema.properties) {
+      for (const [field, fieldSchema] of Object.entries(schema.properties)) {
+        if (data[field] !== undefined) {
+          if (fieldSchema.type === 'array' && !Array.isArray(data[field])) {
+            errors.push(`Field ${field} must be an array`);
+          }
+          if (fieldSchema.minItems && Array.isArray(data[field]) && data[field].length < fieldSchema.minItems) {
+            errors.push(`Field ${field} must have at least ${fieldSchema.minItems} items`);
+          }
+          if (fieldSchema.maxItems && Array.isArray(data[field]) && data[field].length > fieldSchema.maxItems) {
+            errors.push(`Field ${field} must have at most ${fieldSchema.maxItems} items`);
+          }
+        }
+      }
+    }
+    
+    return {
+      valid: errors.length === 0,
+      errors
+    };
+  }
+
+  /**
+   * Apply filter to data
+   */
+  applyFilter(data, filter) {
+    if (!Array.isArray(data) || !filter) {
+      return data;
+    }
+    
+    return data.filter(item => {
+      for (const [key, value] of Object.entries(filter)) {
+        if (item[key] !== value) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Cleanup browser for job
+   */
+  async cleanupJob(jobId) {
+    if (this.activeBrowsers.has(jobId)) {
+      const browser = this.activeBrowsers.get(jobId);
+      await browser.close();
+      this.activeBrowsers.delete(jobId);
+    }
+  }
+}

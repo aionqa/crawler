@@ -1544,16 +1544,13 @@ const modeHandlers = {
           
           allWorkflows.push(analysisResult);
           
-          // Step 2: Execute workflow legs  
+          // Step 2: Execute workflow using WorkflowAnalyzer
           if (context.execute_workflow !== false) {
-            await sendLog(jobId, 'info', `▶️ Executing ${analysisResult.legs_count} workflow legs...`);
+            await sendLog(jobId, 'info', `▶️ Executing workflow using WorkflowAnalyzer...`);
             try {
-              const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
-              
-              const successful = executionResult.results.filter(r => r.result === 'success').length;
-              const failed = executionResult.results.filter(r => r.result === 'failure').length;
-              
-              await sendLog(jobId, 'info', `✅ Workflow complete: ${successful} succeeded, ${failed} failed`);
+              // The WorkflowAnalyzer already executed the workflow during analyzePage
+              // Just report the results
+              await sendLog(jobId, 'info', `✅ Workflow execution completed via WorkflowAnalyzer`);
             } catch (execError) {
               await sendLog(jobId, 'warn', `⚠️ Workflow execution partially completed: ${execError.message}`);
               // Continue to next page even if this one had issues

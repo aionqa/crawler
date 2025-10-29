@@ -11,6 +11,7 @@ import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import VideoStreamManager from './video-stream-manager.js';
 import VideoRecorder from './video-recorder.js';
+import WorkflowServer from './workflow-server.js';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
@@ -34,10 +35,14 @@ const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID);
 // Initialize video recorder for full recording
 const videoRecorder = new VideoRecorder(BACKEND_URL, RUNNER_ID);
 
+// Initialize workflow server for backend-controlled execution
+const workflowServer = new WorkflowServer(4001);
+
 console.log(`🚀 [UNIFIED-RUNNER] Starting runner ${RUNNER_ID}`);
 console.log(`🔗 [UNIFIED-RUNNER] Backend URL: ${BACKEND_URL}`);
 console.log(`⏱️  [UNIFIED-RUNNER] Poll interval: ${POLL_INTERVAL}ms`);
 console.log(`📹 [UNIFIED-RUNNER] Stream interval: ${STREAM_INTERVAL}ms`);
+console.log(`🌐 [UNIFIED-RUNNER] Workflow API server starting on port 4001`);
 
 let isProcessing = false;
 let currentJobId = null;
@@ -144,7 +149,7 @@ async function executeJob(job) {
   let streamInterval = null;
   
   console.log(`\n🎯 [UNIFIED-RUNNER] Executing ${job.jobType} job ${job.id}`);
-  console.log(`📍 [UNIFIED-RUNNER] URL: ${job.url}`);
+  console.log(`📍 [UNIFIED-RUNNER] URL: ${job.start_url || job.url}`);
   console.log(`[DEBUG] Job object at start:`, JSON.stringify(job, null, 2));
 
   // Check job status before starting - accept both 'pending' and 'running'
@@ -317,7 +322,13 @@ async function executeLoginJob(job, streamInterval) {
  */
 async function executeCrawlJob(job, streamInterval) {
   // Extract job parameters
-  const { url, cookies = [], context = {} } = job;
+  const url = job.start_url || job.url;
+  const cookies = job.cookies || [];
+  const context = job.context || {};
+  
+  console.log(`[DEBUG] Extracted URL: ${url}`);
+  console.log(`[DEBUG] Job start_url: ${job.start_url}`);
+  console.log(`[DEBUG] Job url: ${job.url}`);
   const openaiApiKey = context.openai_api_key || process.env.OPENAI_API_KEY;
 
   if (!openaiApiKey) {
@@ -328,6 +339,7 @@ async function executeCrawlJob(job, streamInterval) {
   const executionContext = {
     ...context,
     job_id: job.id,
+    workflow_template_id: job.workflow_template_id, // Pass workflow template ID from job
     useRemoteBrowser: false, // Use local browser (embedded)
     runnerId: RUNNER_ID,
     onPageReady: (page) => {
@@ -344,6 +356,8 @@ async function executeCrawlJob(job, streamInterval) {
 
   try {
     // Execute crawl using existing function
+    console.log(`[DEBUG] About to call startCrawl with URL: ${url}`);
+    console.log(`[DEBUG] Execution context:`, JSON.stringify(executionContext, null, 2));
     const result = await startCrawl(url, cookies, executionContext, openaiApiKey);
     return result;
   } finally {
@@ -399,6 +413,9 @@ async function reportJobFailed(jobId, errorMessage, errorStack) {
  */
 async function runLoop() {
   console.log(`🔄 [UNIFIED-RUNNER] Starting polling loop...`);
+  
+  // Start workflow server
+  workflowServer.start();
 
   while (true) {
     try {
