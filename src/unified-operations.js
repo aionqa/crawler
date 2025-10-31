@@ -1450,6 +1450,13 @@ const modeHandlers = {
     // Initialize workflow analyzer and enhanced executor with context
     const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger, context);
     const workflowExecutor = new EnhancedWorkflowExecutor(backendUrl, aiConversationLogger, backendLogger, context);
+
+    await workflowAnalyzer.loadWorkflowTemplate();
+    const workflowCapabilities = workflowAnalyzer.getCapabilities();
+    context.workflow_capabilities = workflowCapabilities;
+    const shouldRunPerformanceAnalysis = workflowCapabilities.usesPerformanceAudit === true;
+    const shouldDiscoverLinks = workflowCapabilities.usesLinkDiscovery === true;
+    const hasAdvancedAnalysis = (workflowCapabilities.usesPlaywrightAnalysis === true) || (workflowCapabilities.usesAIModel === true);
     
     const visitedUrls = new Set();
     const urlQueue = [{ url: page.url(), depth: 0 }];
@@ -1490,34 +1497,36 @@ const modeHandlers = {
           await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
         }
         
-        // Run Lighthouse analysis on the page
+        // Run Lighthouse analysis on the page if requested by workflow
         let lighthouseResults = null;
-        try {
-          await sendLog(jobId, 'info', `🔍 Running performance analysis...`);
-          const { analyzePageWithLighthouse } = await import('./lighthouse-analyzer.js');
-          lighthouseResults = await analyzePageWithLighthouse(page, jobId, currentUrl);
-          
-          if (lighthouseResults.success) {
-            await sendLog(jobId, 'info', `✅ Lighthouse analysis completed - Performance: ${lighthouseResults.metrics.performance}/100`, {
-              page_url: currentUrl,
-              performance_score: lighthouseResults.metrics.performance,
-              accessibility_score: lighthouseResults.metrics.accessibility,
-              best_practices_score: lighthouseResults.metrics.bestPractices,
-              seo_score: lighthouseResults.metrics.seo,
-              first_contentful_paint: lighthouseResults.metrics.firstContentfulPaint,
-              largest_contentful_paint: lighthouseResults.metrics.largestContentfulPaint,
-              speed_index: lighthouseResults.metrics.speedIndex,
-              cumulative_layout_shift: lighthouseResults.metrics.cumulativeLayoutShift,
-              total_blocking_time: lighthouseResults.metrics.totalBlockingTime,
-              interactive: lighthouseResults.metrics.interactive
-            });
-          } else if (lighthouseResults.skipped) {
-            await sendLog(jobId, 'info', `ℹ️ Lighthouse analysis skipped: ${lighthouseResults.error}`);
-          } else {
-            await sendLog(jobId, 'warn', `⚠️ Lighthouse analysis failed: ${lighthouseResults.error}`);
+        if (shouldRunPerformanceAnalysis) {
+          try {
+            await sendLog(jobId, 'info', `🔍 Running performance analysis...`);
+            const { analyzePageWithLighthouse } = await import('./lighthouse-analyzer.js');
+            lighthouseResults = await analyzePageWithLighthouse(page, jobId, currentUrl);
+            
+            if (lighthouseResults.success) {
+              await sendLog(jobId, 'info', `✅ Lighthouse analysis completed - Performance: ${lighthouseResults.metrics.performance}/100`, {
+                page_url: currentUrl,
+                performance_score: lighthouseResults.metrics.performance,
+                accessibility_score: lighthouseResults.metrics.accessibility,
+                best_practices_score: lighthouseResults.metrics.bestPractices,
+                seo_score: lighthouseResults.metrics.seo,
+                first_contentful_paint: lighthouseResults.metrics.firstContentfulPaint,
+                largest_contentful_paint: lighthouseResults.metrics.largestContentfulPaint,
+                speed_index: lighthouseResults.metrics.speedIndex,
+                cumulative_layout_shift: lighthouseResults.metrics.cumulativeLayoutShift,
+                total_blocking_time: lighthouseResults.metrics.totalBlockingTime,
+                interactive: lighthouseResults.metrics.interactive
+              });
+            } else if (lighthouseResults.skipped) {
+              await sendLog(jobId, 'info', `ℹ️ Lighthouse analysis skipped: ${lighthouseResults.error}`);
+            } else {
+              await sendLog(jobId, 'warn', `⚠️ Lighthouse analysis failed: ${lighthouseResults.error}`);
+            }
+          } catch (lighthouseError) {
+            await sendLog(jobId, 'warn', `⚠️ Lighthouse analysis error: ${lighthouseError.message}`);
           }
-        } catch (lighthouseError) {
-          await sendLog(jobId, 'warn', `⚠️ Lighthouse analysis error: ${lighthouseError.message}`);
         }
         
         // Create basic page document first
@@ -1528,38 +1537,41 @@ const modeHandlers = {
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
         // Check if we should skip AI analysis
-        const skipAIAnalysis = context.options?.skip_ai_analysis || false;
+        const skipAIAnalysisOption = context.options?.skip_ai_analysis || false;
         const disableAICompletely = context.options?.disable_ai_completely || false;
-        
-        if (skipAIAnalysis || disableAICompletely) {
-          // Skip AI analysis - just collect page structure and links
-          await sendLog(jobId, 'info', `⏭️ Skipping AI analysis and test generation (collecting links only)`);
+        const hasWorkflowSteps = workflowAnalyzer.hasExecutableSteps();
+
+        if (disableAICompletely || skipAIAnalysisOption || !hasWorkflowSteps) {
+          await sendLog(jobId, 'info', `⏭️ Skipping workflow execution${disableAICompletely ? ' (AI disabled)' : ''}`);
         } else {
-          // Step 1: Analyze page and create workflow with AI
-          await sendLog(jobId, 'info', `📊 Analyzing page with Playwright and OpenAI...`);
+          const executionMessage = hasAdvancedAnalysis
+            ? `📊 Executing workflow steps with Playwright/AI capabilities...`
+            : `🧩 Executing workflow steps (no Playwright/AI dependencies)...`;
+          await sendLog(jobId, 'info', executionMessage);
+
           const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, createdPageId, projectId);
-          
-          await sendLog(jobId, 'info', `✅ Workflow created with ${analysisResult.legs_count} testable legs`);
-          await sendLog(jobId, 'info', `📝 ${analysisResult.page_description}`);
-          
+
+          if (typeof analysisResult?.legs_count === 'number' && analysisResult.legs_count > 0) {
+            await sendLog(jobId, 'info', `✅ Workflow executed with ${analysisResult.legs_count} testable legs`);
+          }
+          if (analysisResult?.page_description) {
+            await sendLog(jobId, 'info', `📝 ${analysisResult.page_description}`);
+          }
+
           allWorkflows.push(analysisResult);
-          
-          // Step 2: Execute workflow using WorkflowAnalyzer
+
           if (context.execute_workflow !== false) {
             await sendLog(jobId, 'info', `▶️ Executing workflow using WorkflowAnalyzer...`);
             try {
-              // The WorkflowAnalyzer already executed the workflow during analyzePage
-              // Just report the results
               await sendLog(jobId, 'info', `✅ Workflow execution completed via WorkflowAnalyzer`);
             } catch (execError) {
               await sendLog(jobId, 'warn', `⚠️ Workflow execution partially completed: ${execError.message}`);
-              // Continue to next page even if this one had issues
             }
           }
         }
         
         // Step 3: Extract links from page for crawling (if not at max depth)
-        if (depth < maxDepth) {
+        if (shouldDiscoverLinks && depth < maxDepth) {
           const links = await page.$$eval('a[href]', anchors => 
             anchors
               .map(a => a.href)
@@ -1569,8 +1581,7 @@ const modeHandlers = {
           const baseUrl = new URL(currentUrl).origin;
           const internalLinks = links.filter(link => link.startsWith(baseUrl));
           
-          // Add internal links to queue
-          for (const link of internalLinks.slice(0, 20)) {  // Limit to 20 links per page
+          for (const link of internalLinks.slice(0, 20)) {
             if (!visitedUrls.has(link)) {
               urlQueue.push({ url: link, depth: depth + 1 });
             }
@@ -5448,13 +5459,20 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
 
       const operationResult = await modeHandler(page, context, openaiClient, 'crawl');
       
-      // Extract page elements for storage (may fail if browser already closed after long crawl)
+      const workflowCaps = context.workflow_capabilities || {};
+      const shouldExtractElements = mode !== 'workflow'
+        || workflowCaps.usesPlaywrightAnalysis === true
+        || workflowCaps.usesAIModel === true
+        || workflowCaps.usesLinkDiscovery === true;
+      
+      // Extract page elements for storage only when required
       let pageElements = { interactive: [], nonInteractive: [] };
-      try {
-        pageElements = await extractPageElements(page, jobId);
-      } catch (error) {
-        await sendLog(jobId, 'warn', `⚠️ Could not extract final page elements (browser may have closed): ${error.message}`);
-        // Not a critical error - we already have all the page data from recursive crawl
+      if (shouldExtractElements) {
+        try {
+          pageElements = await extractPageElements(page, jobId);
+        } catch (error) {
+          await sendLog(jobId, 'warn', `⚠️ Could not extract final page elements (browser may have closed): ${error.message}`);
+        }
       }
       
       console.log(`[START-CRAWL] operationResult.success = ${operationResult.success}`);
@@ -5473,7 +5491,9 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       return finalResult;
     }, {
       headless: context.options?.headless !== false,
-      enable_screenshots: context.options?.enable_screenshots !== false,
+      enable_screenshots: mode === 'workflow'
+        ? (context.workflow_capabilities?.usesScreenshotStep === true)
+        : (context.options?.enable_screenshots !== false),
       enable_video_recording: true, // MANDATORY per rule 38-video-recording-mandatory.mdc
       job_id: jobId,
       jobId: jobId,
