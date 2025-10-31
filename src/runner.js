@@ -11,7 +11,8 @@ import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import VideoStreamManager from './video-stream-manager.js';
 import VideoRecorder from './video-recorder.js';
-import WorkflowServer from './workflow-server.js';
+import express from 'express';
+import workflowApi from './workflow-api.js';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
@@ -19,6 +20,7 @@ const RUNNER_TOKEN = process.env.RUNNER_TOKEN; // GitHub Actions-style runner to
 // Generate unique runner ID if not provided (includes hostname and UUID for uniqueness)
 const RUNNER_ID = process.env.RUNNER_ID || `unified-runner-${hostname()}-${randomUUID().substring(0, 8)}`;
 const STREAM_INTERVAL = 2000; // Stream browser frame every 2 seconds
+const WORKFLOW_API_PORT = parseInt(process.env.WORKFLOW_API_PORT || '3001'); // Workflow API port
 
 // Validate runner token is configured
 if (!RUNNER_TOKEN) {
@@ -35,14 +37,10 @@ const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID);
 // Initialize video recorder for full recording
 const videoRecorder = new VideoRecorder(BACKEND_URL, RUNNER_ID);
 
-// Initialize workflow server for backend-controlled execution
-const workflowServer = new WorkflowServer(4001);
-
 console.log(`🚀 [UNIFIED-RUNNER] Starting runner ${RUNNER_ID}`);
 console.log(`🔗 [UNIFIED-RUNNER] Backend URL: ${BACKEND_URL}`);
 console.log(`⏱️  [UNIFIED-RUNNER] Poll interval: ${POLL_INTERVAL}ms`);
 console.log(`📹 [UNIFIED-RUNNER] Stream interval: ${STREAM_INTERVAL}ms`);
-console.log(`🌐 [UNIFIED-RUNNER] Workflow API server starting on port 4001`);
 
 let isProcessing = false;
 let currentJobId = null;
@@ -52,8 +50,24 @@ let currentPage = null; // Track current page for streaming
 export const runnerContext = {
   RUNNER_ID,
   BACKEND_URL,
-  setCurrentPage: (page) => { currentPage = page; }
+  setCurrentPage: (page) => { 
+    currentPage = page;
+    // Set global currentPage for workflow API
+    global.currentPage = page;
+  }
 };
+
+// Initialize Express app for workflow API
+const app = express();
+app.use(express.json());
+
+// Mount workflow API routes
+app.use('/', workflowApi);
+
+// Start workflow API server
+const workflowServer = app.listen(WORKFLOW_API_PORT, '0.0.0.0', () => {
+  console.log(`🔌 [UNIFIED-RUNNER] Workflow API server started on port ${WORKFLOW_API_PORT}`);
+});
 
 /**
  * Get axios headers with authentication
@@ -149,7 +163,7 @@ async function executeJob(job) {
   let streamInterval = null;
   
   console.log(`\n🎯 [UNIFIED-RUNNER] Executing ${job.jobType} job ${job.id}`);
-  console.log(`📍 [UNIFIED-RUNNER] URL: ${job.start_url || job.url}`);
+  console.log(`📍 [UNIFIED-RUNNER] URL: ${job.url}`);
   console.log(`[DEBUG] Job object at start:`, JSON.stringify(job, null, 2));
 
   // Check job status before starting - accept both 'pending' and 'running'
@@ -230,7 +244,10 @@ async function executeLoginJob(job, streamInterval) {
     username: loginData.username || job.username,
     password: loginData.password || job.password,
     maxAttempts: job.maxAttempts || 2,
-    context: job.context || {}
+    context: {
+      ...job.context,
+      workflow_template_id: job.context?.workflow_template_id || job.workflow_template_id || job.options?.workflow_template_id
+    }
   };
 
   console.log(`[DEBUG] Extracted credentials: url=${url}, username=${username}, password=${password ? '***' : 'undefined'}`);
@@ -270,33 +287,55 @@ async function executeLoginJob(job, streamInterval) {
   startVideoStream(page, job.id);
 
   try {
-    // Use workflow-based login (NEW - using WorkflowAnalyzer approach)
+    // Execute using workflow-based login operation (iterative AI-driven attempts)
     const { performLoginWithWorkflow } = await import('./login-operations.js');
-    
-    const result = await performLoginWithWorkflow(
-      page, 
-      job.id, 
-      url, 
-      username, 
-      password,
-      openaiApiKey,
-      jobContext.workflow_template_id // Pass workflow template ID
-    );
+    console.log(`[DEBUG] About to execute performLoginWithWorkflow with template ID: ${jobContext.workflow_template_id}`);
+    const result = await performLoginWithWorkflow(page, job.id, url, username, password, openaiApiKey, jobContext.workflow_template_id);
 
     // Extract auth tokens if successful
     if (result.success) {
-      const cookies = await context.cookies();
-      // Import safe storage functions
-      const { safeGetLocalStorage, safeGetSessionStorage } = await import('./unified-operations.js');
+      // Look for auth tokens in workflow results
+      let authTokens = null;
       
-      const localStorage = await safeGetLocalStorage(page);
-      const sessionStorage = await safeGetSessionStorage(page);
+      if (result.results && result.results.length > 0) {
+        // Find the last step that collected auth tokens
+        for (let i = result.results.length - 1; i >= 0; i--) {
+          const stepResult = result.results[i];
+          if (stepResult.result && (stepResult.result.cookies || stepResult.result.localStorage || stepResult.result.sessionStorage)) {
+            authTokens = {
+              cookies: stepResult.result.cookies || [],
+              localStorage: stepResult.result.localStorage || {},
+              sessionStorage: stepResult.result.sessionStorage || {},
+              finalUrl: stepResult.result.finalUrl || page.url()
+            };
+            console.log(`[LOGIN-WORKFLOW] Found auth tokens in step ${stepResult.step_id}: ${authTokens.cookies.length} cookies, ${Object.keys(authTokens.localStorage).length} localStorage items, ${Object.keys(authTokens.sessionStorage).length} sessionStorage items`);
+            break;
+          }
+        }
+      }
+      
+      // Fallback to collecting from current page context
+      if (!authTokens) {
+        console.log(`[LOGIN-WORKFLOW] No auth tokens found in workflow results, collecting from current page context`);
+        const cookies = await context.cookies();
+        // Import safe storage functions
+        const { safeGetLocalStorage, safeGetSessionStorage } = await import('./unified-operations.js');
+        
+        const localStorage = await safeGetLocalStorage(page);
+        const sessionStorage = await safeGetSessionStorage(page);
 
-      result.authTokens = {
-        cookies,
-        localStorage,
-        sessionStorage
-      };
+        authTokens = {
+          cookies,
+          localStorage,
+          sessionStorage,
+          finalUrl: page.url()
+        };
+      }
+      
+      result.authTokens = authTokens;
+    } else {
+      // Handle workflow execution failure
+      console.log(`[LOGIN-WORKFLOW] Workflow execution failed: ${result.error || 'Unknown error'}`);
     }
 
     return result;
@@ -322,13 +361,7 @@ async function executeLoginJob(job, streamInterval) {
  */
 async function executeCrawlJob(job, streamInterval) {
   // Extract job parameters
-  const url = job.start_url || job.url;
-  const cookies = job.cookies || [];
-  const context = job.context || {};
-  
-  console.log(`[DEBUG] Extracted URL: ${url}`);
-  console.log(`[DEBUG] Job start_url: ${job.start_url}`);
-  console.log(`[DEBUG] Job url: ${job.url}`);
+  const { url, cookies = [], context = {} } = job;
   const openaiApiKey = context.openai_api_key || process.env.OPENAI_API_KEY;
 
   if (!openaiApiKey) {
@@ -339,7 +372,6 @@ async function executeCrawlJob(job, streamInterval) {
   const executionContext = {
     ...context,
     job_id: job.id,
-    workflow_template_id: job.workflow_template_id, // Pass workflow template ID from job
     useRemoteBrowser: false, // Use local browser (embedded)
     runnerId: RUNNER_ID,
     onPageReady: (page) => {
@@ -356,8 +388,6 @@ async function executeCrawlJob(job, streamInterval) {
 
   try {
     // Execute crawl using existing function
-    console.log(`[DEBUG] About to call startCrawl with URL: ${url}`);
-    console.log(`[DEBUG] Execution context:`, JSON.stringify(executionContext, null, 2));
     const result = await startCrawl(url, cookies, executionContext, openaiApiKey);
     return result;
   } finally {
@@ -413,9 +443,6 @@ async function reportJobFailed(jobId, errorMessage, errorStack) {
  */
 async function runLoop() {
   console.log(`🔄 [UNIFIED-RUNNER] Starting polling loop...`);
-  
-  // Start workflow server
-  workflowServer.start();
 
   while (true) {
     try {

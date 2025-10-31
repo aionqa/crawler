@@ -92,6 +92,11 @@ export async function findLoginForm(page, jobId, pageUrl) {
 }
 
 /**
+ * Deterministic login for practice/testautomation sites.
+ * Fills credentials, submits, collects cookies/local/session, logs steps.
+ */
+
+/**
  * Step 2: Fill form field with retry
  */
 export async function fillFieldWithRetry(page, jobId, pageUrl, field, value, maxRetries = 2) {
@@ -668,7 +673,7 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
       const response = await axios.get(`${BACKEND_URL}/api/workflow-templates/${workflowTemplateId}`);
       workflowTemplate = response.data;
       console.log(`[LOGIN-WORKFLOW] ✅ Loaded workflow: "${workflowTemplate.name}" (ID: ${workflowTemplateId})`);
-      console.log(`[LOGIN-WORKFLOW] 📄 Workflow contains ${workflowTemplate.prompts?.length || 0} prompts`);
+      console.log(`[LOGIN-WORKFLOW] 📄 Workflow contains ${workflowTemplate.steps?.length || 0} steps`);
       
       // Log workflow usage
       await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
@@ -680,8 +685,8 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
           workflow_decision: true,
           workflow_id: workflowTemplateId,
           workflow_name: workflowTemplate.name,
-          details: `Workflow contains ${workflowTemplate.prompts?.length || 0} prompts`,
-          prompts_count: workflowTemplate.prompts?.length || 0,
+          details: `Workflow contains ${workflowTemplate.steps?.length || 0} steps`,
+          prompts_count: workflowTemplate.steps?.filter(s => s?.config?.prompt || s?.config?.template || s?.config?.prompt_content)?.length || 0,
           timestamp: new Date().toISOString()
         }
       });
@@ -691,244 +696,175 @@ export async function performLoginWithWorkflow(page, jobId, pageUrl, username, p
     }
     
     // Helper to get custom template with logging
+    const promptIndex = new Map();
+    if (workflowTemplate?.steps && Array.isArray(workflowTemplate.steps)) {
+      for (const step of workflowTemplate.steps) {
+        const config = step?.config || {};
+        const promptText = config.prompt || config.template || config.prompt_content;
+        if (!promptText) continue;
+        const entry = {
+          template: promptText,
+          attachments: Array.isArray(config.attachments) ? config.attachments : [],
+          step
+        };
+        const addKey = (key) => {
+          if (!key) return;
+          promptIndex.set(String(key).toLowerCase(), entry);
+        };
+        addKey(step.id);
+        addKey(step.name);
+        addKey(step.type);
+        addKey(config.slug);
+        addKey(config.prompt_slug);
+        // Custom aliases for known login workflow prompts
+        if (step.type === 'ai-prompt' && /login/i.test(step.name || '')) {
+          addKey('attempt-login');
+        }
+        if (step.type === 'page-description' && /page description/i.test(step.name || '')) {
+          addKey('find-login-form');
+          addKey('page-description');
+        }
+      }
+    }
+
     const getCustomTemplate = async (promptName) => {
-      if (!workflowTemplate || !workflowTemplate.prompts) {
-        console.log(`[LOGIN-WORKFLOW] 📋 Using DEFAULT prompt from database: "${promptName}"`);
-        return null;
+      const key = String(promptName || '').toLowerCase();
+      const entry = promptIndex.get(key);
+      if (!entry) {
+        throw new Error(`Prompt "${promptName}" is not configured in workflow steps. Please define it in the workflow builder.`);
       }
-      
-      const prompt = workflowTemplate.prompts.find(p => p.name === promptName);
-      if (prompt && prompt.template) {
-        console.log(`[LOGIN-WORKFLOW] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
-        console.log(`[LOGIN-WORKFLOW] 📝 Prompt text: ${prompt.template.substring(0, 100)}...`);
-        
-        // Log prompt usage
-        try {
-          const axios = (await import('axios')).default;
-          await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'info',
-            message: `📝 PROMPT USAGE: "${promptName}" from workflow-template`,
-            component: 'LOGIN-WORKFLOW',
-            metadata: {
-              prompt_usage: true,
-              prompt_name: promptName,
-              prompt_source: 'workflow-template',
-              prompt_text_preview: prompt.template.substring(0, 200),
-              workflow_template_id: workflowTemplateId,
-              workflow_template_name: workflowTemplate.name,
-              timestamp: new Date().toISOString()
-            }
-          });
-        } catch (logError) {
-          console.error(`[LOGIN-WORKFLOW] Error logging prompt usage: ${logError.message}`);
-        }
-        
-        return prompt.template;
-      } else {
-        console.log(`[LOGIN-WORKFLOW] 📋 Prompt "${promptName}" not found in template, using DEFAULT from database`);
-        
-        // Log default usage
-        try {
-          const axios = (await import('axios')).default;
-          await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'info',
-            message: `📝 PROMPT USAGE: "${promptName}" from database (not in template)`,
-            component: 'LOGIN-WORKFLOW',
-            metadata: {
-              prompt_usage: true,
-              prompt_name: promptName,
-              prompt_source: 'database',
-              prompt_text_preview: 'Default from database',
-              workflow_template_id: workflowTemplateId,
-              workflow_template_name: workflowTemplate.name,
-              timestamp: new Date().toISOString()
-            }
-          });
-        } catch (logError) {
-          console.error(`[LOGIN-WORKFLOW] Error logging prompt usage: ${logError.message}`);
-        }
-        
-        return null;
-      }
-    };
-    
-    // Execute workflow template steps
-    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
-    console.log(`[LOGIN-WORKFLOW] 🔄 EXECUTING WORKFLOW TEMPLATE STEPS`);
-    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
-    
-    if (workflowTemplate.steps && workflowTemplate.steps.length > 0) {
-      console.log(`[LOGIN-WORKFLOW] 📋 Workflow template has ${workflowTemplate.steps.length} steps to execute`);
-      
-      for (let i = 0; i < workflowTemplate.steps.length; i++) {
-        const step = workflowTemplate.steps[i];
-        console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
-        console.log(`[LOGIN-WORKFLOW] 🔄 EXECUTING STEP ${i + 1}/${workflowTemplate.steps.length}: ${step.name}`);
-        console.log(`[LOGIN-WORKFLOW] Type: ${step.type}`);
-        console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
-        
-        // Log step start
+
+      console.log(`[LOGIN-WORKFLOW] ✅ Using workflow step "${entry.step.name}" for prompt "${promptName}"`);
+      console.log(`[LOGIN-WORKFLOW] 📝 Prompt text: ${entry.template.substring(0, 100)}...`);
+
+      try {
+        const axios = (await import('axios')).default;
         await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
           jobId: jobId,
           level: 'info',
-          message: `🔄 WORKFLOW STEP ${i + 1}: Starting "${step.name}" (${step.type})`,
+          message: `📝 PROMPT USAGE: "${promptName}" from workflow step "${entry.step.name}"`,
           component: 'LOGIN-WORKFLOW',
           metadata: {
-            workflow_step: i + 1,
-            step_name: step.name,
-            step_type: step.type,
-            step_id: step.id,
-            step_config: step.config,
+            prompt_usage: true,
+            prompt_name: promptName,
+            prompt_source: 'workflow-step',
+            prompt_text_preview: entry.template.substring(0, 200),
+            workflow_template_id: workflowTemplateId,
+            workflow_template_name: workflowTemplate.name,
+            workflow_step_id: entry.step.id,
+            workflow_step_type: entry.step.type,
+            attachments: entry.attachments,
             timestamp: new Date().toISOString()
           }
         });
-        
-        try {
-          // Execute step based on type
-          switch (step.type) {
-            case 'screenshot':
-              console.log(`[LOGIN-WORKFLOW] 📸 Taking screenshot (${step.name})`);
-              const screenshot = await page.screenshot({ 
-                fullPage: step.config?.fullPage || true,
-                type: 'png'
-              });
-              console.log(`[LOGIN-WORKFLOW] ✅ Screenshot captured (${screenshot.length} bytes)`);
-              break;
-              
-            case 'collect-elements':
-              console.log(`[LOGIN-WORKFLOW] 🔍 Collecting interactive elements (${step.name})`);
-              const elements = await page.$$eval('[role="button"], button, a, input, select, textarea, [onclick], [tabindex]', 
-                elements => elements.map(el => ({
-                  tag: el.tagName,
-                  id: el.id,
-                  class: el.className,
-                  text: el.textContent?.trim().substring(0, 100),
-                  type: el.type,
-                  name: el.name
-                }))
-              );
-              console.log(`[LOGIN-WORKFLOW] ✅ Collected ${elements.length} interactive elements`);
-              break;
-              
-            case 'ai-prompt':
-              console.log(`[LOGIN-WORKFLOW] 🤖 Executing AI prompt (${step.name})`);
-              console.log(`[LOGIN-WORKFLOW] Prompt: ${step.config?.system_message_template || step.config?.prompt || 'No prompt specified'}`);
-              
-              // Actually execute the AI prompt from the workflow step
-              if (step.config?.system_message_template || step.config?.prompt) {
-                const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-                const htmlContent = await page.content();
-                
-                // Create a custom prompt template for this workflow step
-                const customPrompt = {
-                  slug: step.config?.slug || 'workflow-step-prompt',
-                  name: step.config?.name || step.name,
-                  system_message_template: step.config?.system_message_template || step.config?.prompt,
-                  user_message_template: step.config?.user_message_template || 'Page URL: {{page_url}}\nPage Title: {{page_title}}\nHTML Content: {{html_content}}\nScreenshot: {{screenshot}}',
-                  response_format: 'json_object',
-                  response_schema: step.config?.response_schema || {
-                    type: 'object',
-                    properties: {
-                      success: { type: 'boolean' },
-                      message: { type: 'string' },
-                      confidence: { type: 'number' },
-                      evidence: { type: 'string' }
-                    }
-                  }
-                };
-                
-                const aiResponse = await aiLogger.makeAICallWithPrompt(
-                  customPrompt.slug,
-                  {
-                    page_url: pageUrl,
-                    page_title: await page.title(),
-                    html_content: htmlContent.substring(0, 50000),
-                    screenshot: screenshot.toString('base64')
-                  },
-                  jobId,
-                  'login-workflow',
-                  pageUrl,
-                  null,
-                  null,
-                  customPrompt // Pass the full custom prompt template
-                );
-                
-                console.log(`[LOGIN-WORKFLOW] ✅ AI prompt executed with response:`, aiResponse);
-              } else {
-                console.log(`[LOGIN-WORKFLOW] ⚠️ No prompt specified in workflow step`);
-              }
-              break;
-              
-            case 'execute-code':
-              console.log(`[LOGIN-WORKFLOW] 🚀 Executing code (${step.name})`);
-              console.log(`[LOGIN-WORKFLOW] Timeout: ${step.config?.timeout || 10000}ms`);
-              // For now, just log that code execution would happen here
-              // In a full implementation, this would execute the generated code
-              console.log(`[LOGIN-WORKFLOW] ✅ Code execution completed`);
-              break;
-              
-            case 'validate-response':
-              console.log(`[LOGIN-WORKFLOW] ✅ Validating response (${step.name})`);
-              console.log(`[LOGIN-WORKFLOW] Schema: ${step.config?.schema || 'No schema specified'}`);
-              console.log(`[LOGIN-WORKFLOW] ✅ Response validation completed`);
-              break;
-              
-            case 'conditional':
-              console.log(`[LOGIN-WORKFLOW] 🔀 Executing conditional logic (${step.name})`);
-              console.log(`[LOGIN-WORKFLOW] Field: ${step.config?.field}, Operator: ${step.config?.operator}, Value: ${step.config?.value}`);
-              console.log(`[LOGIN-WORKFLOW] ✅ Conditional logic executed`);
-              break;
-              
-            default:
-              console.log(`[LOGIN-WORKFLOW] ⚠️ Unknown step type: ${step.type}`);
-          }
-          
-          // Log step completion
-          await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'info',
-            message: `✅ WORKFLOW STEP ${i + 1}: Completed "${step.name}" (${step.type})`,
-            component: 'LOGIN-WORKFLOW',
-            metadata: {
-              workflow_step: i + 1,
-              step_name: step.name,
-              step_type: step.type,
-              step_id: step.id,
-              status: 'completed',
-              timestamp: new Date().toISOString()
-            }
-          });
-          
-        } catch (stepError) {
-          console.error(`[LOGIN-WORKFLOW] ❌ Step ${i + 1} failed: ${stepError.message}`);
-          
-          // Log step failure
-          await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'error',
-            message: `❌ WORKFLOW STEP ${i + 1}: Failed "${step.name}" (${step.type}) - ${stepError.message}`,
-            component: 'LOGIN-WORKFLOW',
-            metadata: {
-              workflow_step: i + 1,
-              step_name: step.name,
-              step_type: step.type,
-              step_id: step.id,
-              status: 'failed',
-              error: stepError.message,
-              timestamp: new Date().toISOString()
-            }
-          });
-          
-          // Continue with next step or break based on workflow design
-          console.log(`[LOGIN-WORKFLOW] ⚠️ Continuing with next step...`);
-        }
+      } catch (logError) {
+        console.error(`[LOGIN-WORKFLOW] Error logging prompt usage: ${logError.message}`);
       }
-      
-      console.log(`[LOGIN-WORKFLOW] ✅ All workflow template steps completed`);
-    } else {
-      console.log(`[LOGIN-WORKFLOW] ⚠️ No steps found in workflow template`);
+
+      return entry.template;
+    };
+    
+    // Iterative AI-driven loop: scan → prompt → execute → rescan until cookies or attempts
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    console.log(`[LOGIN-WORKFLOW] 🔄 EXECUTING ITERATIVE LOGIN LOOP`);
+    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+
+    const maxAttemptsFromWorkflow = (workflowTemplate.settings && workflowTemplate.settings.maxAttempts) ||
+      (workflowTemplate.config && workflowTemplate.config.maxAttempts) || 3;
+    let attemptIndex = 0;
+    let collectedCookies = [];
+    let lastAIResponse = null;
+
+    while (attemptIndex < maxAttemptsFromWorkflow) {
+      attemptIndex++;
+      await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: `🔁 Iteration ${attemptIndex}/${maxAttemptsFromWorkflow}: Scan → AI → Execute → Rescan`,
+        component: 'LOGIN-WORKFLOW',
+        metadata: { iteration: attemptIndex, max: maxAttemptsFromWorkflow }
+      });
+
+      // Scan page (screenshot + html + interactive elements)
+      const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
+      const htmlContent = await page.content();
+      const interactiveElements = await page.evaluate(() => {
+        const elements = [];
+        const inputs = document.querySelectorAll('input, button, select, textarea, a');
+        inputs.forEach(el => {
+          elements.push({
+            tag: el.tagName.toLowerCase(),
+            type: el.type || '',
+            id: el.id || '',
+            name: el.name || '',
+            placeholder: el.placeholder || '',
+            text: (el.textContent || '').trim().substring(0, 80)
+          });
+        });
+        return JSON.stringify(elements.slice(0, 100));
+      });
+
+      // Ask OpenAI to attempt login and return playwright code
+      const customTemplate = await getCustomTemplate('attempt-login');
+      const aiResponse = await aiLogger.makeAICallWithPrompt(
+        'attempt-login',
+        {
+          page_url: pageUrl,
+          page_title: await page.title(),
+          html_content: htmlContent.substring(0, 50000),
+          screenshot: screenshot.toString('base64'),
+          screenshot_base64: screenshot.toString('base64'),
+          interactive_elements: interactiveElements,
+          username,
+          password
+        },
+        jobId,
+        'login-workflow',
+        pageUrl,
+        null,
+        null,
+        customTemplate
+      );
+      lastAIResponse = aiResponse;
+
+      const codeToRun = aiResponse?.playwright_code || aiResponse?.code || aiResponse?.script;
+      if (codeToRun) {
+        try {
+          const fn = new Function('page', `return (async () => { ${codeToRun}\n })()`);
+          await fn(page);
+        } catch (e) {
+          console.error(`[LOGIN-WORKFLOW] Iteration ${attemptIndex}: code execution error: ${e.message}`);
+        }
+      } else {
+        console.log(`[LOGIN-WORKFLOW] Iteration ${attemptIndex}: no code returned by AI`);
+      }
+
+      // Rescan and check cookies
+      await page.waitForTimeout(2000);
+      const cookiesNow = await page.context().cookies();
+      collectedCookies = cookiesNow;
+      const hasAuthCookies = cookiesNow.some(c =>
+        (c.name || '').toLowerCase().includes('session') ||
+        (c.name || '').toLowerCase().includes('token') ||
+        (c.name || '').toLowerCase().includes('auth') ||
+        (c.name || '').toLowerCase().includes('jwt')
+      );
+
+      await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: hasAuthCookies ? 'info' : 'warn',
+        message: hasAuthCookies ? `✅ Cookies detected after iteration ${attemptIndex}` : `❌ No auth cookies yet after iteration ${attemptIndex}`,
+        component: 'LOGIN-WORKFLOW',
+        metadata: { iteration: attemptIndex, cookies_count: cookiesNow.length }
+      });
+
+      if (hasAuthCookies) {
+        break;
+      }
+    }
+
+    if (collectedCookies.length === 0) {
+      console.log(`[LOGIN-WORKFLOW] ⚠️ Iterations finished without cookies; proceeding to legacy path`);
     }
     
     // Navigate to login page (keep existing logic for compatibility)

@@ -149,8 +149,8 @@ class EnhancedWorkflowExecutor {
    * @param {Object} leg - Leg object from workflow
    * @returns {Object} execution result
    */
-  async executeLeg(page, jobId, workflowId, leg) {
-    console.log(`[EnhancedWorkflowExecutor] Executing leg: ${leg.leg_id} - ${leg.description}`);
+  async executeStep(page, jobId, workflowId, step) {
+    console.log(`[EnhancedWorkflowExecutor] Executing step: ${step.id} - ${step.name}`);
 
     // Load workflow template if not already loaded
     if (!this.workflowTemplate) {
@@ -160,17 +160,17 @@ class EnhancedWorkflowExecutor {
     // Check job status before starting
     const jobStatus = await this.checkJobStatus(jobId);
     if (jobStatus !== 'running') {
-      console.log(`[EnhancedWorkflowExecutor] Job ${jobId} status is ${jobStatus}, stopping leg execution`);
+      console.log(`[EnhancedWorkflowExecutor] Job ${jobId} status is ${jobStatus}, stopping step execution`);
       return {
-        leg_id: leg.leg_id,
+        step_id: step.id,
         result: 'cancelled',
         iterations: 0,
         error: `Job status is ${jobStatus}`
       };
     }
 
-    // Mark leg as in progress
-    await this.updateLegStatus(workflowId, leg.leg_id, 'in_progress', jobId);
+    // Mark step as in progress
+    await this.updateStepStatus(workflowId, step.id, 'in_progress', jobId);
 
     // Update job statistics - page being processed
     await this.updateJobStatistics(jobId, {
@@ -370,7 +370,7 @@ class EnhancedWorkflowExecutor {
           playwrightScript = scriptResponse.script || scriptResponse.playwright_script || scriptResponse.code;
           
           // Update leg with script
-          await this.updateLeg(workflowId, leg.leg_id, { 
+          await this.updateStep(workflowId, step.id, { 
             playwright_script: playwrightScript,
             update_action: true  // Signal backend to also update action document
           });
@@ -548,19 +548,19 @@ class EnhancedWorkflowExecutor {
     // Get workflow
     const workflow = await this.getWorkflow(workflowId);
     
-    if (!workflow || !workflow.legs) {
-      throw new Error('Workflow not found or has no legs');
+    if (!workflow || !workflow.steps) {
+      throw new Error('Workflow not found or has no steps');
     }
 
     const results = [];
 
-    // Execute each leg sequentially
-    for (const leg of workflow.legs) {
-      if (leg.status === 'pending') {
-        const result = await this.executeLeg(page, jobId, workflowId, leg);
+    // Execute each step sequentially
+    for (const step of workflow.steps) {
+      if (step.status === 'pending') {
+        const result = await this.executeStep(page, jobId, workflowId, step);
         results.push(result);
       } else {
-        console.log(`[EnhancedWorkflowExecutor] Skipping leg ${leg.leg_id} - status: ${leg.status}`);
+        console.log(`[EnhancedWorkflowExecutor] Skipping step ${step.id} - status: ${step.status}`);
       }
     }
 
@@ -649,7 +649,7 @@ class EnhancedWorkflowExecutor {
    */
   async getWorkflow(workflowId) {
     try {
-      const response = await axios.get(`${this.backendUrl}/api/workflows/${workflowId}`);
+      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${workflowId}`);
       return response.data;
     } catch (error) {
       console.error('[EnhancedWorkflowExecutor] Error getting workflow:', error.message);
@@ -660,14 +660,14 @@ class EnhancedWorkflowExecutor {
   /**
    * Update leg status
    */
-  async updateLegStatus(workflowId, legId, status, jobId = null) {
-    return await this.updateLeg(workflowId, legId, { status }, jobId);
+  async updateStepStatus(workflowId, stepId, status, jobId = null) {
+    return await this.updateStep(workflowId, stepId, { status }, jobId);
   }
 
   /**
    * Update leg fields
    */
-  async updateLeg(workflowId, legId, updates, jobId = null) {
+  async updateStep(workflowId, stepId, updates, jobId = null) {
     try {
       const payload = { ...updates };
       if (jobId) {
@@ -675,11 +675,11 @@ class EnhancedWorkflowExecutor {
       }
       
       await axios.put(
-        `${this.backendUrl}/api/workflows/${workflowId}/legs/${legId}`,
+        `${this.backendUrl}/api/workflow-templates/${workflowId}/steps/${stepId}`,
         payload
       );
     } catch (error) {
-      console.error('[EnhancedWorkflowExecutor] Error updating leg:', error.message);
+      console.error('[EnhancedWorkflowExecutor] Error updating step:', error.message);
     }
   }
 

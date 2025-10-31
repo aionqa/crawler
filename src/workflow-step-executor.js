@@ -297,22 +297,52 @@ export class WorkflowStepExecutor {
   }
 
   /**
-   * Execute Code Step
+   * Execute Code Step (static code only)
    */
   async executeCodeStep(jobId, stepId, parameters, context) {
     const startTime = Date.now();
-    console.log(`[WorkflowStepExecutor] Executing code step for job ${jobId}`);
+    console.log(`[WorkflowStepExecutor] Executing static code step for job ${jobId}`);
     
     try {
       const page = await this.getPageForJob(jobId, context);
-      
+      const workflowState = context?.workflowState || {};
+
       const code = parameters.code;
       if (!code) {
         throw new Error('Code parameter is required for execute-code step');
       }
       
-      // Execute code in browser context
-      const result = await page.evaluate(new Function('return ' + code));
+      const timeout = parameters.timeout || 30000;
+
+      const result = await page.evaluate(
+        ({ code, workflowState, timeout }) => {
+          const runner = new Function(
+            'workflowState',
+            `return (async () => {\n${code}\n})();`
+          );
+
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error(`Code execution timed out after ${timeout}ms`));
+            }, timeout);
+
+            Promise.resolve(runner(workflowState))
+              .then(result => {
+                clearTimeout(timer);
+                resolve(result);
+              })
+              .catch(error => {
+                clearTimeout(timer);
+                reject(error);
+              });
+          });
+        },
+        {
+          code,
+          workflowState,
+          timeout
+        }
+      );
       
       return {
         executionResult: result,
@@ -325,53 +355,78 @@ export class WorkflowStepExecutor {
   }
 
   /**
-   * Execute Collect Elements Step
+   * Execute Code from Variable Step
    */
-  async executeCollectElementsStep(jobId, stepId, parameters, context) {
+  async executeCodeFromVariableStep(jobId, stepId, parameters, context) {
     const startTime = Date.now();
-    console.log(`[WorkflowStepExecutor] Executing collect elements step for job ${jobId}`);
+    console.log(`[WorkflowStepExecutor] Executing code from variable step for job ${jobId}`);
     
     try {
       const page = await this.getPageForJob(jobId, context);
+      const workflowState = context?.workflowState || {};
+
+      const sourceField = parameters.sourceField;
+      if (!sourceField) {
+        throw new Error('sourceField parameter is required for execute-code-from-variable step');
+      }
+
+      // Resolve the path (remove workflowState. prefix if present)
+      const normalizedPath = sourceField.startsWith('workflowState.')
+        ? sourceField.substring('workflowState.'.length)
+        : sourceField;
       
-      const selectors = parameters.selectors || ['button', 'input', 'select', 'textarea'];
-      const includeText = parameters.includeText !== false;
-      const includeAttributes = parameters.includeAttributes !== false;
-      
-      const elements = [];
-      
-      for (const selector of selectors) {
-        const foundElements = await page.$$(selector);
-        
-        for (const element of foundElements) {
-          const isVisible = await element.isVisible();
-          if (isVisible) {
-            const elementData = {
-              tag: await element.evaluate(el => el.tagName.toLowerCase()),
-              selector: await this.getElementSelector(element)
-            };
-            
-            if (includeText) {
-              elementData.text = await element.textContent();
-            }
-            
-            if (includeAttributes) {
-              elementData.attributes = await this.getElementAttributes(element);
-            }
-            
-            elementData.visible = isVisible;
-            elements.push(elementData);
-          }
+      let code = this.getNestedValue(workflowState, normalizedPath);
+      if (code === undefined) {
+        code = this.getNestedValue(context || {}, normalizedPath);
+        if (code === undefined) {
+          throw new Error(`Code not found at path "${sourceField}" in workflowState`);
         }
       }
+
+      console.log(`[WorkflowStepExecutor] Resolved code from "${sourceField}": ${code ? 'found' : 'not found'}`);
+      
+      if (!code) {
+        throw new Error(`Code is empty at path "${sourceField}"`);
+      }
+      
+      const timeout = parameters.timeout || 30000;
+
+      const result = await page.evaluate(
+        ({ code, workflowState, timeout }) => {
+          const runner = new Function(
+            'workflowState',
+            `return (async () => {\n${code}\n})();`
+          );
+
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error(`Code execution timed out after ${timeout}ms`));
+            }, timeout);
+
+            Promise.resolve(runner(workflowState))
+              .then(result => {
+                clearTimeout(timer);
+                resolve(result);
+              })
+              .catch(error => {
+                clearTimeout(timer);
+                reject(error);
+              });
+          });
+        },
+        {
+          code,
+          workflowState,
+          timeout
+        }
+      );
       
       return {
-        elements,
-        totalElements: elements.length,
+        executionResult: result,
         executionTime: Date.now() - startTime
       };
     } catch (error) {
-      console.error(`[WorkflowStepExecutor] Collect elements step failed:`, error);
+      console.error(`[WorkflowStepExecutor] Execute code from variable step failed:`, error);
       throw error;
     }
   }
@@ -462,7 +517,7 @@ export class WorkflowStepExecutor {
       };
       
       // Send to backend to update page discovery
-      const response = await axios.post(`${this.backendUrl}/api/pages`, pageData);
+      const response = await axios.post(`${this.backendUrl}/pages`, pageData);
       
       return {
         pageId: response.data._id,

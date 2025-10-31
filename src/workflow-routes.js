@@ -228,10 +228,10 @@ router.post('/execute-code', async (req, res) => {
 });
 
 /**
- * Collect Elements Step
- * POST /api/workflow/collect-elements
+ * Execute Code from Variable Step
+ * POST /api/workflow/execute-code-from-variable
  */
-router.post('/collect-elements', async (req, res) => {
+router.post('/execute-code-from-variable', async (req, res) => {
   try {
     const { jobId, stepId, parameters, context } = req.body;
     
@@ -242,7 +242,7 @@ router.post('/collect-elements', async (req, res) => {
       });
     }
 
-    const result = await workflowExecutor.executeCollectElementsStep(jobId, stepId, parameters, context);
+    const result = await workflowExecutor.executeCodeFromVariableStep(jobId, stepId, parameters, context);
     
     res.json({
       success: true,
@@ -253,14 +253,14 @@ router.post('/collect-elements', async (req, res) => {
       executionTime: result.executionTime || 0
     });
   } catch (error) {
-    console.error(`[WORKFLOW-API] Collect elements step failed:`, error);
+    console.error(`[WORKFLOW-API] Execute code from variable step failed:`, error);
     res.json({
       success: false,
       stepId: req.body.stepId,
       jobId: req.body.jobId,
       result: null,
       error: {
-        code: 'COLLECT_ELEMENTS_FAILED',
+        code: 'EXECUTE_CODE_FROM_VARIABLE_FAILED',
         message: error.message,
         details: { stack: error.stack }
       },
@@ -665,3 +665,4 @@ router.get('/health', (req, res) => {
 });
 
 export default router;
+

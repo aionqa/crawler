@@ -632,10 +632,6 @@ class WorkflowAnalyzer {
             await this.executeScreenshotStep(page, step, workflowState, jobId, pageId);
             break;
             
-          case 'collect-elements':
-            await this.executeCollectElementsStep(page, step, workflowState);
-            break;
-            
           case 'playwright-analysis':
             await this.executePlaywrightAnalysisStep(page, step, workflowState);
             break;
@@ -650,6 +646,11 @@ class WorkflowAnalyzer {
             
           case 'workflow-analysis':
             await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId);
+            break;
+          
+          // Deterministic, hardcoded analysis for specific domains (e.g., Practical Test Automation)
+          case 'hardcoded-workflow-analysis':
+            await this.executeHardcodedWorkflowAnalysisStep(page, step, workflowState, jobId);
             break;
             
           case 'create-workflow':
@@ -666,6 +667,26 @@ class WorkflowAnalyzer {
             
           case 'execute-code':
             await this.executeCodeStep(page, step, workflowState);
+            break;
+            
+          case 'execute-code-from-variable':
+            await this.executeCodeFromVariableStep(page, step, workflowState);
+            break;
+            
+          case 'cookie-add':
+            await this.executeCookieAddStep(step, workflowState, jobId);
+            break;
+            
+          case 'cookie-update':
+            await this.executeCookieUpdateStep(step, workflowState, jobId);
+            break;
+            
+          case 'cookie-remove':
+            await this.executeCookieRemoveStep(step, workflowState, jobId);
+            break;
+            
+          case 'cookie-collect':
+            await this.executeCookieCollectStep(step, workflowState, jobId);
             break;
             
           case 'validate-response':
@@ -716,6 +737,115 @@ class WorkflowAnalyzer {
       legs: workflowState.legs,
       ai_analysis: workflowState.aiAnalysisResult
     };
+  }
+
+  /**
+   * Execute hardcoded workflow analysis step
+   * Reproduces deterministic page analysis: pages → actions → elements
+   * Tailored for domains like practicaltestautomation.com to avoid heavy AI usage
+   */
+  async executeHardcodedWorkflowAnalysisStep(page, step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🧩 Performing hardcoded workflow analysis (${step.name})`);
+    const url = workflowState.pageUrl;
+
+    // Ensure Playwright analysis exists (forms, links, interactive elements)
+    if (!workflowState.playwrightAnalysis) {
+      const analysis = await this.performPlaywrightAnalysis(page);
+      workflowState.playwrightAnalysis = analysis;
+    }
+
+    // Domain detection (default to enabled if step.config.force === true)
+    const force = step.config?.force === true;
+    const isPracticalTestAutomation = typeof url === 'string' && /practicaltestautomation/i.test(url);
+    if (!force && !isPracticalTestAutomation) {
+      console.log(`[WorkflowAnalyzer] ℹ️ Hardcoded analysis skipped (domain not matched, use config.force=true to override)`);
+      return;
+    }
+
+    const legs = [];
+
+    // 1) Forms → create legs to fill and submit
+    for (const [formIndex, form] of (workflowState.playwrightAnalysis.forms || []).entries()) {
+      const elementInfo = {
+        selector: form.selector,
+        selectors: form.selectors || [],
+        method: form.method || 'get',
+        action: form.action || null,
+        fields: form.fields || []
+      };
+
+      // Infer input data for common fields encountered on PTA site
+      const inferredData = {};
+      for (const field of elementInfo.fields) {
+        const name = (field.name || field.id || '').toLowerCase();
+        const type = (field.type || 'text').toLowerCase();
+        if (/user|login|email/.test(name)) inferredData[field.selector || field.name || name] = 'student';
+        else if (/pass/.test(name)) inferredData[field.selector || field.name || name] = 'Password123';
+        else if (type === 'email') inferredData[field.selector || field.name || name] = 'test@example.com';
+        else if (type === 'number') inferredData[field.selector || field.name || name] = '1';
+        else inferredData[field.selector || field.name || name] = 'test';
+      }
+
+      legs.push({
+        type: 'form_submit',
+        description: `Submit form #${formIndex + 1} and validate result`,
+        test_instructions: 'Fill all recognized inputs with inferred data and submit, then verify success or error message is visible.',
+        element_info: elementInfo,
+        confidence: 0.9
+      });
+    }
+
+    // 2) Buttons (non-form) → create click action legs
+    for (const [btnIndex, el] of (workflowState.playwrightAnalysis.interactive_elements || []).entries()) {
+      if (el.type === 'button') {
+        legs.push({
+          type: 'click',
+          description: `Click button #${btnIndex + 1} (${el.text || el.role || 'button'}) and validate page state`,
+          test_instructions: 'Click the element and verify visible state change, toast, modal, or navigation.',
+          element_info: {
+            selector: el.selector,
+            selectors: el.selectors || [],
+            text: el.text,
+            role: el.role || null
+          },
+          confidence: 0.7
+        });
+      }
+    }
+
+    // 3) Links (internal) → create navigation validation legs
+    try {
+      const base = new URL(url).origin;
+      for (const [lnkIndex, link] of (workflowState.playwrightAnalysis.links || []).entries()) {
+        if (!link.href) continue;
+        // Only internal links
+        if (!link.href.startsWith(base)) continue;
+        legs.push({
+          type: 'navigate',
+          description: `Follow internal link #${lnkIndex + 1} to ${link.href} and validate load`,
+          test_instructions: 'Click the link, wait for networkidle, verify title and URL changed appropriately.',
+          element_info: {
+            selector: link.selector,
+            selectors: link.selectors || [],
+            href: link.href,
+            text: link.text || ''
+          },
+          confidence: 0.6
+        });
+      }
+    } catch (_) {}
+
+    if (legs.length === 0) {
+      console.log(`[WorkflowAnalyzer] ⚠️ Hardcoded analysis produced no legs`);
+      return;
+    }
+
+    workflowState.legs = legs;
+    workflowState.aiAnalysisResult = {
+      page_description: workflowState.pageDescription || null,
+      legs
+    };
+    console.log(`[WorkflowAnalyzer] ✅ Hardcoded analysis completed: ${legs.length} legs identified`);
   }
 
   /**
@@ -770,29 +900,6 @@ class WorkflowAnalyzer {
         console.error(`[WorkflowAnalyzer] ❌ Failed to upload screenshot: ${error.message}`);
       }
     }
-  }
-
-  /**
-   * Execute collect elements step
-   */
-  async executeCollectElementsStep(page, step, workflowState) {
-    console.log(`[WorkflowAnalyzer] 🔍 Collecting interactive elements (${step.name})`);
-    
-    const elements = await page.$$eval('button, input, select, textarea, a[href], [onclick], [role="button"]', 
-      elements => elements.map(el => ({
-        tag: el.tagName,
-        text: el.textContent?.trim() || '',
-        type: el.type || '',
-        href: el.href || '',
-        id: el.id || '',
-        className: el.className || '',
-        role: el.getAttribute('role') || '',
-        onclick: el.getAttribute('onclick') || ''
-      }))
-    );
-    
-    workflowState.collectedElements = elements;
-    console.log(`[WorkflowAnalyzer] ✅ Collected ${elements.length} interactive elements`);
   }
 
   /**
@@ -1097,10 +1204,78 @@ class WorkflowAnalyzer {
   }
 
   /**
-   * Execute code step
+   * Store step result by slug
+   */
+  storeStepResult(step, result, workflowState) {
+    const slug = step.slug || this.generateSlug(step.name || 'step');
+    if (!workflowState[slug]) {
+      workflowState[slug] = {};
+    }
+    workflowState[slug].result = result;
+    workflowState[slug].stepName = step.name;
+    workflowState[slug].stepType = step.type;
+    // Also store by name for backward compatibility
+    workflowState[`${step.name}_result`] = result;
+  }
+
+  /**
+   * Generate slug from name
+   */
+  generateSlug(name) {
+    if (!name) return 'step';
+    return name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .substring(0, 50);
+  }
+
+  /**
+   * Resolve path with slug support
+   * Supports both slug-based paths (e.g., "generate-login-code.playwright_code") 
+   * and direct paths (e.g., "lastAIResponse.playwright_code")
+   */
+  resolvePath(path, workflowState) {
+    // Remove workflowState. prefix if present
+    const normalizedPath = path.startsWith('workflowState.')
+      ? path.substring('workflowState.'.length)
+      : path;
+    
+    // Check if path starts with a step slug (slug-based reference)
+    const parts = normalizedPath.split('.');
+    if (parts.length > 0) {
+      const firstPart = parts[0];
+      // Check if first part matches any step slug
+      const stepSlug = Object.keys(workflowState).find(key => {
+        const stepData = workflowState[key];
+        return stepData && stepData.stepName && this.generateSlug(stepData.stepName) === firstPart;
+      }) || Object.keys(workflowState).find(key => {
+        return this.generateSlug(key) === firstPart;
+      });
+      
+      if (stepSlug && workflowState[stepSlug]) {
+        // It's a slug-based reference
+        const stepData = workflowState[stepSlug];
+        if (parts.length === 1) {
+          // Just the slug - return the whole step data
+          return stepData;
+        } else {
+          // Slug with path - resolve the nested path
+          const remainingPath = parts.slice(1).join('.');
+          return this.getNestedValue(stepData, remainingPath);
+        }
+      }
+    }
+    
+    // Fall back to direct path resolution
+    return this.getNestedValue(workflowState, normalizedPath);
+  }
+
+  /**
+   * Execute code step (static code)
    */
   async executeCodeStep(page, step, workflowState) {
-    console.log(`[WorkflowAnalyzer] 🚀 Executing code (${step.name})`);
+    console.log(`[WorkflowAnalyzer] 🚀 Executing static code (${step.name})`);
     
     const code = step.config?.code || step.code;
     if (!code) {
@@ -1108,11 +1283,365 @@ class WorkflowAnalyzer {
     }
     
     try {
-      const result = await page.evaluate(code);
-      workflowState[`${step.name}_result`] = result;
+      const timeout = step.config?.timeout || 30000;
+      const result = await page.evaluate(
+        ({ code, workflowState, timeout }) => {
+          const runner = new Function(
+            'workflowState',
+            `return (async () => {\n${code}\n})();`
+          );
+
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error(`Code execution timed out after ${timeout}ms`));
+            }, timeout);
+
+            Promise.resolve(runner(workflowState))
+              .then(result => {
+                clearTimeout(timer);
+                resolve(result);
+              })
+              .catch(error => {
+                clearTimeout(timer);
+                reject(error);
+              });
+          });
+        },
+        { code, workflowState, timeout }
+      );
+      this.storeStepResult(step, result, workflowState);
       console.log(`[WorkflowAnalyzer] ✅ Code execution completed: ${JSON.stringify(result).substring(0, 100)}...`);
     } catch (error) {
       console.error(`[WorkflowAnalyzer] ❌ Code execution failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute code from variable step
+   */
+  async executeCodeFromVariableStep(page, step, workflowState) {
+    console.log(`[WorkflowAnalyzer] 🚀 Executing code from variable (${step.name})`);
+    
+    const sourceField = step.config?.sourceField;
+    if (!sourceField) {
+      throw new Error(`No sourceField provided for step: ${step.name}`);
+    }
+    
+    // Resolve the path with slug support
+    const code = this.resolvePath(sourceField, workflowState);
+    if (!code) {
+      throw new Error(`Code not found at path "${sourceField}" in workflowState for step: ${step.name}`);
+    }
+    
+    console.log(`[WorkflowAnalyzer] 📦 Resolved code from "${sourceField}": ${code ? 'found' : 'not found'}`);
+    
+    try {
+      const timeout = step.config?.timeout || 30000;
+      const result = await page.evaluate(
+        ({ code, workflowState, timeout }) => {
+          const runner = new Function(
+            'workflowState',
+            `return (async () => {\n${code}\n})();`
+          );
+
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new Error(`Code execution timed out after ${timeout}ms`));
+            }, timeout);
+
+            Promise.resolve(runner(workflowState))
+              .then(result => {
+                clearTimeout(timer);
+                resolve(result);
+              })
+              .catch(error => {
+                clearTimeout(timer);
+                reject(error);
+              });
+          });
+        },
+        { code, workflowState, timeout }
+      );
+      this.storeStepResult(step, result, workflowState);
+      console.log(`[WorkflowAnalyzer] ✅ Code execution completed: ${JSON.stringify(result).substring(0, 100)}...`);
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Code execution failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Get authentication headers for API calls
+   */
+  getAuthHeaders() {
+    const headers = {};
+    if (this.context.runner_token) {
+      headers['Authorization'] = `Bearer ${this.context.runner_token}`;
+    }
+    return headers;
+  }
+
+  /**
+   * Execute cookie add step
+   */
+  async executeCookieAddStep(step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🍪 Adding cookie (${step.name})`);
+    
+    const config = step.config || {};
+    if (!config.name || !config.value) {
+      throw new Error(`Cookie name and value are required for step: ${step.name}`);
+    }
+
+    try {
+      // Get project ID from job
+      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+        headers: this.getAuthHeaders()
+      });
+      const projectId = jobResponse.data?.project_id;
+      
+      if (!projectId) {
+        throw new Error(`Could not find project ID for job: ${jobId}`);
+      }
+
+      // Get current cookies
+      const currentCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+        headers: this.getAuthHeaders()
+      });
+      const currentCookies = currentCookiesResponse.data || [];
+
+      // Create new cookie
+      const newCookie = {
+        name: config.name,
+        value: config.value,
+        domain: config.domain || undefined,
+        path: config.path || '/',
+        expires: config.expires || undefined,
+        secure: config.secure || false,
+        httpOnly: config.httpOnly || false,
+        sameSite: config.sameSite || undefined
+      };
+
+      // Add to existing cookies
+      const updatedCookies = [...currentCookies, newCookie];
+
+      // Update project cookies
+      await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+        cookies: updatedCookies,
+        source: 'workflow'
+      }, {
+        headers: this.getAuthHeaders()
+      });
+
+      this.storeStepResult(step, { cookie: newCookie, added: true }, workflowState);
+      console.log(`[WorkflowAnalyzer] ✅ Cookie "${config.name}" added successfully`);
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Cookie add failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute cookie update step
+   */
+  async executeCookieUpdateStep(step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] ✏️ Updating cookie (${step.name})`);
+    
+    const config = step.config || {};
+    if (!config.cookieName || !config.value) {
+      throw new Error(`Cookie name and value are required for step: ${step.name}`);
+    }
+
+    try {
+      // Get project ID from job
+      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+        headers: this.getAuthHeaders()
+      });
+      const projectId = jobResponse.data?.project_id;
+      
+      if (!projectId) {
+        throw new Error(`Could not find project ID for job: ${jobId}`);
+      }
+
+      // Get current cookies
+      const currentCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+        headers: this.getAuthHeaders()
+      });
+      const currentCookies = currentCookiesResponse.data || [];
+
+      // Update cookie
+      const updatedCookies = currentCookies.map(cookie => {
+        if (cookie.name === config.cookieName) {
+          return {
+            ...cookie,
+            value: config.value,
+            domain: config.domain !== undefined ? config.domain : cookie.domain,
+            path: config.path !== undefined ? config.path : cookie.path,
+            expires: config.expires !== undefined ? config.expires : cookie.expires,
+            secure: config.secure !== undefined ? config.secure : cookie.secure,
+            httpOnly: config.httpOnly !== undefined ? config.httpOnly : cookie.httpOnly,
+            sameSite: config.sameSite !== undefined ? config.sameSite : cookie.sameSite
+          };
+        }
+        return cookie;
+      });
+
+      // Check if cookie was found
+      const cookieExists = currentCookies.some(c => c.name === config.cookieName);
+      if (!cookieExists) {
+        throw new Error(`Cookie "${config.cookieName}" not found`);
+      }
+
+      // Update project cookies
+      await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+        cookies: updatedCookies,
+        source: 'workflow'
+      }, {
+        headers: this.getAuthHeaders()
+      });
+
+      this.storeStepResult(step, { cookieName: config.cookieName, updated: true }, workflowState);
+      console.log(`[WorkflowAnalyzer] ✅ Cookie "${config.cookieName}" updated successfully`);
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Cookie update failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute cookie remove step
+   */
+  async executeCookieRemoveStep(step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🗑️ Removing cookie (${step.name})`);
+    
+    const config = step.config || {};
+    const removeAll = config.removeAll || false;
+    const cookieName = config.cookieName;
+
+    if (!removeAll && !cookieName) {
+      throw new Error(`Cookie name is required or removeAll must be true for step: ${step.name}`);
+    }
+
+    try {
+      // Get project ID from job
+      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+        headers: this.getAuthHeaders()
+      });
+      const projectId = jobResponse.data?.project_id;
+      
+      if (!projectId) {
+        throw new Error(`Could not find project ID for job: ${jobId}`);
+      }
+
+      if (removeAll) {
+        // Clear all cookies
+        await axios.delete(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+          headers: this.getAuthHeaders()
+        });
+        this.storeStepResult(step, { removedAll: true }, workflowState);
+        console.log(`[WorkflowAnalyzer] ✅ All cookies removed successfully`);
+      } else {
+        // Remove specific cookie
+        const currentCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+          headers: this.getAuthHeaders()
+        });
+        const currentCookies = currentCookiesResponse.data || [];
+
+        const updatedCookies = currentCookies.filter(cookie => cookie.name !== cookieName);
+
+        if (updatedCookies.length === currentCookies.length) {
+          throw new Error(`Cookie "${cookieName}" not found`);
+        }
+
+        await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+          cookies: updatedCookies,
+          source: 'workflow'
+        }, {
+          headers: this.getAuthHeaders()
+        });
+
+        this.storeStepResult(step, { cookieName, removed: true }, workflowState);
+        console.log(`[WorkflowAnalyzer] ✅ Cookie "${cookieName}" removed successfully`);
+      }
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Cookie remove failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Execute cookie collect step
+   */
+  async executeCookieCollectStep(step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🔍 Collecting cookies (${step.name})`);
+    
+    const config = step.config || {};
+    const source = config.source || 'latest';
+
+    try {
+      // Get project ID from job
+      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+        headers: this.getAuthHeaders()
+      });
+      const projectId = jobResponse.data?.project_id;
+      
+      if (!projectId) {
+        throw new Error(`Could not find project ID for job: ${jobId}`);
+      }
+
+      let collectedCookies = [];
+
+      if (source === 'latest') {
+        // Collect from latest login job
+        const latestCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/latest-cookies`, {
+          headers: this.getAuthHeaders()
+        });
+        collectedCookies = latestCookiesResponse.data || [];
+      } else if (source === 'job') {
+        // Collect from specific job
+        if (!config.jobId) {
+          throw new Error(`Job ID is required when source is 'job'`);
+        }
+        const jobDataResponse = await axios.get(`${this.backendUrl}/api/jobs/${config.jobId}`, {
+          headers: this.getAuthHeaders()
+        });
+        const jobData = jobDataResponse.data;
+        if (jobData && jobData.result && jobData.result.cookies) {
+          collectedCookies = jobData.result.cookies;
+        }
+      } else if (source === 'workflowState') {
+        // Collect from workflow state
+        if (!config.sourceField) {
+          throw new Error(`sourceField is required when source is 'workflowState'`);
+        }
+        const cookiesData = this.resolvePath(config.sourceField, workflowState);
+        if (Array.isArray(cookiesData)) {
+          collectedCookies = cookiesData;
+        } else {
+          throw new Error(`Cookies at path "${config.sourceField}" is not an array`);
+        }
+      }
+
+      // Store collected cookies in workflow state
+      if (config.outputVariable) {
+        workflowState[config.outputVariable] = collectedCookies;
+      }
+      workflowState.collectedCookies = collectedCookies;
+
+      // Optionally save to project
+      if (config.saveToProject !== false) {
+        await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+          cookies: collectedCookies,
+          source: 'workflow'
+        }, {
+          headers: this.getAuthHeaders()
+        });
+      }
+
+      this.storeStepResult(step, { cookies: collectedCookies, count: collectedCookies.length }, workflowState);
+      console.log(`[WorkflowAnalyzer] ✅ Collected ${collectedCookies.length} cookie(s) successfully`);
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Cookie collect failed: ${error.message}`);
       throw error;
     }
   }
