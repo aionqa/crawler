@@ -1115,9 +1115,11 @@ class WorkflowAnalyzer {
       type: format === 'jpeg' || format === 'jpg' ? 'jpeg' : 'png'
     };
 
-    if ((screenshotOptions.type === 'jpeg') && quality) {
+    if (screenshotOptions.type === 'jpeg' && typeof quality === 'number') {
       screenshotOptions.quality = quality;
     }
+
+    console.log('[WorkflowAnalyzer] Screenshot options resolved:', screenshotOptions);
 
     const screenshot = await page.screenshot(screenshotOptions);
 
@@ -1132,10 +1134,12 @@ class WorkflowAnalyzer {
       try {
         console.log(`[WorkflowAnalyzer] 📸 Requesting presigned URL for screenshot upload...`);
 
+        const mimeType = screenshotOptions.type === 'jpeg' ? 'image/jpeg' : 'image/png';
+
         const presignedResponse = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
           type: 'screenshot',
           jobId: jobId,
-          contentType: 'image/png'
+          contentType: mimeType
         }, {
           timeout: 10000,
           headers: this.getAuthHeaders()
@@ -1148,7 +1152,7 @@ class WorkflowAnalyzer {
         publicUrl = returnedUrl;
 
         await axios.put(presignedUrl, screenshot, {
-          headers: { 'Content-Type': 'image/png' },
+          headers: { 'Content-Type': mimeType },
           maxBodyLength: Infinity,
           maxContentLength: Infinity,
           timeout: 30000
@@ -1290,6 +1294,22 @@ class WorkflowAnalyzer {
       page_url: workflowState.pageUrl,
       visible_text: workflowState.visibleText
     };
+
+    const attachments = Array.isArray(step.config?.attachments)
+      ? step.config.attachments
+      : [];
+
+    if (attachments.includes('interactive_elements') && workflowState.playwrightAnalysis?.interactive_elements) {
+      descriptionPayload.interactive_elements = workflowState.playwrightAnalysis.interactive_elements.slice(0, 25);
+    }
+
+    if (attachments.includes('forms') && workflowState.playwrightAnalysis?.forms) {
+      descriptionPayload.forms = workflowState.playwrightAnalysis.forms.slice(0, 15);
+    }
+
+    if (attachments.includes('links') && workflowState.playwrightAnalysis?.links) {
+      descriptionPayload.links = workflowState.playwrightAnalysis.links.slice(0, 40);
+    }
     
     // Log prompt usage
     await this.logPromptUsage(promptName, promptSource, customTemplate || 'Default from database', descriptionPayload);
@@ -1455,10 +1475,21 @@ class WorkflowAnalyzer {
     const customTemplate = this.getPromptTemplate(promptName);
     const promptSource = customTemplate ? 'workflow-template' : 'database';
     
-    // Prepare interactive elements as JSON string
+    // Prepare playbook data as JSON strings (trimmed to reasonable sizes for prompts)
+    const formsData = Array.isArray(workflowState.playwrightAnalysis?.forms)
+      ? workflowState.playwrightAnalysis.forms.slice(0, 20)
+      : [];
+    const interactiveData = Array.isArray(workflowState.playwrightAnalysis?.interactive_elements)
+      ? workflowState.playwrightAnalysis.interactive_elements.slice(0, 30)
+      : [];
+    const linksData = Array.isArray(workflowState.playwrightAnalysis?.links)
+      ? workflowState.playwrightAnalysis.links.slice(0, 40)
+      : [];
+
     const interactiveElementsJson = JSON.stringify({
-      forms: workflowState.playwrightAnalysis?.forms || [],
-      interactive_elements: workflowState.playwrightAnalysis?.interactive_elements || []
+      forms: formsData,
+      interactive_elements: interactiveData,
+      links: linksData
     }, null, 2);
     
     const optimizedPayload = {
@@ -1466,6 +1497,8 @@ class WorkflowAnalyzer {
       page_title: workflowState.pageTitle,
       page_description: workflowState.pageDescription,
       interactive_elements_json: interactiveElementsJson,
+      forms_json: JSON.stringify(formsData, null, 2),
+      links_json: JSON.stringify(linksData, null, 2),
       conversation_history: workflowState.conversationHistory,
       additional_prompt_text: this.context.additional_prompt_text || ''
     };

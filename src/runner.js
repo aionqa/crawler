@@ -361,8 +361,25 @@ async function executeLoginJob(job, streamInterval) {
  */
 async function executeCrawlJob(job, streamInterval) {
   // Extract job parameters
-  const { url, cookies = [], context = {} } = job;
-  const openaiApiKey = context.openai_api_key || process.env.OPENAI_API_KEY;
+  const { url, cookies = [], context: rawContext = {}, options: jobOptions = {} } = job;
+  const executeWorkflowFlag =
+    rawContext?.execute_workflow !== undefined
+      ? rawContext.execute_workflow
+      : (jobOptions?.execute_workflow !== undefined
+          ? jobOptions.execute_workflow
+          : true);
+
+  const normalizedContext = {
+    ...rawContext,
+    execute_workflow: executeWorkflowFlag,
+    options: {
+      ...jobOptions,
+      ...(rawContext?.options || {}),
+      execute_workflow: executeWorkflowFlag
+    }
+  };
+
+  const openaiApiKey = normalizedContext.openai_api_key || process.env.OPENAI_API_KEY;
 
   if (!openaiApiKey) {
     throw new Error('OpenAI API key not provided');
@@ -370,7 +387,7 @@ async function executeCrawlJob(job, streamInterval) {
 
   // Set job_id in context for logging and pass stream callback
   const executionContext = {
-    ...context,
+    ...normalizedContext,
     job_id: job.id,
     useRemoteBrowser: false, // Use local browser (embedded)
     runnerId: RUNNER_ID,
