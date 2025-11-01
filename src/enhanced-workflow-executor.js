@@ -55,21 +55,40 @@ class EnhancedWorkflowExecutor {
   /**
    * Get prompt template by name from workflow template
    */
-  getPromptTemplate(promptName) {
-    if (!this.workflowTemplate || !this.workflowTemplate.prompts) {
+  getPromptConfig(promptName) {
+    if (!this.workflowTemplate || !Array.isArray(this.workflowTemplate.prompts)) {
       console.log(`[EnhancedWorkflowExecutor] 📋 Using DEFAULT prompt from database: "${promptName}"`);
       return null;
     }
 
-    const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName);
-    if (prompt && prompt.template) {
-      console.log(`[EnhancedWorkflowExecutor] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
-      console.log(`[EnhancedWorkflowExecutor] 📝 Prompt text: ${prompt.template.substring(0, 100)}...`);
-      return prompt.template;
-    } else {
+    const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName || p.slug === promptName);
+    if (!prompt) {
       console.log(`[EnhancedWorkflowExecutor] 📋 Prompt "${promptName}" not found in template or template is empty, using DEFAULT from database`);
       return null;
     }
+
+    const promptConfig = {
+      name: prompt.name || prompt.slug || promptName,
+      user_message_template: prompt.user_message_template || prompt.template || null,
+      system_message: prompt.system_message_template || prompt.system_message || null,
+      response_schema: prompt.response_schema || null,
+      response_schema_description: prompt.response_schema_description || null
+    };
+
+    if (promptConfig.user_message_template) {
+      console.log(`[EnhancedWorkflowExecutor] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
+      console.log(`[EnhancedWorkflowExecutor] 📝 Prompt text: ${promptConfig.user_message_template.substring(0, 100)}...`);
+    } else {
+      console.log(`[EnhancedWorkflowExecutor] ⚠️ Prompt "${promptName}" found but missing user message template, falling back to default`);
+      return null;
+    }
+
+    return promptConfig;
+  }
+
+  getPromptTemplate(promptName) {
+    const promptConfig = this.getPromptConfig(promptName);
+    return promptConfig?.user_message_template || null;
   }
 
   /**
@@ -330,8 +349,9 @@ class EnhancedWorkflowExecutor {
           
           // Use custom prompt template if available
           const scriptPromptName = 'generate-workflow-script';
-          const customScriptTemplate = this.getPromptTemplate(scriptPromptName);
-          const scriptPromptSource = customScriptTemplate ? 'workflow-template' : 'database';
+          const customScriptPrompt = this.getPromptConfig(scriptPromptName);
+          const customScriptTemplate = customScriptPrompt?.user_message_template || null;
+          const scriptPromptSource = customScriptPrompt ? 'workflow-template' : 'database';
           
           // Log prompt usage
           await this.logPromptUsage(scriptPromptName, scriptPromptSource, customScriptTemplate || 'Default from database', scriptRequest);
@@ -344,7 +364,7 @@ class EnhancedWorkflowExecutor {
             page.url(),
             screenshotBeforeKey,  // screenshotId for tracking
             scriptRequest,  // Pass scriptRequest as sourcePayload for full attachment logging
-            customScriptTemplate // Pass custom template if available
+            customScriptPrompt || customScriptTemplate // Pass custom template if available
           );
           console.log(`[EnhancedWorkflowExecutor] DEBUG: makeAICallWithPrompt completed successfully`);
 
@@ -433,8 +453,9 @@ class EnhancedWorkflowExecutor {
 
         // Use custom prompt template if available
         const verifyPromptName = 'verify-workflow-leg';
-        const customVerifyTemplate = this.getPromptTemplate(verifyPromptName);
-        const verifyPromptSource = customVerifyTemplate ? 'workflow-template' : 'database';
+        const customVerifyPrompt = this.getPromptConfig(verifyPromptName);
+        const customVerifyTemplate = customVerifyPrompt?.user_message_template || null;
+        const verifyPromptSource = customVerifyPrompt ? 'workflow-template' : 'database';
         
         // Log prompt usage
         await this.logPromptUsage(verifyPromptName, verifyPromptSource, customVerifyTemplate || 'Default from database', verificationRequest);
@@ -447,7 +468,7 @@ class EnhancedWorkflowExecutor {
           page.url(),
           screenshotAfterKey,  // screenshotId for tracking
           verificationRequest,  // Pass verificationRequest as sourcePayload for full attachment logging
-          customVerifyTemplate // Pass custom template if available
+          customVerifyPrompt || customVerifyTemplate // Pass custom template if available
         );
 
         // Step 8: Record iteration with FULL data (no trimming)

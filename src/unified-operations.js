@@ -11,7 +11,6 @@ import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
 import WorkflowAnalyzer from './workflow-analyzer.js';
 import WorkflowExecutor from './workflow-executor.js';
-import EnhancedWorkflowExecutor from './enhanced-workflow-executor.js';
 import OptimizedWorkflowAnalyzer from './optimized-workflow-analyzer.js';
 import axios from 'axios';
 
@@ -1078,6 +1077,14 @@ async function createConversationFlowStep(page, jobId, stepData) {
 }
 
 // Generic AI validation function for ANY operation
+const VALIDATION_PROMPT_SLUGS = {
+  login: 'validate-login-success',
+  crawl: 'validate-crawl-success',
+  form_test: 'validate-form-success',
+  link_click: 'validate-navigation-success',
+  page_analysis: 'validate-analysis-success'
+};
+
 async function validateActionSuccessWithAI(page, context, openaiClient, approach, operation, expectedOutcome = null) {
   const jobId = context.job_id || 'unknown';
   const currentUrl = page.url();
@@ -1106,100 +1113,39 @@ async function validateActionSuccessWithAI(page, context, openaiClient, approach
     const localStorage = await safeGetLocalStorage(page);
     const sessionStorage = await safeGetSessionStorage(page);
     
-    // Build operation-specific prompts
-    let operationPrompts = {
-      login: `You are examining data to determine if authentication was successful.
+    const promptSlug = VALIDATION_PROMPT_SLUGS[operation] || VALIDATION_PROMPT_SLUGS.page_analysis;
+    const urlPath = new URL(currentUrl).pathname || '/';
+    const authCookies = allCookies.filter(c => {
+      const name = (c.name || '').toLowerCase();
+      return name.includes('auth') || name.includes('session');
+    });
 
-IMPORTANT: Consider authentication SUCCESSFUL if the content clearly shows success indicators,
-EVEN IF no authentication tokens were collected. Many test/demo sites don't set authentication cookies.
-
-SUCCESS INDICATORS (ANY of these means authentication succeeded):
-✅ Document title contains: "logged in", "success", "dashboard", "welcome", "home", "profile"
-✅ Content contains: "logged in successfully", "welcome", "logout", "sign out"
-✅ Navigation completed to different content
-✅ Authentication tokens collected (bonus, but NOT required)`,
-
-      crawl: `You are examining data to determine if content extraction was successful.
-
-SUCCESS INDICATORS:
-✅ Content loaded completely (no errors)
-✅ Data content is accessible
-✅ Interactive elements are visible
-✅ No access denied or error messages`,
-
-      form_test: `You are examining data to determine if form submission was successful.
-
-SUCCESS INDICATORS:
-✅ Form submitted without errors
-✅ Success message or confirmation displayed
-✅ Content changed or updated after submission
-✅ No validation errors shown`,
-
-      link_click: `You are examining data to determine if navigation was successful.
-
-SUCCESS INDICATORS:
-✅ Navigation completed to new content
-✅ New content loaded successfully  
-✅ No 404 or error content
-✅ Data is accessible`,
-
-      page_analysis: `You are examining data to determine if content analysis was successful.
-
-SUCCESS INDICATORS:
-✅ Content extracted successfully
-✅ Interactive elements identified
-✅ Forms and links detected
-✅ No parsing or access errors`
+    const promptPayload = {
+      page_url: currentUrl,
+      page_title: currentTitle,
+      url_path: urlPath,
+      page_content: pageContent.substring(0, 50000),
+      expected_outcome: expectedOutcome || '',
+      approach,
+      operation,
+      cookies_total: allCookies.length,
+      auth_cookie_names: authCookies.map(c => c.name).join(', '),
+      cookies_json: JSON.stringify(allCookies, null, 2),
+      local_storage_json: JSON.stringify(localStorage, null, 2),
+      session_storage_json: JSON.stringify(sessionStorage, null, 2),
+      screenshot_available: Boolean(validationScreenshot?.screenshotId)
     };
 
-    const operationInstructions = operationPrompts[operation] || operationPrompts['page_analysis'];
-    const expectedInfo = expectedOutcome ? `\n\nEXPECTED OUTCOME:\n${expectedOutcome}` : '';
-    const urlPath = new URL(currentUrl).pathname || '/';
-    
-    const aiPrompt = `${operationInstructions}
-
-CURRENT STATE:
-PAGE TITLE: ${currentTitle}
-PATH: ${urlPath}
-COOKIES: ${allCookies.length} total
-AUTH COOKIES: ${allCookies.filter(c => c.name.toLowerCase().includes('auth') || c.name.toLowerCase().includes('session')).length}
-
-PAGE CONTENT:
-${pageContent}${expectedInfo}
-
-Respond with JSON:
-{
-  "confirmed": true/false,
-  "confidence": 0.0-1.0,
-  "reason": "explanation focusing on page content",
-  "evidence": ["evidence from page content"],
-  "auth_tokens_collected": {
-    "cookies": ["cookie names"],
-    "localStorage_keys": [],
-    "sessionStorage_keys": []
-  },
-  "recommendations": [],
-  "action_completed": true/false
-}`;
-
-    // Create AI conversation for validation
-    const completion = await aiConversationLogger.createChatCompletion(
-      openaiClient,
+    const validation = await aiConversationLogger.makeAICallWithPrompt(
+      promptSlug,
+      promptPayload,
       jobId,
       'unified-crawler',
-      `${operation}_validation`,
-      {
-        model: "gpt-5-mini",
-        messages: [{ 
-          role: "user", 
-          content: aiPrompt 
-        }],
-      },
-      validationScreenshot?.screenshotId,
       currentUrl,
+      validationScreenshot?.screenshotId,
       {
-        approach: approach,
-        operation: operation,
+        approach,
+        operation,
         validation_type: `${operation}_success`,
         page_title: currentTitle,
         cookies_count: allCookies.length,
@@ -1209,8 +1155,6 @@ Respond with JSON:
         screenshot_path: validationScreenshot?.screenshotPath
       }
     );
-
-    const validation = JSON.parse(completion.choices[0].message.content);
     
     await sendLog(jobId, 'info', `🤖 AI Validation Complete: ${validation.confirmed ? 'CONFIRMED' : 'NOT CONFIRMED'}`, {
       ...pageContext,
@@ -1449,7 +1393,15 @@ const modeHandlers = {
     
     // Initialize workflow analyzer and enhanced executor with context
     const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger, context);
-    const workflowExecutor = new EnhancedWorkflowExecutor(backendUrl, aiConversationLogger, backendLogger, context);
+    const workflowExecutor = new WorkflowExecutor(backendUrl, aiConversationLogger, backendLogger, context);
+    const executeWorkflowFlag =
+      context.execute_workflow !== undefined
+        ? context.execute_workflow
+        : (context.options?.execute_workflow !== undefined
+            ? context.options.execute_workflow
+            : true);
+    const shouldExecuteWorkflowLegs = executeWorkflowFlag !== false;
+    let workflowTemplateLoaded = false;
 
     await workflowAnalyzer.loadWorkflowTemplate();
     const workflowCapabilities = workflowAnalyzer.getCapabilities();
@@ -1560,12 +1512,22 @@ const modeHandlers = {
 
           allWorkflows.push(analysisResult);
 
-          if (context.execute_workflow !== false) {
-            await sendLog(jobId, 'info', `▶️ Executing workflow using WorkflowAnalyzer...`);
-            try {
-              await sendLog(jobId, 'info', `✅ Workflow execution completed via WorkflowAnalyzer`);
-            } catch (execError) {
-              await sendLog(jobId, 'warn', `⚠️ Workflow execution partially completed: ${execError.message}`);
+          if (shouldExecuteWorkflowLegs) {
+            if (!analysisResult?.workflow_id) {
+              await sendLog(jobId, 'warn', '⚠️ Skipping workflow leg execution (workflow_id missing from analysis result)');
+            } else {
+              try {
+                if (!workflowTemplateLoaded) {
+                  await workflowExecutor.loadWorkflowTemplate();
+                  workflowTemplateLoaded = true;
+                }
+
+                await sendLog(jobId, 'info', `▶️ Executing workflow legs for ${analysisResult.workflow_id}...`);
+                const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
+                await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
+              } catch (execError) {
+                await sendLog(jobId, 'warn', `⚠️ Workflow leg execution encountered issues: ${execError.message}`);
+              }
             }
           }
         }
@@ -4350,136 +4312,37 @@ async function executeSimplifiedApproach(page, jobId, context, openaiClient) {
     
     await sendLog(jobId, 'info', `📊 Extracted: ${forms.length} forms, ${links.total} links`, { page_url: pageUrl });
     
-    // Step 3: Send to OpenAI for action decision
-    const aiPrompt = `You are analyzing a web page using structured JSON data from Playwright.
-
-PAGE DATA:
-${JSON.stringify(structuredData, null, 2)}
-
-TASK: Based on this structure, what actions should be performed on this page?
-
-If this is a login page, provide steps to login.
-If this is a form, provide steps to fill and submit.
-If this is a content page, provide navigation recommendations.
-
-CRITICAL: Respond with comprehensive JSON containing human-readable summaries AND structured data.
-
-RESPOND WITH THIS EXACT FORMAT:
-{
-  "code": "{\"action_type\": \"login|form_fill|navigate|none\", \"confidence\": 0.0-1.0, \"steps\": [{\"action\": \"fill\", \"selector\": \"...\", \"value\": \"{parameter_name}\"}, {\"action\": \"click\", \"selector\": \"...\"}], \"reasoning\": \"Why these steps are appropriate\"}",
-  "page_summary": "Human-readable summary of what was found on this page and what actions will be taken",
-  "chat_message": "Conversational message explaining the analysis and next steps for the user"
-}`;
-
-    const completion = await aiConversationLogger.createChatCompletion(
-      openaiClient,
+    // Step 3: Send to OpenAI for action decision using stored prompt template
+    const structuredDataJson = JSON.stringify(structuredData, null, 2);
+    const aiResponse = await aiConversationLogger.makeAICallWithPrompt(
+      'simplified-approach-analysis',
+      {
+        page_url: pageUrl,
+        page_title: pageTitle,
+        structured_data: structuredDataJson,
+        forms_count: forms.length,
+        internal_links_count: links.internal.length,
+        total_links_count: links.total
+      },
       jobId,
       'unified-crawler',
-      'simplified_approach_analysis',
-      {
-        model: "gpt-5-mini",
-        messages: [{ role: "user", content: aiPrompt }],
-      },
-      null,
       pageUrl,
-      { approach: 'simplified', structured_data_size: JSON.stringify(structuredData).length }
+      null,
+      { approach: 'simplified', structured_data_size: structuredDataJson.length }
     );
-    
-    // Parse AI response with validation and retry logic
-    let aiResponse;
-    let retryCount = 0;
-    const maxRetries = 2;
-    
-    while (retryCount <= maxRetries) {
-      try {
-        const rawContent = completion.choices?.[0]?.message?.content || completion.content || '';
-        await sendLog(jobId, 'info', `🔍 Parsing AI response (attempt ${retryCount + 1})`, { 
-          page_url: pageUrl, 
-          response_length: rawContent.length,
-          response_preview: rawContent.substring(0, 200)
-        });
-        
-        // Try to parse the response
-        let parsedContent;
-        try {
-          parsedContent = JSON.parse(rawContent);
-        } catch (parseError) {
-          await sendLog(jobId, 'warn', `❌ JSON parse failed: ${parseError.message}`, { 
-            page_url: pageUrl,
-            raw_content: rawContent.substring(0, 500)
-          });
-          throw new Error(`Invalid JSON: ${parseError.message}`);
-        }
-        
-        // Check if response has "code" field
-        if (parsedContent.code) {
-          aiResponse = JSON.parse(parsedContent.code);
-        } else {
-          // Fallback: try to parse the content directly
-          aiResponse = parsedContent;
-        }
-        
-        // Validate required fields
-        if (!aiResponse.action_type || typeof aiResponse.confidence !== 'number') {
-          throw new Error(`Missing required fields: action_type=${aiResponse.action_type}, confidence=${aiResponse.confidence}`);
-        }
-        
-        // Log human-readable summaries
-        if (parsedContent.page_summary) {
-          await sendLog(jobId, 'info', `📄 Page Analysis: ${parsedContent.page_summary}`, { page_url: pageUrl });
-        }
-        
-        if (parsedContent.chat_message) {
-          await sendLog(jobId, 'info', `💬 AI Chat: ${parsedContent.chat_message}`, { page_url: pageUrl });
-        }
-        
-        break; // Success, exit retry loop
-        
-      } catch (error) {
-        retryCount++;
-        await sendLog(jobId, 'warn', `❌ AI response parsing failed (attempt ${retryCount}): ${error.message}`, { 
-          page_url: pageUrl,
-          retry_count: retryCount,
-          max_retries: maxRetries
-        });
-        
-        if (retryCount > maxRetries) {
-          throw new Error(`Failed to parse AI response after ${maxRetries + 1} attempts: ${error.message}`);
-        }
-        
-        // Retry with corrected prompt
-        const retryPrompt = `The previous response was invalid JSON. Please fix the format.
 
-ERROR: ${error.message}
-
-CRITICAL: Respond with comprehensive JSON containing human-readable summaries AND structured data.
-
-RESPOND WITH THIS EXACT FORMAT:
-{
-  "code": "{\"action_type\": \"login|form_fill|navigate|none\", \"confidence\": 0.0-1.0, \"steps\": [{\"action\": \"fill\", \"selector\": \"...\", \"value\": \"{parameter_name}\"}, {\"action\": \"click\", \"selector\": \"...\"}], \"reasoning\": \"Why these steps are appropriate\"}",
-  "page_summary": "Human-readable summary of what was found on this page and what actions will be taken",
-  "chat_message": "Conversational message explaining the analysis and next steps for the user"
-}`;
-        
-        const retryCompletion = await aiConversationLogger.createChatCompletion(
-          openaiClient,
-          jobId,
-          'unified-crawler',
-          'simplified_approach_retry',
-          {
-            model: "gpt-5-mini",
-            messages: [{ role: "user", content: retryPrompt }],
-          },
-          null,
-          pageUrl,
-          { approach: 'simplified', retry_attempt: retryCount }
-        );
-        
-        completion.choices = retryCompletion.choices;
-        completion.content = retryCompletion.choices?.[0]?.message?.content || retryCompletion.content;
-      }
+    if (aiResponse.page_summary) {
+      await sendLog(jobId, 'info', `📄 Page Analysis: ${aiResponse.page_summary}`, { page_url: pageUrl });
     }
-    
+
+    if (aiResponse.chat_message) {
+      await sendLog(jobId, 'info', `💬 AI Chat: ${aiResponse.chat_message}`, { page_url: pageUrl });
+    }
+
+    if (!aiResponse.action_type || typeof aiResponse.confidence !== 'number') {
+      throw new Error(`Missing required fields in AI response: action_type=${aiResponse.action_type}, confidence=${aiResponse.confidence}`);
+    }
+
     await sendLog(jobId, 'info', `🤖 AI Decision: ${aiResponse.action_type} (confidence: ${aiResponse.confidence})`, { page_url: pageUrl });
     
     return {
@@ -4518,24 +4381,18 @@ async function executeTextApproach(page, jobId, context, openaiClient) {
     await sendLog(jobId, 'info', `📝 HTML extracted (${htmlContent.length} chars, using ${htmlSnippet.length} chars)`, { page_url: pageUrl });
     
     // Step 2: Get action list from OpenAI
-    const listPrompt = `You are analyzing a web page's HTML to determine what actions should be performed.
+    const listPromptTemplate = await aiConversationLogger.fetchPrompt('text-approach-action-list');
+    if (!listPromptTemplate || !listPromptTemplate.user_message_template) {
+      throw new Error('Prompt "text-approach-action-list" is not configured in the database');
+    }
 
-PAGE TITLE: ${pageTitle}
-PAGE URL: ${pageUrl}
-
-HTML CONTENT:
-${htmlSnippet}
-
-TASK: List all actions that should be performed on this page (login, form fill, navigation, etc.)
-
-CRITICAL: Respond with comprehensive JSON containing human-readable summaries AND structured data.
-
-RESPOND WITH THIS EXACT FORMAT:
-{
-  "code": "{\"actions\": [\"Action 1 description\", \"Action 2 description\"], \"page_type\": \"login|form|content|dashboard\", \"confidence\": 0.0-1.0}",
-  "page_summary": "Human-readable summary of what was found on this page and what actions will be taken",
-  "chat_message": "Conversational message explaining the analysis and next steps for the user"
-}`;
+    const listPrompt = aiConversationLogger.replacePlaceholders(listPromptTemplate.user_message_template, {
+      page_title: pageTitle,
+      page_url: pageUrl,
+      html_content: htmlSnippet,
+      full_html_length: htmlContent.length,
+      truncated_html_length: htmlSnippet.length
+    });
 
     const listCompletion = await aiConversationLogger.createChatCompletion(
       openaiClient,
@@ -4728,17 +4585,14 @@ RESPOND WITH THIS EXACT FORMAT:
       const freshBase64 = freshScreenshot.toString('base64');
       
       // Ask OpenAI where the element is
-      const locatePrompt = `Looking at this screenshot, where is the element for: "${actionDesc}"?
+      const locatePromptTemplate = await aiConversationLogger.fetchPrompt('media-approach-locate-action');
+      if (!locatePromptTemplate || !locatePromptTemplate.user_message_template) {
+        throw new Error('Prompt "media-approach-locate-action" is not configured in the database');
+      }
 
-Provide coordinates or description.
-
-RESPOND WITH JSON:
-{
-  "location_strategy": "coordinates" | "selector",
-  "coordinates": { "x": number, "y": number } | null,
-  "selector_suggestion": "CSS selector" | null,
-  "description": "Visual description of element location"
-}`;
+      const locatePrompt = aiConversationLogger.replacePlaceholders(locatePromptTemplate.user_message_template, {
+        action_description: actionDesc
+      });
 
       const locateCompletion = await aiConversationLogger.createChatCompletion(
         openaiClient,
@@ -4838,38 +4692,20 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
     await sendLog(jobId, 'info', `📋 Metadata extracted, ${commonSelectors.length} common selectors found`, { page_url: pageUrl });
     
     // Step 3: Send to OpenAI for Playwright script generation
-    const scriptPrompt = `You are a QA automation engineer using the STATIC approach. Generate Playwright test scripts using ONLY the provided metadata and common selectors.
+    const scriptPromptTemplate = await aiConversationLogger.fetchPrompt('static-approach-script-generation');
+    if (!scriptPromptTemplate || !scriptPromptTemplate.user_message_template) {
+      throw new Error('Prompt "static-approach-script-generation" is not configured in the database');
+    }
 
-PAGE METADATA ONLY:
-- Title: ${metadata.title}
-- URL: ${pageUrl}
-- Description: ${metadata.description}
-- Keywords: ${metadata.keywords}
-- Main Heading: ${metadata.h1}
-- Subheadings: ${metadata.h2.join(', ')}
-
-AVAILABLE COMMON SELECTORS (use ONLY these):
-${commonSelectors.map(s => `- ${s}`).join('\n')}
-
-TASK:
-Based on the page metadata and common selectors, generate Playwright test scripts for likely scenarios.
-
-REQUIREMENTS:
-- Scripts must be async functions: async (page, context) => { ... }
-- Use ONLY the provided common selectors
-- Include robust error handling (try/catch)
-- Add meaningful comments
-- Return result object: { success: true/false, message: "...", data: {...} }
-- Assume context contains: { username, password, testData }
-
-CRITICAL: Respond with comprehensive JSON containing human-readable summaries AND structured data.
-
-RESPOND WITH THIS EXACT FORMAT:
-{
-  "code": "{\"scenarios\": [{\"name\": \"Test scenario name\", \"description\": \"What this test validates\", \"playwright_script\": \"async (page, context) => { /* complete script code here */ }\", \"expected_outcome\": \"What should happen if test passes\", \"validation_rules\": [\"rule 1\", \"rule 2\"], \"parameters\": {\"username\": \"context.username\", \"password\": \"context.password\"}}], \"analysis\": \"Testing strategy based on metadata and common patterns\"}",
-  "page_summary": "Human-readable summary of what was found on this page and what test scripts will be generated",
-  "chat_message": "Conversational message explaining the analysis and test generation strategy for the user"
-}`;
+    const scriptPrompt = aiConversationLogger.replacePlaceholders(scriptPromptTemplate.user_message_template, {
+      page_title: metadata.title,
+      page_url: pageUrl,
+      page_description: metadata.description,
+      page_keywords: metadata.keywords,
+      main_heading: metadata.h1,
+      subheadings: metadata.h2.join(', '),
+      available_selectors: commonSelectors.map(sel => `- ${sel}`).join('\n')
+    });
 
     const scriptCompletion = await aiConversationLogger.createChatCompletion(
       openaiClient,
