@@ -924,6 +924,7 @@ class WorkflowAnalyzer {
       aiAnalysisResult: null,
       workflowId: null,
       legs: [],
+      legResults: [],
       inputCredentials: this.context?.credentials || {
         username: this.context?.username || null,
         password: this.context?.password || null
@@ -1030,6 +1031,10 @@ class WorkflowAnalyzer {
             
           case 'sleep':
             await this.executeSleepStep(step, workflowState);
+            break;
+            
+          case 'for-each':
+            await this.executeForEachStep(page, step, workflowState, jobId);
             break;
             
           default:
@@ -1396,7 +1401,7 @@ class WorkflowAnalyzer {
   async executeAIPromptStep(page, step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 🤖 Executing AI prompt (${step.name})`);
     
-    const promptName = step.config?.prompt || step.prompt_slug || step.name;
+    const promptName = step.config?.prompt_slug || step.config?.prompt || step.prompt_slug || step.name;
     const customTemplate = this.getPromptTemplate(promptName);
     const promptSource = customTemplate ? 'workflow-template' : 'database';
     
@@ -1423,6 +1428,15 @@ class WorkflowAnalyzer {
       }
       if (step.config.attachments.includes('page_description') && workflowState.pageDescription) {
         stepPayload.page_description = workflowState.pageDescription;
+      }
+      if (step.config.attachments.includes('current_leg') && workflowState.currentLeg) {
+        stepPayload.current_leg = workflowState.currentLeg;
+      }
+      if (step.config.attachments.includes('last_execution_result') && workflowState.lastExecutionResult) {
+        stepPayload.execution_result = workflowState.lastExecutionResult;
+      }
+      if (step.config.attachments.includes('playwright_analysis') && workflowState.playwrightAnalysis) {
+        stepPayload.playwright_analysis = workflowState.playwrightAnalysis;
       }
     }
     
@@ -1468,7 +1482,7 @@ class WorkflowAnalyzer {
   async executeWorkflowAnalysisStep(page, step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 🔍 Performing workflow analysis (${step.name})`);
     
-    const promptName = step.config?.prompt || step.prompt_slug;
+    const promptName = step.config?.prompt_slug || step.config?.prompt || step.prompt_slug;
     if (!promptName) {
       throw new Error(`No prompt specified for step: ${step.name}`);
     }
@@ -1521,6 +1535,7 @@ class WorkflowAnalyzer {
       if (workflowState.aiAnalysisResult && workflowState.aiAnalysisResult.legs) {
         workflowState.legs = workflowState.aiAnalysisResult.legs;
         console.log(`[WorkflowAnalyzer] ✅ Workflow analysis completed: ${workflowState.legs.length} legs identified`);
+        workflowState.legResults = new Array(workflowState.legs.length).fill(null);
         this.storeStepResult(step, {
           legs: workflowState.legs,
           aiAnalysis: workflowState.aiAnalysisResult
@@ -1822,6 +1837,26 @@ class WorkflowAnalyzer {
     workflowState[slug].stepType = step.type;
     // Also store by name for backward compatibility
     workflowState[`${step.name}_result`] = result;
+    
+    // Also store by step ID if it exists (for nested steps in for-each)
+    if (step.id) {
+      if (!workflowState.results) {
+        workflowState.results = {};
+      }
+      if (!workflowState.results[step.id]) {
+        workflowState.results[step.id] = {};
+      }
+      workflowState.results[step.id].result = result;
+      workflowState.results[step.id].stepName = step.name;
+      workflowState.results[step.id].stepType = step.type;
+      
+      // Also store directly on workflowState for easier access
+      workflowState[step.id] = {
+        result,
+        stepName: step.name,
+        stepType: step.type
+      };
+    }
   }
 
   /**
@@ -1915,6 +1950,46 @@ class WorkflowAnalyzer {
         },
         { code, workflowState, timeout }
       );
+      workflowState.lastExecutionResult = result;
+      
+      // If result contains workflowState updates (like legsToExecute, context updates), merge them
+      console.log(`[WorkflowAnalyzer] 🔍 Checking result for merge - type: ${typeof result}, isArray: ${Array.isArray(result)}, keys: ${result && typeof result === 'object' && !Array.isArray(result) ? Object.keys(result).join(',') : 'N/A'}`);
+      
+      // Check if result has legsToExecute (handle both object and array results)
+      let resultObj = result;
+      if (Array.isArray(result)) {
+        // If result is an array, check if it's actually legsToExecute
+        if (result.length > 0 && typeof result[0] === 'object' && result[0].leg_id) {
+          // It's an array of leg objects - wrap it
+          resultObj = { legsToExecute: result };
+        } else {
+          resultObj = null; // Can't extract legsToExecute from this array
+        }
+      }
+      
+      if (resultObj && typeof resultObj === 'object' && !Array.isArray(resultObj)) {
+        if (resultObj.legsToExecute && Array.isArray(resultObj.legsToExecute)) {
+          console.log(`[WorkflowAnalyzer] 📦 Merging legsToExecute: ${resultObj.legsToExecute.length} items`);
+          if (resultObj.summary) {
+            console.log(`[WorkflowAnalyzer] 📊 Legs summary:`, JSON.stringify(resultObj.summary));
+          }
+          workflowState.legsToExecute = resultObj.legsToExecute;
+          if (!workflowState.context) {
+            workflowState.context = {};
+          }
+          workflowState.context.legsToExecute = resultObj.legsToExecute;
+          console.log(`[WorkflowAnalyzer] ✅ Merged legsToExecute into workflowState and context`);
+        } else {
+          console.log(`[WorkflowAnalyzer] ⚠️ Result doesn't have legsToExecute array. Result keys: ${Object.keys(resultObj).join(', ')}`);
+        }
+        if (resultObj.context && typeof resultObj.context === 'object') {
+          workflowState.context = { ...workflowState.context, ...resultObj.context };
+        }
+        if (resultObj.legs && Array.isArray(resultObj.legs)) {
+          workflowState.legs = resultObj.legs;
+        }
+      }
+      
       this.storeStepResult(step, result, workflowState);
       console.log(`[WorkflowAnalyzer] ✅ Code execution completed: ${JSON.stringify(result).substring(0, 100)}...`);
     } catch (error) {
@@ -2417,6 +2492,317 @@ class WorkflowAnalyzer {
       console.error(`[WorkflowAnalyzer] ❌ Sleep step failed: ${error.message}`);
       throw error;
     }
+  }
+
+  /**
+   * Execute for-each step - iterate over items and execute nested steps
+   */
+  async executeForEachStep(page, step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🔁 Executing for-each step (${step.name})`);
+    
+    const config = step.config || {};
+    const {
+      itemsPath,
+      sourceType = 'context',
+      itemVariable = 'currentItem',
+      indexVariable = `${itemVariable}Index`,
+      maxItems,
+      resultKey: providedResultKey,
+      steps: nestedStepsConfig = []
+    } = config;
+
+    if (!itemsPath) {
+      throw new Error(`for-each step ${step.id || ''} is missing required config.itemsPath`);
+    }
+
+    // Resolve items from context or results
+    let items = this.resolvePathValue(workflowState, itemsPath, sourceType);
+    
+    // If not found, try multiple fallback locations
+    if (!Array.isArray(items)) {
+      // Try directly on workflowState (from merge logic)
+      if (workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute)) {
+        items = workflowState.legsToExecute;
+      }
+      // Try from context (from merge logic)
+      else if (workflowState.context?.legsToExecute && Array.isArray(workflowState.context.legsToExecute)) {
+        items = workflowState.context.legsToExecute;
+      }
+      // Try lastExecutionResult from prepare step
+      else if (workflowState.lastExecutionResult && workflowState.lastExecutionResult.legsToExecute && Array.isArray(workflowState.lastExecutionResult.legsToExecute)) {
+        items = workflowState.lastExecutionResult.legsToExecute;
+      }
+      // Try from previous step result by slug - search all possible slugs
+      else {
+        const possibleSlugs = ['prepare-legs-for-execution', 'prepare_legs_for_execution', 'prepare-legs-for-execution'];
+        let found = false;
+        for (const slug of possibleSlugs) {
+          const prepareResult = workflowState[slug]?.result || workflowState.results?.[slug]?.result;
+          if (prepareResult && prepareResult.legsToExecute && Array.isArray(prepareResult.legsToExecute)) {
+            items = prepareResult.legsToExecute;
+            found = true;
+            break;
+          }
+        }
+        
+        // If still not found, search all workflowState keys for legsToExecute
+        if (!found) {
+          for (const key of Object.keys(workflowState)) {
+            if (workflowState[key] && typeof workflowState[key] === 'object' && workflowState[key].result) {
+              const stepResult = workflowState[key].result;
+              if (stepResult && stepResult.legsToExecute && Array.isArray(stepResult.legsToExecute)) {
+                items = stepResult.legsToExecute;
+                found = true;
+                break;
+              }
+            }
+          }
+        }
+        
+        // Update workflowState if found
+        if (found && Array.isArray(items)) {
+          workflowState.legsToExecute = items;
+          if (!workflowState.context) {
+            workflowState.context = {};
+          }
+          workflowState.context.legsToExecute = items;
+        }
+      }
+    }
+
+    if (!Array.isArray(items)) {
+      throw new Error(`for-each step expected an array at path "${itemsPath}" (source: ${sourceType}), got: ${typeof items}. Checked: lastExecutionResult, workflowState.legsToExecute, context.legsToExecute`);
+    }
+
+    const numericMaxItems = this.coerceToInteger(maxItems);
+    const effectiveItems = numericMaxItems !== null ? items.slice(0, Math.max(numericMaxItems, 0)) : items;
+    const resultKey = providedResultKey || `${step.id || 'for_each'}_results`;
+
+    // Save previous values if they exist
+    const hadItemVariable = Object.prototype.hasOwnProperty.call(workflowState, itemVariable);
+    const previousItemValue = workflowState[itemVariable];
+    const hadIndexVariable = Object.prototype.hasOwnProperty.call(workflowState, indexVariable);
+    const previousIndexValue = workflowState[indexVariable];
+
+    const nestedStepsArray = Array.isArray(nestedStepsConfig) ? nestedStepsConfig : [];
+    const iterationSummaries = [];
+
+    console.log(`[WorkflowAnalyzer] 🔁 Iterating over ${effectiveItems.length} items`);
+
+    for (let idx = 0; idx < effectiveItems.length; idx++) {
+      const item = effectiveItems[idx];
+      workflowState[itemVariable] = item;
+      workflowState[indexVariable] = idx;
+
+      console.log(`[WorkflowAnalyzer] 🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
+      
+      // Execute nested steps for this item
+      if (nestedStepsArray.length > 0) {
+        for (let nestedIdx = 0; nestedIdx < nestedStepsArray.length; nestedIdx++) {
+          const nestedStep = nestedStepsArray[nestedIdx];
+          
+          // Create unique step ID for nested step
+          const baseId = nestedStep.id || `nested-${nestedIdx}`;
+          const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
+          
+          const nestedStepWithId = {
+            ...nestedStep,
+            id: nestedStepId,
+            originalId: nestedStep.id || baseId
+          };
+          
+          console.log(`[WorkflowAnalyzer] 🔁 Executing nested step ${nestedIdx + 1}/${nestedStepsArray.length}: ${nestedStep.name || nestedStep.type} (iteration ${idx + 1})`);
+          
+          try {
+            // Execute nested step using the same switch logic
+            await this.executeStepByType(page, nestedStepWithId, workflowState, jobId);
+          } catch (nestedError) {
+            console.error(`[WorkflowAnalyzer] ❌ Nested step failed in iteration ${idx + 1}: ${nestedError.message}`);
+            // Continue with next step unless critical
+            if (nestedStep.config?.critical) {
+              throw nestedError;
+            }
+          }
+        }
+      }
+
+      // Collect step results for this iteration
+      const stepResults = nestedStepsArray.map((nestedStep, nestedIndex) => {
+        const baseId = nestedStep.id || `nested-${nestedIndex}`;
+        const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
+        return {
+          stepId: nestedStepId,
+          originalStepId: nestedStep.id || baseId,
+          result: workflowState[nestedStepId]
+        };
+      });
+
+      iterationSummaries.push({
+        index: idx,
+        item,
+        stepResults
+      });
+    }
+
+    // Restore previous values
+    if (hadItemVariable) {
+      workflowState[itemVariable] = previousItemValue;
+    } else {
+      delete workflowState[itemVariable];
+    }
+
+    if (hadIndexVariable) {
+      workflowState[indexVariable] = previousIndexValue;
+    } else {
+      delete workflowState[indexVariable];
+    }
+
+    // Store results
+    workflowState[resultKey] = iterationSummaries;
+    if (!workflowState.context) {
+      workflowState.context = {};
+    }
+    workflowState.context[resultKey] = iterationSummaries;
+
+    this.storeStepResult(step, {
+      iterations: iterationSummaries,
+      totalIterations: iterationSummaries.length,
+      resultKey
+    }, workflowState);
+
+    console.log(`[WorkflowAnalyzer] ✅ For-each step completed: ${iterationSummaries.length} iterations`);
+  }
+
+  /**
+   * Execute step by type (used by for-each to execute nested steps)
+   */
+  async executeStepByType(page, step, workflowState, jobId) {
+    switch (step.type) {
+      case 'screenshot':
+        await this.executeScreenshotStep(page, step, workflowState, jobId, workflowState.pageId);
+        break;
+      case 'playwright-analysis':
+        await this.executePlaywrightAnalysisStep(page, step, workflowState, jobId);
+        break;
+      case 'page-description':
+        await this.executePageDescriptionStep(page, step, workflowState, jobId);
+        break;
+      case 'ai-prompt':
+        await this.executeAIPromptStep(page, step, workflowState, jobId);
+        break;
+      case 'workflow-analysis':
+        await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId);
+        break;
+      case 'create-workflow':
+        await this.executeCreateWorkflowStep(step, workflowState, workflowState.pageId, workflowState.projectId, jobId);
+        break;
+      case 'update-workflow':
+        await this.executeUpdateWorkflowStep(step, workflowState, jobId);
+        break;
+      case 'page-discovery':
+        await this.executePageDiscoveryStep(step, workflowState, jobId, workflowState.pageId, workflowState.projectId);
+        break;
+      case 'execute-code':
+        await this.executeCodeStep(page, step, workflowState);
+        break;
+      case 'execute-code-from-variable':
+        await this.executeCodeFromVariableStep(page, step, workflowState);
+        break;
+      case 'validate-response':
+        await this.executeValidateResponseStep(step, workflowState);
+        break;
+      case 'filter-response':
+        await this.executeFilterResponseStep(step, workflowState);
+        break;
+      case 'print':
+        await this.executePrintStep(step, workflowState, jobId);
+        break;
+      case 'sleep':
+        await this.executeSleepStep(step, workflowState);
+        break;
+      default:
+        console.log(`[WorkflowAnalyzer] ⚠️ Unknown nested step type: ${step.type}`);
+    }
+  }
+
+  /**
+   * Resolve path value from object (supports both context and results)
+   */
+  resolvePathValue(source, path, sourceType = 'context') {
+    if (!path || !source) {
+      return undefined;
+    }
+
+    const segments = path.split('.').map(part => part.trim()).filter(Boolean);
+    
+    // Determine starting point based on sourceType
+    let current;
+    if (sourceType === 'results') {
+      // For results, look in source.results or source itself
+      current = source.results || source;
+    } else {
+      // For context, try multiple locations: source.context, source directly, or source[path]
+      // First try source.context
+      if (source.context && segments.length > 0 && source.context[segments[0]] !== undefined) {
+        current = source.context;
+      } else if (segments.length > 0 && source[segments[0]] !== undefined) {
+        // Try direct access on source
+        current = source;
+      } else {
+        // Fallback to context or source
+        current = source.context || source;
+      }
+    }
+    
+    for (const segment of segments) {
+      if (current === null || current === undefined) {
+        return undefined;
+      }
+
+      if (Array.isArray(current)) {
+        const index = Number(segment);
+        if (Number.isNaN(index) || index < 0 || index >= current.length) {
+          return undefined;
+        }
+        current = current[index];
+      } else if (typeof current === 'object') {
+        current = current[segment];
+      } else {
+        return undefined;
+      }
+    }
+
+    return current;
+  }
+
+  /**
+   * Coerce value to integer
+   */
+  coerceToInteger(value) {
+    if (value === undefined || value === null || value === '') {
+      return null;
+    }
+
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) {
+        return null;
+      }
+      return Math.trunc(value);
+    }
+
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed === '') {
+        return null;
+      }
+      const parsed = Number(trimmed);
+      if (!Number.isFinite(parsed)) {
+        return null;
+      }
+      return Math.trunc(parsed);
+    }
+
+    return null;
   }
 
   /**
