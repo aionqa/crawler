@@ -16,7 +16,8 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
   console.log(`[WORKFLOW-FUNCTIONS] Executing AI Request: ${stepId}`);
   
   try {
-    const aiLogger = new AIConversationLogger(BACKEND_URL);
+    const RUNNER_TOKEN = process.env.RUNNER_TOKEN;
+    const aiLogger = new AIConversationLogger(BACKEND_URL, RUNNER_TOKEN);
     
     // Get prompt template from backend
     const promptResponse = await axios.get(`${BACKEND_URL}/api/prompts/${parameters.prompt}`);
@@ -27,7 +28,31 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
     }
 
     // Prepare attachments based on configuration
-    const attachments = await prepareAttachments(page, parameters.attachments || []);
+    const attachments = await prepareAttachments(page, parameters.attachments || [], context);
+
+    const contextFields = Array.isArray(parameters.contextFields) ? parameters.contextFields : [];
+    const contextualPayload = {};
+    for (const field of contextFields) {
+      if (!field) continue;
+      if (typeof field === 'string') {
+        const value = getNestedValue(context?.workflowState || context || {}, field);
+        if (value !== undefined) {
+          const key = field.split('.').pop();
+          contextualPayload[key] = value;
+        }
+        continue;
+      }
+
+      const path = field.path || field.key || field.name;
+      if (!path) continue;
+      const alias = field.name || field.key || path.split('.').pop();
+      const source = field.source || field.from || 'workflowState';
+      const sourceObject = source === 'context' ? (context || {}) : (context?.workflowState || {});
+      const value = getNestedValue(sourceObject, path);
+      if (value !== undefined) {
+        contextualPayload[alias] = value;
+      }
+    }
     
     // Make AI call with retry logic
     let lastError = null;
@@ -37,6 +62,7 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
           parameters.prompt,
           {
             ...attachments,
+            ...contextualPayload,
             pageUrl: context.pageUrl,
             jobId: context.jobId
           },
@@ -59,12 +85,23 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
           }
         }
 
-        return {
+        const responsePayload = {
           success: true,
           result: result,
           attempt: attempt,
-          prompt: parameters.prompt
+          prompt: parameters.prompt,
+          lastAIResponse: result
         };
+
+        if (parameters.storeResultAs) {
+          responsePayload[parameters.storeResultAs] = result;
+        }
+
+        if (parameters.mergeResultIntoContext && typeof result === 'object' && result !== null) {
+          Object.assign(responsePayload, result);
+        }
+
+        return responsePayload;
 
       } catch (error) {
         lastError = error;
@@ -262,7 +299,8 @@ export async function executeCode(page, jobId, stepId, parameters, context) {
       success: true,
       result: result,
       stepId: stepId,
-      code: code
+      code: code,
+      lastExecutionResult: result
     };
 
   } catch (error) {
@@ -534,7 +572,7 @@ export async function executeStopJob(page, jobId, stepId, parameters, context) {
 
 // Helper functions
 
-async function prepareAttachments(page, attachmentTypes) {
+async function prepareAttachments(page, attachmentTypes, context = {}) {
   const attachments = {};
   
   for (const type of attachmentTypes) {
@@ -556,10 +594,30 @@ async function prepareAttachments(page, attachmentTypes) {
         break;
       case 'screenshot':
         const screenshot = await page.screenshot({ fullPage: true });
-        attachments.screenshot = screenshot.toString('base64');
+        attachments.screenshot_base64 = screenshot.toString('base64');
+        attachments.screenshot = attachments.screenshot_base64;
         break;
       case 'page_description':
         // This would be populated by a previous step
+        break;
+      case 'current_action':
+        attachments.current_action = getNestedValue(context?.workflowState || context || {}, 'currentAction');
+        break;
+      case 'current_item':
+        attachments.current_item = getNestedValue(context?.workflowState || context || {}, 'currentItem');
+        break;
+      case 'current_leg':
+        attachments.current_leg = getNestedValue(context?.workflowState || context || {}, 'currentLeg');
+        break;
+      case 'forms':
+        attachments.forms = getNestedValue(context?.workflowState || context || {}, 'forms')
+          || getNestedValue(context?.workflowState || context || {}, 'playwrightAnalysis.forms');
+        break;
+      case 'last_execution_result':
+        attachments.last_execution_result = getNestedValue(context?.workflowState || context || {}, 'lastExecutionResult');
+        break;
+      case 'playwright_analysis':
+        attachments.playwright_analysis = getNestedValue(context?.workflowState || context || {}, 'playwrightAnalysis');
         break;
     }
   }

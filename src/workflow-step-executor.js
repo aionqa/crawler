@@ -11,7 +11,8 @@ import * as BackendLogger from './backend-logger.js';
 export class WorkflowStepExecutor {
   constructor() {
     this.backendUrl = process.env.BACKEND_URL || 'http://back:4000';
-    this.aiLogger = new AIConversationLogger(this.backendUrl);
+    const RUNNER_TOKEN = process.env.RUNNER_TOKEN;
+    this.aiLogger = new AIConversationLogger(this.backendUrl, RUNNER_TOKEN);
     this.activeBrowsers = new Map(); // Track active browser instances per job
   }
 
