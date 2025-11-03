@@ -84,44 +84,6 @@ class WorkflowAnalyzer {
     return !!(this.workflowCapabilities?.hasSteps);
   }
 
-  /**
-   * Get prompt template by name from workflow template
-   * Supports both legacy prompts array and new steps array
-   */
-  getPromptTemplate(promptName) {
-    if (!this.workflowTemplate) {
-      console.log(`[WorkflowAnalyzer] 📋 No workflow template loaded, using DEFAULT prompt from database: "${promptName}"`);
-      return null;
-    }
-
-    // Check new steps array first
-    if (this.workflowTemplate.steps && Array.isArray(this.workflowTemplate.steps)) {
-      const step = this.workflowTemplate.steps.find(s => 
-        s.config?.prompt === promptName || 
-        s.prompt_slug === promptName ||
-        s.name === promptName
-      );
-      
-      if (step && step.config?.template) {
-        console.log(`[WorkflowAnalyzer] ✅ Using CUSTOM prompt from workflow template step: "${step.name}"`);
-        console.log(`[WorkflowAnalyzer] 📝 Prompt text: ${step.config.template.substring(0, 100)}...`);
-        return step.config.template;
-      }
-    }
-
-    // Fallback to legacy prompts array
-    if (this.workflowTemplate.prompts && Array.isArray(this.workflowTemplate.prompts)) {
-      const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName);
-      if (prompt && prompt.template) {
-        console.log(`[WorkflowAnalyzer] ✅ Using CUSTOM prompt from legacy workflow template: "${promptName}"`);
-        console.log(`[WorkflowAnalyzer] 📝 Prompt text: ${prompt.template.substring(0, 100)}...`);
-        return prompt.template;
-      }
-    }
-
-    console.log(`[WorkflowAnalyzer] 📋 Prompt "${promptName}" not found in template, using DEFAULT from database`);
-    return null;
-  }
 
   /**
    * Analyze page using workflow template steps only
@@ -986,7 +948,7 @@ class WorkflowAnalyzer {
             break;
             
           case 'execute-code-from-variable':
-            await this.executeCodeFromVariableStep(page, step, workflowState);
+            await this.executeCodeFromVariableStep(page, step, workflowState, jobId);
             break;
             
           case 'cookie-add':
@@ -1035,6 +997,15 @@ class WorkflowAnalyzer {
             
           case 'for-each':
             await this.executeForEachStep(page, step, workflowState, jobId);
+            break;
+            
+          case 'while-loop':
+            await this.executeWhileLoopStep(page, step, workflowState, jobId);
+            break;
+            
+          case 'if':
+          case 'if-step':
+            await this.executeIfStep(page, step, workflowState, jobId);
             break;
             
           default:
@@ -1286,13 +1257,15 @@ class WorkflowAnalyzer {
       });
     }
     
-    // Get prompt name from step configuration
-    const promptName = step.config?.prompt || step.prompt_slug;
-    if (!promptName) {
-      throw new Error(`No prompt specified for step: ${step.name}`);
+    // Prompt template MUST be embedded directly in step config
+    const customTemplate = step.config?.template || step.config?.user_message_template || null;
+    
+    if (!customTemplate) {
+      throw new Error(`No embedded prompt template found in workflow step "${step.name || step.id}". All prompts must be embedded in workflow step configs.`);
     }
-    const customTemplate = this.getPromptTemplate(promptName);
-    const promptSource = customTemplate ? 'workflow-template' : 'database';
+    
+    const promptIdentifier = step.id || step.name || 'page-description';
+    const promptSource = 'workflow-step';
     
     const descriptionPayload = {
       page_title: workflowState.pageTitle,
@@ -1317,18 +1290,18 @@ class WorkflowAnalyzer {
     }
     
     // Log prompt usage
-    await this.logPromptUsage(promptName, promptSource, customTemplate || 'Default from database', descriptionPayload);
+    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, descriptionPayload);
     
     try {
       workflowState.pageDescription = await this.aiLogger.makeAICallWithPrompt(
-        promptName,
+        promptIdentifier,
         descriptionPayload,
         jobId,
         'page-descriptor',
         workflowState.pageUrl,
         null,
         descriptionPayload,
-        customTemplate
+        customTemplate // Pass custom template (required - no fallback to database)
       );
       
       console.log(`[WorkflowAnalyzer] ✅ Page description generated: ${workflowState.pageDescription.short_description}`);
@@ -1401,9 +1374,17 @@ class WorkflowAnalyzer {
   async executeAIPromptStep(page, step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 🤖 Executing AI prompt (${step.name})`);
     
-    const promptName = step.config?.prompt_slug || step.config?.prompt || step.prompt_slug || step.name;
-    const customTemplate = this.getPromptTemplate(promptName);
-    const promptSource = customTemplate ? 'workflow-template' : 'database';
+    // Prompt template MUST be embedded directly in step config, not fetched from database
+    const customTemplate = step.config?.template || step.config?.user_message_template || null;
+    const systemMessage = step.config?.system_message || step.config?.system_message_template || null;
+    const responseSchema = step.config?.response_schema || null;
+    
+    if (!customTemplate) {
+      throw new Error(`No embedded prompt template found in workflow step "${step.name || step.id}". All prompts must be embedded in workflow step configs.`);
+    }
+    
+    const promptIdentifier = step.id || step.name || 'workflow-step';
+    const promptSource = 'workflow-step';
     
     // Prepare payload based on step configuration
     const stepPayload = {
@@ -1438,21 +1419,36 @@ class WorkflowAnalyzer {
       if (step.config.attachments.includes('playwright_analysis') && workflowState.playwrightAnalysis) {
         stepPayload.playwright_analysis = workflowState.playwrightAnalysis;
       }
+      if (step.config.attachments.includes('url_before_action') && workflowState.urlBeforeAction) {
+        stepPayload.url_before_action = workflowState.urlBeforeAction;
+        stepPayload.before_url = workflowState.urlBeforeAction;
+      }
+      if (step.config.attachments.includes('url_after_action') && workflowState.urlAfterAction) {
+        stepPayload.url_after_action = workflowState.urlAfterAction;
+        stepPayload.after_url = workflowState.urlAfterAction;
+      }
     }
     
     // Log prompt usage
-    await this.logPromptUsage(promptName, promptSource, customTemplate || 'Default from database', stepPayload);
+    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, stepPayload);
     
     try {
+      // Use embedded template from step config (required - no fallback to database)
+      const promptConfig = {
+        user_message_template: customTemplate,
+        system_message: systemMessage,
+        response_schema: responseSchema
+      };
+      
       const aiResponse = await this.aiLogger.makeAICallWithPrompt(
-        promptName,
+        promptIdentifier,
         stepPayload,
         jobId,
         'workflow-step',
         workflowState.pageUrl,
         null,
         stepPayload,
-        customTemplate
+        promptConfig // Pass full config (required - no fallback to database)
       );
       
       let parsedResponse = aiResponse;
@@ -1482,12 +1478,15 @@ class WorkflowAnalyzer {
   async executeWorkflowAnalysisStep(page, step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 🔍 Performing workflow analysis (${step.name})`);
     
-    const promptName = step.config?.prompt_slug || step.config?.prompt || step.prompt_slug;
-    if (!promptName) {
-      throw new Error(`No prompt specified for step: ${step.name}`);
+    // Prompt template MUST be embedded directly in step config
+    const customTemplate = step.config?.template || step.config?.user_message_template || null;
+    
+    if (!customTemplate) {
+      throw new Error(`No embedded prompt template found in workflow step "${step.name || step.id}". All prompts must be embedded in workflow step configs.`);
     }
-    const customTemplate = this.getPromptTemplate(promptName);
-    const promptSource = customTemplate ? 'workflow-template' : 'database';
+    
+    const promptIdentifier = step.id || step.name || 'workflow-analysis';
+    const promptSource = 'workflow-step';
     
     // Prepare playbook data as JSON strings (trimmed to reasonable sizes for prompts)
     const formsData = Array.isArray(workflowState.playwrightAnalysis?.forms)
@@ -1518,18 +1517,18 @@ class WorkflowAnalyzer {
     };
     
     // Log prompt usage
-    await this.logPromptUsage(promptName, promptSource, customTemplate || 'Default from database', optimizedPayload);
+    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, optimizedPayload);
     
     try {
       workflowState.aiAnalysisResult = await this.aiLogger.makeAICallWithPrompt(
-        promptName,
+        promptIdentifier,
         optimizedPayload,
         jobId,
         'workflow-analyzer',
         workflowState.pageUrl,
         null,
         optimizedPayload,
-        customTemplate
+        customTemplate // Pass custom template (required - no fallback to database)
       );
       
       if (workflowState.aiAnalysisResult && workflowState.aiAnalysisResult.legs) {
@@ -1953,17 +1952,46 @@ class WorkflowAnalyzer {
       workflowState.lastExecutionResult = result;
       
       // If result contains workflowState updates (like legsToExecute, context updates), merge them
-      console.log(`[WorkflowAnalyzer] 🔍 Checking result for merge - type: ${typeof result}, isArray: ${Array.isArray(result)}, keys: ${result && typeof result === 'object' && !Array.isArray(result) ? Object.keys(result).join(',') : 'N/A'}`);
+      const resultType = typeof result;
+      const isResultArray = Array.isArray(result);
+      const resultKeys = result && typeof result === 'object' && !Array.isArray(result) ? Object.keys(result) : [];
+      
+      console.log(`[WorkflowAnalyzer] 🔍 Checking result for merge - type: ${resultType}, isArray: ${isResultArray}, keys: ${resultKeys.join(', ') || 'N/A'}`);
+      
+      try {
+        const resultStr = JSON.stringify(result);
+        console.log(`[WorkflowAnalyzer] 🔍 Result preview: ${resultStr.substring(0, 500)}${resultStr.length > 500 ? '...' : ''}`);
+      } catch (e) {
+        console.log(`[WorkflowAnalyzer] ⚠️ Could not stringify result: ${e.message}`);
+        console.log(`[WorkflowAnalyzer] 🔍 Result:`, result);
+      }
       
       // Check if result has legsToExecute (handle both object and array results)
       let resultObj = result;
-      if (Array.isArray(result)) {
+      if (isResultArray) {
         // If result is an array, check if it's actually legsToExecute
-        if (result.length > 0 && typeof result[0] === 'object' && result[0].leg_id) {
-          // It's an array of leg objects - wrap it
-          resultObj = { legsToExecute: result };
+        if (result.length > 0) {
+          const firstItem = result[0];
+          const firstItemKeys = typeof firstItem === 'object' && firstItem !== null ? Object.keys(firstItem) : [];
+          console.log(`[WorkflowAnalyzer] 🔍 Array result: length=${result.length}, first item keys: ${firstItemKeys.join(', ')}`);
+          
+          if (typeof firstItem === 'object' && firstItem !== null && (firstItem.leg_id || firstItem.legId || firstItem.id || firstItem.type)) {
+            // It's an array of leg objects - wrap it
+            resultObj = { legsToExecute: result };
+            console.log(`[WorkflowAnalyzer] 🔄 Wrapped array result into object with legsToExecute (${result.length} items)`);
+          } else {
+            console.log(`[WorkflowAnalyzer] ⚠️ Result is array but doesn't appear to be legs. Length: ${result.length}, first item type: ${typeof firstItem}, keys: ${firstItemKeys.join(',') || 'N/A'}`);
+            // Check if it's an array containing a single object with legsToExecute
+            if (result.length === 1 && typeof result[0] === 'object' && result[0] !== null && result[0].legsToExecute) {
+              console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in nested array object`);
+              resultObj = result[0];
+            } else {
+              resultObj = null; // Can't extract legsToExecute from this array
+            }
+          }
         } else {
-          resultObj = null; // Can't extract legsToExecute from this array
+          console.log(`[WorkflowAnalyzer] ⚠️ Result is empty array`);
+          resultObj = null;
         }
       }
       
@@ -1980,7 +2008,19 @@ class WorkflowAnalyzer {
           workflowState.context.legsToExecute = resultObj.legsToExecute;
           console.log(`[WorkflowAnalyzer] ✅ Merged legsToExecute into workflowState and context`);
         } else {
-          console.log(`[WorkflowAnalyzer] ⚠️ Result doesn't have legsToExecute array. Result keys: ${Object.keys(resultObj).join(', ')}`);
+          const availableKeys = Object.keys(resultObj);
+          console.log(`[WorkflowAnalyzer] ⚠️ Result doesn't have legsToExecute array. Result keys: ${availableKeys.join(', ')}`);
+          // Try to find legsToExecute with different naming
+          const legsKey = availableKeys.find(k => k.toLowerCase().includes('leg') && k.toLowerCase().includes('execute'));
+          if (legsKey && Array.isArray(resultObj[legsKey])) {
+            console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute with different key name: ${legsKey}`);
+            workflowState.legsToExecute = resultObj[legsKey];
+            if (!workflowState.context) {
+              workflowState.context = {};
+            }
+            workflowState.context.legsToExecute = resultObj[legsKey];
+            console.log(`[WorkflowAnalyzer] ✅ Merged legsToExecute from key ${legsKey}`);
+          }
         }
         if (resultObj.context && typeof resultObj.context === 'object') {
           workflowState.context = { ...workflowState.context, ...resultObj.context };
@@ -1988,6 +2028,8 @@ class WorkflowAnalyzer {
         if (resultObj.legs && Array.isArray(resultObj.legs)) {
           workflowState.legs = resultObj.legs;
         }
+      } else if (resultObj === null && isResultArray && result.length === 0) {
+        console.log(`[WorkflowAnalyzer] ⚠️ Result is empty array - code may have failed or returned nothing`);
       }
       
       this.storeStepResult(step, result, workflowState);
@@ -2019,19 +2061,64 @@ class WorkflowAnalyzer {
     
     try {
       const timeout = step.config?.timeout || 30000;
+      
+      // Capture URL before action
+      const urlBeforeAction = page.url();
+      workflowState.urlBeforeAction = urlBeforeAction;
+      
+      // Take screenshot before action
+      let screenshotBeforeKey = null;
+      try {
+        const screenshotBefore = await page.screenshot({ fullPage: true, type: 'png' });
+        const presignedBefore = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
+          type: 'screenshot',
+          jobId: jobId,
+          contentType: 'image/png'
+        }, {
+          headers: this.getAuthHeaders()
+        });
+        
+        if (presignedBefore.data.key && presignedBefore.data.url) {
+          await axios.put(presignedBefore.data.url, screenshotBefore, {
+            headers: { 'Content-Type': 'image/png' },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity
+          });
+          screenshotBeforeKey = presignedBefore.data.key;
+          
+          // Store screenshot link with action metadata
+          const currentLeg = workflowState.currentLeg || {};
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'info',
+            message: `📸 Screenshot before action: ${step.name} - ${currentLeg.description || 'Action execution'}`,
+            component: 'WORKFLOW-STEP',
+            metadata: {
+              screenshot_type: 'before_action',
+              action: step.name,
+              leg_id: currentLeg.leg_id,
+              leg_description: currentLeg.description,
+              screenshot_key: screenshotBeforeKey,
+              url: urlBeforeAction
+            }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        }
+      } catch (screenshotError) {
+        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to capture before screenshot: ${screenshotError.message}`);
+      }
+      
       const result = await page.evaluate(
-        ({ code, workflowState, timeout }) => {
-          const runner = new Function(
-            'workflowState',
-            `return (async () => {\n${code}\n})();`
-          );
-
+        ({ code, timeout }) => {
+          const runner = new Function('page', `return (async () => { ${code}\n })();`);
+          
           return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
               reject(new Error(`Code execution timed out after ${timeout}ms`));
             }, timeout);
-
-            Promise.resolve(runner(workflowState))
+            
+            Promise.resolve(runner(page))
               .then(result => {
                 clearTimeout(timer);
                 resolve(result);
@@ -2042,12 +2129,103 @@ class WorkflowAnalyzer {
               });
           });
         },
-        { code, workflowState, timeout }
+        { code, timeout }
       );
-      this.storeStepResult(step, result, workflowState);
-      console.log(`[WorkflowAnalyzer] ✅ Code execution completed: ${JSON.stringify(result).substring(0, 100)}...`);
+      
+      // After executing code, wait for page to stabilize (navigation, DOM updates, etc.)
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+        await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } catch (waitError) {
+        console.log(`[WorkflowAnalyzer] ⚠️ Page wait warning: ${waitError.message}`);
+      }
+      
+      // Capture URL after action
+      const urlAfterAction = page.url();
+      workflowState.urlAfterAction = urlAfterAction;
+      const pageChanged = urlBeforeAction !== urlAfterAction;
+      
+      // Update workflow state with current page URL in case navigation occurred
+      if (pageChanged) {
+        console.log(`[WorkflowAnalyzer] 🔄 Page navigation detected: ${urlBeforeAction} → ${urlAfterAction}`);
+        workflowState.pageUrl = urlAfterAction;
+        workflowState.pageTitle = await page.title().catch(() => '');
+      }
+      
+      // Take screenshot after action
+      let screenshotAfterKey = null;
+      try {
+        const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
+        const presignedAfter = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
+          type: 'screenshot',
+          jobId: jobId,
+          contentType: 'image/png'
+        }, {
+          headers: this.getAuthHeaders()
+        });
+        
+        if (presignedAfter.data.key && presignedAfter.data.url) {
+          await axios.put(presignedAfter.data.url, screenshotAfter, {
+            headers: { 'Content-Type': 'image/png' },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity
+          });
+          screenshotAfterKey = presignedAfter.data.key;
+          
+          // Store screenshot link with action metadata
+          const currentLeg = workflowState.currentLeg || {};
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'info',
+            message: `📸 Screenshot after action: ${step.name} - ${currentLeg.description || 'Action execution'} ${pageChanged ? '(page changed)' : '(same page)'}`,
+            component: 'WORKFLOW-STEP',
+            metadata: {
+              screenshot_type: 'after_action',
+              action: step.name,
+              leg_id: currentLeg.leg_id,
+              leg_description: currentLeg.description,
+              screenshot_key: screenshotAfterKey,
+              url: urlAfterAction,
+              url_before: urlBeforeAction,
+              url_after: urlAfterAction,
+              page_changed: pageChanged
+            }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        }
+      } catch (screenshotError) {
+        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to capture after screenshot: ${screenshotError.message}`);
+      }
+      
+      const executionResult = {
+        ...result,
+        urlBeforeAction,
+        urlAfterAction,
+        pageChanged,
+        screenshotBeforeKey,
+        screenshotAfterKey
+      };
+      
+      workflowState.lastExecutionResult = executionResult;
+      this.storeStepResult(step, executionResult, workflowState);
+      
+      console.log(`[WorkflowAnalyzer] ✅ Code execution completed. Page changed: ${pageChanged}`);
+      
+      return executionResult;
     } catch (error) {
       console.error(`[WorkflowAnalyzer] ❌ Code execution failed: ${error.message}`);
+      const urlAfterAction = page.url();
+      const errorResult = {
+        success: false,
+        error: error.message,
+        urlBeforeAction: workflowState.urlBeforeAction || page.url(),
+        urlAfterAction,
+        pageChanged: (workflowState.urlBeforeAction || '') !== urlAfterAction
+      };
+      workflowState.lastExecutionResult = errorResult;
+      this.storeStepResult(step, errorResult, workflowState);
       throw error;
     }
   }
@@ -2518,19 +2696,34 @@ class WorkflowAnalyzer {
     // Resolve items from context or results
     let items = this.resolvePathValue(workflowState, itemsPath, sourceType);
     
+    console.log(`[WorkflowAnalyzer] 🔍 For-each resolving items from path "${itemsPath}" (source: ${sourceType})`);
+    console.log(`[WorkflowAnalyzer] 🔍 Resolved items: ${Array.isArray(items) ? `array with ${items.length} items` : `not an array (${typeof items})`}`);
+    
     // If not found, try multiple fallback locations
     if (!Array.isArray(items)) {
       // Try directly on workflowState (from merge logic)
       if (workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute)) {
+        console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute directly on workflowState (${workflowState.legsToExecute.length} items)`);
         items = workflowState.legsToExecute;
       }
       // Try from context (from merge logic)
       else if (workflowState.context?.legsToExecute && Array.isArray(workflowState.context.legsToExecute)) {
+        console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in context (${workflowState.context.legsToExecute.length} items)`);
         items = workflowState.context.legsToExecute;
       }
-      // Try lastExecutionResult from prepare step
-      else if (workflowState.lastExecutionResult && workflowState.lastExecutionResult.legsToExecute && Array.isArray(workflowState.lastExecutionResult.legsToExecute)) {
-        items = workflowState.lastExecutionResult.legsToExecute;
+      // Try from lastExecutionResult (from previous step)
+      else if (workflowState.lastExecutionResult) {
+        const lastResult = workflowState.lastExecutionResult;
+        if (Array.isArray(lastResult)) {
+          // Check if it's an array of leg objects
+          if (lastResult.length > 0 && typeof lastResult[0] === 'object' && lastResult[0].leg_id) {
+            console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in lastExecutionResult as array (${lastResult.length} items)`);
+            items = lastResult;
+          }
+        } else if (lastResult && typeof lastResult === 'object' && lastResult.legsToExecute && Array.isArray(lastResult.legsToExecute)) {
+          console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in lastExecutionResult object (${lastResult.legsToExecute.length} items)`);
+          items = lastResult.legsToExecute;
+        }
       }
       // Try from previous step result by slug - search all possible slugs
       else {
@@ -2674,6 +2867,542 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Execute while-loop step - loops while condition is true
+   * General-purpose looping element that can loop based on conditions from code or AI
+   */
+  async executeWhileLoopStep(page, step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🔄 Executing while-loop (${step.name})`);
+    
+    const config = step.config || {};
+    const maxIterations = config.maxIterations || 10;
+    const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
+    const conditionType = config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
+    const invertCondition = config.invertCondition === true; // If true, loop while condition is false
+    const nestedSteps = config.steps || [];
+    
+    if (!nestedSteps.length) {
+      console.log(`[WorkflowAnalyzer] ⚠️ While-loop has no nested steps`);
+      return;
+    }
+    
+    let iteration = 0;
+    let condition = true; // Start with true to enter loop
+    let lastResult = null;
+    
+    console.log(`[WorkflowAnalyzer] 🔄 Starting while-loop (max ${maxIterations} iterations)`);
+    
+    // Initialize loop state
+    if (!workflowState.loopState) {
+      workflowState.loopState = {};
+    }
+    if (!workflowState.loopState[step.id]) {
+      workflowState.loopState[step.id] = {
+        iterations: [],
+        currentIteration: 0
+      };
+    }
+    
+    const loopState = workflowState.loopState[step.id];
+    
+    // Loop while condition is true (or false if inverted) and under max iterations
+    while ((invertCondition ? !condition : condition) && iteration < maxIterations) {
+      iteration++;
+      loopState.currentIteration = iteration;
+      
+      console.log(`[WorkflowAnalyzer] 🔄 While-loop iteration ${iteration}/${maxIterations}`);
+      
+      try {
+        // Execute nested steps
+        for (let nestedIdx = 0; nestedIdx < nestedSteps.length; nestedIdx++) {
+          const nestedStep = nestedSteps[nestedIdx];
+          
+          try {
+            await this.executeStepByType(page, nestedStep, workflowState, jobId);
+          } catch (nestedError) {
+            console.error(`[WorkflowAnalyzer] ❌ Nested step ${nestedIdx + 1} failed in iteration ${iteration}: ${nestedError.message}`);
+            if (nestedStep.config?.critical) {
+              throw nestedError;
+            }
+          }
+        }
+        
+        // Evaluate condition after nested steps
+        if (conditionType === 'code' && config.conditionCode) {
+          // Execute code to get condition
+          const conditionResult = await page.evaluate(
+            ({ code, workflowState }) => {
+              const runner = new Function('workflowState', `return (${code});`);
+              return runner(workflowState);
+            },
+            { code: config.conditionCode, workflowState }
+          );
+          condition = conditionResult === true || conditionResult === 'true' || conditionResult === 1;
+          
+        } else if (conditionType === 'ai-response' || conditionType === 'path') {
+          // Get condition from workflowState path (check multiple locations)
+          let conditionValue = this.resolvePathValue(workflowState, conditionPath || 'determine_completion.status', 'results');
+          
+          // If not found, try finding the determine_completion step result directly
+          if (conditionValue === undefined || conditionValue === null) {
+            const determineStepResult = workflowState['determine_completion']?.result || 
+                                       workflowState.results?.['determine_completion']?.result ||
+                                       workflowState.lastExecutionResult ||
+                                       {};
+            
+            // Extract condition from step result
+            if (conditionPath) {
+              const pathSegments = conditionPath.split('.');
+              let current = determineStepResult;
+              for (const segment of pathSegments) {
+                if (current && typeof current === 'object') {
+                  current = current[segment];
+                } else {
+                  current = undefined;
+                  break;
+                }
+              }
+              conditionValue = current;
+            } else {
+              // Default: check status, fallback to is_complete
+              conditionValue = determineStepResult.status || determineStepResult.is_complete;
+            }
+          }
+          
+          if (conditionValue !== undefined && conditionValue !== null) {
+            // Support both new status field (success/failure/continue/stuck) and legacy is_complete
+            if (typeof conditionValue === 'string') {
+              // New format: status field with 'success', 'failure', 'continue', 'stuck'
+              const expectedValue = config.conditionValue || 'continue';
+              condition = conditionValue === expectedValue;
+              // If status is 'stuck', exit loop (don't continue)
+              if (conditionValue === 'stuck' || conditionValue === 'failure' || conditionValue === 'success') {
+                condition = false; // Exit loop for stuck, failure, or success
+              }
+              console.log(`[WorkflowAnalyzer] 🔍 Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
+            } else {
+              // Legacy format: boolean is_complete
+              condition = conditionValue === true || conditionValue === 'true' || conditionValue === 1 || conditionValue === 'complete';
+            }
+          } else {
+            // If path not found and it's required, default to false (exit loop)
+            if (conditionPath) {
+              console.log(`[WorkflowAnalyzer] ⚠️ Condition path "${conditionPath}" not found, exiting loop`);
+              condition = invertCondition ? true : false;
+            } else {
+              // No condition path specified, default to false (exit loop)
+              condition = false;
+            }
+          }
+        }
+        
+        // Record iteration
+        loopState.iterations.push({
+          iteration,
+          condition,
+          timestamp: new Date().toISOString(),
+          lastResult: workflowState.lastExecutionResult
+        });
+        
+        console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: condition=${condition} (inverted=${invertCondition}, should continue=${invertCondition ? !condition : condition})`);
+        
+        // Small delay between iterations
+        if (iteration < maxIterations && (invertCondition ? !condition : condition)) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+        
+      } catch (iterationError) {
+        console.error(`[WorkflowAnalyzer] ❌ Iteration ${iteration} failed: ${iterationError.message}`);
+        loopState.iterations.push({
+          iteration,
+          error: iterationError.message,
+          timestamp: new Date().toISOString()
+        });
+        
+        // Break on critical errors
+        if (iterationError.message.includes('critical') || iteration >= maxIterations) {
+          break;
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    
+    const finalResult = {
+      iterations: iteration,
+      maxIterations,
+      exitedEarly: iteration < maxIterations && (invertCondition ? condition : !condition),
+      finalCondition: condition,
+      loopHistory: loopState.iterations
+    };
+    
+    this.storeStepResult(step, finalResult, workflowState);
+    console.log(`[WorkflowAnalyzer] ✅ While-loop completed after ${iteration} iterations`);
+  }
+
+  /**
+   * Execute if-step - conditionally executes nested steps based on a condition
+   * General-purpose conditional element
+   */
+  async executeIfStep(page, step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🔀 Executing if-step (${step.name})`);
+    
+    const config = step.config || {};
+    const conditionCode = config.conditionCode; // JavaScript code that returns boolean
+    const conditionPath = config.conditionPath; // Path to check for condition value
+    const conditionType = config.conditionType || 'code'; // 'code', 'path', or 'ai-response'
+    const nestedSteps = config.steps || [];
+    const elseSteps = config.elseSteps || []; // Optional else branch
+    
+    if (!nestedSteps.length) {
+      console.log(`[WorkflowAnalyzer] ⚠️ If-step has no nested steps`);
+      return;
+    }
+    
+    let condition = false;
+    
+    try {
+      // Evaluate condition
+      if (conditionType === 'code' && conditionCode) {
+        // Execute code to get condition
+        const conditionResult = await page.evaluate(
+          ({ code, workflowState }) => {
+            const runner = new Function('workflowState', `return (${code});`);
+            return runner(workflowState);
+          },
+          { code: conditionCode, workflowState }
+        );
+        condition = conditionResult === true || conditionResult === 'true' || conditionResult === 1;
+        
+      } else if (conditionType === 'path' || conditionType === 'ai-response') {
+        // Get condition from workflowState path
+        const conditionValue = this.resolvePathValue(workflowState, conditionPath || 'determine_completion.is_complete', 'results');
+        
+        if (conditionValue !== undefined && conditionValue !== null) {
+          condition = conditionValue === true || conditionValue === 'true' || conditionValue === 1 || conditionValue === 'complete';
+        }
+      }
+      
+      console.log(`[WorkflowAnalyzer] 🔀 Condition evaluated: ${condition}`);
+      
+      // Execute appropriate branch
+      const stepsToExecute = condition ? nestedSteps : elseSteps;
+      
+      if (stepsToExecute.length > 0) {
+        for (let nestedIdx = 0; nestedIdx < stepsToExecute.length; nestedIdx++) {
+          const nestedStep = stepsToExecute[nestedIdx];
+          
+          try {
+            await this.executeStepByType(page, nestedStep, workflowState, jobId);
+          } catch (nestedError) {
+            console.error(`[WorkflowAnalyzer] ❌ Nested step ${nestedIdx + 1} failed in if-step: ${nestedError.message}`);
+            if (nestedStep.config?.critical) {
+              throw nestedError;
+            }
+          }
+        }
+      }
+      
+      const result = {
+        condition,
+        conditionType,
+        executedBranch: condition ? 'then' : 'else',
+        stepsExecuted: stepsToExecute.length
+      };
+      
+      this.storeStepResult(step, result, workflowState);
+      console.log(`[WorkflowAnalyzer] ✅ If-step completed: executed ${condition ? 'then' : 'else'} branch (${stepsToExecute.length} steps)`);
+      
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ If-step failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * @deprecated Use while-loop instead. This method is kept for backward compatibility but will be removed.
+   * Execute test-leg-iteratively step - recursively tests a leg until AI says it's complete
+   */
+  async executeTestLegIterativelyStep(page, step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🔄 Executing iterative leg test (${step.name})`);
+    
+    const config = step.config || {};
+    const maxIterations = config.maxIterations || 10;
+    const maxDepth = config.maxDepth || 5;
+    
+    // Get current leg from context
+    const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
+    const currentLegIndex = workflowState.currentLegIndex ?? 0;
+    
+    if (!currentLeg || !currentLeg.leg_id) {
+      throw new Error(`No current leg found for iterative testing`);
+    }
+    
+    // Initialize testing history
+    if (!workflowState.legTestingHistory) {
+      workflowState.legTestingHistory = {};
+    }
+    if (!workflowState.legTestingHistory[currentLeg.leg_id]) {
+      workflowState.legTestingHistory[currentLeg.leg_id] = [];
+    }
+    
+    const testingHistory = workflowState.legTestingHistory[currentLeg.leg_id];
+    let iteration = 0;
+    let depth = 0;
+    let isComplete = false;
+    let lastExecutionResult = null;
+    let finalResult = null;
+    
+    console.log(`[WorkflowAnalyzer] 🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id}`);
+    
+    // Iterate until complete or max iterations reached
+    while (!isComplete && iteration < maxIterations && depth < maxDepth) {
+      iteration++;
+      console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration}/${maxIterations} (depth ${depth + 1}/${maxDepth}) for leg: ${currentLeg.leg_id}`);
+      
+      try {
+        // Step 1: Capture page state before action
+        await this.executePlaywrightAnalysisStep(page, {
+          id: `${step.id}_iteration_${iteration}_analysis`,
+          name: `Page Analysis (Iteration ${iteration})`,
+          type: 'playwright-analysis',
+          config: { collectForms: true, collectLinks: true, collectInteractiveElements: true }
+        }, workflowState, jobId);
+        
+        await this.executeScreenshotStep(page, {
+          id: `${step.id}_iteration_${iteration}_screenshot`,
+          name: `Screenshot (Iteration ${iteration})`,
+          type: 'screenshot',
+          config: { fullPage: true, quality: 90 }
+        }, workflowState, jobId, workflowState.pageId);
+        
+        // Step 2: Get page description
+        await this.executePageDescriptionStep(page, {
+          id: `${step.id}_iteration_${iteration}_description`,
+          name: `Page Description (Iteration ${iteration})`,
+          type: 'page-description',
+          config: {
+            prompt_slug: 'describe-page',
+            attachments: ['visible_text', 'interactive_elements', 'screenshot'],
+            maxRetries: 1
+          }
+        }, workflowState, jobId);
+        
+        // Step 3: Generate action script (only on first iteration, or if new content detected)
+        if (iteration === 1 || (lastExecutionResult && lastExecutionResult.new_content_detected)) {
+          await this.executeAIPromptStep(page, {
+            id: `${step.id}_iteration_${iteration}_generate_script`,
+            name: `Generate Action Script (Iteration ${iteration})`,
+            type: 'ai-prompt',
+            config: {
+              prompt_slug: 'generate-playwright-script',
+              attachments: ['page_description', 'interactive_elements', 'forms', 'current_leg', 'playwright_analysis'],
+              maxRetries: 2
+            }
+          }, workflowState, jobId);
+          
+          // Get the generated script
+          const generateStepId = `${step.id}_iteration_${iteration}_generate_script`;
+          const generateResult = workflowState[generateStepId]?.result || workflowState.results?.[generateStepId]?.result || {};
+          const script = generateResult.playwright_script || generateResult.code || '';
+          
+          if (!script || script.trim() === '') {
+            throw new Error(`No Playwright script generated for iteration ${iteration}`);
+          }
+          
+          workflowState.legScriptToExecute = script;
+        }
+        
+        // Step 4: Execute the script
+        await this.executeCodeFromVariableStep(page, {
+          id: `${step.id}_iteration_${iteration}_execute`,
+          name: `Execute Action Script (Iteration ${iteration})`,
+          type: 'execute-code-from-variable',
+          config: {
+            sourceField: 'legScriptToExecute',
+            timeout: 45000
+          }
+        }, workflowState);
+        
+        const executeStepId = `${step.id}_iteration_${iteration}_execute`;
+        lastExecutionResult = workflowState[executeStepId]?.result || workflowState.lastExecutionResult || {};
+        
+        // Step 5: Capture page state after action
+        await this.executePlaywrightAnalysisStep(page, {
+          id: `${step.id}_iteration_${iteration}_analysis_after`,
+          name: `Page Analysis After Action (Iteration ${iteration})`,
+          type: 'playwright-analysis',
+          config: { collectForms: true, collectLinks: true, collectInteractiveElements: true }
+        }, workflowState, jobId);
+        
+        await this.executeScreenshotStep(page, {
+          id: `${step.id}_iteration_${iteration}_screenshot_after`,
+          name: `Screenshot After Action (Iteration ${iteration})`,
+          type: 'screenshot',
+          config: { fullPage: true, quality: 90 }
+        }, workflowState, jobId, workflowState.pageId);
+        
+        await this.executePageDescriptionStep(page, {
+          id: `${step.id}_iteration_${iteration}_description_after`,
+          name: `Page Description After Action (Iteration ${iteration})`,
+          type: 'page-description',
+          config: {
+            prompt_slug: 'describe-page',
+            attachments: ['visible_text', 'interactive_elements', 'screenshot'],
+            maxRetries: 1
+          }
+        }, workflowState, jobId);
+        
+        // Step 6: Use AI to determine if leg testing is complete
+        // Prepare testing history for attachment
+        const testingHistoryForAttachment = testingHistory.map((record, idx) => ({
+          iteration: record.iteration,
+          depth: record.depth,
+          what_happened: record.completionDecision?.what_happened || record.executionResult?.message || 'N/A',
+          content_type: record.completionDecision?.content_type || 'unknown',
+          is_complete: record.isComplete || false,
+          timestamp: record.timestamp
+        }));
+        
+        // Store formatted testing history
+        workflowState.testing_history = JSON.stringify(testingHistoryForAttachment, null, 2);
+        
+        await this.executeAIPromptStep(page, {
+          id: `${step.id}_iteration_${iteration}_determine_completion`,
+          name: `Determine Completion (Iteration ${iteration})`,
+          type: 'ai-prompt',
+          config: {
+            prompt_slug: 'determine-leg-completion',
+            attachments: ['current_leg', 'last_execution_result', 'page_description', 'visible_text', 'interactive_elements', 'forms', 'testing_history'],
+            maxRetries: 1
+          }
+        }, workflowState, jobId);
+        
+        const completionStepId = `${step.id}_iteration_${iteration}_determine_completion`;
+        const completionResult = workflowState[completionStepId]?.result || workflowState.results?.[completionStepId]?.result || {};
+        
+        // Extract completion decision
+        isComplete = completionResult.is_complete === true || completionResult.completion_status === 'complete';
+        const needsMoreTesting = completionResult.needs_more_testing === true && !isComplete;
+        
+        // Record iteration
+        const iterationRecord = {
+          iteration,
+          depth,
+          executionResult: lastExecutionResult,
+          completionDecision: completionResult,
+          isComplete,
+          needsMoreTesting,
+          timestamp: new Date().toISOString()
+        };
+        testingHistory.push(iterationRecord);
+        
+        console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: isComplete=${isComplete}, needsMoreTesting=${needsMoreTesting}`);
+        
+        // If complete, break
+        if (isComplete) {
+          console.log(`[WorkflowAnalyzer] ✅ Leg testing completed after ${iteration} iterations. Reason: ${completionResult.reason || 'AI determined complete'}`);
+          finalResult = {
+            success: true,
+            completed: true,
+            iterations: iteration,
+            depth,
+            finalExecutionResult: lastExecutionResult,
+            completionReason: completionResult.reason,
+            testingHistory
+          };
+          break;
+        }
+        
+        // If needs more testing, continue
+        if (needsMoreTesting) {
+          console.log(`[WorkflowAnalyzer] 🔄 More testing needed: ${completionResult.next_action_suggestion || 'Continue testing'}`);
+          depth++;
+          
+          // Update current leg context with next action suggestion
+          if (completionResult.next_action_suggestion) {
+            workflowState.currentLeg = {
+              ...currentLeg,
+              next_action_suggestion: completionResult.next_action_suggestion,
+              content_type: completionResult.content_type
+            };
+          }
+          
+          // Small delay before next iteration
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } else {
+          // No more testing needed but not marked complete - break anyway
+          console.log(`[WorkflowAnalyzer] ⚠️ No more testing needed but not marked complete. Breaking.`);
+          finalResult = {
+            success: completionResult.completion_status !== 'failed',
+            completed: false,
+            iterations: iteration,
+            depth,
+            finalExecutionResult: lastExecutionResult,
+            completionReason: completionResult.reason || 'No more testing needed',
+            testingHistory
+          };
+          break;
+        }
+        
+      } catch (iterationError) {
+        console.error(`[WorkflowAnalyzer] ❌ Iteration ${iteration} failed: ${iterationError.message}`);
+        testingHistory.push({
+          iteration,
+          depth,
+          error: iterationError.message,
+          timestamp: new Date().toISOString()
+        });
+        
+        // If max iterations reached or critical error, break
+        if (iteration >= maxIterations || iterationError.message.includes('critical')) {
+          finalResult = {
+            success: false,
+            completed: false,
+            iterations: iteration,
+            depth,
+            error: iterationError.message,
+            testingHistory
+          };
+          break;
+        }
+        
+        // Continue to next iteration
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    
+    // Final result
+    if (!finalResult) {
+      finalResult = {
+        success: false,
+        completed: false,
+        iterations: iteration,
+        depth,
+        reason: 'Max iterations or depth reached',
+        testingHistory
+      };
+    }
+    
+    // Store result
+    this.storeStepResult(step, finalResult, workflowState);
+    
+    // Update leg result
+    const legIndex = currentLegIndex;
+    if (!Array.isArray(workflowState.legResults)) {
+      workflowState.legResults = [];
+    }
+    workflowState.legResults[legIndex] = {
+      ...currentLeg,
+      ...finalResult,
+      finished_at: new Date().toISOString()
+    };
+    
+    console.log(`[WorkflowAnalyzer] ✅ Iterative leg testing completed: ${finalResult.completed ? 'COMPLETE' : 'INCOMPLETE'} after ${finalResult.iterations} iterations`);
+    
+    return finalResult;
+  }
+
+  /**
    * Execute step by type (used by for-each to execute nested steps)
    */
   async executeStepByType(page, step, workflowState, jobId) {
@@ -2706,7 +3435,7 @@ class WorkflowAnalyzer {
         await this.executeCodeStep(page, step, workflowState);
         break;
       case 'execute-code-from-variable':
-        await this.executeCodeFromVariableStep(page, step, workflowState);
+        await this.executeCodeFromVariableStep(page, step, workflowState, jobId);
         break;
       case 'validate-response':
         await this.executeValidateResponseStep(step, workflowState);
@@ -2719,6 +3448,16 @@ class WorkflowAnalyzer {
         break;
       case 'sleep':
         await this.executeSleepStep(step, workflowState);
+        break;
+      case 'for-each':
+        await this.executeForEachStep(page, step, workflowState, jobId);
+        break;
+      case 'while-loop':
+        await this.executeWhileLoopStep(page, step, workflowState, jobId);
+        break;
+      case 'if':
+      case 'if-step':
+        await this.executeIfStep(page, step, workflowState, jobId);
         break;
       default:
         console.log(`[WorkflowAnalyzer] ⚠️ Unknown nested step type: ${step.type}`);
