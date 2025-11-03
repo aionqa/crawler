@@ -53,42 +53,33 @@ class EnhancedWorkflowExecutor {
   }
 
   /**
-   * Get prompt template by name from workflow template
+   * Find any AI prompt step with embedded template
+   * Prompts are embedded directly in workflow step configs
    */
-  getPromptConfig(promptName) {
-    if (!this.workflowTemplate || !Array.isArray(this.workflowTemplate.prompts)) {
-      console.log(`[EnhancedWorkflowExecutor] 📋 Using DEFAULT prompt from database: "${promptName}"`);
+  findAIPromptStep() {
+    if (!this.workflowTemplate || !this.workflowTemplate.steps) {
       return null;
     }
 
-    const prompt = this.workflowTemplate.prompts.find(p => p.name === promptName || p.slug === promptName);
-    if (!prompt) {
-      console.log(`[EnhancedWorkflowExecutor] 📋 Prompt "${promptName}" not found in template or template is empty, using DEFAULT from database`);
+    const findInSteps = (steps) => {
+      for (const s of steps || []) {
+        if (s.type === 'ai-prompt') {
+          // Check if step has embedded template
+          const template = s.config?.template || s.config?.user_message_template;
+          if (template) {
+            return s;
+          }
+        }
+        // Check nested steps (for-each, while-loop, etc.)
+        if (s.config?.steps && Array.isArray(s.config.steps)) {
+          const found = findInSteps(s.config.steps);
+          if (found) return found;
+        }
+      }
       return null;
-    }
-
-    const promptConfig = {
-      name: prompt.name || prompt.slug || promptName,
-      user_message_template: prompt.user_message_template || prompt.template || null,
-      system_message: prompt.system_message_template || prompt.system_message || null,
-      response_schema: prompt.response_schema || null,
-      response_schema_description: prompt.response_schema_description || null
     };
 
-    if (promptConfig.user_message_template) {
-      console.log(`[EnhancedWorkflowExecutor] ✅ Using CUSTOM prompt from workflow template: "${promptName}"`);
-      console.log(`[EnhancedWorkflowExecutor] 📝 Prompt text: ${promptConfig.user_message_template.substring(0, 100)}...`);
-    } else {
-      console.log(`[EnhancedWorkflowExecutor] ⚠️ Prompt "${promptName}" found but missing user message template, falling back to default`);
-      return null;
-    }
-
-    return promptConfig;
-  }
-
-  getPromptTemplate(promptName) {
-    const promptConfig = this.getPromptConfig(promptName);
-    return promptConfig?.user_message_template || null;
+    return findInSteps(this.workflowTemplate.steps);
   }
 
   /**
@@ -347,24 +338,29 @@ class EnhancedWorkflowExecutor {
             throw new Error(`AI request limit exceeded: ${aiRequestCount}/${this.maxAiRequestsPerLeg}`);
           }
           
-          // Use custom prompt template if available
-          const scriptPromptName = 'generate-workflow-script';
-          const customScriptPrompt = this.getPromptConfig(scriptPromptName);
-          const customScriptTemplate = customScriptPrompt?.user_message_template || null;
-          const scriptPromptSource = customScriptPrompt ? 'workflow-template' : 'database';
+          // Find prompt from workflow steps - prompts MUST be embedded in step configs
+          const scriptStep = this.findAIPromptStep();
+          const customScriptTemplate = scriptStep ? (scriptStep.config?.template || scriptStep.config?.user_message_template) : null;
+          
+          if (!customScriptTemplate) {
+            throw new Error(`No embedded prompt template found in workflow steps. All prompts must be embedded in workflow step configs. Step: ${scriptStep?.name || 'unknown'}`);
+          }
+          
+          const scriptPromptSource = 'workflow-step';
+          const promptIdentifier = scriptStep ? (scriptStep.id || scriptStep.name || 'workflow-step') : 'enhanced-workflow-executor';
           
           // Log prompt usage
-          await this.logPromptUsage(scriptPromptName, scriptPromptSource, customScriptTemplate || 'Default from database', scriptRequest);
+          await this.logPromptUsage(promptIdentifier, scriptPromptSource, customScriptTemplate, scriptRequest);
           
           const scriptResponse = await this.aiLogger.makeAICallWithPrompt(
-            scriptPromptName,
+            promptIdentifier,
             scriptRequest,
             jobId,
             'enhanced-workflow-executor',
             page.url(),
             screenshotBeforeKey,  // screenshotId for tracking
             scriptRequest,  // Pass scriptRequest as sourcePayload for full attachment logging
-            customScriptPrompt || customScriptTemplate // Pass custom template if available
+            customScriptTemplate // Pass custom template (required - no fallback to database)
           );
           console.log(`[EnhancedWorkflowExecutor] DEBUG: makeAICallWithPrompt completed successfully`);
 
@@ -451,24 +447,29 @@ class EnhancedWorkflowExecutor {
           throw new Error(`AI request limit exceeded: ${aiRequestCount}/${this.maxAiRequestsPerLeg}`);
         }
 
-        // Use custom prompt template if available
-        const verifyPromptName = 'verify-workflow-leg';
-        const customVerifyPrompt = this.getPromptConfig(verifyPromptName);
-        const customVerifyTemplate = customVerifyPrompt?.user_message_template || null;
-        const verifyPromptSource = customVerifyPrompt ? 'workflow-template' : 'database';
+        // Find prompt from workflow steps - prompts MUST be embedded in step configs
+        const verifyStep = this.findAIPromptStep();
+        const customVerifyTemplate = verifyStep ? (verifyStep.config?.template || verifyStep.config?.user_message_template) : null;
+        
+        if (!customVerifyTemplate) {
+          throw new Error(`No embedded prompt template found in workflow steps for verification. All prompts must be embedded in workflow step configs. Step: ${verifyStep?.name || 'unknown'}`);
+        }
+        
+        const verifyPromptSource = 'workflow-step';
+        const verifyPromptIdentifier = verifyStep ? (verifyStep.id || verifyStep.name || 'workflow-step') : 'enhanced-workflow-executor';
         
         // Log prompt usage
-        await this.logPromptUsage(verifyPromptName, verifyPromptSource, customVerifyTemplate || 'Default from database', verificationRequest);
+        await this.logPromptUsage(verifyPromptIdentifier, verifyPromptSource, customVerifyTemplate, verificationRequest);
         
         const verificationResponse = await this.aiLogger.makeAICallWithPrompt(
-          verifyPromptName,
+          verifyPromptIdentifier,
           verificationRequest,
           jobId,
           'enhanced-workflow-executor',
           page.url(),
           screenshotAfterKey,  // screenshotId for tracking
           verificationRequest,  // Pass verificationRequest as sourcePayload for full attachment logging
-          customVerifyPrompt || customVerifyTemplate // Pass custom template if available
+          customVerifyTemplate // Pass custom template (required - no fallback to database)
         );
 
         // Step 8: Record iteration with FULL data (no trimming)
