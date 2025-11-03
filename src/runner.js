@@ -11,8 +11,7 @@ import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import VideoStreamManager from './video-stream-manager.js';
 import VideoRecorder from './video-recorder.js';
-import express from 'express';
-import workflowApi from './workflow-api.js';
+// HTTP server removed - runners only poll backend, never expose HTTP endpoints (rule 51-runner-architecture.mdc)
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
@@ -20,7 +19,7 @@ const RUNNER_TOKEN = process.env.RUNNER_TOKEN; // GitHub Actions-style runner to
 // Generate unique runner ID if not provided (includes hostname and UUID for uniqueness)
 const RUNNER_ID = process.env.RUNNER_ID || `unified-runner-${hostname()}-${randomUUID().substring(0, 8)}`;
 const STREAM_INTERVAL = 2000; // Stream browser frame every 2 seconds
-const WORKFLOW_API_PORT = parseInt(process.env.WORKFLOW_API_PORT || '3001'); // Workflow API port
+// WORKFLOW_API_PORT removed - runners do not expose HTTP endpoints (rule 51-runner-architecture.mdc)
 
 // Validate runner token is configured
 if (!RUNNER_TOKEN) {
@@ -52,22 +51,13 @@ export const runnerContext = {
   BACKEND_URL,
   setCurrentPage: (page) => { 
     currentPage = page;
-    // Set global currentPage for workflow API
-    global.currentPage = page;
+    // No global currentPage needed - workflow execution happens internally
   }
 };
 
-// Initialize Express app for workflow API
-const app = express();
-app.use(express.json());
-
-// Mount workflow API routes
-app.use('/', workflowApi);
-
-// Start workflow API server
-const workflowServer = app.listen(WORKFLOW_API_PORT, '0.0.0.0', () => {
-  console.log(`🔌 [UNIFIED-RUNNER] Workflow API server started on port ${WORKFLOW_API_PORT}`);
-});
+// HTTP server removed - runners only poll backend, never expose HTTP endpoints (rule 51-runner-architecture.mdc)
+// Workflow execution happens internally within the runner - no HTTP endpoints needed
+console.log(`✅ [UNIFIED-RUNNER] Runner uses polling pattern only - no HTTP server exposed`);
 
 /**
  * Get axios headers with authentication
