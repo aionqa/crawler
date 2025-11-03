@@ -83,6 +83,75 @@ class EnhancedWorkflowExecutor {
   }
 
   /**
+   * Find the specific script generation step (prioritizes script generation over action analysis)
+   */
+  findScriptGenerationStep() {
+    if (!this.workflowTemplate || !this.workflowTemplate.steps) {
+      console.log(`[EnhancedWorkflowExecutor] findScriptGenerationStep: No workflow template or steps`);
+      return null;
+    }
+
+    const findInSteps = (steps, depth = 0) => {
+      for (const s of steps || []) {
+        if (s.type === 'ai-prompt') {
+          // Prioritize steps that are clearly for script generation
+          const stepId = s.id || s.name || '';
+          const stepName = (s.name || '').toLowerCase();
+          const template = s.config?.template || s.config?.user_message_template || '';
+          
+          // Check if this is a script generation step
+          // Exclude steps that are clearly for action analysis (but allow generation steps that mention actions)
+          const isAnalysisStep = 
+            (stepId.includes('analyze') && !stepId.includes('generate')) || 
+            (stepName.includes('analyze') && !stepName.includes('generate')) ||
+            (template.toLowerCase().includes('identify') && !template.toLowerCase().includes('generate')) ||
+            template.toLowerCase().includes('list actions');
+          
+          const isScriptStep = 
+            !isAnalysisStep && ( // Exclude analysis steps
+              stepId.includes('script') || 
+              stepId.includes('generate') ||
+              stepName.includes('script') ||
+              stepName.includes('generate') ||
+              template.toLowerCase().includes('playwright code') ||
+              template.toLowerCase().includes('playwright script') ||
+              template.toLowerCase().includes('executable code') ||
+              template.toLowerCase().includes('generate playwright') ||
+              template.toLowerCase().includes('javascript code')
+            );
+          
+          if (isScriptStep && template) {
+            console.log(`[EnhancedWorkflowExecutor] ✅ Found script generation step: ${stepId || stepName} (depth: ${depth})`);
+            return s;
+          }
+        }
+        // Check nested steps (for-each, while-loop, if-step, etc.)
+        if (s.config?.steps && Array.isArray(s.config.steps)) {
+          const found = findInSteps(s.config.steps, depth + 1);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+
+    // First try to find script generation step
+    let scriptStep = findInSteps(this.workflowTemplate.steps);
+    
+    // If not found, fall back to any ai-prompt step
+    if (!scriptStep) {
+      console.log(`[EnhancedWorkflowExecutor] ⚠️ No script generation step found, falling back to any ai-prompt step`);
+      scriptStep = this.findAIPromptStep();
+      if (scriptStep) {
+        console.log(`[EnhancedWorkflowExecutor] ✅ Fallback found ai-prompt step: ${scriptStep.id || scriptStep.name || 'unknown'}`);
+      } else {
+        console.log(`[EnhancedWorkflowExecutor] ❌ No ai-prompt step found either`);
+      }
+    }
+    
+    return scriptStep;
+  }
+
+  /**
    * Check job status from backend
    * @param {string} jobId - Job ID to check
    * @returns {string} Job status (running, failed, paused, etc.)
@@ -339,12 +408,19 @@ class EnhancedWorkflowExecutor {
           }
           
           // Find prompt from workflow steps - prompts MUST be embedded in step configs
-          const scriptStep = this.findAIPromptStep();
+          // Prioritize script generation steps over action analysis steps
+          const scriptStep = this.findScriptGenerationStep();
           const customScriptTemplate = scriptStep ? (scriptStep.config?.template || scriptStep.config?.user_message_template) : null;
           
           if (!customScriptTemplate) {
-            throw new Error(`No embedded prompt template found in workflow steps. All prompts must be embedded in workflow step configs. Step: ${scriptStep?.name || 'unknown'}`);
+            const stepInfo = scriptStep ? `${scriptStep.id || scriptStep.name || 'unknown'}` : 'none found';
+            console.error(`[EnhancedWorkflowExecutor] ❌ No embedded prompt template found in workflow steps.`);
+            console.error(`[EnhancedWorkflowExecutor] Step found: ${stepInfo}`);
+            console.error(`[EnhancedWorkflowExecutor] Available steps: ${this.workflowTemplate?.steps?.map(s => s.id || s.name || s.type).join(', ') || 'none'}`);
+            throw new Error(`No embedded prompt template found in workflow steps. All prompts must be embedded in workflow step configs. Step: ${stepInfo}`);
           }
+          
+          console.log(`[EnhancedWorkflowExecutor] ✅ Using prompt template from step: ${scriptStep.id || scriptStep.name || 'unknown'}`);
           
           const scriptPromptSource = 'workflow-step';
           const promptIdentifier = scriptStep ? (scriptStep.id || scriptStep.name || 'workflow-step') : 'enhanced-workflow-executor';
@@ -364,26 +440,75 @@ class EnhancedWorkflowExecutor {
           );
           console.log(`[EnhancedWorkflowExecutor] DEBUG: makeAICallWithPrompt completed successfully`);
 
+          // Helper function to extract script from various response formats
+          const extractScript = (response) => {
+            if (!response) return null;
+            
+            // Handle string responses (might be JSON string)
+            if (typeof response === 'string') {
+              try {
+                const parsed = JSON.parse(response);
+                return extractScript(parsed);
+              } catch {
+                // If it's not JSON, check if it's already script code
+                if (response.trim().length > 0 && (response.includes('await') || response.includes('page.') || response.includes('async'))) {
+                  return response;
+                }
+                return null;
+              }
+            }
+            
+            // Handle nested objects (response.data, response.result, etc.)
+            if (response.data && typeof response.data === 'object') {
+              const fromData = extractScript(response.data);
+              if (fromData) return fromData;
+            }
+            if (response.result && typeof response.result === 'object') {
+              const fromResult = extractScript(response.result);
+              if (fromResult) return fromResult;
+            }
+            if (response.response && typeof response.response === 'object') {
+              const fromResponse = extractScript(response.response);
+              if (fromResponse) return fromResponse;
+            }
+            
+            // Check all possible field names (case-insensitive check for common variations)
+            const possibleFields = [
+              'script',
+              'playwright_script',
+              'code',
+              'playwright_code',
+              'playwrightCode',
+              'executable_code',
+              'automation_code',
+              'test_code',
+              'action_code'
+            ];
+            
+            for (const field of possibleFields) {
+              if (response[field] && typeof response[field] === 'string' && response[field].trim().length > 0) {
+                return response[field];
+              }
+            }
+            
+            return null;
+          };
+          
+          playwrightScript = extractScript(scriptResponse);
+          
           console.log(`[EnhancedWorkflowExecutor] DEBUG: scriptResponse type: ${typeof scriptResponse}`);
           console.log(`[EnhancedWorkflowExecutor] DEBUG: scriptResponse keys: ${scriptResponse ? Object.keys(scriptResponse) : 'null'}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: has playwright_script: ${!!scriptResponse?.playwright_script}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: has code: ${!!scriptResponse?.code}`);
+          console.log(`[EnhancedWorkflowExecutor] DEBUG: Extracted script length: ${playwrightScript ? playwrightScript.length : 0}`);
           
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: Validation check:`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: !scriptResponse = ${!scriptResponse}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: !scriptResponse.playwright_script = ${!scriptResponse?.playwright_script}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: !scriptResponse.code = ${!scriptResponse?.code}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: !scriptResponse.script = ${!scriptResponse?.script}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: (!scriptResponse.playwright_script && !scriptResponse.code && !scriptResponse.script) = ${(!scriptResponse?.playwright_script && !scriptResponse?.code && !scriptResponse?.script)}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: Full validation result = ${!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code && !scriptResponse.script)}`);
-          
-          if (!scriptResponse || (!scriptResponse.playwright_script && !scriptResponse.code && !scriptResponse.script)) {
-            console.warn(`[EnhancedWorkflowExecutor] OpenAI did not return a valid Playwright script. Response: ${JSON.stringify(scriptResponse)}`);
-            throw new Error('OpenAI did not return a valid Playwright script');
+          if (!playwrightScript || playwrightScript.trim().length === 0) {
+            console.error(`[EnhancedWorkflowExecutor] ❌ OpenAI did not return a valid Playwright script.`);
+            console.error(`[EnhancedWorkflowExecutor] Response type: ${typeof scriptResponse}`);
+            console.error(`[EnhancedWorkflowExecutor] Response keys: ${scriptResponse ? Object.keys(scriptResponse).join(', ') : 'null'}`);
+            console.error(`[EnhancedWorkflowExecutor] Full response: ${JSON.stringify(scriptResponse, null, 2)}`);
+            throw new Error(`OpenAI did not return a valid Playwright script. Response keys: ${scriptResponse ? Object.keys(scriptResponse).join(', ') : 'null'}`);
           }
-
-          // Check for script field first (most common), then playwright_script, then code field
-          playwrightScript = scriptResponse.script || scriptResponse.playwright_script || scriptResponse.code;
+          
+          console.log(`[EnhancedWorkflowExecutor] ✅ Successfully extracted Playwright script (${playwrightScript.length} characters)`);
           
           // Update leg with script
           await this.updateStep(workflowId, step.id, { 
