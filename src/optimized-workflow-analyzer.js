@@ -4,38 +4,52 @@
  */
 
 import axios from 'axios';
-import OptimizedPageAnalyzer from '../shared/optimized-page-analyzer.js';
-import { AIConversationLogger } from '../shared/ai-conversation-logger.js';
+// Note: OptimizedPageAnalyzer is deprecated - using workflow-based approach instead
+// import OptimizedPageAnalyzer from '../shared/optimized-page-analyzer.js';
+// Note: AIConversationLogger import is handled dynamically in unified-operations.js
+// import { AIConversationLogger } from '../../shared/ai-conversation-logger.js';
 import * as backendLogger from './backend-logger.js';
 
 export class OptimizedWorkflowAnalyzer {
-  constructor(backendUrl = null) {
+  constructor(backendUrl = null, aiLogger = null) {
     this.backendUrl = backendUrl || process.env.BACKEND_URL || 'http://back:4000';
-    this.pageAnalyzer = new OptimizedPageAnalyzer(backendUrl);
-    this.aiLogger = new AIConversationLogger(backendUrl);
+    // Note: OptimizedPageAnalyzer is deprecated - using workflow-based approach instead
+    // this.pageAnalyzer = new OptimizedPageAnalyzer(backendUrl);
+    // Note: aiLogger should be passed in from unified-operations.js
+    this.aiLogger = aiLogger;
     this.maxDepth = 6;
   }
 
   /**
    * Analyze page with optimized data collection and QA-like testing
+   * NOTE: This is deprecated - workflow mode uses WorkflowAnalyzer/WorkflowExecutor instead
    */
   async analyzePage(page, jobId, pageId, projectId, openaiClient) {
     const pageUrl = page.url();
     const pageTitle = await page.title();
     
+    console.log(`[OptimizedWorkflowAnalyzer] ⚠️  Optimized mode is deprecated - use workflow mode instead`);
     console.log(`[OptimizedWorkflowAnalyzer] 🔍 Starting QA-like analysis of ${pageTitle}`);
     
     try {
-      // Step 1: Collect all page data (visible text, interactive elements, AX tree, DOM snapshot)
-      const pageData = await this.pageAnalyzer.collectPageData(page, jobId, pageUrl, true, true);
+      // Note: OptimizedPageAnalyzer is deprecated - using basic page data collection instead
+      const visibleText = await page.evaluate(() => document.body.innerText || '');
+      const interactiveElements = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"]')).length;
+        const links = Array.from(document.querySelectorAll('a[href]')).length;
+        const inputs = Array.from(document.querySelectorAll('input, textarea, select')).length;
+        return { buttons, links, inputs, interactive_count: buttons + links + inputs };
+      });
       
-      // Step 2: Send page data to backend for storage
-      await this.pageAnalyzer.sendPageDataToBackend(jobId, pageData);
+      const pageData = {
+        page_url: pageUrl,
+        page_title: pageTitle,
+        visible_text: visibleText.substring(0, 2000),
+        interactive_elements: interactiveElements,
+        collection_time_ms: Date.now()
+      };
       
-      // Step 3: Generate page description for job history
-      await this.addPageDescriptionToJobHistory(jobId, pageData);
-      
-      // Step 4: Start QA-like testing iterations
+      // Step 2: Start QA-like testing iterations
       const testResults = await this.performQATesting(page, jobId, pageId, projectId, openaiClient, pageData);
       
       return {
@@ -94,9 +108,19 @@ export class OptimizedWorkflowAnalyzer {
         console.log(`[OptimizedWorkflowAnalyzer] 🔄 Iteration ${currentDepth + 1}/${this.maxDepth}`);
         
         // Create optimized payload for OpenAI (minimal tokens)
-        const optimizedPayload = this.pageAnalyzer.createOptimizedPayload(currentPageData, conversationHistory);
+        // Note: Using basic payload creation since OptimizedPageAnalyzer is deprecated
+        const optimizedPayload = {
+          page_url: currentPageData.page_url,
+          page_title: currentPageData.page_title,
+          visible_text: currentPageData.visible_text?.substring(0, 1000) || '',
+          interactive_elements: currentPageData.interactive_elements || {},
+          conversation_history: conversationHistory
+        };
         
         // Send to OpenAI for analysis and action generation
+        if (!this.aiLogger) {
+          throw new Error('AIConversationLogger is required but not provided');
+        }
         const aiResponse = await this.aiLogger.makeAICallWithPrompt(
           'analyze-interactive-elements',
           optimizedPayload,
@@ -140,7 +164,22 @@ export class OptimizedWorkflowAnalyzer {
         }
         
         // Collect new page data for next iteration
-        currentPageData = await this.pageAnalyzer.collectPageData(page, jobId, page.url(), true, true);
+        // Note: Using basic page data collection since OptimizedPageAnalyzer is deprecated
+        const visibleText = await page.evaluate(() => document.body.innerText || '');
+        const interactiveElements = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"]')).length;
+          const links = Array.from(document.querySelectorAll('a[href]')).length;
+          const inputs = Array.from(document.querySelectorAll('input, textarea, select')).length;
+          return { buttons, links, inputs, interactive_count: buttons + links + inputs };
+        });
+        
+        currentPageData = {
+          page_url: page.url(),
+          page_title: await page.title(),
+          visible_text: visibleText.substring(0, 2000),
+          interactive_elements: interactiveElements,
+          collection_time_ms: Date.now()
+        };
         currentDepth++;
         
       } catch (error) {
@@ -159,35 +198,238 @@ export class OptimizedWorkflowAnalyzer {
   }
 
   /**
+   * Clean script to remove markdown code blocks and other formatting
+   */
+  cleanScript(script) {
+    if (!script || typeof script !== 'string') {
+      return script;
+    }
+    
+    let cleaned = script.trim();
+    
+    // First, extract code from markdown code blocks if present
+    // This handles cases where there's text before/after the code block
+    const codeBlockRegex = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
+    const codeBlockMatches = [...cleaned.matchAll(codeBlockRegex)];
+    if (codeBlockMatches.length > 0) {
+      // If code blocks are found, extract only the code from them
+      cleaned = codeBlockMatches.map(match => match[1]).join('\n\n');
+    } else {
+      // No code blocks found, but remove any markdown markers that might be present
+      cleaned = cleaned.replace(/^```[\w]*\s*\n?/gm, '');
+      cleaned = cleaned.replace(/\n?\s*```$/gm, '');
+      cleaned = cleaned.replace(/^\s*```[\w]*\s*$/gm, '');
+      cleaned = cleaned.replace(/```[\w]*/g, '');
+    }
+    
+    // Extract function bodies instead of removing functions completely
+    // This handles nested braces by matching from function start to matching closing brace
+    const extractFunctionBodies = (text) => {
+      const patterns = [
+        /async\s+function\s*\([^)]*\)\s*\{/g,
+        /async\s+function\s+\w+\s*\([^)]*\)\s*\{/g,
+        /function\s*\([^)]*\)\s*\{/g,
+        /function\s+\w+\s*\([^)]*\)\s*\{/g
+      ];
+      
+      for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+          const start = match.index;
+          const openBracePos = match.index + match[0].length - 1; // Position of opening {
+          let braceCount = 1;
+          let pos = openBracePos + 1;
+          const bodyStart = pos;
+          
+          // Find matching closing brace
+          while (braceCount > 0 && pos < text.length) {
+            if (text[pos] === '{') braceCount++;
+            else if (text[pos] === '}') braceCount--;
+            pos++;
+          }
+          
+          if (braceCount === 0) {
+            // Found matching brace, extract function body (content between braces)
+            const bodyEnd = pos - 1; // Position just before closing }
+            const functionBody = text.slice(bodyStart, bodyEnd).trim();
+            // Replace function with just its body
+            text = text.slice(0, start) + functionBody + text.slice(pos);
+            pattern.lastIndex = 0; // Reset regex
+          }
+        }
+      }
+      
+      return text;
+    };
+    
+    cleaned = extractFunctionBodies(cleaned);
+    
+    // Remove IIFE wrappers (async () => { ... })() or (async function() { ... })()
+    cleaned = cleaned.replace(/\(async\s*\([^)]*\)\s*=>\s*\{/g, '');
+    cleaned = cleaned.replace(/\(async\s+function\s*\([^)]*\)\s*\{[^}]*\}\)\s*\(\)/g, '');
+    cleaned = cleaned.replace(/\(async\s*\(\)\s*=>\s*\{[^}]*\}\)\s*\(\)/g, '');
+    
+    // Remove require statements
+    cleaned = cleaned.replace(/const\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+\w+\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
+    cleaned = cleaned.replace(/require\s*\([^)]*\)\s*;?\s*/g, '');
+    
+    // Remove module.exports
+    cleaned = cleaned.replace(/module\.exports\s*=\s*[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/module\.exports\s*=\s*async\s+function[^}]*\}/g, '');
+    
+    // Remove browser/page creation (we're already in a Playwright context)
+    cleaned = cleaned.replace(/const\s+browser\s*=\s*await\s+chromium\.launch[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+page\s*=\s*await\s+browser\.newPage[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+context\s*=\s*await\s+browser\.newContext[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+page\s*=\s*await\s+context\.newPage[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/await\s+browser\.close[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/await\s+context\.close[^;]+;?\s*/g, '');
+    
+    // Remove template variables ({{action}}, {{page_context}}, etc.)
+    cleaned = cleaned.replace(/\{\{[^}]+\}\}/g, '');
+    
+    // Remove comments
+    cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
+    cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
+    
+    // Clean up extra whitespace and newlines
+    cleaned = cleaned.replace(/\n\s*\n\s*\n/g, '\n');
+    cleaned = cleaned.trim();
+    
+    // If the script is wrapped in braces, unwrap them
+    if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+      cleaned = cleaned.slice(1, -1).trim();
+    }
+    
+    return cleaned;
+  }
+
+  /**
    * Execute Playwright script generated by AI
    */
   async executePlaywrightScript(page, script, jobId, depth) {
+    const startTime = Date.now();
+    const originalScriptLength = script?.length || 0;
+    
     try {
       console.log(`[OptimizedWorkflowAnalyzer] 🎭 Executing Playwright script at depth ${depth + 1}`);
       
+      // Log script execution start
+      await backendLogger.appendJobLog(jobId, 'debug', 
+        `🎭 Starting script execution (depth ${depth + 1})`,
+        'OPTIMIZED-WORKFLOW-ANALYZER',
+        {
+          depth: depth + 1,
+          original_script_length: originalScriptLength,
+          script_preview: script?.substring(0, 300) || 'N/A',
+          page_url: page.url()
+        }
+      );
+      
+      // Clean the script to remove markdown code blocks and other formatting
+      const cleanedScript = this.cleanScript(script);
+      const cleanedScriptLength = cleanedScript?.length || 0;
+      
+      if (!cleanedScript || cleanedScript.trim().length === 0) {
+        const error = 'Script is empty after cleaning';
+        await backendLogger.appendJobLog(jobId, 'error', 
+          `❌ ${error}`,
+          'OPTIMIZED-WORKFLOW-ANALYZER',
+          {
+            depth: depth + 1,
+            original_script_length: originalScriptLength,
+            cleaned_script_length: cleanedScriptLength,
+            original_script_preview: script?.substring(0, 500) || 'N/A'
+          }
+        );
+        throw new Error(error);
+      }
+      
+      // Log cleaned script info
+      await backendLogger.appendJobLog(jobId, 'debug',
+        `📝 Script cleaned (${originalScriptLength} → ${cleanedScriptLength} chars)`,
+        'OPTIMIZED-WORKFLOW-ANALYZER',
+        {
+          depth: depth + 1,
+          cleaned_script_preview: cleanedScript.substring(0, 500),
+          cleaning_removed_chars: originalScriptLength - cleanedScriptLength
+        }
+      );
+      
       // Take screenshot before action
       const beforeScreenshot = await page.screenshot({ type: 'png', fullPage: true });
+      const urlBefore = page.url();
+      const titleBefore = await page.title();
       
-      // Execute the script
-      await page.evaluate(script);
+      // Execute the script in browser context
+      await backendLogger.appendJobLog(jobId, 'debug',
+        `▶️ Executing script in browser context...`,
+        'OPTIMIZED-WORKFLOW-ANALYZER',
+        {
+          depth: depth + 1,
+          url_before: urlBefore,
+          title_before: titleBefore
+        }
+      );
+      
+      // page.evaluate() can accept a string containing JavaScript code
+      await page.evaluate(cleanedScript);
       
       // Wait for page to settle
       await page.waitForTimeout(2000);
       
       // Take screenshot after action
       const afterScreenshot = await page.screenshot({ type: 'png', fullPage: true });
+      const urlAfter = page.url();
+      const titleAfter = await page.title();
+      const executionTime = Date.now() - startTime;
+      
+      // Log successful execution
+      await backendLogger.appendJobLog(jobId, 'info',
+        `✅ Script executed successfully (${executionTime}ms)`,
+        'OPTIMIZED-WORKFLOW-ANALYZER',
+        {
+          depth: depth + 1,
+          execution_time_ms: executionTime,
+          url_before: urlBefore,
+          url_after: urlAfter,
+          title_before: titleBefore,
+          title_after: titleAfter,
+          url_changed: urlBefore !== urlAfter,
+          title_changed: titleBefore !== titleAfter
+        }
+      );
       
       return {
         success: true,
         before_screenshot: beforeScreenshot.toString('base64'),
         after_screenshot: afterScreenshot.toString('base64'),
-        url_before: page.url(),
-        url_after: page.url(),
-        page_title_after: await page.title()
+        url_before: urlBefore,
+        url_after: urlAfter,
+        page_title_after: titleAfter
       };
       
     } catch (error) {
+      const executionTime = Date.now() - startTime;
       console.error(`[OptimizedWorkflowAnalyzer] ❌ Script execution failed: ${error.message}`);
+      console.error(`[OptimizedWorkflowAnalyzer] Script content (first 500 chars): ${script?.substring(0, 500)}`);
+      
+      // Log execution failure with details
+      await backendLogger.appendJobLog(jobId, 'error',
+        `❌ Script execution failed: ${error.message}`,
+        'OPTIMIZED-WORKFLOW-ANALYZER',
+        {
+          depth: depth + 1,
+          execution_time_ms: executionTime,
+          error_message: error.message,
+          error_stack: error.stack?.substring(0, 1000),
+          original_script_preview: script?.substring(0, 500) || 'N/A',
+          cleaned_script_preview: this.cleanScript(script)?.substring(0, 500) || 'N/A',
+          page_url: page.url()
+        }
+      );
+      
       return {
         success: false,
         error: error.message
