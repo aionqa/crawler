@@ -893,8 +893,19 @@ class WorkflowAnalyzer {
       }
     };
     
+    // Check if we should retry from a specific step (after self-adjustable workflow)
+    let startStepIndex = 0;
+    if (workflowState.shouldRetryFromStep !== undefined && workflowState.shouldRetryFromStep !== null) {
+      startStepIndex = workflowState.shouldRetryFromStep;
+      console.log(`[WorkflowAnalyzer] 🔄 Retrying from step ${startStepIndex} with adjusted workflow`);
+      // Clear the flag so we don't loop
+      delete workflowState.shouldRetryFromStep;
+      // Clear the last script failure so self-adjustable workflow doesn't trigger again
+      delete workflowState.lastScriptFailure;
+    }
+    
     // Execute each step in sequence
-    for (let i = 0; i < this.workflowTemplate.steps.length; i++) {
+    for (let i = startStepIndex; i < this.workflowTemplate.steps.length; i++) {
       const step = this.workflowTemplate.steps[i];
       console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
       console.log(`[WorkflowAnalyzer] 🔄 EXECUTING STEP ${i + 1}/${this.workflowTemplate.steps.length}: ${step.name}`);
@@ -944,7 +955,7 @@ class WorkflowAnalyzer {
             break;
             
           case 'execute-code':
-            await this.executeCodeStep(page, step, workflowState);
+            await this.executeCodeStep(page, step, workflowState, jobId);
             break;
             
           case 'execute-code-from-variable':
@@ -967,7 +978,11 @@ class WorkflowAnalyzer {
             await this.executeCookieCollectStep(page, step, workflowState, jobId);
             break;
             
-          case 'validate-response':
+          case 'self-adjustable-ai-workflow':
+            await this.executeSelfAdjustableAIWorkflowStep(page, step, workflowState, jobId, pageId, projectId);
+            break;
+            
+            case 'validate-response':
             await this.executeValidateResponseStep(step, workflowState);
             break;
             
@@ -1008,6 +1023,10 @@ class WorkflowAnalyzer {
             await this.executeIfStep(page, step, workflowState, jobId);
             break;
             
+          case 'self-adjustable-ai-workflow':
+            await this.executeSelfAdjustableAIWorkflowStep(page, step, workflowState, jobId, pageId, projectId);
+            break;
+            
           default:
             console.log(`[WorkflowAnalyzer] ⚠️ Unknown step type: ${step.type}`);
         }
@@ -1017,8 +1036,42 @@ class WorkflowAnalyzer {
         
       } catch (stepError) {
         console.error(`[WorkflowAnalyzer] ❌ Step ${i + 1} failed: ${stepError.message}`);
-        // Continue with next step unless it's critical
-        if (step.config?.critical) {
+        
+        // Check if this is a script execution failure and next step is self-adjustable-ai-workflow
+        const isScriptExecutionFailure = (
+          step.type === 'execute-code' || 
+          step.type === 'execute-code-from-variable'
+        );
+        const nextStepIndex = i + 1;
+        const nextStep = nextStepIndex < this.workflowTemplate.steps.length 
+          ? this.workflowTemplate.steps[nextStepIndex] 
+          : null;
+        const nextStepIsAdjustable = nextStep && nextStep.type === 'self-adjustable-ai-workflow';
+        
+        if (isScriptExecutionFailure && nextStepIsAdjustable) {
+          console.log(`[WorkflowAnalyzer] 🔄 Script execution failed, next step is self-adjustable-ai-workflow - will retry`);
+          // Store failure info for retry, including which step failed and which step generated the script
+          // Find the AI prompt step that generated this script (should be before the execute step)
+          let scriptGenerationStep = null;
+          for (let j = i - 1; j >= 0; j--) {
+            const prevStep = this.workflowTemplate.steps[j];
+            if (prevStep.type === 'ai-prompt') {
+              scriptGenerationStep = prevStep;
+              break;
+            }
+          }
+          workflowState.lastScriptFailure = {
+            step: step,
+            stepIndex: i,
+            scriptGenerationStep: scriptGenerationStep,
+            scriptGenerationStepIndex: scriptGenerationStep ? this.workflowTemplate.steps.findIndex(s => s.id === scriptGenerationStep.id || s.name === scriptGenerationStep.name) : null,
+            error: stepError.message,
+            script: workflowState.lastExecutionResult?.script || workflowState.lastExecutionResult?.code || null,
+            timestamp: new Date(),
+            executionResult: workflowState.lastExecutionResult || null
+          };
+          // Continue to next step (self-adjustable-ai-workflow) which will handle retry
+        } else if (step.config?.critical && !nextStepIsAdjustable) {
           throw stepError;
         }
       }
@@ -1912,22 +1965,263 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Clean script to remove markdown code blocks and function declarations
+   */
+  cleanScript(script) {
+    if (!script || typeof script !== 'string') {
+      return script;
+    }
+    
+    let cleaned = script.trim();
+    
+    // First, extract code from markdown code blocks if present
+    const codeBlockRegex = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
+    const codeBlockMatches = [...cleaned.matchAll(codeBlockRegex)];
+    if (codeBlockMatches.length > 0) {
+      cleaned = codeBlockMatches.map(match => match[1]).join('\n\n');
+    } else {
+      cleaned = cleaned.replace(/^```[\w]*\s*\n?/gm, '');
+      cleaned = cleaned.replace(/\n?\s*```$/gm, '');
+      cleaned = cleaned.replace(/^\s*```[\w]*\s*$/gm, '');
+      cleaned = cleaned.replace(/```[\w]*/g, '');
+    }
+    
+    // Extract function bodies instead of removing functions completely
+    const extractFunctionBodies = (text) => {
+      const patterns = [
+        /async\s+function\s*\([^)]*\)\s*\{/g,
+        /async\s+function\s+\w+\s*\([^)]*\)\s*\{/g,
+        /function\s*\([^)]*\)\s*\{/g,
+        /function\s+\w+\s*\([^)]*\)\s*\{/g
+      ];
+      
+      for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+          const start = match.index;
+          const openBracePos = match.index + match[0].length - 1;
+          let braceCount = 1;
+          let pos = openBracePos + 1;
+          const bodyStart = pos;
+          
+          while (braceCount > 0 && pos < text.length) {
+            if (text[pos] === '{') braceCount++;
+            else if (text[pos] === '}') braceCount--;
+            pos++;
+          }
+          
+          if (braceCount === 0) {
+            const bodyEnd = pos - 1;
+            const functionBody = text.slice(bodyStart, bodyEnd).trim();
+            text = text.slice(0, start) + functionBody + text.slice(pos);
+            pattern.lastIndex = 0;
+          }
+        }
+      }
+      
+      return text;
+    };
+    
+    cleaned = extractFunctionBodies(cleaned);
+    
+    // Remove IIFE wrappers
+    cleaned = cleaned.replace(/\(async\s*\([^)]*\)\s*=>\s*\{/g, '');
+    cleaned = cleaned.replace(/\(async\s+function\s*\([^)]*\)\s*\{[^}]*\}\)\s*\(\)/g, '');
+    cleaned = cleaned.replace(/\(async\s*\(\)\s*=>\s*\{[^}]*\}\)\s*\(\)/g, '');
+    
+    // Remove require statements
+    cleaned = cleaned.replace(/const\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+\w+\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
+    cleaned = cleaned.replace(/require\s*\([^)]*\)\s*;?\s*/g, '');
+    
+    // Remove module.exports
+    cleaned = cleaned.replace(/module\.exports\s*=\s*[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/module\.exports\s*=\s*async\s+function[^}]*\}/g, '');
+    
+    // Remove browser/page creation
+    cleaned = cleaned.replace(/const\s+browser\s*=\s*await\s+chromium\.launch[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+page\s*=\s*await\s+browser\.newPage[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+context\s*=\s*await\s+browser\.newContext[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+page\s*=\s*await\s+context\.newPage[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/await\s+browser\.close[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/await\s+context\.close[^;]+;?\s*/g, '');
+    
+    // Remove template variables
+    cleaned = cleaned.replace(/\{\{[^}]+\}\}/g, '');
+    
+    // Remove comments
+    cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
+    cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
+    
+    // Clean up extra whitespace
+    cleaned = cleaned.replace(/\n\s*\n\s*\n/g, '\n');
+    cleaned = cleaned.trim();
+    
+    // If the script is wrapped in braces, unwrap them
+    if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+      cleaned = cleaned.slice(1, -1).trim();
+    }
+    
+    return cleaned;
+  }
+
+  /**
    * Execute code step (static code)
    */
-  async executeCodeStep(page, step, workflowState) {
+  async executeCodeStep(page, step, workflowState, jobId = null) {
+    const startTime = Date.now();
     console.log(`[WorkflowAnalyzer] 🚀 Executing static code (${step.name})`);
     
-    const code = step.config?.code || step.code;
+    // Log execution start
+    if (jobId) {
+      try {
+        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+          jobId: jobId,
+          level: 'debug',
+          message: `🚀 Starting code execution: ${step.name}`,
+          component: 'WORKFLOW-ANALYZER',
+          metadata: {
+            step_id: step.id,
+            step_name: step.name,
+            step_type: 'execute-code',
+            page_url: page.url()
+          }
+        }, {
+          headers: this.getAuthHeaders()
+        });
+      } catch (e) {
+        // Silent fail - don't block execution
+      }
+    }
+    
+    let code = step.config?.code || step.code;
+    const originalCodeLength = code?.length || 0;
+    
     if (!code) {
+      if (jobId) {
+        try {
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'error',
+            message: `❌ No code provided for step: ${step.name}`,
+            component: 'WORKFLOW-ANALYZER',
+            metadata: { step_id: step.id, step_name: step.name }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        } catch (e) {}
+      }
       throw new Error(`No code provided for step: ${step.name}`);
+    }
+    
+    // Clean the code to remove markdown code blocks and function declarations
+    code = this.cleanScript(code);
+    const cleanedCodeLength = code?.length || 0;
+    
+    if (!code || code.trim().length === 0) {
+      if (jobId) {
+        try {
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'error',
+            message: `❌ Script is empty after cleaning for step: ${step.name}`,
+            component: 'WORKFLOW-ANALYZER',
+            metadata: {
+              step_id: step.id,
+              step_name: step.name,
+              original_code_length: originalCodeLength,
+              cleaned_code_length: cleanedCodeLength,
+              original_code_preview: step.config?.code?.substring(0, 500) || step.code?.substring(0, 500) || 'N/A'
+            }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        } catch (e) {}
+      }
+      throw new Error(`Script is empty after cleaning for step: ${step.name}`);
+    }
+    
+    // Log cleaned code info
+    if (jobId) {
+      try {
+        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+          jobId: jobId,
+          level: 'debug',
+          message: `📝 Code cleaned (${originalCodeLength} → ${cleanedCodeLength} chars)`,
+          component: 'WORKFLOW-ANALYZER',
+          metadata: {
+            step_id: step.id,
+            step_name: step.name,
+            cleaned_code_preview: code.substring(0, 500),
+            cleaning_removed_chars: originalCodeLength - cleanedCodeLength
+          }
+        }, {
+          headers: this.getAuthHeaders()
+        });
+      } catch (e) {}
     }
     
     try {
       const timeout = step.config?.timeout || 30000;
+      const urlBefore = page.url();
+      const titleBefore = await page.title();
+      
+      // Log execution start
+      if (jobId) {
+        try {
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'debug',
+            message: `▶️ Executing code in browser context...`,
+            component: 'WORKFLOW-ANALYZER',
+            metadata: {
+              step_id: step.id,
+              step_name: step.name,
+              url_before: urlBefore,
+              title_before: titleBefore,
+              timeout_ms: timeout
+            }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        } catch (e) {}
+      }
+      
       const result = await page.evaluate(
         ({ code, workflowState, timeout }) => {
+          // Extract commonly used variables from workflowState for direct access in browser context
+          const collectedLinks = workflowState?.collectedLinks || workflowState?.playwrightAnalysis?.links || [];
+          const collectedForms = workflowState?.collectedForms || workflowState?.playwrightAnalysis?.forms || [];
+          const collectedInteractiveElements = workflowState?.collectedInteractiveElements || workflowState?.playwrightAnalysis?.interactive_elements || [];
+          const visibleText = workflowState?.visibleText || workflowState?.visible_text || '';
+          const interactiveElements = workflowState?.interactiveElements || workflowState?.interactive_elements || [];
+          const forms = workflowState?.forms || [];
+          const links = workflowState?.links || [];
+          const pageUrl = workflowState?.pageUrl || workflowState?.page_url || '';
+          const pageTitle = workflowState?.pageTitle || workflowState?.page_title || '';
+          const pageDescription = workflowState?.pageDescription || workflowState?.page_description || '';
+          const currentLeg = workflowState?.currentLeg || {};
+          const currentItem = workflowState?.currentItem || {};
+          const legsToExecute = workflowState?.legsToExecute || workflowState?.legs || [];
+          const context = workflowState?.context || {};
+          
+          // Create runner function with all extracted variables available in scope
           const runner = new Function(
             'workflowState',
+            'collectedLinks',
+            'collectedForms',
+            'collectedInteractiveElements',
+            'visibleText',
+            'interactiveElements',
+            'forms',
+            'links',
+            'pageUrl',
+            'pageTitle',
+            'pageDescription',
+            'currentLeg',
+            'currentItem',
+            'legsToExecute',
+            'context',
             `return (async () => {\n${code}\n})();`
           );
 
@@ -1936,7 +2230,23 @@ class WorkflowAnalyzer {
               reject(new Error(`Code execution timed out after ${timeout}ms`));
             }, timeout);
 
-            Promise.resolve(runner(workflowState))
+            Promise.resolve(runner(
+              workflowState,
+              collectedLinks,
+              collectedForms,
+              collectedInteractiveElements,
+              visibleText,
+              interactiveElements,
+              forms,
+              links,
+              pageUrl,
+              pageTitle,
+              pageDescription,
+              currentLeg,
+              currentItem,
+              legsToExecute,
+              context
+            ))
               .then(result => {
                 clearTimeout(timer);
                 resolve(result);
@@ -1949,6 +2259,37 @@ class WorkflowAnalyzer {
         },
         { code, workflowState, timeout }
       );
+      
+      const urlAfter = page.url();
+      const titleAfter = await page.title();
+      const executionTime = Date.now() - startTime;
+      
+      // Log successful execution
+      if (jobId) {
+        try {
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'info',
+            message: `✅ Code executed successfully (${executionTime}ms): ${step.name}`,
+            component: 'WORKFLOW-ANALYZER',
+            metadata: {
+              step_id: step.id,
+              step_name: step.name,
+              execution_time_ms: executionTime,
+              url_before: urlBefore,
+              url_after: urlAfter,
+              title_before: titleBefore,
+              title_after: titleAfter,
+              url_changed: urlBefore !== urlAfter,
+              title_changed: titleBefore !== titleAfter,
+              result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500)
+            }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        } catch (e) {}
+      }
+      
       workflowState.lastExecutionResult = result;
       
       // If result contains workflowState updates (like legsToExecute, context updates), merge them
@@ -2035,7 +2376,34 @@ class WorkflowAnalyzer {
       this.storeStepResult(step, result, workflowState);
       console.log(`[WorkflowAnalyzer] ✅ Code execution completed: ${JSON.stringify(result).substring(0, 100)}...`);
     } catch (error) {
+      const executionTime = Date.now() - startTime;
       console.error(`[WorkflowAnalyzer] ❌ Code execution failed: ${error.message}`);
+      
+      // Log execution failure
+      if (jobId) {
+        try {
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'error',
+            message: `❌ Code execution failed: ${error.message}`,
+            component: 'WORKFLOW-ANALYZER',
+            metadata: {
+              step_id: step.id,
+              step_name: step.name,
+              execution_time_ms: executionTime,
+              error_message: error.message,
+              error_stack: error.stack?.substring(0, 1000),
+              code_preview: code?.substring(0, 500) || 'N/A',
+              page_url: page.url()
+            }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        } catch (e) {
+          // Silent fail - don't block error throwing
+        }
+      }
+      
       throw error;
     }
   }
@@ -2058,6 +2426,13 @@ class WorkflowAnalyzer {
     }
     
     console.log(`[WorkflowAnalyzer] 📦 Resolved code from "${sourceField}": ${code ? 'found' : 'not found'}`);
+    
+    // Clean the code to remove markdown code blocks and function declarations
+    code = this.cleanScript(code);
+    
+    if (!code || code.trim().length === 0) {
+      throw new Error(`Script is empty after cleaning for step: ${step.name}`);
+    }
     
     try {
       const timeout = step.config?.timeout || 30000;
@@ -2110,15 +2485,66 @@ class WorkflowAnalyzer {
       }
       
       const result = await page.evaluate(
-        ({ code, timeout }) => {
-          const runner = new Function('page', `return (async () => { ${code}\n })();`);
+        ({ code, workflowState, timeout }) => {
+          // Extract commonly used variables from workflowState for direct access in browser context
+          const collectedLinks = workflowState?.collectedLinks || workflowState?.playwrightAnalysis?.links || [];
+          const collectedForms = workflowState?.collectedForms || workflowState?.playwrightAnalysis?.forms || [];
+          const collectedInteractiveElements = workflowState?.collectedInteractiveElements || workflowState?.playwrightAnalysis?.interactive_elements || [];
+          const visibleText = workflowState?.visibleText || workflowState?.visible_text || '';
+          const interactiveElements = workflowState?.interactiveElements || workflowState?.interactive_elements || [];
+          const forms = workflowState?.forms || [];
+          const links = workflowState?.links || [];
+          const pageUrl = workflowState?.pageUrl || workflowState?.page_url || '';
+          const pageTitle = workflowState?.pageTitle || workflowState?.page_title || '';
+          const pageDescription = workflowState?.pageDescription || workflowState?.page_description || '';
+          const currentLeg = workflowState?.currentLeg || {};
+          const currentItem = workflowState?.currentItem || {};
+          const legsToExecute = workflowState?.legsToExecute || workflowState?.legs || [];
+          const context = workflowState?.context || {};
+          
+          // Create runner function with all extracted variables available in scope
+          // Note: 'page' is NOT available in browser context - scripts must use DOM APIs
+          const runner = new Function(
+            'workflowState',
+            'collectedLinks',
+            'collectedForms',
+            'collectedInteractiveElements',
+            'visibleText',
+            'interactiveElements',
+            'forms',
+            'links',
+            'pageUrl',
+            'pageTitle',
+            'pageDescription',
+            'currentLeg',
+            'currentItem',
+            'legsToExecute',
+            'context',
+            `return (async () => { ${code}\n })();`
+          );
           
           return new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
               reject(new Error(`Code execution timed out after ${timeout}ms`));
             }, timeout);
             
-            Promise.resolve(runner(page))
+            Promise.resolve(runner(
+              workflowState,
+              collectedLinks,
+              collectedForms,
+              collectedInteractiveElements,
+              visibleText,
+              interactiveElements,
+              forms,
+              links,
+              pageUrl,
+              pageTitle,
+              pageDescription,
+              currentLeg,
+              currentItem,
+              legsToExecute,
+              context
+            ))
               .then(result => {
                 clearTimeout(timer);
                 resolve(result);
@@ -2129,7 +2555,7 @@ class WorkflowAnalyzer {
               });
           });
         },
-        { code, timeout }
+        { code, workflowState, timeout }
       );
       
       // After executing code, wait for page to stabilize (navigation, DOM updates, etc.)
@@ -2928,13 +3354,18 @@ class WorkflowAnalyzer {
         
         // Evaluate condition after nested steps
         if (conditionType === 'code' && config.conditionCode) {
+          // Clean the code before execution
+          let cleanedCode = this.cleanScript(config.conditionCode);
+          if (!cleanedCode || cleanedCode.trim().length === 0) {
+            throw new Error('Condition code is empty after cleaning');
+          }
           // Execute code to get condition
           const conditionResult = await page.evaluate(
             ({ code, workflowState }) => {
               const runner = new Function('workflowState', `return (${code});`);
               return runner(workflowState);
             },
-            { code: config.conditionCode, workflowState }
+            { code: cleanedCode, workflowState }
           );
           condition = conditionResult === true || conditionResult === 'true' || conditionResult === 1;
           
@@ -3063,13 +3494,18 @@ class WorkflowAnalyzer {
     try {
       // Evaluate condition
       if (conditionType === 'code' && conditionCode) {
+        // Clean the code before execution
+        let cleanedCode = this.cleanScript(conditionCode);
+        if (!cleanedCode || cleanedCode.trim().length === 0) {
+          throw new Error('Condition code is empty after cleaning');
+        }
         // Execute code to get condition
         const conditionResult = await page.evaluate(
           ({ code, workflowState }) => {
             const runner = new Function('workflowState', `return (${code});`);
             return runner(workflowState);
           },
-          { code: conditionCode, workflowState }
+          { code: cleanedCode, workflowState }
         );
         condition = conditionResult === true || conditionResult === 'true' || conditionResult === 1;
         
@@ -3203,10 +3639,17 @@ class WorkflowAnalyzer {
           // Get the generated script
           const generateStepId = `${step.id}_iteration_${iteration}_generate_script`;
           const generateResult = workflowState[generateStepId]?.result || workflowState.results?.[generateStepId]?.result || {};
-          const script = generateResult.playwright_script || generateResult.code || '';
+          let script = generateResult.playwright_script || generateResult.code || '';
           
           if (!script || script.trim() === '') {
             throw new Error(`No Playwright script generated for iteration ${iteration}`);
+          }
+          
+          // Clean the script to remove markdown code blocks and function declarations
+          script = this.cleanScript(script);
+          
+          if (!script || script.trim().length === 0) {
+            throw new Error(`Script is empty after cleaning for iteration ${iteration}`);
           }
           
           workflowState.legScriptToExecute = script;
@@ -3571,6 +4014,306 @@ class WorkflowAnalyzer {
     return path.split('.').reduce((current, key) => {
       return current && current[key] !== undefined ? current[key] : undefined;
     }, obj);
+  }
+
+  /**
+   * Execute self-adjustable AI workflow step
+   * Retries failed script execution with modified prompts up to a configurable number of times
+   */
+  async executeSelfAdjustableAIWorkflowStep(page, step, workflowState, jobId, pageId, projectId) {
+    console.log(`[WorkflowAnalyzer] 🔄 Executing self-adjustable AI workflow step (${step.name})`);
+    
+    // Get configuration
+    const config = step.config || {};
+    const maxRetries = config.maxRetries ?? 3;
+    const explanation = config.explanation || '';
+    const includeContext = config.includeContext ?? true;
+    const includeError = config.includeError ?? true;
+    const includePreviousScript = config.includePreviousScript ?? true;
+    const includeScreenshot = config.includeScreenshot ?? true;
+    const includeHTML = config.includeHTML ?? true;
+    
+    // Get retry count from workflow state or initialize
+    const retryCount = workflowState.selfAdjustableRetryCount || 0;
+    
+    // Check if we've exceeded max retries
+    if (retryCount >= maxRetries) {
+      console.log(`[WorkflowAnalyzer] ❌ Max retries (${maxRetries}) exceeded for self-adjustable AI workflow`);
+      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'error',
+        message: `Max retries (${maxRetries}) exceeded for self-adjustable AI workflow`,
+        component: 'WORKFLOW-STEP',
+        metadata: { step: step.name, retryCount, maxRetries }
+      }, {
+        headers: this.getAuthHeaders()
+      });
+      throw new Error(`Max retries (${maxRetries}) exceeded`);
+    }
+    
+    // Check if there was a previous script failure
+    const lastFailure = workflowState.lastScriptFailure;
+    if (!lastFailure) {
+      console.log(`[WorkflowAnalyzer] ℹ️ No previous script failure found, skipping retry`);
+      return;
+    }
+    
+    console.log(`[WorkflowAnalyzer] 🔄 Retry ${retryCount + 1}/${maxRetries} for failed script execution`);
+    
+    // Log retry attempt
+    await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+      jobId: jobId,
+      level: 'info',
+      message: `🔄 Self-adjustable AI workflow retry ${retryCount + 1}/${maxRetries}`,
+      component: 'WORKFLOW-STEP',
+      metadata: {
+        step: step.name,
+        retryCount: retryCount + 1,
+        maxRetries,
+        previousError: lastFailure.error,
+        explanation
+      }
+    }, {
+      headers: this.getAuthHeaders()
+    });
+    
+    // Use the script generation step from the failure info (exact step that generated the failed script)
+    const scriptGenerationStep = lastFailure.scriptGenerationStep;
+    const scriptGenerationStepIndex = lastFailure.scriptGenerationStepIndex;
+    
+    if (!scriptGenerationStep || scriptGenerationStepIndex === null) {
+      console.error(`[WorkflowAnalyzer] ❌ No script generation step found in failure info`);
+      throw new Error('No script generation step found in failure info');
+    }
+    
+    console.log(`[WorkflowAnalyzer] 📍 Found script generation step at index ${scriptGenerationStepIndex}: ${scriptGenerationStep.name || scriptGenerationStep.id}`);
+    
+    // Get current page state for retry
+    const pageUrl = page.url();
+    const pageTitle = await page.title().catch(() => '');
+    let htmlContent = null;
+    let screenshotBase64 = null;
+    
+    if (includeHTML) {
+      htmlContent = await page.content().catch(() => null);
+    }
+    
+    if (includeScreenshot) {
+      try {
+        const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
+        screenshotBase64 = screenshot.toString('base64');
+      } catch (e) {
+        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to capture screenshot: ${e.message}`);
+      }
+    }
+    
+    // Modify the prompt for retry
+    const originalTemplate = scriptGenerationStep.config?.template || 
+                            scriptGenerationStep.config?.user_message_template || 
+                            '';
+    
+    if (!originalTemplate) {
+      console.error(`[WorkflowAnalyzer] ❌ No template found in script generation step`);
+      throw new Error('No template found in script generation step');
+    }
+    
+    const modifiedPrompt = this.modifyPromptForRetry(
+      originalTemplate,
+      {
+        retryNumber: retryCount + 1,
+        maxRetries,
+        previousError: lastFailure.error,
+        explanation,
+        previousScript: includePreviousScript ? lastFailure.script : null,
+        includeContext,
+        includeError,
+        includeScreenshot,
+        includeHTML,
+        htmlContent,
+        screenshotBase64,
+        pageUrl,
+        pageTitle
+      },
+      workflowState
+    );
+    
+    // Create a new workflow for this page with modified prompt
+    const newWorkflowName = `AI-Generated Workflow - Retry ${retryCount + 1} - ${new Date().toISOString()}`;
+    const newWorkflow = {
+      name: newWorkflowName,
+      description: `Auto-generated workflow for retry ${retryCount + 1} after script execution failure`,
+      type: 'page',
+      project_id: projectId,
+      page_id: pageId,
+      is_ai_generated: true,
+      parent_workflow_id: this.workflowTemplate._id,
+      retry_number: retryCount + 1,
+      folder: 'AI-generated workflows',
+      steps: this.workflowTemplate.steps.map(s => {
+        if (s.id === scriptGenerationStep.id || s.name === scriptGenerationStep.name) {
+          // Modify the script generation step with new prompt
+          return {
+            ...s,
+            config: {
+              ...s.config,
+              template: modifiedPrompt,
+              user_message_template: modifiedPrompt
+            }
+          };
+        }
+        return s;
+      })
+    };
+    
+    // Store the new workflow in MongoDB
+    try {
+      const workflowResponse = await axios.post(
+        `${this.backendUrl}/api/workflow-templates`,
+        newWorkflow,
+        {
+          headers: this.getAuthHeaders()
+        }
+      );
+      
+      const newWorkflowId = workflowResponse.data._id;
+      console.log(`[WorkflowAnalyzer] ✅ Created new AI-generated workflow: ${newWorkflowId}`);
+      
+      // Update workflow state with new workflow ID
+      workflowState.aiGeneratedWorkflowId = newWorkflowId;
+      workflowState.selfAdjustableRetryCount = retryCount + 1;
+      
+      // Log workflow creation
+      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: `✅ Created new AI-generated workflow for retry ${retryCount + 1}`,
+        component: 'WORKFLOW-STEP',
+        metadata: {
+          step: step.name,
+          workflowId: newWorkflowId,
+          workflowName: newWorkflowName,
+          retryCount: retryCount + 1,
+          parentWorkflowId: this.workflowTemplate._id
+        }
+      }, {
+        headers: this.getAuthHeaders()
+      });
+      
+      // Load the new workflow and continue execution from the script generation step
+      const newWorkflowResponse = await axios.get(
+        `${this.backendUrl}/api/workflow-templates/${newWorkflowId}`,
+        {
+          headers: this.getAuthHeaders()
+        }
+      );
+      
+      const newWorkflowTemplate = newWorkflowResponse.data;
+      
+      // Update the current workflow template to use the new one
+      this.workflowTemplate = newWorkflowTemplate;
+      
+      // Set flag to continue from the script generation step (where we'll regenerate the script)
+      workflowState.shouldRetryFromStep = scriptGenerationStepIndex;
+      workflowState.retryWorkflowId = newWorkflowId;
+      
+      console.log(`[WorkflowAnalyzer] 🔄 Loaded new workflow, will continue from step ${scriptGenerationStepIndex} (script generation step)`);
+      
+      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: 'info',
+        message: `🔄 Continuing execution from step ${scriptGenerationStepIndex} with new adjusted workflow`,
+        component: 'SELF-ADJUSTABLE-WORKFLOW',
+        metadata: {
+          retry_from_step: scriptGenerationStepIndex,
+          new_workflow_id: newWorkflowId,
+          page_id: pageId
+        }
+      }, {
+        headers: this.getAuthHeaders()
+      });
+      
+      // Continue execution from the script generation step
+      // We need to re-execute from that step with the new workflow
+      // This will be handled by the main workflow execution loop
+      // by checking workflowState.shouldRetryFromStep
+      
+      return {
+        success: true,
+        workflowId: newWorkflowId,
+        retryCount: retryCount + 1,
+        shouldRetryFromStep: scriptGenerationStepIndex,
+        message: `Created new workflow for retry ${retryCount + 1}, continuing from step ${scriptGenerationStepIndex}`
+      };
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Failed to create new workflow: ${error.message}`);
+      throw error;
+    }
+  }
+  
+  /**
+   * Modify prompt for retry with additional context
+   */
+  modifyPromptForRetry(originalTemplate, retryContext, workflowState) {
+    let modifiedPrompt = originalTemplate;
+    
+    // Add workflow system context first, so OpenAI understands the system
+    modifiedPrompt += `\n\n--- WORKFLOW SYSTEM CONTEXT ---\n`;
+    modifiedPrompt += `You are part of an automated testing workflow system. Here's how it works:\n`;
+    modifiedPrompt += `1. The system analyzes web pages and creates test workflows automatically.\n`;
+    modifiedPrompt += `2. You generate Playwright scripts to interact with page elements.\n`;
+    modifiedPrompt += `3. The system executes these scripts in a real browser.\n`;
+    modifiedPrompt += `4. If a script fails, the system adjusts the workflow and retries.\n`;
+    modifiedPrompt += `5. Each workflow consists of multiple steps executed in sequence.\n`;
+    modifiedPrompt += `6. The current step is part of a larger workflow that tests page functionality.\n`;
+    modifiedPrompt += `7. Your script will be executed immediately after generation, so it must be correct and complete.\n`;
+    modifiedPrompt += `8. The script must handle page loading, element selection, and interactions properly.\n`;
+    modifiedPrompt += `9. Consider timing issues, dynamic content, and element availability.\n`;
+    modifiedPrompt += `10. The script should be robust and handle edge cases.\n\n`;
+    
+    // Add retry context
+    if (retryContext.includeError && retryContext.previousError) {
+      modifiedPrompt += `--- RETRY CONTEXT ---\n`;
+      modifiedPrompt += `⚠️ IMPORTANT: This is retry attempt ${retryContext.retryNumber} of ${retryContext.maxRetries}.\n`;
+      modifiedPrompt += `The previous script execution FAILED with the following error:\n`;
+      modifiedPrompt += `Error: ${retryContext.previousError}\n\n`;
+      
+      if (retryContext.previousScript && retryContext.includePreviousScript) {
+        modifiedPrompt += `The previous script that failed was:\n`;
+        modifiedPrompt += `\`\`\`javascript\n${retryContext.previousScript}\n\`\`\`\n\n`;
+        modifiedPrompt += `Please analyze what went wrong with this script and why it failed.\n`;
+        modifiedPrompt += `Common issues include:\n`;
+        modifiedPrompt += `- Wrong selectors (element not found or changed)\n`;
+        modifiedPrompt += `- Timing issues (element not ready when accessed)\n`;
+        modifiedPrompt += `- Element not visible or not interactable\n`;
+        modifiedPrompt += `- Page structure changed or element moved\n`;
+        modifiedPrompt += `- JavaScript errors in the script\n`;
+        modifiedPrompt += `- Network issues or page not loaded\n\n`;
+      }
+      
+      if (retryContext.explanation) {
+        modifiedPrompt += `Additional context from workflow configuration: ${retryContext.explanation}\n\n`;
+      }
+      
+      modifiedPrompt += `Current page state:\n`;
+      modifiedPrompt += `- URL: ${retryContext.pageUrl}\n`;
+      modifiedPrompt += `- Title: ${retryContext.pageTitle}\n`;
+      
+      if (retryContext.htmlContent && retryContext.includeHTML) {
+        modifiedPrompt += `- HTML structure (first 5000 chars): ${retryContext.htmlContent.substring(0, 5000)}...\n`;
+      }
+      
+      modifiedPrompt += `\n--- YOUR TASK ---\n`;
+      modifiedPrompt += `Based on the error analysis and current page state, generate an IMPROVED Playwright script that:\n`;
+      modifiedPrompt += `1. Addresses the specific failure from the previous attempt\n`;
+      modifiedPrompt += `2. Uses more robust selectors and error handling\n`;
+      modifiedPrompt += `3. Handles timing and element availability properly\n`;
+      modifiedPrompt += `4. Is complete and ready to execute\n`;
+      modifiedPrompt += `5. Follows Playwright best practices\n`;
+      modifiedPrompt += `\nThe script must be valid JavaScript that can be executed directly in a Playwright page context.\n`;
+      modifiedPrompt += `Do not include explanations or comments that are not executable code.\n`;
+    }
+    
+    return modifiedPrompt;
   }
 }
 

@@ -17,6 +17,107 @@ export class WorkflowStepExecutor {
   }
 
   /**
+   * Clean script to remove markdown code blocks and function declarations
+   */
+  cleanScript(script) {
+    if (!script || typeof script !== 'string') {
+      return script;
+    }
+    
+    let cleaned = script.trim();
+    
+    // First, extract code from markdown code blocks if present
+    const codeBlockRegex = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
+    const codeBlockMatches = [...cleaned.matchAll(codeBlockRegex)];
+    if (codeBlockMatches.length > 0) {
+      cleaned = codeBlockMatches.map(match => match[1]).join('\n\n');
+    } else {
+      cleaned = cleaned.replace(/^```[\w]*\s*\n?/gm, '');
+      cleaned = cleaned.replace(/\n?\s*```$/gm, '');
+      cleaned = cleaned.replace(/^\s*```[\w]*\s*$/gm, '');
+      cleaned = cleaned.replace(/```[\w]*/g, '');
+    }
+    
+    // Extract function bodies instead of removing functions completely
+    const extractFunctionBodies = (text) => {
+      const patterns = [
+        /async\s+function\s*\([^)]*\)\s*\{/g,
+        /async\s+function\s+\w+\s*\([^)]*\)\s*\{/g,
+        /function\s*\([^)]*\)\s*\{/g,
+        /function\s+\w+\s*\([^)]*\)\s*\{/g
+      ];
+      
+      for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+          const start = match.index;
+          const openBracePos = match.index + match[0].length - 1;
+          let braceCount = 1;
+          let pos = openBracePos + 1;
+          const bodyStart = pos;
+          
+          while (braceCount > 0 && pos < text.length) {
+            if (text[pos] === '{') braceCount++;
+            else if (text[pos] === '}') braceCount--;
+            pos++;
+          }
+          
+          if (braceCount === 0) {
+            const bodyEnd = pos - 1;
+            const functionBody = text.slice(bodyStart, bodyEnd).trim();
+            text = text.slice(0, start) + functionBody + text.slice(pos);
+            pattern.lastIndex = 0;
+          }
+        }
+      }
+      
+      return text;
+    };
+    
+    cleaned = extractFunctionBodies(cleaned);
+    
+    // Remove IIFE wrappers
+    cleaned = cleaned.replace(/\(async\s*\([^)]*\)\s*=>\s*\{/g, '');
+    cleaned = cleaned.replace(/\(async\s+function\s*\([^)]*\)\s*\{[^}]*\}\)\s*\(\)/g, '');
+    cleaned = cleaned.replace(/\(async\s*\(\)\s*=>\s*\{[^}]*\}\)\s*\(\)/g, '');
+    
+    // Remove require statements
+    cleaned = cleaned.replace(/const\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+\w+\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
+    cleaned = cleaned.replace(/require\s*\([^)]*\)\s*;?\s*/g, '');
+    
+    // Remove module.exports
+    cleaned = cleaned.replace(/module\.exports\s*=\s*[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/module\.exports\s*=\s*async\s+function[^}]*\}/g, '');
+    
+    // Remove browser/page creation
+    cleaned = cleaned.replace(/const\s+browser\s*=\s*await\s+chromium\.launch[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+page\s*=\s*await\s+browser\.newPage[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+context\s*=\s*await\s+browser\.newContext[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+page\s*=\s*await\s+context\.newPage[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/await\s+browser\.close[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/await\s+context\.close[^;]+;?\s*/g, '');
+    
+    // Remove template variables
+    cleaned = cleaned.replace(/\{\{[^}]+\}\}/g, '');
+    
+    // Remove comments
+    cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
+    cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
+    
+    // Clean up extra whitespace
+    cleaned = cleaned.replace(/\n\s*\n\s*\n/g, '\n');
+    cleaned = cleaned.trim();
+    
+    // If the script is wrapped in braces, unwrap them
+    if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+      cleaned = cleaned.slice(1, -1).trim();
+    }
+    
+    return cleaned;
+  }
+
+  /**
    * Get or create browser instance for job
    */
   async getBrowserForJob(jobId) {
@@ -308,9 +409,16 @@ export class WorkflowStepExecutor {
       const page = await this.getPageForJob(jobId, context);
       const workflowState = context?.workflowState || {};
 
-      const code = parameters.code;
+      let code = parameters.code;
       if (!code) {
         throw new Error('Code parameter is required for execute-code step');
+      }
+      
+      // Clean the code to remove markdown code blocks and function declarations
+      code = this.cleanScript(code);
+      
+      if (!code || code.trim().length === 0) {
+        throw new Error('Script is empty after cleaning');
       }
       
       const timeout = parameters.timeout || 30000;

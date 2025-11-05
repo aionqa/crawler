@@ -12,8 +12,10 @@ class WorkflowExecutor {
     this.backendLogger = backendLogger;
     this.context = context;
     this.workflowTemplate = null;
-    this.maxIterations = 2; // Maximum iterations per leg (reduced for faster execution)
-    this.maxAiRequestsPerLeg = 4; // Maximum AI requests per leg (2 iterations × 2 requests each)
+    // For page analysis workflows, don't retry legs on failure (maxIterations = 1)
+    // For other workflows, allow 1 retry (maxIterations = 2)
+    this.maxIterations = context.maxIterations !== undefined ? context.maxIterations : 2;
+    this.maxAiRequestsPerLeg = this.maxIterations * 2; // Maximum AI requests per leg (iterations × 2 requests each)
   }
 
   /**
@@ -492,7 +494,14 @@ class WorkflowExecutor {
             throw new Error(`OpenAI did not return a valid Playwright script. Response keys: ${scriptResponse ? Object.keys(scriptResponse).join(', ') : 'null'}`);
           }
           
-          console.log(`[WorkflowExecutor] ✅ Successfully extracted Playwright script (${playwrightScript.length} characters)`);
+          // Clean the script immediately after extraction to remove markdown code blocks
+          playwrightScript = this.cleanScript(playwrightScript);
+          
+          if (!playwrightScript || playwrightScript.trim().length === 0) {
+            throw new Error(`Script is empty after cleaning`);
+          }
+          
+          console.log(`[WorkflowExecutor] ✅ Successfully extracted and cleaned Playwright script (${playwrightScript.length} characters)`);
           
           // Update leg with script
           await this.updateLeg(workflowId, leg.leg_id, { 
@@ -504,7 +513,7 @@ class WorkflowExecutor {
         console.log(`[WorkflowExecutor] Executing script for leg ${leg.leg_id}`);
 
         // Step 4: Execute Playwright script
-        const executionResult = await this.executeScript(page, playwrightScript);
+        const executionResult = await this.executeScript(page, playwrightScript, jobId);
 
         // Step 5: Take screenshot after action
         const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
@@ -702,18 +711,229 @@ class WorkflowExecutor {
   /**
    * Execute Playwright script in page context
    */
-  async executeScript(page, script) {
+  /**
+   * Clean script to remove function declarations, require statements, etc.
+   * Extract only executable code
+   */
+  cleanScript(script) {
+    if (!script || typeof script !== 'string') {
+      return script;
+    }
+    
+    let cleaned = script.trim();
+    
+    // First, extract code from markdown code blocks if present
+    // This handles cases where there's text before/after the code block
+    const codeBlockRegex = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
+    const codeBlockMatches = [...cleaned.matchAll(codeBlockRegex)];
+    if (codeBlockMatches.length > 0) {
+      // If code blocks are found, extract only the code from them
+      cleaned = codeBlockMatches.map(match => match[1]).join('\n\n');
+    } else {
+      // No code blocks found, but remove any markdown markers that might be present
+      cleaned = cleaned.replace(/^```[\w]*\s*\n?/gm, '');
+      cleaned = cleaned.replace(/\n?\s*```$/gm, '');
+      cleaned = cleaned.replace(/^\s*```[\w]*\s*$/gm, '');
+      cleaned = cleaned.replace(/```[\w]*/g, '');
+    }
+    
+    // Extract function bodies instead of removing functions completely
+    // This handles nested braces by matching from function start to matching closing brace
+    const extractFunctionBodies = (text) => {
+      const patterns = [
+        /async\s+function\s*\([^)]*\)\s*\{/g,
+        /async\s+function\s+\w+\s*\([^)]*\)\s*\{/g,
+        /function\s*\([^)]*\)\s*\{/g,
+        /function\s+\w+\s*\([^)]*\)\s*\{/g
+      ];
+      
+      for (const pattern of patterns) {
+        let match;
+        while ((match = pattern.exec(text)) !== null) {
+          const start = match.index;
+          const openBracePos = match.index + match[0].length - 1; // Position of opening {
+          let braceCount = 1;
+          let pos = openBracePos + 1;
+          const bodyStart = pos;
+          
+          // Find matching closing brace
+          while (braceCount > 0 && pos < text.length) {
+            if (text[pos] === '{') braceCount++;
+            else if (text[pos] === '}') braceCount--;
+            pos++;
+          }
+          
+          if (braceCount === 0) {
+            // Found matching brace, extract function body (content between braces)
+            const bodyEnd = pos - 1; // Position just before closing }
+            const functionBody = text.slice(bodyStart, bodyEnd).trim();
+            // Replace function with just its body
+            text = text.slice(0, start) + functionBody + text.slice(pos);
+            pattern.lastIndex = 0; // Reset regex
+          }
+        }
+      }
+      
+      return text;
+    };
+    
+    cleaned = extractFunctionBodies(cleaned);
+    
+    // Remove IIFE wrappers (async () => { ... })() or (async function() { ... })()
+    cleaned = cleaned.replace(/\(async\s*\([^)]*\)\s*=>\s*\{/g, '');
+    cleaned = cleaned.replace(/\(async\s+function\s*\([^)]*\)\s*\{[^}]*\}\)\s*\(\)/g, '');
+    cleaned = cleaned.replace(/\(async\s*\(\)\s*=>\s*\{[^}]*\}\)\s*\(\)/g, '');
+    
+    // Remove require statements (const { chromium } = require('playwright'); etc.)
+    cleaned = cleaned.replace(/const\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+\w+\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
+    cleaned = cleaned.replace(/require\s*\([^)]*\)\s*;?\s*/g, '');
+    
+    // Remove module.exports
+    cleaned = cleaned.replace(/module\.exports\s*=\s*[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/module\.exports\s*=\s*async\s+function[^}]*\}/g, '');
+    
+    // Remove browser/page creation (we're already in a Playwright context)
+    cleaned = cleaned.replace(/const\s+browser\s*=\s*await\s+chromium\.launch[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+page\s*=\s*await\s+browser\.newPage[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+context\s*=\s*await\s+browser\.newContext[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/const\s+page\s*=\s*await\s+context\.newPage[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/await\s+browser\.close[^;]+;?\s*/g, '');
+    cleaned = cleaned.replace(/await\s+context\.close[^;]+;?\s*/g, '');
+    
+    // Remove Node.js-specific code (process.env, process.argv, console.error, etc.)
+    cleaned = cleaned.replace(/const\s+\w+\s*=\s*process\.env\.\w+/g, '');
+    cleaned = cleaned.replace(/process\.env\.\w+/g, '""');
+    cleaned = cleaned.replace(/process\.argv\[\d+\]/g, '""');
+    cleaned = cleaned.replace(/console\.(error|log|warn|info)\([^)]*\)\s*;?\s*/g, '');
+    cleaned = cleaned.replace(/process\.exit\(\d+\)\s*;?\s*/g, '');
+    
+    // Remove template variables ({{action}}, {{page_context}}, etc.)
+    cleaned = cleaned.replace(/\{\{[^}]+\}\}/g, '');
+    
+    // Remove comments
+    cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
+    cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
+    
+    // Clean up extra whitespace and newlines
+    cleaned = cleaned.replace(/\n\s*\n\s*\n/g, '\n');
+    cleaned = cleaned.trim();
+    
+    // If the script is wrapped in braces, unwrap them
+    if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
+      cleaned = cleaned.slice(1, -1).trim();
+    }
+    
+    return cleaned;
+  }
+
+  async executeScript(page, script, jobId = null) {
+    const startTime = Date.now();
+    const originalScriptLength = script?.length || 0;
+    
     try {
-      // Wrap the AI-generated code in an async IIFE to support return statements
-      const wrappedScript = `(async function() { ${script} })()`;
+      // Log script execution start if jobId available
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(jobId, 'debug',
+          `🎭 Starting script execution`,
+          'WORKFLOW-EXECUTOR',
+          {
+            original_script_length: originalScriptLength,
+            script_preview: script?.substring(0, 300) || 'N/A',
+            page_url: page.url()
+          }
+        );
+      }
+      
+      // Clean the script to remove function declarations, require statements, etc.
+      const cleanedScript = this.cleanScript(script);
+      const cleanedScriptLength = cleanedScript?.length || 0;
+      
+      if (!cleanedScript || cleanedScript.trim().length === 0) {
+        const error = 'Script is empty after cleaning';
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'error',
+            `❌ ${error}`,
+            'WORKFLOW-EXECUTOR',
+            {
+              original_script_length: originalScriptLength,
+              cleaned_script_length: cleanedScriptLength,
+              original_script_preview: script?.substring(0, 500) || 'N/A'
+            }
+          );
+        }
+        throw new Error(error);
+      }
+      
+      // Log cleaned script info
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(jobId, 'debug',
+          `📝 Script cleaned (${originalScriptLength} → ${cleanedScriptLength} chars)`,
+          'WORKFLOW-EXECUTOR',
+          {
+            cleaned_script_preview: cleanedScript.substring(0, 500),
+            cleaning_removed_chars: originalScriptLength - cleanedScriptLength
+          }
+        );
+      }
+      
+      const urlBefore = page.url();
+      const titleBefore = await page.title();
+      
+      // Log execution start
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(jobId, 'debug',
+          `▶️ Executing script in Node.js context...`,
+          'WORKFLOW-EXECUTOR',
+          {
+            url_before: urlBefore,
+            title_before: titleBefore
+          }
+        );
+      }
+      
+      // Playwright scripts must execute in Node.js context, not browser context
+      // The 'page' object is available in Node.js, not in browser
+      // Create an async function that has access to the page object
+      const executeInNodeContext = async (pageObj, scriptCode) => {
+        // Use string concatenation (not template literals) to avoid escaping issues
+        // This allows the script code to contain backticks, ${}, etc. without problems
+        const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
+        
+        // Create a function with page as parameter
+        const fn = new Function('page', functionBody);
+        return await fn(pageObj);
+      };
       
       // Wrap script execution with timeout
       const result = await Promise.race([
-        page.evaluate(wrappedScript),
+        executeInNodeContext(page, cleanedScript),
         new Promise((_, reject) => 
           setTimeout(() => reject(new Error('Script execution timeout')), 30000)
         )
       ]);
+      
+      const urlAfter = page.url();
+      const titleAfter = await page.title();
+      const executionTime = Date.now() - startTime;
+
+      // Log successful execution
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(jobId, 'info',
+          `✅ Script executed successfully (${executionTime}ms)`,
+          'WORKFLOW-EXECUTOR',
+          {
+            execution_time_ms: executionTime,
+            url_before: urlBefore,
+            url_after: urlAfter,
+            title_before: titleBefore,
+            title_after: titleAfter,
+            url_changed: urlBefore !== urlAfter,
+            title_changed: titleBefore !== titleAfter,
+            result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500)
+          }
+        );
+      }
 
       return {
         success: true,
@@ -721,6 +941,24 @@ class WorkflowExecutor {
         error: null
       };
     } catch (error) {
+      const executionTime = Date.now() - startTime;
+      
+      // Log execution failure
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(jobId, 'error',
+          `❌ Script execution failed: ${error.message}`,
+          'WORKFLOW-EXECUTOR',
+          {
+            execution_time_ms: executionTime,
+            error_message: error.message,
+            error_stack: error.stack?.substring(0, 1000),
+            original_script_preview: script?.substring(0, 500) || 'N/A',
+            cleaned_script_preview: this.cleanScript(script)?.substring(0, 500) || 'N/A',
+            page_url: page.url()
+          }
+        );
+      }
+      
       return {
         success: false,
         result: null,
