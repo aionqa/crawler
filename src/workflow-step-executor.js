@@ -330,7 +330,8 @@ export class WorkflowStepExecutor {
       const descriptionPayload = {
         page_title: pageTitle,
         page_url: pageUrl,
-        visible_text: visibleText.substring(0, 2000) // Limit text length
+        visible_text: visibleText.substring(0, 2000), // Limit text length
+        additional_prompt_text: context.additional_prompt_text || ''
       };
       
       // Make AI call
@@ -375,7 +376,8 @@ export class WorkflowStepExecutor {
         page_url: pageUrl,
         page_description: context.pageDescription || 'No description available',
         interactive_elements_json: JSON.stringify(context.interactiveElements || []),
-        conversation_history: context.conversationHistory || []
+        conversation_history: context.conversationHistory || [],
+        additional_prompt_text: context.additional_prompt_text || ''
       };
       
       // Make AI call
@@ -656,7 +658,8 @@ export class WorkflowStepExecutor {
       const attachments = parameters.attachments || [];
       const promptPayload = {
         page_url: context.pageUrl,
-        page_title: context.pageTitle || ''
+        page_title: context.pageTitle || '',
+        additional_prompt_text: context.additional_prompt_text || ''
       };
       
       // Add attachments to payload

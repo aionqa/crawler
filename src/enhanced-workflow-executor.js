@@ -1077,11 +1077,62 @@ class EnhancedWorkflowExecutor {
         return await fn(pageObj);
       };
       
-      // Wrap script execution with timeout
+      // Validate script completeness before execution
+      // Check for common incomplete patterns that indicate truncation
+      const lines = cleanedScript.split('\n');
+      const incompletePatterns = [
+        /['"`][a-z]+\s*=\s*$/,  // Incomplete selector like 'xpath= or "button=
+        /await\s+page\.(waitForSelector|click|fill)\(['"`][^'"`]*$/,  // Incomplete await statement
+        /^\s*try\s*\{\s*$/,  // Incomplete try block (only opening brace)
+        /^\s*catch\s*\(\s*$/,  // Incomplete catch block (only opening paren)
+      ];
+      
+      // Check last few lines for incomplete patterns
+      const lastLines = lines.slice(-3).join('\n');
+      for (const pattern of incompletePatterns) {
+        if (pattern.test(lastLines)) {
+          const error = 'Script appears to be incomplete (truncated)';
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error',
+              `❌ ${error}`,
+              'WORKFLOW-EXECUTOR',
+              {
+                original_script_length: originalScriptLength,
+                cleaned_script_length: cleanedScriptLength,
+                script_preview: cleanedScript.substring(Math.max(0, cleanedScript.length - 500)),
+                incomplete_pattern: pattern.toString(),
+                last_50_chars: cleanedScript.substring(Math.max(0, cleanedScript.length - 50))
+              }
+            );
+          }
+          throw new Error(error);
+        }
+      }
+      
+      // Additional check: if script ends with incomplete string/quotes
+      const trimmedScript = cleanedScript.trim();
+      if (trimmedScript.match(/['"`][^'"`]*$/)) {
+        const error = 'Script appears to end with incomplete string literal';
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'error',
+            `❌ ${error}`,
+            'WORKFLOW-EXECUTOR',
+            {
+              original_script_length: originalScriptLength,
+              cleaned_script_length: cleanedScriptLength,
+              script_preview: cleanedScript.substring(Math.max(0, cleanedScript.length - 500)),
+              last_50_chars: cleanedScript.substring(Math.max(0, cleanedScript.length - 50))
+            }
+          );
+        }
+        throw new Error(error);
+      }
+      
+      // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
       const result = await Promise.race([
         executeInNodeContext(page, cleanedScript),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Script execution timeout')), 30000)
+          setTimeout(() => reject(new Error('Script execution timeout after 45 seconds')), 45000)
         )
       ]);
       
