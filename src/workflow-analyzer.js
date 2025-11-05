@@ -955,11 +955,13 @@ class WorkflowAnalyzer {
             break;
             
           case 'execute-code':
-            await this.executeCodeStep(page, step, workflowState, jobId);
+            const nextStepForCode = i + 1 < this.workflowTemplate.steps.length ? this.workflowTemplate.steps[i + 1] : null;
+            await this.executeCodeStep(page, step, workflowState, jobId, nextStepForCode);
             break;
             
           case 'execute-code-from-variable':
-            await this.executeCodeFromVariableStep(page, step, workflowState, jobId);
+            const nextStep = i + 1 < this.workflowTemplate.steps.length ? this.workflowTemplate.steps[i + 1] : null;
+            await this.executeCodeFromVariableStep(page, step, workflowState, jobId, nextStep);
             break;
             
           case 'cookie-add':
@@ -1323,7 +1325,8 @@ class WorkflowAnalyzer {
     const descriptionPayload = {
       page_title: workflowState.pageTitle,
       page_url: workflowState.pageUrl,
-      visible_text: workflowState.visibleText
+      visible_text: workflowState.visibleText,
+      additional_prompt_text: this.context.additional_prompt_text || ''
     };
 
     const attachments = Array.isArray(step.config?.attachments)
@@ -1443,7 +1446,8 @@ class WorkflowAnalyzer {
     const stepPayload = {
       page_url: workflowState.pageUrl,
       page_title: workflowState.pageTitle || await page.title(),
-      page_content: workflowState.htmlContent || await page.content()
+      page_content: workflowState.htmlContent || await page.content(),
+      additional_prompt_text: this.context.additional_prompt_text || ''
     };
     if (workflowState.inputCredentials) {
       stepPayload.input_credentials = workflowState.inputCredentials;
@@ -2068,7 +2072,7 @@ class WorkflowAnalyzer {
   /**
    * Execute code step (static code)
    */
-  async executeCodeStep(page, step, workflowState, jobId = null) {
+  async executeCodeStep(page, step, workflowState, jobId = null, nextStep = null) {
     const startTime = Date.now();
     console.log(`[WorkflowAnalyzer] 🚀 Executing static code (${step.name})`);
     
@@ -2190,9 +2194,11 @@ class WorkflowAnalyzer {
       const result = await page.evaluate(
         ({ code, workflowState, timeout }) => {
           // Extract commonly used variables from workflowState for direct access in browser context
-          const collectedLinks = workflowState?.collectedLinks || workflowState?.playwrightAnalysis?.links || [];
-          const collectedForms = workflowState?.collectedForms || workflowState?.playwrightAnalysis?.forms || [];
-          const collectedInteractiveElements = workflowState?.collectedInteractiveElements || workflowState?.playwrightAnalysis?.interactive_elements || [];
+          const analysis = workflowState?.analysis || workflowState?.playwrightAnalysis || {};
+          const playwrightAnalysis = workflowState?.playwrightAnalysis || {};
+          const collectedLinks = workflowState?.collectedLinks || playwrightAnalysis?.links || [];
+          const collectedForms = workflowState?.collectedForms || playwrightAnalysis?.forms || [];
+          const collectedInteractiveElements = workflowState?.collectedInteractiveElements || playwrightAnalysis?.interactive_elements || [];
           const visibleText = workflowState?.visibleText || workflowState?.visible_text || '';
           const interactiveElements = workflowState?.interactiveElements || workflowState?.interactive_elements || [];
           const forms = workflowState?.forms || [];
@@ -2204,10 +2210,40 @@ class WorkflowAnalyzer {
           const currentItem = workflowState?.currentItem || {};
           const legsToExecute = workflowState?.legsToExecute || workflowState?.legs || [];
           const context = workflowState?.context || {};
+          const lastExecutionResult = workflowState?.lastExecutionResult || null;
+          const executionResult = lastExecutionResult;
+          // Extract step results from workflowState (all stored step results)
+          const results = workflowState?.results || {};
+          // Common step result variables that might be referenced
+          // Try multiple possible locations for playwright analysis result
+          let playwrightStepResult = workflowState?.playwright_analysis?.result || 
+            workflowState?.playwrightAnalysis || 
+            results?.playwright_analysis?.result ||
+            workflowState?.playwright_analysis ||
+            {};
+          // Try to find any step with playwright in its name/id
+          if (!playwrightStepResult || typeof playwrightStepResult !== 'object' || Object.keys(playwrightStepResult).length === 0) {
+            for (const [key, value] of Object.entries(workflowState)) {
+              if (key && typeof key === 'string' && 
+                  (key.includes('playwright') || key.includes('analysis')) && 
+                  value && typeof value === 'object' && 
+                  (value.result || value.forms || value.links || value.interactive_elements)) {
+                playwrightStepResult = value.result || value;
+                break;
+              }
+            }
+          }
+          // Fallback to empty object if still not found
+          if (!playwrightStepResult || typeof playwrightStepResult !== 'object') {
+            playwrightStepResult = {};
+          }
+          const stepResult = lastExecutionResult || {};
           
           // Create runner function with all extracted variables available in scope
           const runner = new Function(
             'workflowState',
+            'analysis',
+            'playwrightAnalysis',
             'collectedLinks',
             'collectedForms',
             'collectedInteractiveElements',
@@ -2222,6 +2258,11 @@ class WorkflowAnalyzer {
             'currentItem',
             'legsToExecute',
             'context',
+            'lastExecutionResult',
+            'executionResult',
+            'results',
+            'playwrightStepResult',
+            'stepResult',
             `return (async () => {\n${code}\n})();`
           );
 
@@ -2232,6 +2273,8 @@ class WorkflowAnalyzer {
 
             Promise.resolve(runner(
               workflowState,
+              analysis,
+              playwrightAnalysis,
               collectedLinks,
               collectedForms,
               collectedInteractiveElements,
@@ -2245,7 +2288,12 @@ class WorkflowAnalyzer {
               currentLeg,
               currentItem,
               legsToExecute,
-              context
+              context,
+              lastExecutionResult,
+              executionResult,
+              results,
+              playwrightStepResult,
+              stepResult
             ))
               .then(result => {
                 clearTimeout(timer);
@@ -2404,6 +2452,26 @@ class WorkflowAnalyzer {
         }
       }
       
+      // If next step is self-adjustable-ai-workflow, don't throw - let workflow continue
+      if (nextStep && nextStep.type === 'self-adjustable-ai-workflow') {
+        console.log(`[WorkflowAnalyzer] 🔄 Script execution failed, but next step is self-adjustable-ai-workflow - will retry`);
+        // Store failure info for retry
+        workflowState.lastScriptFailure = {
+          step: step,
+          error: error.message,
+          script: code?.substring(0, 500) || 'N/A',
+          timestamp: new Date(),
+          executionResult: {
+            success: false,
+            error: error.message
+          }
+        };
+        return {
+          success: false,
+          error: error.message
+        }; // Return error result instead of throwing
+      }
+      
       throw error;
     }
   }
@@ -2411,7 +2479,7 @@ class WorkflowAnalyzer {
   /**
    * Execute code from variable step
    */
-  async executeCodeFromVariableStep(page, step, workflowState) {
+  async executeCodeFromVariableStep(page, step, workflowState, jobId, nextStep = null) {
     console.log(`[WorkflowAnalyzer] 🚀 Executing code from variable (${step.name})`);
     
     const sourceField = step.config?.sourceField;
@@ -2487,9 +2555,11 @@ class WorkflowAnalyzer {
       const result = await page.evaluate(
         ({ code, workflowState, timeout }) => {
           // Extract commonly used variables from workflowState for direct access in browser context
-          const collectedLinks = workflowState?.collectedLinks || workflowState?.playwrightAnalysis?.links || [];
-          const collectedForms = workflowState?.collectedForms || workflowState?.playwrightAnalysis?.forms || [];
-          const collectedInteractiveElements = workflowState?.collectedInteractiveElements || workflowState?.playwrightAnalysis?.interactive_elements || [];
+          const analysis = workflowState?.analysis || workflowState?.playwrightAnalysis || {};
+          const playwrightAnalysis = workflowState?.playwrightAnalysis || {};
+          const collectedLinks = workflowState?.collectedLinks || playwrightAnalysis?.links || [];
+          const collectedForms = workflowState?.collectedForms || playwrightAnalysis?.forms || [];
+          const collectedInteractiveElements = workflowState?.collectedInteractiveElements || playwrightAnalysis?.interactive_elements || [];
           const visibleText = workflowState?.visibleText || workflowState?.visible_text || '';
           const interactiveElements = workflowState?.interactiveElements || workflowState?.interactive_elements || [];
           const forms = workflowState?.forms || [];
@@ -2501,11 +2571,41 @@ class WorkflowAnalyzer {
           const currentItem = workflowState?.currentItem || {};
           const legsToExecute = workflowState?.legsToExecute || workflowState?.legs || [];
           const context = workflowState?.context || {};
+          const lastExecutionResult = workflowState?.lastExecutionResult || null;
+          const executionResult = lastExecutionResult;
+          // Extract step results from workflowState (all stored step results)
+          const results = workflowState?.results || {};
+          // Common step result variables that might be referenced
+          // Try multiple possible locations for playwright analysis result
+          let playwrightStepResult = workflowState?.playwright_analysis?.result || 
+            workflowState?.playwrightAnalysis || 
+            results?.playwright_analysis?.result ||
+            workflowState?.playwright_analysis ||
+            {};
+          // Try to find any step with playwright in its name/id
+          if (!playwrightStepResult || typeof playwrightStepResult !== 'object' || Object.keys(playwrightStepResult).length === 0) {
+            for (const [key, value] of Object.entries(workflowState)) {
+              if (key && typeof key === 'string' && 
+                  (key.includes('playwright') || key.includes('analysis')) && 
+                  value && typeof value === 'object' && 
+                  (value.result || value.forms || value.links || value.interactive_elements)) {
+                playwrightStepResult = value.result || value;
+                break;
+              }
+            }
+          }
+          // Fallback to empty object if still not found
+          if (!playwrightStepResult || typeof playwrightStepResult !== 'object') {
+            playwrightStepResult = {};
+          }
+          const stepResult = lastExecutionResult || {};
           
           // Create runner function with all extracted variables available in scope
           // Note: 'page' is NOT available in browser context - scripts must use DOM APIs
           const runner = new Function(
             'workflowState',
+            'analysis',
+            'playwrightAnalysis',
             'collectedLinks',
             'collectedForms',
             'collectedInteractiveElements',
@@ -2520,6 +2620,11 @@ class WorkflowAnalyzer {
             'currentItem',
             'legsToExecute',
             'context',
+            'lastExecutionResult',
+            'executionResult',
+            'results',
+            'playwrightStepResult',
+            'stepResult',
             `return (async () => { ${code}\n })();`
           );
           
@@ -2530,6 +2635,8 @@ class WorkflowAnalyzer {
             
             Promise.resolve(runner(
               workflowState,
+              analysis,
+              playwrightAnalysis,
               collectedLinks,
               collectedForms,
               collectedInteractiveElements,
@@ -2543,7 +2650,12 @@ class WorkflowAnalyzer {
               currentLeg,
               currentItem,
               legsToExecute,
-              context
+              context,
+              lastExecutionResult,
+              executionResult,
+              results,
+              playwrightStepResult,
+              stepResult
             ))
               .then(result => {
                 clearTimeout(timer);
@@ -2652,6 +2764,21 @@ class WorkflowAnalyzer {
       };
       workflowState.lastExecutionResult = errorResult;
       this.storeStepResult(step, errorResult, workflowState);
+      
+      // If next step is self-adjustable-ai-workflow, don't throw - let workflow continue
+      if (nextStep && nextStep.type === 'self-adjustable-ai-workflow') {
+        console.log(`[WorkflowAnalyzer] 🔄 Script execution failed, but next step is self-adjustable-ai-workflow - will retry`);
+        // Store failure info for retry
+        workflowState.lastScriptFailure = {
+          step: step,
+          error: error.message,
+          script: workflowState[step.config?.sourceField] || null,
+          timestamp: new Date(),
+          executionResult: errorResult
+        };
+        return errorResult; // Return error result instead of throwing
+      }
+      
       throw error;
     }
   }
@@ -3623,8 +3750,8 @@ class WorkflowAnalyzer {
           }
         }, workflowState, jobId);
         
-        // Step 3: Generate action script (only on first iteration, or if new content detected)
-        if (iteration === 1 || (lastExecutionResult && lastExecutionResult.new_content_detected)) {
+        // Step 3: Generate action script (only on first iteration, or if new content detected, or if no script is stored)
+        if (iteration === 1 || (lastExecutionResult && lastExecutionResult.new_content_detected) || !workflowState.legScriptToExecute) {
           await this.executeAIPromptStep(page, {
             id: `${step.id}_iteration_${iteration}_generate_script`,
             name: `Generate Action Script (Iteration ${iteration})`,
@@ -3760,6 +3887,19 @@ class WorkflowAnalyzer {
         if (needsMoreTesting) {
           console.log(`[WorkflowAnalyzer] 🔄 More testing needed: ${completionResult.next_action_suggestion || 'Continue testing'}`);
           depth++;
+          
+          // Store playwright_script from determine_completion if provided (for next iteration)
+          if (completionResult.playwright_script && completionResult.playwright_script.trim()) {
+            let script = completionResult.playwright_script;
+            // Clean the script to remove markdown code blocks and function declarations
+            script = this.cleanScript(script);
+            if (script && script.trim().length > 0) {
+              workflowState.legScriptToExecute = script;
+              console.log(`[WorkflowAnalyzer] ✅ Stored playwright_script from determine_completion (${script.length} chars) for next iteration`);
+            } else {
+              console.warn(`[WorkflowAnalyzer] ⚠️ playwright_script from determine_completion is empty after cleaning`);
+            }
+          }
           
           // Update current leg context with next action suggestion
           if (completionResult.next_action_suggestion) {

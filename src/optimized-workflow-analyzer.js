@@ -11,12 +11,13 @@ import axios from 'axios';
 import * as backendLogger from './backend-logger.js';
 
 export class OptimizedWorkflowAnalyzer {
-  constructor(backendUrl = null, aiLogger = null) {
+  constructor(backendUrl = null, aiLogger = null, context = {}) {
     this.backendUrl = backendUrl || process.env.BACKEND_URL || 'http://back:4000';
     // Note: OptimizedPageAnalyzer is deprecated - using workflow-based approach instead
     // this.pageAnalyzer = new OptimizedPageAnalyzer(backendUrl);
     // Note: aiLogger should be passed in from unified-operations.js
     this.aiLogger = aiLogger;
+    this.context = context;
     this.maxDepth = 6;
   }
 
@@ -114,7 +115,8 @@ export class OptimizedWorkflowAnalyzer {
           page_title: currentPageData.page_title,
           visible_text: currentPageData.visible_text?.substring(0, 1000) || '',
           interactive_elements: currentPageData.interactive_elements || {},
-          conversation_history: conversationHistory
+          conversation_history: conversationHistory,
+          additional_prompt_text: (this.context && this.context.additional_prompt_text) || ''
         };
         
         // Send to OpenAI for analysis and action generation

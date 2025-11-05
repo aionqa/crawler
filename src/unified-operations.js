@@ -1234,7 +1234,8 @@ async function validateActionSuccessWithAI(page, context, openaiClient, approach
       cookies_json: JSON.stringify(allCookies, null, 2),
       local_storage_json: JSON.stringify(localStorage, null, 2),
       session_storage_json: JSON.stringify(sessionStorage, null, 2),
-      screenshot_available: Boolean(validationScreenshot?.screenshotId)
+      screenshot_available: Boolean(validationScreenshot?.screenshotId),
+      additional_prompt_text: context.additional_prompt_text || ''
     };
 
     const validation = await aiConversationLogger.makeAICallWithPrompt(
@@ -1444,8 +1445,8 @@ const modeHandlers = {
     await sendLog(jobId, 'info', `🚀 OPTIMIZED MODE: QA-like testing with minimal token usage`);
     
     try {
-      // Initialize optimized workflow analyzer (pass aiLogger if available)
-      const optimizedAnalyzer = new OptimizedWorkflowAnalyzer(backendUrl, aiConversationLogger);
+      // Initialize optimized workflow analyzer (pass aiLogger and context if available)
+      const optimizedAnalyzer = new OptimizedWorkflowAnalyzer(backendUrl, aiConversationLogger, context);
       
       // Get or create page ID
       const pageUrl = page.url();
@@ -3991,7 +3992,8 @@ async function executeSimplifiedApproach(page, jobId, context, openaiClient) {
         structured_data: structuredDataJson,
         forms_count: forms.length,
         internal_links_count: links.internal.length,
-        total_links_count: links.total
+        total_links_count: links.total,
+        additional_prompt_text: context.additional_prompt_text || ''
       },
       jobId,
       'unified-crawler',
