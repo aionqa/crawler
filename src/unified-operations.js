@@ -186,12 +186,14 @@ function getNextSequence(jobId) {
   return seq;
 }
 
-// Helper function to remove ASCII graphics from log messages
+// Helper function to remove ASCII graphics from log messages (but preserve emojis)
 function cleanLogMessage(message) {
-  // Remove box drawing characters
+  if (!message || typeof message !== 'string') {
+    return message || '';
+  }
+  // Remove box drawing characters (but preserve emojis)
   message = message.replace(/[╔╗╚╝═║│┌┐└┘─├┤┬┴┼━┃┏┓┗┛┣┫┳┻╋]/g, '');
-  // Remove decorative emojis at start of lines (but keep meaningful ones)
-  message = message.replace(/^[🌍📍⏳🔗📊📋🔍📄🎯💬✓✅🚀🎉📸🎥🔐⚠️❌]/gm, '');
+  // DO NOT remove emojis - they are important visual indicators
   // Clean up excessive whitespace
   message = message.replace(/\n{3,}/g, '\n\n');
   message = message.trim();

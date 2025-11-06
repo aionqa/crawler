@@ -255,7 +255,8 @@ class EnhancedWorkflowExecutor {
         playwright_script: playwrightScript,
         status: 'pending',
         source: 'ai-generated',
-        leg_id: leg.leg_id || leg.id
+        leg_id: leg.leg_id || leg.id,
+        job_id: jobId  // Link action to job immediately
       };
       
       // Check if action already exists (matching logic)
@@ -437,16 +438,86 @@ class EnhancedWorkflowExecutor {
         const htmlContent = await page.content();
         
         // Get interactive elements for context
-        const interactiveElements = await page.$$eval('[role="button"], button, a, input, select, textarea, [onclick], [tabindex]', 
-          elements => elements.map(el => ({
-            tag: el.tagName,
-            id: el.id,
-            class: el.className,
-            text: el.textContent?.trim().substring(0, 100),
-            type: el.type,
-            name: el.name
-          }))
-        ).catch(() => []);
+        // Collect interactive elements with proper selectors and IDs
+        const interactiveElementsArray = await page.$$('[role="button"], button, a, input, select, textarea, [onclick], [tabindex]');
+        const interactiveElements = [];
+        
+        for (let i = 0; i < interactiveElementsArray.length; i++) {
+          const el = interactiveElementsArray[i];
+          const tagName = await el.evaluate(el => el.tagName.toLowerCase());
+          const id = await el.getAttribute('id');
+          const name = await el.getAttribute('name');
+          const type = await el.getAttribute('type');
+          const className = await el.getAttribute('class');
+          const text = await el.evaluate(el => el.textContent?.trim().substring(0, 100) || '');
+          const role = await el.getAttribute('role');
+          
+          // Generate selector - prioritize ID, then name, then type, then class, then text
+          let selector = '';
+          let elementId = id || '';
+          
+          if (id) {
+            selector = `#${id}`;
+            elementId = id;
+          } else if (name) {
+            selector = `${tagName}[name="${name}"]`;
+            elementId = `element_${i}_${tagName}_${name}`;
+          } else if (type) {
+            selector = `${tagName}[type="${type}"]`;
+            elementId = `element_${i}_${tagName}_${type}`;
+          } else if (className && className.trim()) {
+            const firstClass = className.trim().split(/\s+/)[0];
+            selector = `.${firstClass}`;
+            elementId = `element_${i}_${tagName}_${firstClass}`;
+          } else if (text) {
+            selector = `${tagName}:has-text("${text.substring(0, 30)}")`;
+            elementId = `element_${i}_${tagName}_text`;
+          } else {
+            // Generate nth-of-type selector as fallback
+            const sameTagElements = await page.$$(tagName);
+            const index = sameTagElements.indexOf(el);
+            selector = `${tagName}:nth-of-type(${index + 1})`;
+            elementId = `element_${i}_${tagName}_nth${index + 1}`;
+          }
+          
+          // Generate XPath as additional identifier
+          const xpath = await el.evaluate((el) => {
+            if (el.id) return `//*[@id="${el.id}"]`;
+            if (el.name) return `//${el.tagName.toLowerCase()}[@name="${el.name}"]`;
+            const path = [];
+            let current = el;
+            while (current && current.nodeType === Node.ELEMENT_NODE) {
+              let selector = current.tagName.toLowerCase();
+              if (current.id) {
+                selector += `[@id="${current.id}"]`;
+                path.unshift(selector);
+                break;
+              }
+              const siblings = Array.from(current.parentNode?.children || []).filter(c => c.tagName === current.tagName);
+              const index = siblings.indexOf(current) + 1;
+              selector += `[${index}]`;
+              path.unshift(selector);
+              current = current.parentNode;
+              if (current === document.body) break;
+            }
+            return '/' + path.join('/');
+          });
+          
+          interactiveElements.push({
+            tag: tagName.toUpperCase(),
+            id: elementId, // Always provide an ID (real or generated)
+            class: className || '',
+            text: text,
+            type: type || '',
+            name: name || '',
+            role: role || '',
+            selector: selector, // Primary selector
+            xpath: xpath, // XPath for additional identification
+            // Additional attributes for better recognition
+            href: tagName === 'a' ? await el.getAttribute('href') : null,
+            placeholder: tagName === 'input' ? await el.getAttribute('placeholder') : null
+          });
+        }
         
         const interactiveElementsJson = JSON.stringify(interactiveElements, null, 2);
         
@@ -456,44 +527,76 @@ class EnhancedWorkflowExecutor {
           elements_added: interactiveElements.length
         });
         
-        // Get Playwright analysis (form structure, inputs, buttons)
+        // Get Playwright analysis (form structure, inputs, buttons) with proper selectors and IDs
         const playwrightAnalysis = await page.evaluate(() => {
           const forms = [];
           document.querySelectorAll('form').forEach((form, idx) => {
+            const formId = form.id || `form_${idx}`;
             const formData = {
               index: idx,
+              id: formId,
               action: form.action || '',
               method: form.method || 'get',
+              selector: form.id ? `#${form.id}` : `form:nth-of-type(${idx + 1})`,
               fields: []
             };
-            form.querySelectorAll('input, select, textarea').forEach(field => {
+            form.querySelectorAll('input, select, textarea').forEach((field, fieldIdx) => {
+              const fieldId = field.id || `field_${idx}_${fieldIdx}`;
+              const fieldSelector = field.id 
+                ? `#${field.id}` 
+                : (field.name 
+                  ? `${field.tagName.toLowerCase()}[name="${field.name}"]` 
+                  : `${field.tagName.toLowerCase()}:nth-of-type(${fieldIdx + 1})`);
+              
               formData.fields.push({
                 type: field.type || field.tagName.toLowerCase(),
                 name: field.name || '',
-                id: field.id || '',
+                id: fieldId, // Always provide an ID (real or generated)
                 placeholder: field.placeholder || '',
                 required: field.required || false,
-                selector: `${field.tagName.toLowerCase()}${field.id ? `#${field.id}` : ''}${field.name ? `[name="${field.name}"]` : ''}`
+                selector: fieldSelector // Always provide a selector
               });
             });
             forms.push(formData);
           });
           
-          return {
-            forms: forms,
-            inputs: Array.from(document.querySelectorAll('input')).map(input => ({
+          // Generate inputs with selectors and IDs
+          const inputs = Array.from(document.querySelectorAll('input')).map((input, idx) => {
+            const inputId = input.id || `input_${idx}`;
+            const inputSelector = input.id 
+              ? `#${input.id}` 
+              : (input.name 
+                ? `input[name="${input.name}"]` 
+                : `input:nth-of-type(${idx + 1})`);
+            
+            return {
               type: input.type,
-              name: input.name,
-              id: input.id,
-              placeholder: input.placeholder,
-              selector: `input${input.id ? `#${input.id}` : ''}${input.name ? `[name="${input.name}"]` : ''}`
-            })),
-            buttons: Array.from(document.querySelectorAll('button, input[type="submit"]')).map(btn => ({
+              name: input.name || '',
+              id: inputId, // Always provide an ID
+              placeholder: input.placeholder || '',
+              selector: inputSelector // Always provide a selector
+            };
+          });
+          
+          // Generate buttons with selectors and IDs
+          const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]')).map((btn, idx) => {
+            const btnId = btn.id || `button_${idx}`;
+            const btnSelector = btn.id 
+              ? `#${btn.id}` 
+              : `${btn.tagName.toLowerCase()}:nth-of-type(${idx + 1})`;
+            
+            return {
               type: btn.type,
               text: btn.textContent || btn.value || '',
-              id: btn.id,
-              selector: `${btn.tagName.toLowerCase()}${btn.id ? `#${btn.id}` : ''}`
-            }))
+              id: btnId, // Always provide an ID
+              selector: btnSelector // Always provide a selector
+            };
+          });
+          
+          return {
+            forms: forms,
+            inputs: inputs,
+            buttons: buttons
           };
         });
 
@@ -644,6 +747,26 @@ class EnhancedWorkflowExecutor {
             console.error(`[EnhancedWorkflowExecutor] Response keys: ${scriptResponse ? Object.keys(scriptResponse).join(', ') : 'null'}`);
             console.error(`[EnhancedWorkflowExecutor] Full response: ${JSON.stringify(scriptResponse, null, 2)}`);
             throw new Error(`OpenAI did not return a valid Playwright script. Response keys: ${scriptResponse ? Object.keys(scriptResponse).join(', ') : 'null'}`);
+          }
+          
+          // Validate script completeness BEFORE cleaning
+          // Check if script ends with an incomplete string literal (unmatched quote)
+          const originalScriptLength = playwrightScript.length;
+          const hasIncompleteString = this.checkIncompleteString(playwrightScript);
+          if (hasIncompleteString) {
+            const error = 'Script appears to end with incomplete string literal';
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'error',
+                `❌ ${error}`,
+                'WORKFLOW-EXECUTOR',
+                {
+                  original_script_length: originalScriptLength,
+                  script_preview: playwrightScript.substring(Math.max(0, playwrightScript.length - 500)),
+                  last_50_chars: playwrightScript.substring(Math.max(0, playwrightScript.length - 50))
+                }
+              );
+            }
+            throw new Error(error);
           }
           
           // Clean the script immediately after extraction to remove markdown code blocks

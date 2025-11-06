@@ -561,16 +561,25 @@ class WorkflowAnalyzer {
    */
   async logPageDescription(jobId, pageUrl, pageTitle, pageDescription, metadata = {}, htmlContent = null, screenshotBase64 = null) {
     try {
-      const message = `📄 Page Analysis: ${pageDescription.short_description}`;
+      // Extract short_description with fallbacks (handle different response structures)
+      const shortDescription = pageDescription?.short_description ||
+                               pageDescription?.description ||
+                               pageDescription?.summary ||
+                               pageDescription?.short_summary ||
+                               (pageDescription && typeof pageDescription === 'string' ? pageDescription : null) ||
+                               pageTitle ||
+                               'Page analysis completed';
+      
+      const message = `📄 Page Analysis: ${shortDescription}`;
       
       const logMetadata = {
         page_analysis: true,
         page_title: pageTitle,
         page_url: pageUrl,
-        short_description: pageDescription.short_description,
-        full_description: pageDescription.full_description,
-        purpose: pageDescription.purpose,
-        conversation_context: pageDescription.conversation_context,
+        short_description: shortDescription,
+        full_description: pageDescription?.full_description || pageDescription?.description || '',
+        purpose: pageDescription?.purpose || '',
+        conversation_context: pageDescription?.conversation_context || '',
         ...metadata
       };
       
@@ -589,14 +598,37 @@ class WorkflowAnalyzer {
         });
       }
       
-      // 2. Screenshot attachment (store reference, not full base64)
+      // 2. Screenshot attachment (store as base64 data URL for display)
       if (screenshotBase64) {
+        // Ensure screenshotBase64 is properly formatted as base64 string
+        let screenshotContent = screenshotBase64;
+        if (typeof screenshotBase64 === 'string') {
+          // If it's already a data URL, use it as-is
+          if (screenshotBase64.startsWith('data:image/')) {
+            screenshotContent = screenshotBase64;
+          } else {
+            // If it's raw base64, add data URL prefix
+            if (screenshotBase64.length > 100 && /^[A-Za-z0-9+/=]+$/.test(screenshotBase64)) {
+              screenshotContent = `data:image/png;base64,${screenshotBase64}`;
+            } else {
+              screenshotContent = screenshotBase64;
+            }
+          }
+        } else {
+          // If it's a Buffer, convert to base64 data URL
+          screenshotContent = `data:image/png;base64,${screenshotBase64.toString('base64')}`;
+        }
+        
+        const size = typeof screenshotBase64 === 'string' 
+          ? (screenshotBase64.startsWith('data:image/') ? screenshotBase64.length - 22 : screenshotBase64.length)
+          : screenshotBase64.length;
+        
         attachments.push({
           type: 'screenshot',
           filename: `page_screenshot_${Date.now()}.png`,
-          content: screenshotBase64,  // Full base64 for display
+          content: screenshotContent,  // Base64 data URL for display
           mimeType: 'image/png',
-          size: screenshotBase64.length,
+          size: size,
           timestamp: new Date().toISOString()
         });
       }
@@ -769,16 +801,33 @@ class WorkflowAnalyzer {
   /**
    * Log prompt usage to job history
    * Shows which prompt was used (custom from template or default from database)
+   * @param {string} promptName - Name of the prompt
+   * @param {string} source - Source of the prompt ('workflow-step', 'workflow-template', 'database')
+   * @param {string} promptText - The prompt text (optional)
+   * @param {object} payload - The payload sent to the prompt (optional)
+   * @param {object} stepInfo - Step information {step, stepIndex, totalSteps} (optional)
    */
-  async logPromptUsage(promptName, source, promptText, payload) {
+  async logPromptUsage(promptName, source, promptText, payload, stepInfo = null) {
     try {
       const jobId = this.context.job_id;
       if (!jobId) return;
       
+      // Format message with step information if available
+      let message = `📝 PROMPT USAGE: "${promptName}"`;
+      
+      if (stepInfo && stepInfo.step && stepInfo.stepIndex !== undefined) {
+        const stepNumber = stepInfo.stepIndex + 1; // 1-indexed for display
+        const stepName = stepInfo.step.name || stepInfo.step.type || 'Unknown';
+        const totalSteps = stepInfo.totalSteps || this.workflowTemplate?.steps?.length || '?';
+        message += ` from Step ${stepNumber}/${totalSteps}: "${stepName}"`;
+      } else if (source) {
+        message += ` from ${source}`;
+      }
+      
       await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
         jobId: jobId,
         level: 'info',
-        message: `📝 PROMPT USAGE: "${promptName}" from ${source}`,
+        message: message,
         component: 'WORKFLOW-ANALYZER',
         metadata: {
           prompt_usage: true,
@@ -788,11 +837,15 @@ class WorkflowAnalyzer {
           workflow_template_id: this.context.workflow_template_id || null,
           workflow_template_name: this.workflowTemplate?.name || null,
           payload_keys: Object.keys(payload || {}),
+          step_name: stepInfo?.step?.name || null,
+          step_type: stepInfo?.step?.type || null,
+          step_number: stepInfo?.stepIndex !== undefined ? stepInfo.stepIndex + 1 : null,
+          total_steps: stepInfo?.totalSteps || this.workflowTemplate?.steps?.length || null,
           timestamp: new Date().toISOString()
         }
       });
       
-      console.log(`[WorkflowAnalyzer] 📝 Logged prompt usage: ${promptName} (${source})`);
+      console.log(`[WorkflowAnalyzer] 📝 Logged prompt usage: ${promptName}${stepInfo && stepInfo.step ? ` (Step ${stepInfo.stepIndex + 1}: ${stepInfo.step.name || stepInfo.step.type})` : ''}`);
     } catch (error) {
       console.error('[WorkflowAnalyzer] Error logging prompt usage:', error.message);
     }
@@ -815,7 +868,7 @@ class WorkflowAnalyzer {
       await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
         jobId: jobId,
         level: 'info',
-        message: `🔧 [${step.type.toUpperCase()}] Executing step: "${step.name || step.type}" with params: ${JSON.stringify(stepConfig)}`,
+        message: `🔧 [${step.type.toUpperCase()}] Executing step: "${step.name || step.type}"`,
         component: 'WORKFLOW-STEP',
         metadata: logData
       }, {
@@ -831,7 +884,7 @@ class WorkflowAnalyzer {
   /**
    * Log step outcome with summary metadata
    */
-  async logStepOutcome(step, jobId, message, metadata = {}, level = 'info') {
+  async logStepOutcome(step, jobId, message, metadata = {}, level = 'info', attachments = []) {
     if (!jobId) {
       return;
     }
@@ -849,7 +902,8 @@ class WorkflowAnalyzer {
           step_slug: slug,
           ...metadata,
           timestamp: new Date().toISOString()
-        }
+        },
+        attachments: attachments.length > 0 ? attachments : undefined
       }, {
         headers: this.getAuthHeaders()
       });
@@ -926,15 +980,15 @@ class WorkflowAnalyzer {
             break;
             
           case 'page-description':
-            await this.executePageDescriptionStep(page, step, workflowState, jobId);
+            await this.executePageDescriptionStep(page, step, workflowState, jobId, i);
             break;
             
           case 'ai-prompt':
-            await this.executeAIPromptStep(page, step, workflowState, jobId);
+            await this.executeAIPromptStep(page, step, workflowState, jobId, i);
             break;
             
           case 'workflow-analysis':
-            await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId);
+            await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId, i);
             break;
           
           // Deterministic, hardcoded analysis for specific domains (e.g., Practical Test Automation)
@@ -952,6 +1006,10 @@ class WorkflowAnalyzer {
             
           case 'page-discovery':
             await this.executePageDiscoveryStep(step, workflowState, jobId, pageId, projectId);
+            break;
+            
+          case 'save-data':
+            await this.executeSaveDataStep(page, step, workflowState, jobId);
             break;
             
           case 'execute-code':
@@ -1217,19 +1275,46 @@ class WorkflowAnalyzer {
       quality
     }, workflowState);
 
+    // Create screenshot attachment for display in job history
+    const screenshotAttachments = [];
+    if (uploaded && publicUrl) {
+      // If uploaded, create attachment with reference to the uploaded file
+      screenshotAttachments.push({
+        type: 'screenshot',
+        filename: `screenshot_${fileId || Date.now()}.png`,
+        screenshot_id: fileId,
+        screenshot_url: publicUrl,
+        mimeType: 'image/png',
+        size: screenshot.length,
+        timestamp: new Date().toISOString()
+      });
+    } else if (screenshot) {
+      // If not uploaded, include base64 screenshot data
+      screenshotAttachments.push({
+        type: 'screenshot',
+        filename: `screenshot_${Date.now()}.png`,
+        content: screenshot.toString('base64'),
+        mimeType: 'image/png',
+        size: screenshot.length,
+        timestamp: new Date().toISOString()
+      });
+    }
+
     await this.logStepOutcome(
       step,
       jobId,
       uploaded
         ? `📸 [SCREENSHOT] Uploaded screenshot (${screenshot.length} bytes)`
-        : `📸 [SCREENSHOT] Captured screenshot locally (${screenshot.length} bytes)` ,
+        : `📸 [SCREENSHOT] Captured screenshot locally (${screenshot.length} bytes)`,
       {
         uploaded,
         fileId,
         fullPage,
         quality,
         size_bytes: screenshot.length
-      }
+      },
+      'info',
+      screenshotAttachments
     );
   }
 
@@ -1272,7 +1357,7 @@ class WorkflowAnalyzer {
   /**
    * Execute page description step
    */
-  async executePageDescriptionStep(page, step, workflowState, jobId) {
+  async executePageDescriptionStep(page, step, workflowState, jobId, stepIndex = null) {
     console.log(`[WorkflowAnalyzer] 📝 Generating page description (${step.name})`);
     
     // Get page title and content if not already collected
@@ -1345,8 +1430,13 @@ class WorkflowAnalyzer {
       descriptionPayload.links = workflowState.playwrightAnalysis.links.slice(0, 40);
     }
     
-    // Log prompt usage
-    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, descriptionPayload);
+    // Log prompt usage with step information
+    const currentStepIndex = stepIndex !== null ? stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
+    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, descriptionPayload, {
+      step: step,
+      stepIndex: currentStepIndex >= 0 ? currentStepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.type === step.type) ?? -1),
+      totalSteps: this.workflowTemplate?.steps?.length
+    });
     
     try {
       workflowState.pageDescription = await this.aiLogger.makeAICallWithPrompt(
@@ -1360,13 +1450,27 @@ class WorkflowAnalyzer {
         customTemplate // Pass custom template (required - no fallback to database)
       );
       
-      console.log(`[WorkflowAnalyzer] ✅ Page description generated: ${workflowState.pageDescription.short_description}`);
+      // Extract short_description with fallbacks (handle different response structures)
+      const shortDescription = workflowState.pageDescription?.short_description ||
+                               workflowState.pageDescription?.description ||
+                               workflowState.pageDescription?.summary ||
+                               workflowState.pageDescription?.short_summary ||
+                               (workflowState.pageDescription && typeof workflowState.pageDescription === 'string' ? workflowState.pageDescription : null) ||
+                               workflowState.pageTitle ||
+                               'Page description generated';
+      
+      console.log(`[WorkflowAnalyzer] ✅ Page description generated: ${shortDescription}`);
+      
+      // Ensure pageDescription has short_description if it's missing
+      if (workflowState.pageDescription && !workflowState.pageDescription.short_description) {
+        workflowState.pageDescription.short_description = shortDescription;
+      }
       
       // Add to conversation history
       workflowState.conversationHistory.push({
         timestamp: new Date().toISOString(),
         action: 'page-description-generated',
-        description: workflowState.pageDescription.short_description
+        description: shortDescription
       });
       
       // Log page description to job history
@@ -1385,9 +1489,9 @@ class WorkflowAnalyzer {
       await this.logStepOutcome(
         step,
         jobId,
-        `📝 [PAGE-DESCRIPTION] Generated summary: ${workflowState.pageDescription.short_description}`,
+        `📝 [PAGE-DESCRIPTION] Generated summary: ${shortDescription}`,
         {
-          short_description: workflowState.pageDescription.short_description,
+          short_description: shortDescription,
           attachments: step.config?.attachments || [],
           visible_text_length: workflowState.visibleText.length
         }
@@ -1427,7 +1531,7 @@ class WorkflowAnalyzer {
   /**
    * Execute AI prompt step
    */
-  async executeAIPromptStep(page, step, workflowState, jobId) {
+  async executeAIPromptStep(page, step, workflowState, jobId, stepIndex = null) {
     console.log(`[WorkflowAnalyzer] 🤖 Executing AI prompt (${step.name})`);
     
     // Prompt template MUST be embedded directly in step config, not fetched from database
@@ -1486,8 +1590,13 @@ class WorkflowAnalyzer {
       }
     }
     
-    // Log prompt usage
-    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, stepPayload);
+    // Log prompt usage with step information
+    const currentStepIndex = stepIndex !== null ? stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
+    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, stepPayload, {
+      step: step,
+      stepIndex: currentStepIndex >= 0 ? currentStepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.type === step.type) ?? -1),
+      totalSteps: this.workflowTemplate?.steps?.length
+    });
     
     try {
       // Use embedded template from step config (required - no fallback to database)
@@ -1517,6 +1626,42 @@ class WorkflowAnalyzer {
         }
       }
 
+      // Debug: Log what was returned
+      console.log(`[WorkflowAnalyzer] 🔍 AI Response for step ${step.id}:`, JSON.stringify(parsedResponse, null, 2).substring(0, 500));
+      if (parsedResponse && typeof parsedResponse === 'object') {
+        console.log(`[WorkflowAnalyzer] 🔍 Response keys: ${Object.keys(parsedResponse).join(', ')}`);
+        if (parsedResponse.playwright_script) {
+          console.log(`[WorkflowAnalyzer] ✅ playwright_script found: ${parsedResponse.playwright_script.length} chars`);
+          // Log to job history
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info',
+              `✅ playwright_script extracted: ${parsedResponse.playwright_script.length} chars`,
+              'WORKFLOW-ANALYZER',
+              {
+                step_id: step.id,
+                script_length: parsedResponse.playwright_script.length,
+                script_preview: parsedResponse.playwright_script.substring(0, 200),
+                script_ends_with: parsedResponse.playwright_script.substring(Math.max(0, parsedResponse.playwright_script.length - 100))
+              }
+            );
+          }
+        } else {
+          console.log(`[WorkflowAnalyzer] ⚠️ playwright_script NOT found in response`);
+          // Log to job history
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn',
+              `⚠️ playwright_script NOT found in AI response`,
+              'WORKFLOW-ANALYZER',
+              {
+                step_id: step.id,
+                response_keys: Object.keys(parsedResponse).join(', '),
+                response_preview: JSON.stringify(parsedResponse).substring(0, 500)
+              }
+            );
+          }
+        }
+      }
+
       // Store response in workflow state (legacy key and slug-based)
       workflowState[`${step.name}_response`] = parsedResponse;
       this.storeStepResult(step, parsedResponse, workflowState);
@@ -1532,7 +1677,7 @@ class WorkflowAnalyzer {
   /**
    * Execute workflow analysis step
    */
-  async executeWorkflowAnalysisStep(page, step, workflowState, jobId) {
+  async executeWorkflowAnalysisStep(page, step, workflowState, jobId, stepIndex = null) {
     console.log(`[WorkflowAnalyzer] 🔍 Performing workflow analysis (${step.name})`);
     
     // Prompt template MUST be embedded directly in step config
@@ -1573,8 +1718,13 @@ class WorkflowAnalyzer {
       additional_prompt_text: this.context.additional_prompt_text || ''
     };
     
-    // Log prompt usage
-    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, optimizedPayload);
+    // Log prompt usage with step information
+    const currentStepIndex = stepIndex !== null ? stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
+    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, optimizedPayload, {
+      step: step,
+      stepIndex: currentStepIndex >= 0 ? currentStepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.type === step.type) ?? -1),
+      totalSteps: this.workflowTemplate?.steps?.length
+    });
     
     try {
       workflowState.aiAnalysisResult = await this.aiLogger.makeAICallWithPrompt(
@@ -1881,6 +2031,103 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Execute save-data step - saves discovered data immediately to database
+   */
+  async executeSaveDataStep(page, step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 💾 Executing save-data step (${step.name})`);
+    
+    if (!workflowState.workflowId) {
+      throw new Error('No workflow ID available for save-data step');
+    }
+    
+    const config = step.config || {};
+    
+    // Determine what to save based on config
+    const saveLegs = config.saveLegs !== false; // Default true
+    const saveInteractiveElements = config.saveInteractiveElements === true;
+    const saveNonInteractiveElements = config.saveNonInteractiveElements === true;
+    const saveLinks = config.saveLinks === true;
+    const saveCookies = config.saveCookies === true;
+    
+    // Collect data from workflowState
+    const legs = workflowState.legs || [];
+    const interactiveElements = workflowState.playwrightAnalysis?.interactive_elements || [];
+    const nonInteractiveElements = workflowState.playwrightAnalysis?.non_interactive_elements || [];
+    const links = workflowState.playwrightAnalysis?.links || [];
+    
+    // Get cookies from page context
+    let cookies = [];
+    if (saveCookies) {
+      try {
+        const pageCookies = await page.context().cookies();
+        cookies = pageCookies;
+      } catch (error) {
+        console.warn(`[WorkflowAnalyzer] Failed to collect cookies: ${error.message}`);
+      }
+    }
+    
+    // Prepare payload
+    const payload = {
+      saveLegs,
+      saveInteractiveElements,
+      saveNonInteractiveElements,
+      saveLinks,
+      saveCookies,
+      legs: saveLegs ? legs : [],
+      interactiveElements: saveInteractiveElements ? interactiveElements : [],
+      nonInteractiveElements: saveNonInteractiveElements ? nonInteractiveElements : [],
+      links: saveLinks ? links : [],
+      cookies: saveCookies ? cookies : [],
+      job_id: jobId
+    };
+    
+    try {
+      const response = await axios.post(
+        `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+        payload,
+        {
+          headers: this.getAuthHeaders()
+        }
+      );
+      
+      const results = response.data?.results || {};
+      
+      console.log(`[WorkflowAnalyzer] ✅ Saved data:`, {
+        legs: results.legs,
+        actions: results.actions,
+        page: results.page,
+        cookies: results.cookies
+      });
+      
+      this.storeStepResult(step, {
+        success: true,
+        results
+      }, workflowState);
+      
+      await this.logStepOutcome(
+        step,
+        jobId,
+        `💾 [SAVE-DATA] Saved ${results.legs?.created || 0} new legs, ${results.legs?.updated || 0} updated legs, ${results.actions?.created || 0} new actions, ${results.actions?.updated || 0} updated actions`,
+        {
+          results,
+          config: {
+            saveLegs,
+            saveInteractiveElements,
+            saveNonInteractiveElements,
+            saveLinks,
+            saveCookies
+          }
+        }
+      );
+      
+      return results;
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Failed to save data: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Store step result by slug
    */
   storeStepResult(step, result, workflowState) {
@@ -1966,6 +2213,53 @@ class WorkflowAnalyzer {
     
     // Fall back to direct path resolution
     return this.getNestedValue(workflowState, normalizedPath);
+  }
+
+  /**
+   * Check if script ends with an incomplete string literal
+   * Returns true if there's an unmatched quote at the end
+   */
+  checkIncompleteString(script) {
+    if (!script || typeof script !== 'string') {
+      return false;
+    }
+    
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let inTemplateLiteral = false;
+    let escapeNext = false;
+    
+    for (let i = 0; i < script.length; i++) {
+      const char = script[i];
+      
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      
+      // Handle template literals first (they can contain ${})
+      if (char === '`' && !inSingleQuote && !inDoubleQuote) {
+        inTemplateLiteral = !inTemplateLiteral;
+        continue;
+      }
+      
+      // Only check single/double quotes if not in template literal
+      if (!inTemplateLiteral) {
+        if (char === "'" && !inDoubleQuote) {
+          inSingleQuote = !inSingleQuote;
+        } else if (char === '"' && !inSingleQuote) {
+          inDoubleQuote = !inDoubleQuote;
+        }
+      }
+    }
+    
+    // If we're still inside a string at the end, it's incomplete
+    return inSingleQuote || inDoubleQuote || inTemplateLiteral;
   }
 
   /**
@@ -3772,6 +4066,28 @@ class WorkflowAnalyzer {
             throw new Error(`No Playwright script generated for iteration ${iteration}`);
           }
           
+          // Validate script completeness BEFORE cleaning
+          // Check if script ends with an incomplete string literal (unmatched quote)
+          const originalScriptLength = script.length;
+          const hasIncompleteString = this.checkIncompleteString(script);
+          if (hasIncompleteString) {
+            const error = 'Script appears to end with incomplete string literal';
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'error',
+                `❌ ${error}`,
+                'WORKFLOW-ANALYZER',
+                {
+                  original_script_length: originalScriptLength,
+                  script_preview: script.substring(Math.max(0, script.length - 500)),
+                  last_50_chars: script.substring(Math.max(0, script.length - 50)),
+                  step_id: generateStepId,
+                  iteration: iteration
+                }
+              );
+            }
+            throw new Error(error);
+          }
+          
           // Clean the script to remove markdown code blocks and function declarations
           script = this.cleanScript(script);
           
@@ -3891,6 +4207,27 @@ class WorkflowAnalyzer {
           // Store playwright_script from determine_completion if provided (for next iteration)
           if (completionResult.playwright_script && completionResult.playwright_script.trim()) {
             let script = completionResult.playwright_script;
+            
+            // Validate script completeness BEFORE cleaning
+            const originalScriptLength = script.length;
+            if (script.match(/['"`][^'"`]*$/)) {
+              const error = 'Script from determine_completion appears to end with incomplete string literal';
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'error',
+                  `❌ ${error}`,
+                  'WORKFLOW-ANALYZER',
+                  {
+                    original_script_length: originalScriptLength,
+                    script_preview: script.substring(Math.max(0, script.length - 500)),
+                    last_50_chars: script.substring(Math.max(0, script.length - 50)),
+                    step_id: step.id,
+                    iteration: iteration
+                  }
+                );
+              }
+              throw new Error(error);
+            }
+            
             // Clean the script to remove markdown code blocks and function declarations
             script = this.cleanScript(script);
             if (script && script.trim().length > 0) {
@@ -4041,6 +4378,9 @@ class WorkflowAnalyzer {
       case 'if':
       case 'if-step':
         await this.executeIfStep(page, step, workflowState, jobId);
+        break;
+      case 'save-data':
+        await this.executeSaveDataStep(page, step, workflowState, jobId);
         break;
       default:
         console.log(`[WorkflowAnalyzer] ⚠️ Unknown nested step type: ${step.type}`);
