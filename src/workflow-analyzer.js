@@ -29,6 +29,12 @@ class WorkflowAnalyzer {
         forEachMaxItems: 50
       }
     };
+    this.variableSnapshotLimits = {
+      maxDepth: 5,
+      maxArrayItems: 25,
+      maxStringLength: 1200,
+      maxHistory: 200
+    };
   }
 
   /**
@@ -802,6 +808,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       action_description: actionPlan?.description || currentLeg?.description || null,
       expected_result: actionPlan?.expected_result || currentLeg?.expected_outcome || currentLeg?.expectedOutcome || null,
       analysis_notes: actionPlan?.analysis_notes || null,
+        page_summary: actionPlan?.page_summary || determineResult?.page_state || null,
       timestamp: new Date().toISOString()
     });
 
@@ -831,7 +838,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       action_description: actionPlan?.description || currentLeg?.description || null,
       expected_result: actionPlan?.expected_result || currentLeg?.expected_outcome || currentLeg?.expectedOutcome || null,
       analysis_notes: actionPlan?.analysis_notes || null,
-      page_summary: actionPlan?.page_summary || workflowState.pageDescription || null
+        page_summary: actionPlan?.page_summary || determineResult?.page_state || null
     });
     if (workflowState.executionHistory.length > 50) {
       workflowState.executionHistory = workflowState.executionHistory.slice(-50);
@@ -1531,6 +1538,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     workflowState.context.workflow_type = workflowState.workflowType;
     
+    this.initializeVariablePool(workflowState);
+
     const templateHasCreateWorkflow = Array.isArray(this.workflowTemplate?.steps)
       ? this.workflowTemplate.steps.some((step) => step?.type === 'create-workflow')
       : false;
@@ -1643,6 +1652,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executeCodeStep(page, step, workflowState, jobId, nextStepForCode);
             break;
             
+          case 'var-export':
+            await this.executeVarExportStep(step, workflowState, jobId);
+            break;
+
+          case 'var-dump':
+            await this.executeVarDumpStep(step, workflowState, jobId);
+            break;
+
           case 'execute-code-from-variable':
             const nextStep = i + 1 < this.workflowTemplate.steps.length ? this.workflowTemplate.steps[i + 1] : null;
             await this.executeCodeFromVariableStep(page, step, workflowState, jobId, nextStep);
@@ -2764,6 +2781,51 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (Array.isArray(parsedResponse.cookies)) {
           workflowState.latestCookies = parsedResponse.cookies;
         }
+
+        const idsToPersist = new Set([step.id]);
+        if (step.id.includes('::')) {
+          idsToPersist.add(step.id.split('::').pop());
+        }
+        idsToPersist.add('determine_completion');
+        if (step.slug) {
+          idsToPersist.add(step.slug);
+        }
+
+        idsToPersist.forEach((storeId) => {
+          if (!storeId) {
+            return;
+          }
+
+          if (!workflowState.results) {
+            workflowState.results = {};
+          }
+          if (!workflowState.results[storeId]) {
+            workflowState.results[storeId] = {};
+          }
+          workflowState.results[storeId].result = parsedResponse;
+          if (parsedResponse.status !== undefined) {
+            workflowState.results[storeId].status = parsedResponse.status;
+          }
+          if (parsedResponse.is_complete !== undefined) {
+            workflowState.results[storeId].is_complete = parsedResponse.is_complete;
+          }
+
+          if (!workflowState[storeId]) {
+            workflowState[storeId] = {};
+          }
+          workflowState[storeId].result = parsedResponse;
+          if (parsedResponse.status !== undefined) {
+            workflowState[storeId].status = parsedResponse.status;
+          }
+          if (parsedResponse.is_complete !== undefined) {
+            workflowState[storeId].is_complete = parsedResponse.is_complete;
+          }
+        });
+
+        workflowState.determineCompletionStatus = parsedResponse.status ?? null;
+        workflowState.lastDetermineResult = parsedResponse;
+        workflowState.context.determine_completion = parsedResponse;
+        workflowState.context.determine_completion_status = parsedResponse.status ?? null;
       }
 
       // Store response in workflow state (legacy key and slug-based)
@@ -3382,7 +3444,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
   /**
    * Store step result by slug
    */
-  storeStepResult(step, result, workflowState) {
+  storeStepResult(step, result, workflowState, options = {}) {
     const slug = step.slug || this.generateSlug(step.name || 'step');
     if (!workflowState[slug]) {
       workflowState[slug] = {};
@@ -3395,23 +3457,419 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     // Also store by step ID if it exists (for nested steps in for-each)
     if (step.id) {
+      const idsToIndex = [step.id];
+      if (step.id.includes('::')) {
+        const baseId = step.id.split('::').pop();
+        if (baseId && !idsToIndex.includes(baseId)) {
+          idsToIndex.push(baseId);
+        }
+      }
+
       if (!workflowState.results) {
         workflowState.results = {};
       }
-      if (!workflowState.results[step.id]) {
-        workflowState.results[step.id] = {};
-      }
-      workflowState.results[step.id].result = result;
-      workflowState.results[step.id].stepName = step.name;
-      workflowState.results[step.id].stepType = step.type;
-      
-      // Also store directly on workflowState for easier access
-      workflowState[step.id] = {
-        result,
-        stepName: step.name,
-        stepType: step.type
+
+      idsToIndex.forEach((id) => {
+        if (!workflowState.results[id]) {
+          workflowState.results[id] = {};
+        }
+        workflowState.results[id].result = result;
+        workflowState.results[id].stepName = step.name;
+        workflowState.results[id].stepType = step.type;
+
+        workflowState[id] = {
+          result,
+          stepName: step.name,
+          stepType: step.type
+        };
+
+        if (result && typeof result === 'object' && !Array.isArray(result)) {
+          Object.entries(result).forEach(([key, value]) => {
+            const isPromotable =
+              value === null ||
+              typeof value === 'string' ||
+              typeof value === 'number' ||
+              typeof value === 'boolean';
+
+            if (isPromotable) {
+              workflowState.results[id][key] = value;
+              workflowState[id][key] = value;
+              if (workflowState[slug]) {
+                workflowState[slug][key] = value;
+              }
+            }
+          });
+        }
+      });
+    }
+
+    try {
+      this.updateVariablePool(step, result, workflowState, options);
+    } catch (error) {
+      console.warn(`[WorkflowAnalyzer] ⚠️ Failed to update variable pool for step ${step.name || step.type}: ${error.message}`);
+    }
+  }
+
+  initializeVariablePool(workflowState) {
+    if (!workflowState || typeof workflowState !== 'object') {
+      return;
+    }
+
+    const now = new Date().toISOString();
+    workflowState.variablePool = {
+      shared: {
+        meta: {
+          jobId: workflowState.jobId || null,
+          projectId: workflowState.projectId || null,
+          pageId: workflowState.pageId || null,
+          workflowType: workflowState.workflowType || null,
+          pageUrl: workflowState.pageUrl || null,
+          initializedAt: now,
+          lastUpdatedAt: now
+        },
+        context: this.cloneForVariablePool(workflowState.context || {}),
+        options: this.cloneForVariablePool(workflowState.options || {}),
+        byStep: {},
+        exports: {}
+      },
+      steps: {},
+      loopStack: [],
+      history: []
+    };
+  }
+
+  syncSharedContext(workflowState) {
+    if (!workflowState?.variablePool?.shared) {
+      return;
+    }
+
+    const shared = workflowState.variablePool.shared;
+    shared.context = this.cloneForVariablePool(workflowState.context || {});
+    shared.options = this.cloneForVariablePool(workflowState.options || {});
+    if (!shared.meta) {
+      shared.meta = {};
+    }
+    shared.meta.lastUpdatedAt = new Date().toISOString();
+  }
+
+  getActiveLoopScope(workflowState) {
+    if (!workflowState?.variablePool?.loopStack) {
+      return null;
+    }
+    const stack = workflowState.variablePool.loopStack;
+    return stack.length > 0 ? stack[stack.length - 1] : null;
+  }
+
+  isInsideLoop(workflowState) {
+    const scope = this.getActiveLoopScope(workflowState);
+    return !!scope;
+  }
+
+  enterLoopScope(workflowState, metadata = {}) {
+    if (!workflowState?.variablePool) {
+      return null;
+    }
+    if (!Array.isArray(workflowState.variablePool.loopStack)) {
+      workflowState.variablePool.loopStack = [];
+    }
+    const scope = {
+      metadata: {
+        ...metadata,
+        startedAt: new Date().toISOString()
+      },
+      variables: {}
+    };
+    workflowState.variablePool.loopStack.push(scope);
+    return scope;
+  }
+
+  exitLoopScope(workflowState, metadata = {}) {
+    if (!workflowState?.variablePool?.loopStack || workflowState.variablePool.loopStack.length === 0) {
+      return null;
+    }
+    const scope = workflowState.variablePool.loopStack.pop();
+    if (scope && scope.metadata) {
+      scope.metadata = {
+        ...scope.metadata,
+        ...metadata,
+        endedAt: new Date().toISOString()
       };
     }
+    return scope;
+  }
+
+  cloneForVariablePool(value, options = {}, depth = 0, seen = new WeakSet()) {
+    const limits = {
+      maxDepth: options.maxDepth ?? this.variableSnapshotLimits.maxDepth,
+      maxArrayItems: options.maxArrayItems ?? this.variableSnapshotLimits.maxArrayItems,
+      maxStringLength: options.maxStringLength ?? this.variableSnapshotLimits.maxStringLength
+    };
+
+    if (value === undefined) {
+      return '[Undefined]';
+    }
+    if (value === null) {
+      return null;
+    }
+    if (typeof value === 'string') {
+      if (value.length > limits.maxStringLength) {
+        const clipped = value.slice(0, limits.maxStringLength);
+        return `${clipped}… [${value.length - limits.maxStringLength} more chars]`;
+      }
+      return value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return value;
+    }
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+    if (typeof value === 'function') {
+      return '[Function]';
+    }
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+    if (Buffer.isBuffer(value)) {
+      return `[Buffer length=${value.length}]`;
+    }
+
+    if (typeof value === 'object') {
+      if (seen.has(value)) {
+        return '[Circular]';
+      }
+      seen.add(value);
+
+      if (depth >= limits.maxDepth) {
+        return '[Depth limit]';
+      }
+
+      if (Array.isArray(value)) {
+        const result = value.slice(0, limits.maxArrayItems).map(item =>
+          this.cloneForVariablePool(item, options, depth + 1, seen)
+        );
+        if (value.length > limits.maxArrayItems) {
+          result.push(`… ${value.length - limits.maxArrayItems} more items`);
+        }
+        seen.delete(value);
+        return result;
+      }
+
+      if (value instanceof Map) {
+        const obj = {};
+        let index = 0;
+        for (const [key, mapValue] of value.entries()) {
+          if (index >= limits.maxArrayItems) {
+            obj.__truncated = `${value.size - limits.maxArrayItems} more entries`;
+            break;
+          }
+          obj[key] = this.cloneForVariablePool(mapValue, options, depth + 1, seen);
+          index++;
+        }
+        seen.delete(value);
+        return obj;
+      }
+
+      if (value instanceof Set) {
+        const arr = Array.from(value).slice(0, limits.maxArrayItems).map(item =>
+          this.cloneForVariablePool(item, options, depth + 1, seen)
+        );
+        if (value.size > limits.maxArrayItems) {
+          arr.push(`… ${value.size - limits.maxArrayItems} more items`);
+        }
+        seen.delete(value);
+        return arr;
+      }
+
+      const keys = Object.keys(value);
+      const resultObj = {};
+      for (let i = 0; i < keys.length; i++) {
+        if (i >= limits.maxArrayItems) {
+          resultObj.__truncated = `${keys.length - limits.maxArrayItems} more keys`;
+          break;
+        }
+        const key = keys[i];
+        resultObj[key] = this.cloneForVariablePool(value[key], options, depth + 1, seen);
+      }
+      seen.delete(value);
+      return resultObj;
+    }
+
+    return String(value);
+  }
+
+  updateVariablePool(step, result, workflowState, options = {}) {
+    if (!workflowState?.variablePool) {
+      return;
+    }
+
+    this.syncSharedContext(workflowState);
+
+    const slug = step.slug || this.generateSlug(step.name || step.type || 'step');
+    const sanitizedResult = this.cloneForVariablePool(result);
+    const activeScope = this.getActiveLoopScope(workflowState);
+    const forceShared = options.forceShared === true;
+    const skipShared = options.skipShared === true;
+
+    const entry = {
+      stepId: step.id || slug,
+      slug,
+      stepName: step.name || step.type || slug,
+      stepType: step.type,
+      updatedAt: new Date().toISOString(),
+      scope: activeScope ? 'loop' : 'shared',
+      result: sanitizedResult
+    };
+
+    workflowState.variablePool.steps = workflowState.variablePool.steps || {};
+    workflowState.variablePool.steps[slug] = entry;
+
+    workflowState.variablePool.history = workflowState.variablePool.history || [];
+    workflowState.variablePool.history.push({
+      stepId: entry.stepId,
+      slug: entry.slug,
+      stepType: entry.stepType,
+      scope: entry.scope,
+      updatedAt: entry.updatedAt
+    });
+    if (workflowState.variablePool.history.length > this.variableSnapshotLimits.maxHistory) {
+      workflowState.variablePool.history.shift();
+    }
+
+    if (activeScope) {
+      activeScope.variables[slug] = entry.result;
+    }
+
+    if ((!activeScope || forceShared) && !skipShared) {
+      const shared = workflowState.variablePool.shared || (workflowState.variablePool.shared = {});
+      shared.byStep = shared.byStep || {};
+      shared.byStep[slug] = entry.result;
+
+      const reservedKeys = new Set(['meta', 'byStep', 'context', 'options', 'exports']);
+      if (!reservedKeys.has(slug)) {
+        shared[slug] = entry.result;
+      }
+      shared.meta = shared.meta || {};
+      shared.meta.lastUpdatedAt = entry.updatedAt;
+    }
+  }
+
+  resolveVariableSource(path, workflowState) {
+    if (!path || !workflowState) {
+      return undefined;
+    }
+
+    const trimmed = path.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+
+    if (trimmed === 'shared') {
+      return workflowState.variablePool?.shared;
+    }
+    if (trimmed.startsWith('shared.')) {
+      const sharedPath = trimmed.substring('shared.'.length);
+      return this.getNestedValue(workflowState.variablePool?.shared, sharedPath);
+    }
+
+    if (trimmed === 'loop') {
+      return this.getActiveLoopScope(workflowState)?.variables;
+    }
+    if (trimmed.startsWith('loop.')) {
+      const loopPath = trimmed.substring('loop.'.length);
+      return this.getNestedValue(this.getActiveLoopScope(workflowState)?.variables || {}, loopPath);
+    }
+
+    if (trimmed.startsWith('step.')) {
+      const rest = trimmed.substring('step.'.length);
+      const [slug, ...segments] = rest.split('.').filter(Boolean);
+      if (!slug) {
+        return undefined;
+      }
+      const stepEntry = workflowState.variablePool?.steps?.[slug];
+      let base = stepEntry?.result;
+      if (!base && workflowState[slug]?.result) {
+        base = workflowState[slug].result;
+      }
+      if (!segments.length) {
+        return base;
+      }
+      return this.getNestedValue(base, segments.join('.'));
+    }
+
+    if (trimmed.startsWith('results.')) {
+      const resultsPath = trimmed.substring('results.'.length);
+      return this.resolvePathValue(workflowState, resultsPath, 'results');
+    }
+
+    if (trimmed.startsWith('state.')) {
+      const statePath = trimmed.substring('state.'.length);
+      return this.resolvePathValue(workflowState, statePath, 'context');
+    }
+
+    // Try direct context path first, then results
+    let resolved = this.resolvePathValue(workflowState, trimmed, 'context');
+    if (resolved === undefined) {
+      resolved = this.resolvePathValue(workflowState, trimmed, 'results');
+    }
+    return resolved;
+  }
+
+  applyExportToShared(targetPath, value, strategy, workflowState) {
+    if (!workflowState?.variablePool?.shared) {
+      return { success: false, reason: 'Shared pool not initialised' };
+    }
+
+    const sanitized = this.cloneForVariablePool(value);
+    const shared = workflowState.variablePool.shared;
+    const segments = (targetPath && typeof targetPath === 'string'
+      ? targetPath.split('.').map(segment => segment.trim()).filter(Boolean)
+      : []);
+
+    const reservedKeys = new Set(['meta', 'byStep', 'context', 'options']);
+    let effectiveSegments = segments.length > 0 ? [...segments] : [];
+    if (effectiveSegments.length === 0) {
+      effectiveSegments = ['exports', `export_${Date.now()}`];
+    } else if (reservedKeys.has(effectiveSegments[0]) && effectiveSegments.length === 1) {
+      effectiveSegments = ['exports', effectiveSegments[0]];
+    }
+
+    let container = shared;
+    for (let i = 0; i < effectiveSegments.length - 1; i++) {
+      const key = effectiveSegments[i];
+      if (!container[key] || typeof container[key] !== 'object') {
+        container[key] = {};
+      }
+      container = container[key];
+    }
+
+    const finalKey = effectiveSegments[effectiveSegments.length - 1];
+    const existing = container[finalKey];
+    const normalizedStrategy = (strategy || 'replace').toLowerCase();
+
+    switch (normalizedStrategy) {
+      case 'merge':
+        if (existing && typeof existing === 'object' && !Array.isArray(existing) && sanitized && typeof sanitized === 'object' && !Array.isArray(sanitized)) {
+          container[finalKey] = { ...existing, ...sanitized };
+        } else {
+          container[finalKey] = sanitized;
+        }
+        break;
+      case 'append':
+        if (Array.isArray(existing)) {
+          container[finalKey] = existing.concat([sanitized]);
+        } else if (existing === undefined) {
+          container[finalKey] = [sanitized];
+        } else {
+          container[finalKey] = [existing, sanitized];
+        }
+        break;
+      default:
+        container[finalKey] = sanitized;
+        break;
+    }
+
+    return { success: true, targetPath: effectiveSegments.join('.') };
   }
 
   /**
@@ -4335,6 +4793,162 @@ IMPORTANT OUTPUT REQUIREMENTS:
   /**
    * Execute cookie add step
    */
+  async executeVarExportStep(step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 📤 Executing var-export step (${step.name || step.slug || step.type})`);
+
+    if (!workflowState.variablePool) {
+      this.initializeVariablePool(workflowState);
+    }
+
+    const config = step.config || {};
+    const exportsConfig = Array.isArray(config.exports) ? config.exports : [];
+    const slug = step.slug || this.generateSlug(step.name || step.type || 'var-export');
+    const results = [];
+
+    for (let idx = 0; idx < exportsConfig.length; idx++) {
+      const mapping = exportsConfig[idx] || {};
+      const sourcePath = typeof mapping.source === 'string' ? mapping.source.trim() : '';
+      const rawTargetPath = typeof mapping.target === 'string' ? mapping.target.trim() : '';
+      const strategy = (mapping.strategy || 'replace').toLowerCase();
+      const targetPath = rawTargetPath.length > 0 ? rawTargetPath : `exports.${slug}.mapping_${idx + 1}`;
+
+      if (!sourcePath) {
+        results.push({
+          source: sourcePath,
+          target: targetPath,
+          strategy,
+          success: false,
+          reason: 'source_missing'
+        });
+        continue;
+      }
+
+      const resolvedValue = this.resolveVariableSource(sourcePath, workflowState);
+      if (resolvedValue === undefined) {
+        results.push({
+          source: sourcePath,
+          target: targetPath,
+          strategy,
+          success: false,
+          reason: 'source_not_found'
+        });
+        continue;
+      }
+
+      const applied = this.applyExportToShared(targetPath, resolvedValue, strategy, workflowState);
+      results.push({
+        source: sourcePath,
+        target: applied.targetPath || targetPath,
+        strategy,
+        success: applied.success !== false,
+        reason: applied.reason || null
+      });
+    }
+
+    const successCount = results.filter(entry => entry.success).length;
+    const message = exportsConfig.length === 0
+      ? '📤 Var export: no mappings configured'
+      : `📤 Var export: ${successCount}/${exportsConfig.length} mappings promoted`;
+    const level = exportsConfig.length === 0 || successCount === exportsConfig.length ? 'info' : 'warn';
+
+    const summary = {
+      exported: results,
+      total: exportsConfig.length,
+      success: successCount,
+      failed: exportsConfig.length - successCount
+    };
+
+    this.storeStepResult(step, summary, workflowState, { forceShared: true });
+
+    await this.logStepOutcome(step, jobId, message, {
+      exported: results,
+      success: successCount,
+      total: exportsConfig.length
+    }, level);
+
+    return summary;
+  }
+
+  async executeVarDumpStep(step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 📝 Executing var-dump step (${step.name || step.slug || step.type})`);
+
+    if (!workflowState.variablePool) {
+      this.initializeVariablePool(workflowState);
+    }
+
+    const config = step.config || {};
+
+    const includeShared = config.includeShared !== false;
+    const includeCurrentLoop = config.includeCurrentLoop !== false;
+    const includeStepsSummary = config.includeStepsSummary === true;
+    const includeContext = config.includeContext === true;
+
+    const depthOverride = this.coerceToInteger(config.maxDepth);
+    const arrayOverride = this.coerceToInteger(config.maxArrayLength);
+    const stringOverride = this.coerceToInteger(config.maxStringLength);
+
+    const snapshotOptions = {
+      maxDepth: depthOverride !== null ? Math.max(1, depthOverride) : undefined,
+      maxArrayItems: arrayOverride !== null ? Math.max(1, arrayOverride) : undefined,
+      maxStringLength: stringOverride !== null ? Math.max(50, stringOverride) : undefined
+    };
+
+    const snapshotPayload = {};
+    const scopesIncluded = [];
+
+    if (includeShared && workflowState.variablePool?.shared) {
+      snapshotPayload.shared = this.cloneForVariablePool(workflowState.variablePool.shared, snapshotOptions);
+      scopesIncluded.push('shared');
+    }
+
+    if (includeCurrentLoop) {
+      const activeScope = this.getActiveLoopScope(workflowState);
+      if (activeScope) {
+        snapshotPayload.currentLoop = {
+          metadata: { ...(activeScope.metadata || {}) },
+          variables: this.cloneForVariablePool(activeScope.variables || {}, snapshotOptions)
+        };
+        scopesIncluded.push('currentLoop');
+      }
+    }
+
+    if (includeStepsSummary) {
+      const steps = Object.values(workflowState.variablePool?.steps || {}).map(entry => ({
+        slug: entry.slug,
+        stepName: entry.stepName,
+        stepType: entry.stepType,
+        scope: entry.scope,
+        updatedAt: entry.updatedAt
+      }));
+      snapshotPayload.steps = steps;
+      scopesIncluded.push('steps');
+    }
+
+    if (includeContext) {
+      snapshotPayload.context = this.cloneForVariablePool(workflowState.context || {}, snapshotOptions);
+      scopesIncluded.push('context');
+    }
+
+    const generatedAt = new Date().toISOString();
+    const displayScopes = scopesIncluded.length > 0 ? scopesIncluded.join(', ') : 'none';
+
+    const result = {
+      scopes: scopesIncluded,
+      snapshot: snapshotPayload,
+      generatedAt
+    };
+
+    this.storeStepResult(step, result, workflowState, { forceShared: true });
+
+    await this.logStepOutcome(step, jobId, `📝 Var dump captured (${displayScopes})`, {
+      scopes: scopesIncluded,
+      snapshot: snapshotPayload,
+      generatedAt
+    }, 'info');
+
+    return result;
+  }
+
   async executeCookieAddStep(step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 🍪 Adding cookie (${step.name})`);
     
@@ -5423,49 +6037,60 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       console.log(`[WorkflowAnalyzer] 🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
       
-      // Execute nested steps for this item
-      if (nestedStepsArray.length > 0) {
-        for (let nestedIdx = 0; nestedIdx < nestedStepsArray.length; nestedIdx++) {
-          const nestedStep = nestedStepsArray[nestedIdx];
-          
-          // Create unique step ID for nested step
-          const baseId = nestedStep.id || `nested-${nestedIdx}`;
-          const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
-          
-          const nestedStepWithId = {
-            ...nestedStep,
-            id: nestedStepId,
-            originalId: nestedStep.id || baseId
-          };
-          
-          console.log(`[WorkflowAnalyzer] 🔁 Executing nested step ${nestedIdx + 1}/${nestedStepsArray.length}: ${nestedStep.name || nestedStep.type} (iteration ${idx + 1})`);
-          
-          try {
-            // Execute nested step using the same switch logic
-            await this.executeStepByType(page, nestedStepWithId, workflowState, jobId, {
-              stepIndex: nestedIdx,
-              siblings: nestedStepsArray
-            });
-          } catch (nestedError) {
-            console.error(`[WorkflowAnalyzer] ❌ Nested step failed in iteration ${idx + 1}: ${nestedError.message}`);
-            // Continue with next step unless critical
-            if (nestedStep.config?.critical) {
-              throw nestedError;
+      const loopScopeMetadata = {
+        loopType: 'for-each',
+        stepId: step.id || 'for-each',
+        stepName: step.name || step.type || 'for-each',
+        iteration: idx,
+        itemSummary: this.summarizeItemForMetadata(item)
+      };
+
+      this.enterLoopScope(workflowState, loopScopeMetadata);
+      let stepResults = [];
+
+      try {
+        if (nestedStepsArray.length > 0) {
+          for (let nestedIdx = 0; nestedIdx < nestedStepsArray.length; nestedIdx++) {
+            const nestedStep = nestedStepsArray[nestedIdx];
+            
+            // Create unique step ID for nested step
+            const baseId = nestedStep.id || `nested-${nestedIdx}`;
+            const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
+            
+            const nestedStepWithId = {
+              ...nestedStep,
+              id: nestedStepId,
+              originalId: nestedStep.id || baseId
+            };
+            
+            console.log(`[WorkflowAnalyzer] 🔁 Executing nested step ${nestedIdx + 1}/${nestedStepsArray.length}: ${nestedStep.name || nestedStep.type} (iteration ${idx + 1})`);
+            
+            try {
+              await this.executeStepByType(page, nestedStepWithId, workflowState, jobId, {
+                stepIndex: nestedIdx,
+                siblings: nestedStepsArray
+              });
+            } catch (nestedError) {
+              console.error(`[WorkflowAnalyzer] ❌ Nested step failed in iteration ${idx + 1}: ${nestedError.message}`);
+              if (nestedStep.config?.critical) {
+                throw nestedError;
+              }
             }
           }
         }
-      }
 
-      // Collect step results for this iteration
-      const stepResults = nestedStepsArray.map((nestedStep, nestedIndex) => {
-        const baseId = nestedStep.id || `nested-${nestedIndex}`;
-        const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
-        return {
-          stepId: nestedStepId,
-          originalStepId: nestedStep.id || baseId,
-          result: workflowState[nestedStepId]
-        };
-      });
+        stepResults = nestedStepsArray.map((nestedStep, nestedIndex) => {
+          const baseId = nestedStep.id || `nested-${nestedIndex}`;
+          const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
+          return {
+            stepId: nestedStepId,
+            originalStepId: nestedStep.id || baseId,
+            result: workflowState[nestedStepId]
+          };
+        });
+      } finally {
+        this.exitLoopScope(workflowState, { iteration: idx, loopType: 'for-each' });
+      }
 
       iterationSummaries.push({
         index: idx,
@@ -5611,6 +6236,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
         max_iterations: maxIterations
       });
       
+      const loopScopeMetadata = {
+        loopType: 'while-loop',
+        stepId: step.id || 'while-loop',
+        stepName: step.name || step.type || 'while-loop',
+        iteration,
+        expectedValue
+      };
+
+      this.enterLoopScope(workflowState, loopScopeMetadata);
+
       try {
         // Execute nested steps
         for (let nestedIdx = 0; nestedIdx < nestedSteps.length; nestedIdx++) {
@@ -5630,6 +6265,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         // Evaluate condition after nested steps
+        let autoContinueReason = null;
+        let originalConditionValue = null;
+
         if (conditionType === 'code' && config.conditionCode) {
           // Clean the code before execution
           let cleanedCode = this.cleanScript(config.conditionCode);
@@ -5645,11 +6283,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
             { code: cleanedCode, workflowState }
           );
           condition = conditionResult === true || conditionResult === 'true' || conditionResult === 1;
+          originalConditionValue = conditionResult;
+          lastConditionValue = conditionResult;
           
         } else if (conditionType === 'ai-response' || conditionType === 'path') {
           // Get condition from workflowState path (check multiple locations)
           let conditionValue = this.resolvePathValue(workflowState, conditionPath || 'determine_completion.status', 'results');
           lastConditionValue = conditionValue;
+          originalConditionValue = conditionValue;
           
           // If not found, try finding the determine_completion step result directly
           if (conditionValue === undefined || conditionValue === null) {
@@ -5678,22 +6319,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
             lastConditionValue = conditionValue;
           }
           
-          if (conditionValue !== undefined && conditionValue !== null) {
-            // Support both new status field (success/failure/continue/stuck) and legacy is_complete
-            if (typeof conditionValue === 'string') {
-              // New format: status field with 'success', 'failure', 'continue', 'stuck'
-              condition = conditionValue === expectedValue;
-              console.log(`[WorkflowAnalyzer] 🔍 Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
+          const normalizedExpectedValue = typeof expectedValue === 'string'
+            ? expectedValue.trim().toLowerCase()
+            : expectedValue;
+          let normalizedConditionValue = conditionValue;
+          if (typeof normalizedConditionValue === 'string') {
+            normalizedConditionValue = normalizedConditionValue.trim().toLowerCase();
+          }
+
+          if (normalizedConditionValue !== undefined && normalizedConditionValue !== null) {
+            if (typeof normalizedConditionValue === 'string' && typeof normalizedExpectedValue === 'string') {
+              condition = normalizedConditionValue === normalizedExpectedValue;
+              console.log(`[WorkflowAnalyzer] 🔍 Checking status: ${normalizedConditionValue} === ${normalizedExpectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
             } else {
-              // Legacy format: boolean is_complete
-              condition = conditionValue === true || conditionValue === 'true' || conditionValue === 1 || conditionValue === 'complete';
+              condition = normalizedConditionValue === normalizedExpectedValue;
             }
           } else {
-            // If path not found and it's required, default to false (exit loop)
             if (conditionPath) {
               console.log(`[WorkflowAnalyzer] ⚠️ Condition path "${conditionPath}" not found, exiting loop`);
               
-              // Send log to backend
               await this.sendLogToBackend(jobId, 'warn', `⚠️ Condition path "${conditionPath}" not found, exiting loop`, 'WORKFLOW-ANALYZER', {
                 step_id: step.id,
                 step_name: step.name || step.type,
@@ -5704,9 +6348,62 @@ IMPORTANT OUTPUT REQUIREMENTS:
               
               condition = invertCondition ? true : false;
             } else {
-              // No condition path specified, default to false (exit loop)
               condition = false;
             }
+          }
+
+          if (!condition) {
+            const determineResult =
+              workflowState.lastDetermineResult ||
+              workflowState['determine_completion']?.result ||
+              workflowState.results?.['determine_completion']?.result ||
+              workflowState.context?.determine_completion ||
+              null;
+
+            if (determineResult && typeof determineResult === 'object') {
+              const completionStatus = typeof determineResult.completion_status === 'string'
+                ? determineResult.completion_status.trim().toLowerCase()
+                : null;
+              const statusField = typeof determineResult.status === 'string'
+                ? determineResult.status.trim().toLowerCase()
+                : determineResult.status;
+              const needsMoreTesting = determineResult.needs_more_testing === true;
+              const explicitlyIncomplete = determineResult.is_complete === false;
+              const hasFollowUpScript = typeof determineResult.playwright_script === 'string' && determineResult.playwright_script.trim().length > 0;
+              const shouldAutoContinue =
+                needsMoreTesting ||
+                explicitlyIncomplete ||
+                completionStatus === 'needs_iteration' ||
+                completionStatus === 'in_progress' ||
+                statusField === 'retry' ||
+                statusField === 'pending' ||
+                hasFollowUpScript;
+
+              if (shouldAutoContinue) {
+                condition = true;
+                autoContinueReason =
+                  (needsMoreTesting && 'needs_more_testing') ||
+                  (explicitlyIncomplete && 'is_complete_false') ||
+                  (completionStatus === 'needs_iteration' && 'completion_status_needs_iteration') ||
+                  (completionStatus === 'in_progress' && 'completion_status_in_progress') ||
+                  (statusField === 'retry' && 'status_retry') ||
+                  (statusField === 'pending' && 'status_pending') ||
+                  (hasFollowUpScript && 'follow_up_script_provided') ||
+                  'derived_continue';
+
+                const derivedValue = statusField || completionStatus || 'auto-continue';
+                const derivedLabel = typeof derivedValue === 'string' ? derivedValue : 'auto-continue';
+                conditionValue = derivedLabel;
+                lastConditionValue = `${derivedLabel} (auto:${autoContinueReason})`;
+                console.log(`[WorkflowAnalyzer] 🔁 Auto-continuing loop because ${autoContinueReason} (status=${statusField}, completion_status=${completionStatus})`);
+              } else {
+                lastConditionValue = originalConditionValue;
+              }
+            } else {
+              lastConditionValue = originalConditionValue;
+            }
+          } else {
+            lastConditionValue = originalConditionValue;
           }
         }
         
@@ -5715,7 +6412,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
           iteration,
           condition,
           timestamp: new Date().toISOString(),
-          lastResult: workflowState.lastExecutionResult
+          lastResult: workflowState.lastExecutionResult,
+          autoContinueReason,
+          originalConditionValue
         });
         
         console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: condition=${condition} (inverted=${invertCondition}, should continue=${invertCondition ? !condition : condition})`);
@@ -5730,7 +6429,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
           inverted: invertCondition,
           should_continue: invertCondition ? !condition : condition,
           condition_value: lastConditionValue,
-          expected_value: expectedValue
+          expected_value: expectedValue,
+          condition_original_value: originalConditionValue,
+          auto_continue_reason: autoContinueReason
         });
         
         // Small delay between iterations
@@ -5762,6 +6463,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         await new Promise(resolve => setTimeout(resolve, 1000));
+      } finally {
+        this.exitLoopScope(workflowState, { iteration, loopType: 'while-loop' });
       }
     }
     
@@ -6241,6 +6944,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
       case 'execute-code':
         await this.executeCodeStep(page, step, workflowState);
         break;
+      case 'var-export':
+        await this.executeVarExportStep(step, workflowState, jobId);
+        break;
+      case 'var-dump':
+        await this.executeVarDumpStep(step, workflowState, jobId);
+        break;
       case 'execute-code-from-variable':
         await this.executeCodeFromVariableStep(page, step, workflowState, jobId);
         break;
@@ -6321,6 +7030,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
           current = current.result[segment];
         } else if (current.metadata && typeof current.metadata === 'object' && Object.prototype.hasOwnProperty.call(current.metadata, segment)) {
           current = current.metadata[segment];
+        } else if (sourceType === 'results') {
+          const matchingKey = Object.keys(current).find((key) => {
+            if (typeof key !== 'string') {
+              return false;
+            }
+            if (key === segment) {
+              return true;
+            }
+            if (key.includes('::')) {
+              const suffix = key.split('::').pop();
+              return suffix === segment;
+            }
+            return false;
+          });
+          if (matchingKey && current[matchingKey]) {
+            current = current[matchingKey];
+          } else {
+            current = undefined;
+          }
         } else {
           current = undefined;
         }
