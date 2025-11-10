@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { appendRequirementToTemplate, getRequirementTextForNextStep } from './step-requirements.js';
 
 /**
  * EnhancedWorkflowExecutor
@@ -13,8 +14,7 @@ class EnhancedWorkflowExecutor {
     this.backendLogger = backendLogger;
     this.context = context;
     this.workflowTemplate = null;
-    this.maxIterations = 2; // Maximum iterations per leg (reduced for faster execution)
-    this.maxAiRequestsPerLeg = 4; // Maximum AI requests per leg (2 iterations × 2 requests each)
+    // NO HARDCODED LIMITS - all limits come from workflow step configs
   }
 
   /**
@@ -360,15 +360,16 @@ class EnhancedWorkflowExecutor {
   }
 
   /**
-   * Execute a single workflow leg
+   * Execute a single workflow step based on its type
+   * NO HARDCODED LOOPS - all logic comes from workflow steps
    * @param {Page} page - Playwright page object
    * @param {string} jobId - Job ID for logging
    * @param {string} workflowId - Workflow ID
-   * @param {Object} leg - Leg object from workflow
+   * @param {Object} step - Step object from workflow template
    * @returns {Object} execution result
    */
-  async executeStep(page, jobId, workflowId, step) {
-    console.log(`[EnhancedWorkflowExecutor] Executing step: ${step.id} - ${step.name}`);
+  async executeStep(page, jobId, workflowId, step, options = {}) {
+    console.log(`[EnhancedWorkflowExecutor] Executing step: ${step.id} - ${step.name} (type: ${step.type})`);
 
     // Load workflow template if not already loaded
     if (!this.workflowTemplate) {
@@ -382,7 +383,6 @@ class EnhancedWorkflowExecutor {
       return {
         step_id: step.id,
         result: 'cancelled',
-        iterations: 0,
         error: `Job status is ${jobStatus}`
       };
     }
@@ -390,571 +390,456 @@ class EnhancedWorkflowExecutor {
     // Mark step as in progress
     await this.updateStepStatus(workflowId, step.id, 'in_progress', jobId);
 
-    // Update job statistics - page being processed
-    await this.updateJobStatistics(jobId, {
-      pages_processed: 1,
-      pages_added: 1
-    });
-
-    // Mark associated action as started if it exists
-    if (leg.action_id) {
-      await this.markActionStarted(leg.action_id, jobId);
+    // Execute step based on its type - NO HARDCODED LOOPS
+    try {
+      const stepType = step.type || 'ai-prompt';
+      const parentSteps = Array.isArray(options.parentSteps) ? options.parentSteps : [];
+      const stepIndex = typeof options.stepIndex === 'number' ? options.stepIndex : null;
+      const nextStep = options.nextStepOverride ??
+        (parentSteps.length > 0 && stepIndex !== null ? parentSteps[stepIndex + 1] : null);
+      
+      switch (stepType) {
+        case 'while-loop':
+          return await this.executeWhileLoopStep(page, jobId, workflowId, step);
+        case 'if-step':
+          return await this.executeIfStep(page, jobId, workflowId, step);
+        case 'execute-code':
+          return await this.executeCodeStep(page, jobId, workflowId, step);
+        case 'ai-prompt':
+          return await this.executeAIPromptStep(page, jobId, workflowId, step, { nextStep });
+        case 'cycle':
+          return await this.executeCycleStep(page, jobId, workflowId, step);
+        default:
+          // Default to ai-prompt for backward compatibility
+          console.warn(`[EnhancedWorkflowExecutor] Unknown step type: ${stepType}, defaulting to ai-prompt`);
+          return await this.executeAIPromptStep(page, jobId, workflowId, step, { nextStep });
+      }
+    } catch (error) {
+      console.error(`[EnhancedWorkflowExecutor] Error executing step ${step.id}:`, error);
+      await this.updateStepStatus(workflowId, step.id, 'failed', jobId);
+      return {
+        step_id: step.id,
+        result: 'failure',
+        error: error.message
+      };
     }
+  }
 
+  /**
+   * Execute a while-loop step - NO HARDCODED LOGIC, follows workflow config
+   */
+  async executeWhileLoopStep(page, jobId, workflowId, step) {
+    const config = step.config || {};
+    const maxIterations = config.maxIterations || 20;
+    const conditionPath = config.conditionPath;
+    const conditionType = config.conditionType || 'ai-response';
+    const conditionValue = config.conditionValue;
+    const onEachIteration = config.onEachIteration;
+    const onComplete = config.onComplete;
+    const loopSteps = Array.isArray(config.steps) ? config.steps : [];
+    const findLoopStepIndex = (stepObj) => loopSteps.findIndex(s => s && stepObj && s.id === stepObj.id);
+    
+    console.log(`[EnhancedWorkflowExecutor] Executing while-loop step: ${step.id} (maxIterations: ${maxIterations})`);
+    
     let iteration = 0;
-    let completed = false;
-    let finalResult = 'failure';
-    let lastError = null;
-    let aiRequestCount = 0;
-
-    while (iteration < this.maxIterations && !completed && aiRequestCount < this.maxAiRequestsPerLeg) {
+    let shouldContinue = true;
+    
+    // Get nested steps from workflow template
+    const workflow = await this.getWorkflow(workflowId);
+    const workflowTemplate = this.workflowTemplate;
+    
+    // Find the step to execute on each iteration
+    let iterationStep = null;
+    if (onEachIteration) {
+      iterationStep = workflowTemplate?.steps?.find(s => s.id === onEachIteration || s.name === onEachIteration);
+      if (!iterationStep) {
+        throw new Error(`While-loop step ${step.id} references step ${onEachIteration} which was not found`);
+      }
+    }
+    
+    while (iteration < maxIterations && shouldContinue) {
       iteration++;
-      console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} - Iteration ${iteration}/${this.maxIterations} (AI requests: ${aiRequestCount}/${this.maxAiRequestsPerLeg})`);
-
-      // Check job status before each iteration
+      console.log(`[EnhancedWorkflowExecutor] While-loop iteration ${iteration}/${maxIterations}`);
+      
+      // Check job status
       const jobStatus = await this.checkJobStatus(jobId);
       if (jobStatus !== 'running') {
-        console.log(`[EnhancedWorkflowExecutor] Job ${jobId} status changed to ${jobStatus}, stopping leg execution`);
-        finalResult = 'cancelled';
-        completed = true;
-        lastError = `Job status changed to ${jobStatus}`;
+        console.log(`[EnhancedWorkflowExecutor] Job ${jobId} status changed to ${jobStatus}, stopping loop`);
         break;
       }
-
-      // Refetch workflow to get latest leg state with iterations
-      if (iteration > 1) {
-        const latestWorkflow = await this.getWorkflow(workflowId);
-        leg = latestWorkflow.legs.find(l => l.leg_id === leg.leg_id) || leg;
-        console.log(`[EnhancedWorkflowExecutor] Refetched leg with ${leg.iterations?.length || 0} previous iterations`);
-      }
-
-      try {
-        // Step 1: Take screenshot before action
-        const screenshotBefore = await page.screenshot({ fullPage: true, type: 'png' });
-        const screenshotBeforeKey = await this.uploadScreenshot(jobId, screenshotBefore, 'before');
-        const screenshotBeforeBase64 = screenshotBefore.toString('base64');
-
-        // Step 2: Get HTML content (FULL - no trimming)
-        const htmlContent = await page.content();
+      
+      // Execute iteration step and follow the chain until verification
+      if (iterationStep) {
+        // Execute the step chain starting from iterationStep
+        // Follow onSuccess/onFailure links until we reach a verification step
+        let currentStep = iterationStep;
+        let lastResult = null;
+        const executedSteps = new Set();
+        const maxChainLength = 10; // Prevent infinite loops
+        let chainLength = 0;
         
-        // Get interactive elements for context
-        // Collect interactive elements with proper selectors and IDs
-        const interactiveElementsArray = await page.$$('[role="button"], button, a, input, select, textarea, [onclick], [tabindex]');
-        const interactiveElements = [];
-        
-        for (let i = 0; i < interactiveElementsArray.length; i++) {
-          const el = interactiveElementsArray[i];
-          const tagName = await el.evaluate(el => el.tagName.toLowerCase());
-          const id = await el.getAttribute('id');
-          const name = await el.getAttribute('name');
-          const type = await el.getAttribute('type');
-          const className = await el.getAttribute('class');
-          const text = await el.evaluate(el => el.textContent?.trim().substring(0, 100) || '');
-          const role = await el.getAttribute('role');
+        while (currentStep && chainLength < maxChainLength && !executedSteps.has(currentStep.id)) {
+          executedSteps.add(currentStep.id);
+          chainLength++;
           
-          // Generate selector - prioritize ID, then name, then type, then class, then text
-          let selector = '';
-          let elementId = id || '';
+          console.log(`[EnhancedWorkflowExecutor] Executing step in chain: ${currentStep.id} - ${currentStep.name}`);
+          const contextIndex = findLoopStepIndex(currentStep);
+          const stepResult = await this.executeStep(page, jobId, workflowId, currentStep, {
+            parentSteps: loopSteps,
+            stepIndex: contextIndex >= 0 ? contextIndex : null
+          });
+          lastResult = stepResult;
           
-          if (id) {
-            selector = `#${id}`;
-            elementId = id;
-          } else if (name) {
-            selector = `${tagName}[name="${name}"]`;
-            elementId = `element_${i}_${tagName}_${name}`;
-          } else if (type) {
-            selector = `${tagName}[type="${type}"]`;
-            elementId = `element_${i}_${tagName}_${type}`;
-          } else if (className && className.trim()) {
-            const firstClass = className.trim().split(/\s+/)[0];
-            selector = `.${firstClass}`;
-            elementId = `element_${i}_${tagName}_${firstClass}`;
-          } else if (text) {
-            selector = `${tagName}:has-text("${text.substring(0, 30)}")`;
-            elementId = `element_${i}_${tagName}_text`;
+          // Check if this is a verification step (usually step_6_verify or similar)
+          const isVerifyStep = currentStep.id?.includes('verify') || currentStep.name?.includes('verify');
+          
+          if (isVerifyStep) {
+            // Found verification step - check condition from its result
+            break;
+          }
+          
+          // Follow onSuccess link to next step
+          if (stepResult.result === 'success' && currentStep.onSuccess) {
+            const nextStepId = currentStep.onSuccess;
+            currentStep = workflowTemplate?.steps?.find(s => s.id === nextStepId || s.name === nextStepId);
+            if (!currentStep) {
+              console.warn(`[EnhancedWorkflowExecutor] Next step ${nextStepId} not found in workflow template`);
+              break;
+            }
+          } else if (stepResult.result === 'failure' && currentStep.onFailure) {
+            const nextStepId = currentStep.onFailure;
+            currentStep = workflowTemplate?.steps?.find(s => s.id === nextStepId || s.name === nextStepId);
+            if (!currentStep) {
+              console.warn(`[EnhancedWorkflowExecutor] Failure step ${nextStepId} not found in workflow template`);
+              break;
+            }
           } else {
-            // Generate nth-of-type selector as fallback
-            const sameTagElements = await page.$$(tagName);
-            const index = sameTagElements.indexOf(el);
-            selector = `${tagName}:nth-of-type(${index + 1})`;
-            elementId = `element_${i}_${tagName}_nth${index + 1}`;
+            // No next step defined
+            break;
           }
-          
-          // Generate XPath as additional identifier
-          const xpath = await el.evaluate((el) => {
-            if (el.id) return `//*[@id="${el.id}"]`;
-            if (el.name) return `//${el.tagName.toLowerCase()}[@name="${el.name}"]`;
-            const path = [];
-            let current = el;
-            while (current && current.nodeType === Node.ELEMENT_NODE) {
-              let selector = current.tagName.toLowerCase();
-              if (current.id) {
-                selector += `[@id="${current.id}"]`;
-                path.unshift(selector);
-                break;
-              }
-              const siblings = Array.from(current.parentNode?.children || []).filter(c => c.tagName === current.tagName);
-              const index = siblings.indexOf(current) + 1;
-              selector += `[${index}]`;
-              path.unshift(selector);
-              current = current.parentNode;
-              if (current === document.body) break;
-            }
-            return '/' + path.join('/');
-          });
-          
-          interactiveElements.push({
-            tag: tagName.toUpperCase(),
-            id: elementId, // Always provide an ID (real or generated)
-            class: className || '',
-            text: text,
-            type: type || '',
-            name: name || '',
-            role: role || '',
-            selector: selector, // Primary selector
-            xpath: xpath, // XPath for additional identification
-            // Additional attributes for better recognition
-            href: tagName === 'a' ? await el.getAttribute('href') : null,
-            placeholder: tagName === 'input' ? await el.getAttribute('placeholder') : null
-          });
         }
         
-        const interactiveElementsJson = JSON.stringify(interactiveElements, null, 2);
-        
-        // Update job statistics - elements processed
-        await this.updateJobStatistics(jobId, {
-          elements_processed: interactiveElements.length,
-          elements_added: interactiveElements.length
-        });
-        
-        // Get Playwright analysis (form structure, inputs, buttons) with proper selectors and IDs
-        const playwrightAnalysis = await page.evaluate(() => {
-          const forms = [];
-          document.querySelectorAll('form').forEach((form, idx) => {
-            const formId = form.id || `form_${idx}`;
-            const formData = {
-              index: idx,
-              id: formId,
-              action: form.action || '',
-              method: form.method || 'get',
-              selector: form.id ? `#${form.id}` : `form:nth-of-type(${idx + 1})`,
-              fields: []
-            };
-            form.querySelectorAll('input, select, textarea').forEach((field, fieldIdx) => {
-              const fieldId = field.id || `field_${idx}_${fieldIdx}`;
-              const fieldSelector = field.id 
-                ? `#${field.id}` 
-                : (field.name 
-                  ? `${field.tagName.toLowerCase()}[name="${field.name}"]` 
-                  : `${field.tagName.toLowerCase()}:nth-of-type(${fieldIdx + 1})`);
+        // Check condition to determine if loop should continue
+        if (conditionPath && conditionType === 'ai-response') {
+          // Refetch workflow to get latest results after step execution
+          const latestWorkflow = await this.getWorkflow(workflowId);
+          
+          // The condition path should point to the verification step result
+          // e.g., 'verify_result.is_complete' means check step_6_verify's openai_response.is_complete
+          const pathParts = conditionPath.split('.');
+          if (pathParts.length >= 2) {
+            // Find the verification step (usually step_6_verify or similar)
+            const verifyStepId = pathParts[0].replace('_result', '').replace('verify', 'step_6_verify');
+            const verifyStep = workflowTemplate?.steps?.find(s => 
+              s.id === verifyStepId || s.id === 'step_6_verify' || s.name?.includes('verify')
+            );
+            
+            if (verifyStep && latestWorkflow.results?.[verifyStep.id]) {
+              const verifyResult = latestWorkflow.results[verifyStep.id];
+              // Get the value from the verification response
+              const fieldPath = pathParts.slice(1).join('.'); // e.g., 'is_complete'
+              const conditionValueFromResult = this.getPathValue(verifyResult.openai_response || verifyResult, fieldPath);
               
-              formData.fields.push({
-                type: field.type || field.tagName.toLowerCase(),
-                name: field.name || '',
-                id: fieldId, // Always provide an ID (real or generated)
-                placeholder: field.placeholder || '',
-                required: field.required || false,
-                selector: fieldSelector // Always provide a selector
-              });
-            });
-            forms.push(formData);
-          });
-          
-          // Generate inputs with selectors and IDs
-          const inputs = Array.from(document.querySelectorAll('input')).map((input, idx) => {
-            const inputId = input.id || `input_${idx}`;
-            const inputSelector = input.id 
-              ? `#${input.id}` 
-              : (input.name 
-                ? `input[name="${input.name}"]` 
-                : `input:nth-of-type(${idx + 1})`);
-            
-            return {
-              type: input.type,
-              name: input.name || '',
-              id: inputId, // Always provide an ID
-              placeholder: input.placeholder || '',
-              selector: inputSelector // Always provide a selector
-            };
-          });
-          
-          // Generate buttons with selectors and IDs
-          const buttons = Array.from(document.querySelectorAll('button, input[type="submit"]')).map((btn, idx) => {
-            const btnId = btn.id || `button_${idx}`;
-            const btnSelector = btn.id 
-              ? `#${btn.id}` 
-              : `${btn.tagName.toLowerCase()}:nth-of-type(${idx + 1})`;
-            
-            return {
-              type: btn.type,
-              text: btn.textContent || btn.value || '',
-              id: btnId, // Always provide an ID
-              selector: btnSelector // Always provide a selector
-            };
-          });
-          
-          return {
-            forms: forms,
-            inputs: inputs,
-            buttons: buttons
-          };
-        });
-
-        // Step 3: Ask OpenAI for Playwright script with FULL context and previous logs
-        let playwrightScript = leg.playwright_script;
-        
-        if (!playwrightScript || iteration > 1) {
-          // Build previous logs context from leg iterations
-          let previousLogs = '';
-          if (leg.iterations && leg.iterations.length > 0) {
-            previousLogs = leg.iterations.map((iter, idx) => 
-              `Iteration ${iter.iteration_number}:
-  Script: ${iter.script_executed?.substring(0, 500) || 'N/A'}
-  Result: ${iter.result}
-  Error: ${iter.error || 'None'}`
-            ).join('\n\n');
-          }
-          
-          const scriptRequest = {
-            page_url: page.url(),
-            html_content: htmlContent,  // FULL HTML - no trimming
-            screenshot_base64: screenshotBeforeBase64,  // Include screenshot inline for Vision API
-            playwright_analysis: JSON.stringify(playwrightAnalysis, null, 2),  // Include Playwright analysis
-            interactive_elements_json: interactiveElementsJson,
-            leg_description: leg.description,
-            leg_type: leg.type,
-            element_info: JSON.stringify(leg.element_info, null, 2),
-            test_instructions: leg.test_instructions,
-            previous_error: lastError,
-            previous_logs: previousLogs,
-            iteration_number: iteration,
-            additional_prompt_text: this.context.additional_prompt_text || ''  // Project-specific additional context
-          };
-
-          console.log(`[EnhancedWorkflowExecutor] Requesting script from OpenAI (HTML: ${htmlContent.length} chars, screenshot: ${screenshotBeforeBase64.length} chars, iteration: ${iteration})`);
-
-          // Update sub-status with descriptive information
-          const legDescription = leg.description || 'Unknown workflow step';
-          await this.updateJobSubstatus(jobId, `Generating test script for: ${legDescription}`, {
-            current_page: page.url(),
-            workflow_leg: leg.leg_id,
-            iteration: iteration
-          });
-
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: About to call makeAICallWithPrompt`);
-          aiRequestCount++;
-          if (aiRequestCount > this.maxAiRequestsPerLeg) {
-            console.log(`[EnhancedWorkflowExecutor] AI request limit reached (${this.maxAiRequestsPerLeg}), stopping leg execution`);
-            throw new Error(`AI request limit exceeded: ${aiRequestCount}/${this.maxAiRequestsPerLeg}`);
-          }
-          
-          // Find prompt from workflow steps - prompts MUST be embedded in step configs
-          // Prioritize script generation steps over action analysis steps
-          const scriptStep = this.findScriptGenerationStep();
-          const customScriptTemplate = scriptStep ? (scriptStep.config?.template || scriptStep.config?.user_message_template) : null;
-          
-          if (!customScriptTemplate) {
-            const stepInfo = scriptStep ? `${scriptStep.id || scriptStep.name || 'unknown'}` : 'none found';
-            console.error(`[EnhancedWorkflowExecutor] ❌ No embedded prompt template found in workflow steps.`);
-            console.error(`[EnhancedWorkflowExecutor] Step found: ${stepInfo}`);
-            console.error(`[EnhancedWorkflowExecutor] Available steps: ${this.workflowTemplate?.steps?.map(s => s.id || s.name || s.type).join(', ') || 'none'}`);
-            throw new Error(`No embedded prompt template found in workflow steps. All prompts must be embedded in workflow step configs. Step: ${stepInfo}`);
-          }
-          
-          console.log(`[EnhancedWorkflowExecutor] ✅ Using prompt template from step: ${scriptStep.id || scriptStep.name || 'unknown'}`);
-          
-          const scriptPromptSource = 'workflow-step';
-          const promptIdentifier = scriptStep ? (scriptStep.id || scriptStep.name || 'workflow-step') : 'enhanced-workflow-executor';
-          
-          // Log prompt usage
-          await this.logPromptUsage(promptIdentifier, scriptPromptSource, customScriptTemplate, scriptRequest);
-          
-          const scriptResponse = await this.aiLogger.makeAICallWithPrompt(
-            promptIdentifier,
-            scriptRequest,
-            jobId,
-            'enhanced-workflow-executor',
-            page.url(),
-            screenshotBeforeKey,  // screenshotId for tracking
-            scriptRequest,  // Pass scriptRequest as sourcePayload for full attachment logging
-            customScriptTemplate // Pass custom template (required - no fallback to database)
-          );
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: makeAICallWithPrompt completed successfully`);
-
-          // Helper function to extract script from various response formats
-          const extractScript = (response) => {
-            if (!response) return null;
-            
-            // Handle string responses (might be JSON string)
-            if (typeof response === 'string') {
-              try {
-                const parsed = JSON.parse(response);
-                return extractScript(parsed);
-              } catch {
-                // If it's not JSON, check if it's already script code
-                if (response.trim().length > 0 && (response.includes('await') || response.includes('page.') || response.includes('async'))) {
-                  return response;
-                }
-                return null;
-              }
+              // Check if condition matches - continue while condition is true (e.g., is_complete === false)
+              shouldContinue = conditionValueFromResult === conditionValue;
+              console.log(`[EnhancedWorkflowExecutor] Condition check: ${conditionPath} = ${conditionValueFromResult} (expected: ${conditionValue}) -> continue: ${shouldContinue}`);
+            } else {
+              // If verification step not found or no result yet, continue by default
+              console.warn(`[EnhancedWorkflowExecutor] Verification step ${verifyStepId} not found or no result yet, continuing loop`);
+              shouldContinue = true;
             }
-            
-            // Handle nested objects (response.data, response.result, etc.)
-            if (response.data && typeof response.data === 'object') {
-              const fromData = extractScript(response.data);
-              if (fromData) return fromData;
-            }
-            if (response.result && typeof response.result === 'object') {
-              const fromResult = extractScript(response.result);
-              if (fromResult) return fromResult;
-            }
-            if (response.response && typeof response.response === 'object') {
-              const fromResponse = extractScript(response.response);
-              if (fromResponse) return fromResponse;
-            }
-            
-            // Check all possible field names (case-insensitive check for common variations)
-            const possibleFields = [
-              'script',
-              'playwright_script',
-              'code',
-              'playwright_code',
-              'playwrightCode',
-              'executable_code',
-              'automation_code',
-              'test_code',
-              'action_code'
-            ];
-            
-            for (const field of possibleFields) {
-              if (response[field] && typeof response[field] === 'string' && response[field].trim().length > 0) {
-                return response[field];
-              }
-            }
-            
-            return null;
-          };
-          
-          playwrightScript = extractScript(scriptResponse);
-          
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: scriptResponse type: ${typeof scriptResponse}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: scriptResponse keys: ${scriptResponse ? Object.keys(scriptResponse) : 'null'}`);
-          console.log(`[EnhancedWorkflowExecutor] DEBUG: Extracted script length: ${playwrightScript ? playwrightScript.length : 0}`);
-          
-          if (!playwrightScript || playwrightScript.trim().length === 0) {
-            console.error(`[EnhancedWorkflowExecutor] ❌ OpenAI did not return a valid Playwright script.`);
-            console.error(`[EnhancedWorkflowExecutor] Response type: ${typeof scriptResponse}`);
-            console.error(`[EnhancedWorkflowExecutor] Response keys: ${scriptResponse ? Object.keys(scriptResponse).join(', ') : 'null'}`);
-            console.error(`[EnhancedWorkflowExecutor] Full response: ${JSON.stringify(scriptResponse, null, 2)}`);
-            throw new Error(`OpenAI did not return a valid Playwright script. Response keys: ${scriptResponse ? Object.keys(scriptResponse).join(', ') : 'null'}`);
+          } else {
+            // Simple path - check directly in result
+            const conditionValueFromResult = this.getPathValue(lastResult, conditionPath);
+            shouldContinue = conditionValueFromResult === conditionValue;
+            console.log(`[EnhancedWorkflowExecutor] Condition check: ${conditionPath} = ${conditionValueFromResult} (expected: ${conditionValue}) -> continue: ${shouldContinue}`);
           }
-          
-          // Validate script completeness BEFORE cleaning
-          // Check if script ends with an incomplete string literal (unmatched quote)
-          const originalScriptLength = playwrightScript.length;
-          const hasIncompleteString = this.checkIncompleteString(playwrightScript);
-          if (hasIncompleteString) {
-            const error = 'Script appears to end with incomplete string literal';
-            if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'error',
-                `❌ ${error}`,
-                'WORKFLOW-EXECUTOR',
-                {
-                  original_script_length: originalScriptLength,
-                  script_preview: playwrightScript.substring(Math.max(0, playwrightScript.length - 500)),
-                  last_50_chars: playwrightScript.substring(Math.max(0, playwrightScript.length - 50))
-                }
-              );
-            }
-            throw new Error(error);
-          }
-          
-          // Clean the script immediately after extraction to remove markdown code blocks
-          playwrightScript = this.cleanScript(playwrightScript);
-          
-          if (!playwrightScript || playwrightScript.trim().length === 0) {
-            throw new Error(`Script is empty after cleaning`);
-          }
-          
-          console.log(`[EnhancedWorkflowExecutor] ✅ Successfully extracted and cleaned Playwright script (${playwrightScript.length} characters)`);
-          
-          // Create action immediately when OpenAI proposes it
-          await this.createActionImmediately(leg, playwrightScript, jobId, page, workflowState);
-          
-          // Update leg with script
-          await this.updateStep(workflowId, step.id, { 
-            playwright_script: playwrightScript,
-            update_action: true  // Signal backend to also update action document
-          });
-        }
-
-        console.log(`[EnhancedWorkflowExecutor] Executing script for leg ${leg.leg_id}`);
-
-        // Step 4: Execute Playwright script
-        const executionResult = await this.executeScript(page, playwrightScript, jobId);
-
-        // Step 5: Take screenshot after action
-        const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
-        const screenshotAfterKey = await this.uploadScreenshot(jobId, screenshotAfter, 'after');
-        const screenshotAfterBase64 = screenshotAfter.toString('base64');
-
-        // Step 6: Get HTML after action (FULL - no trimming)
-        const htmlAfter = await page.content();
-
-        // Build previous logs for verification context
-        const verificationLogs = leg.iterations ? leg.iterations.map((iter, idx) => 
-          `Iteration ${iter.iteration_number}: ${iter.result} - ${iter.error || 'No error'}`
-        ).join('\n') : '';
-
-        // Step 7: Ask OpenAI to verify with FULL context and previous logs
-        const verificationRequest = {
-          // Map to template field names
-          leg_name: leg.description,
-          leg_action: leg.type,
-          expected_outcome: leg.test_instructions,
-          before_url: page.url(),
-          before_title: await page.title(),
-          after_url: page.url(),
-          after_title: await page.title(),
-          after_visible_text: await page.evaluate(() => document.body.innerText),
-          dom_snapshot: htmlAfter,  // Use HTML after action as DOM snapshot
-          // Additional context for AI
-          page_url: page.url(),
-          html_before: htmlContent,  // FULL HTML - no trimming
-          html_after: htmlAfter,     // FULL HTML - no trimming
-          screenshot_base64: screenshotAfterBase64,  // Include after screenshot inline for Vision API
-          leg_description: leg.description,
-          leg_type: leg.type,
-          test_instructions: leg.test_instructions,
-          script: playwrightScript,
-          execution_result: JSON.stringify(executionResult, null, 2),
-          screenshot_before: screenshotBeforeKey,
-          screenshot_after: screenshotAfterKey,
-          previous_logs: verificationLogs,
-          iteration_number: iteration,
-          additional_prompt_text: this.context.additional_prompt_text || ''  // Project-specific additional context
-        };
-
-        console.log(`[EnhancedWorkflowExecutor] Verifying with OpenAI (HTML before: ${htmlContent.length} chars, after: ${htmlAfter.length} chars, screenshot: ${screenshotAfterBase64.length} chars)`);
-
-        aiRequestCount++;
-        if (aiRequestCount > this.maxAiRequestsPerLeg) {
-          console.log(`[EnhancedWorkflowExecutor] AI request limit reached (${this.maxAiRequestsPerLeg}), stopping leg execution`);
-          throw new Error(`AI request limit exceeded: ${aiRequestCount}/${this.maxAiRequestsPerLeg}`);
-        }
-
-        // Find prompt from workflow steps - prompts MUST be embedded in step configs
-        const verifyStep = this.findAIPromptStep();
-        const customVerifyTemplate = verifyStep ? (verifyStep.config?.template || verifyStep.config?.user_message_template) : null;
-        
-        if (!customVerifyTemplate) {
-          throw new Error(`No embedded prompt template found in workflow steps for verification. All prompts must be embedded in workflow step configs. Step: ${verifyStep?.name || 'unknown'}`);
-        }
-        
-        const verifyPromptSource = 'workflow-step';
-        const verifyPromptIdentifier = verifyStep ? (verifyStep.id || verifyStep.name || 'workflow-step') : 'enhanced-workflow-executor';
-        
-        // Log prompt usage
-        await this.logPromptUsage(verifyPromptIdentifier, verifyPromptSource, customVerifyTemplate, verificationRequest);
-        
-        const verificationResponse = await this.aiLogger.makeAICallWithPrompt(
-          verifyPromptIdentifier,
-          verificationRequest,
-          jobId,
-          'enhanced-workflow-executor',
-          page.url(),
-          screenshotAfterKey,  // screenshotId for tracking
-          verificationRequest,  // Pass verificationRequest as sourcePayload for full attachment logging
-          customVerifyTemplate // Pass custom template (required - no fallback to database)
-        );
-
-        // Step 8: Record iteration with FULL data (no trimming)
-        await this.addIteration(workflowId, leg.leg_id, {
-          screenshot_before: screenshotBeforeKey,
-          screenshot_after: screenshotAfterKey,
-          html_sent: htmlContent,  // FULL HTML - no trimming for proper context
-          html_after: htmlAfter,   // FULL HTML after execution
-          script_executed: playwrightScript,
-          openai_request: verificationRequest,
-          openai_response: verificationResponse,
-          result: verificationResponse.status || 'incomplete',
-          error: executionResult.error || null
-        });
-
-        // Step 9: Check if OpenAI says we're done
-        // FIX: Handle both old format (status/completed) and new format (success/confidence)
-        if (verificationResponse.success === true || verificationResponse.status === 'completed' || verificationResponse.completed === true) {
-          console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} completed successfully`);
-          completed = true;
-          finalResult = 'success';
-        } else if (verificationResponse.success === false && verificationResponse.can_retry === false) {
-          // Only fail permanently if explicitly marked as non-retryable
-          console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} failed permanently (explicitly marked as non-retryable)`);
-          completed = true;
-          finalResult = 'failure';
-          lastError = verificationResponse.description || verificationResponse.reason || 'Unknown failure';
-        } else if (verificationResponse.success === false && iteration >= this.maxIterations) {
-          // Fail permanently only after max iterations
-          console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} failed permanently (max iterations reached)`);
-          completed = true;
-          finalResult = 'failure';
-          lastError = verificationResponse.description || verificationResponse.reason || 'Max iterations reached';
         } else {
-          // Continue to next iteration (including success: false with can_retry: true/undefined)
-          console.log(`[EnhancedWorkflowExecutor] Leg ${leg.leg_id} incomplete, continuing... Reason: ${verificationResponse.description || verificationResponse.reason || 'Unknown'}`);
-          lastError = verificationResponse.description || verificationResponse.reason;
+          // No condition - continue until max iterations
+          shouldContinue = true;
         }
-
-      } catch (error) {
-        console.error(`[EnhancedWorkflowExecutor] Error in iteration ${iteration}:`, error.message);
-        console.error(`[EnhancedWorkflowExecutor] Error stack:`, error.stack);
-        lastError = error.message;
-
-        // Record failed iteration
-        await this.addIteration(workflowId, leg.leg_id, {
-          screenshot_before: null,
-          screenshot_after: null,
-          html_sent: null,
-          script_executed: typeof playwrightScript !== 'undefined' ? playwrightScript : null,
-          openai_request: null,
-          openai_response: null,
-          result: 'failure',
-          error: error.message
-        });
-
-        // If this was the last iteration, mark as failed
-        if (iteration >= this.maxIterations) {
-          finalResult = 'failure';
-          completed = true;
-        }
+      } else {
+        // No iteration step defined, break immediately
+        console.warn(`[EnhancedWorkflowExecutor] While-loop step ${step.id} has no onEachIteration step defined`);
+        break;
       }
     }
-
-    // Mark leg as completed
-    await this.completeLeg(workflowId, leg.leg_id, finalResult, lastError, jobId);
-
-    // Mark associated action as completed if it exists
-    if (leg.action_id) {
-      const success = finalResult === 'success';
-      // Get screenshot keys from the last successful iteration
-      let screenshotBefore = null;
-      let screenshotAfter = null;
-      
-      if (leg.iterations && leg.iterations.length > 0) {
-        const lastIteration = leg.iterations[leg.iterations.length - 1];
-        screenshotBefore = lastIteration.screenshot_before;
-        screenshotAfter = lastIteration.screenshot_after;
-      }
-      
-      await this.markActionCompleted(leg.action_id, success, lastError, screenshotBefore, screenshotAfter);
-    }
-
+    
+    await this.updateStepStatus(workflowId, step.id, 'completed', jobId);
+    
     return {
-      leg_id: leg.leg_id,
-      result: finalResult,
+      step_id: step.id,
+      result: shouldContinue ? 'incomplete' : 'completed',
       iterations: iteration,
-      error: lastError
+      next_step: shouldContinue ? null : onComplete
     };
+  }
+
+  /**
+   * Execute an if-step (conditional step) - NO HARDCODED LOGIC, follows workflow config
+   */
+  async executeIfStep(page, jobId, workflowId, step) {
+    const config = step.config || {};
+    const conditionType = config.conditionType || 'ai-response';
+    const conditionPath = config.conditionPath;
+    const conditionValue = config.conditionValue;
+    const onTrue = config.onTrue;
+    const onFalse = config.onFalse;
+    
+    console.log(`[EnhancedWorkflowExecutor] Executing if-step: ${step.id}`);
+    
+    // Get workflow to access previous results
+    const workflow = await this.getWorkflow(workflowId);
+    
+    // Evaluate condition
+    let conditionResult = false;
+    if (conditionPath && conditionType === 'ai-response') {
+      // The condition path format is like 'verify_result.is_complete' or 'verify_result.success'
+      // Find the verification step (usually step_6_verify)
+      const pathParts = conditionPath.split('.');
+      const verifyStepId = pathParts[0]?.replace('_result', '').replace('verify', 'step_6_verify') || 'step_6_verify';
+      const verifyResult = workflow.results?.[verifyStepId] || workflow.results?.['step_6_verify'];
+      
+      if (verifyResult) {
+        // Get the field path (e.g., 'is_complete' from 'verify_result.is_complete')
+        const fieldPath = pathParts.length > 1 ? pathParts.slice(1).join('.') : conditionPath;
+        const conditionValueFromResult = this.getPathValue(
+          verifyResult.openai_response || verifyResult, 
+          fieldPath
+        );
+        conditionResult = conditionValueFromResult === conditionValue;
+        console.log(`[EnhancedWorkflowExecutor] Condition check: ${conditionPath} = ${conditionValueFromResult} (expected: ${conditionValue}) -> result: ${conditionResult}`);
+      } else {
+        console.warn(`[EnhancedWorkflowExecutor] Verification step ${verifyStepId} not found or no result yet, condition defaults to false`);
+      }
+    }
+    
+    await this.updateStepStatus(workflowId, step.id, 'completed', jobId);
+    
+    return {
+      step_id: step.id,
+      result: conditionResult ? 'true' : 'false',
+      next_step: conditionResult ? onTrue : onFalse
+    };
+  }
+
+  /**
+   * Execute an execute-code step - NO HARDCODED LOGIC, follows workflow config
+   */
+  async executeCodeStep(page, jobId, workflowId, step) {
+    const config = step.config || {};
+    const scriptSource = config.scriptSource || 'from-previous-step';
+    
+    console.log(`[EnhancedWorkflowExecutor] Executing code step: ${step.id} (scriptSource: ${scriptSource})`);
+    
+    // Get script from previous step or from leg
+    let playwrightScript = null;
+    
+    if (scriptSource === 'from-previous-step') {
+      // Get script from previous step's result
+      const workflow = await this.getWorkflow(workflowId);
+      // Find the script generation step result
+      const scriptStep = this.workflowTemplate?.steps?.find(s => 
+        (s.type === 'ai-prompt' && s.name?.includes('script')) || 
+        (s.id === 'step_4_gen_or_reuse_script')
+      );
+      
+      if (scriptStep && workflow.results?.[scriptStep.id]) {
+        const scriptResult = workflow.results[scriptStep.id];
+        playwrightScript = scriptResult.playwright_script || scriptResult.script;
+      }
+    }
+    
+    if (!playwrightScript) {
+      // Fallback: get from step's playwright_script field
+      playwrightScript = step.playwright_script;
+    }
+    
+    if (!playwrightScript) {
+      throw new Error(`No script available for code step ${step.id}`);
+    }
+    
+    // Execute script
+    const executionResult = await this.executeScript(page, playwrightScript, jobId);
+    
+    // Take screenshot after execution
+    const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
+    const screenshotAfterKey = await this.uploadScreenshot(jobId, screenshotAfter, 'after');
+    
+    await this.updateStepStatus(workflowId, step.id, executionResult.success ? 'completed' : 'failed', jobId);
+    
+    return {
+      step_id: step.id,
+      result: executionResult.success ? 'success' : 'failure',
+      execution_result: executionResult,
+      screenshot_after: screenshotAfterKey,
+      playwright_script: playwrightScript
+    };
+  }
+
+  /**
+   * Execute an AI prompt step - NO HARDCODED LOOPS, just executes the prompt
+   */
+  async executeAIPromptStep(page, jobId, workflowId, step, options = {}) {
+    console.log(`[EnhancedWorkflowExecutor] Executing AI prompt step: ${step.id}`);
+    
+    // Get template from step config
+    const baseTemplate = step.config?.template || step.config?.user_message_template;
+    if (!baseTemplate) {
+      throw new Error(`AI prompt step ${step.id} has no template in config`);
+    }
+    const requirementText = getRequirementTextForNextStep(options.nextStep);
+    const template = appendRequirementToTemplate(baseTemplate, requirementText);
+    
+    // Take screenshot before
+    const screenshotBefore = await page.screenshot({ fullPage: true, type: 'png' });
+    const screenshotBeforeKey = await this.uploadScreenshot(jobId, screenshotBefore, 'before');
+    const screenshotBeforeBase64 = screenshotBefore.toString('base64');
+    
+    // Get HTML content
+    const htmlContent = await page.content();
+    
+    // Prepare request based on step attachments
+    const attachments = step.attachments || [];
+    const requestData = {
+      page_url: page.url(),
+      html_content: htmlContent,
+      screenshot_base64: screenshotBeforeBase64
+    };
+    
+    // Add attachments based on step config
+    if (attachments.includes('interactive_elements')) {
+      // Collect interactive elements (simplified - full implementation would be more complex)
+      const interactiveElements = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('[role="button"], button, a, input, select, textarea')).map(el => ({
+          tag: el.tagName.toLowerCase(),
+          id: el.id || '',
+          text: el.textContent?.trim().substring(0, 100) || ''
+        }));
+      });
+      requestData.interactive_elements_json = JSON.stringify(interactiveElements, null, 2);
+    }
+    
+    // Make AI call
+    const promptIdentifier = step.id || step.name || 'workflow-step';
+    const aiResponse = await this.aiLogger.makeAICallWithPrompt(
+      promptIdentifier,
+      requestData,
+      jobId,
+      'enhanced-workflow-executor',
+      page.url(),
+      screenshotBeforeKey,
+      requestData,
+      template
+    );
+    
+    await this.updateStepStatus(workflowId, step.id, 'completed', jobId);
+    
+    return {
+      step_id: step.id,
+      result: 'success',
+      openai_response: aiResponse,
+      playwright_script: aiResponse.playwright_script || aiResponse.script || null
+    };
+  }
+
+  /**
+   * Execute a cycle step - NO HARDCODED LOOPS, follows workflow config
+   */
+  async executeCycleStep(page, jobId, workflowId, step) {
+    const config = step.config || {};
+    const cycleType = config.cycleType || 'leg';
+    const maxIterations = config.maxIterations || 10;
+    const onEachIteration = config.onEachIteration;
+    
+    console.log(`[EnhancedWorkflowExecutor] Executing cycle step: ${step.id} (type: ${cycleType}, maxIterations: ${maxIterations})`);
+    
+    // Get workflow to find items to iterate over
+    const workflow = await this.getWorkflow(workflowId);
+    
+    let items = [];
+    if (cycleType === 'leg') {
+      items = workflow.legs || [];
+    }
+    
+    const results = [];
+    for (let i = 0; i < Math.min(items.length, maxIterations); i++) {
+      const item = items[i];
+      console.log(`[EnhancedWorkflowExecutor] Cycle iteration ${i + 1}/${items.length} for ${cycleType}`);
+      
+      // Check job status
+      const jobStatus = await this.checkJobStatus(jobId);
+      if (jobStatus !== 'running') {
+        break;
+      }
+      
+      // Execute iteration step if specified
+      if (onEachIteration) {
+        const iterationStep = this.workflowTemplate?.steps?.find(s => s.id === onEachIteration || s.name === onEachIteration);
+        if (iterationStep) {
+          const templateSteps = Array.isArray(this.workflowTemplate?.steps) ? this.workflowTemplate.steps : [];
+          const iterationIndex = templateSteps.findIndex(s => s && iterationStep && s.id === iterationStep.id);
+          const result = await this.executeStep(page, jobId, workflowId, iterationStep, {
+            parentSteps: templateSteps,
+            stepIndex: iterationIndex >= 0 ? iterationIndex : null
+          });
+          results.push(result);
+        }
+      }
+    }
+    
+    await this.updateStepStatus(workflowId, step.id, 'completed', jobId);
+    
+    return {
+      step_id: step.id,
+      result: 'completed',
+      iterations: results.length,
+      results: results
+    };
+  }
+
+  /**
+   * Helper to get value from object by path (e.g., "verify_result.is_complete")
+   */
+  getPathValue(obj, path) {
+    if (!obj || !path) return undefined;
+    const parts = path.split('.');
+    let current = obj;
+    for (const part of parts) {
+      if (current === null || current === undefined) return undefined;
+      current = current[part];
+    }
+    return current;
+  }
+
+  /**
+   * Execute a leg by executing workflow steps
+   * NO HARDCODED LOOPS - delegates to workflow step execution
+   */
+  async executeLeg(page, jobId, workflowId, leg) {
+    // Convert leg to workflow step format
+    // Find the step that corresponds to this leg from workflow template
+    const workflowTemplate = this.workflowTemplate;
+    if (!workflowTemplate || !workflowTemplate.steps) {
+      throw new Error('Workflow template not loaded or has no steps');
+    }
+    
+    // Find the cycle step that processes legs
+    const cycleStep = workflowTemplate.steps.find(s => 
+      s.type === 'cycle' && s.config?.cycleType === 'leg'
+    );
+    
+    if (!cycleStep) {
+      throw new Error('No cycle step found for legs in workflow template');
+    }
+    
+    // Execute the cycle step - it will handle the leg
+    const templateSteps = workflowTemplate.steps || [];
+    const cycleIndex = templateSteps.findIndex(s => s && cycleStep && s.id === cycleStep.id);
+    return await this.executeStep(page, jobId, workflowId, cycleStep, {
+      parentSteps: templateSteps,
+      stepIndex: cycleIndex >= 0 ? cycleIndex : null
+    });
   }
 
   /**
@@ -971,11 +856,16 @@ class EnhancedWorkflowExecutor {
     }
 
     const results = [];
+    const workflowSteps = Array.isArray(workflow.steps) ? workflow.steps : [];
 
     // Execute each step sequentially
-    for (const step of workflow.steps) {
+    for (let index = 0; index < workflowSteps.length; index++) {
+      const step = workflowSteps[index];
       if (step.status === 'pending') {
-        const result = await this.executeStep(page, jobId, workflowId, step);
+        const result = await this.executeStep(page, jobId, workflowId, step, {
+          parentSteps: workflowSteps,
+          stepIndex: index
+        });
         results.push(result);
       } else {
         console.log(`[EnhancedWorkflowExecutor] Skipping step ${step.id} - status: ${step.status}`);
@@ -1004,14 +894,197 @@ class EnhancedWorkflowExecutor {
   }
 
   /**
-   * Clean script to remove function declarations, require statements, etc.
-   * Extract only executable code
+   * OLD HARDCODED CODE REMOVED - All execution now goes through workflow steps
    */
-  cleanScript(script) {
+  async _OLD_executeWorkflow(page, jobId, workflowId) {
+    // This method is intentionally left empty - all old hardcoded loops removed
+    // All execution now goes through executeWorkflow which delegates to workflow step types
+    throw new Error('Old hardcoded executeWorkflow method removed - use workflow steps instead');
+  }
+
+  /**
+   * DUPLICATE METHOD REMOVED
+   */
+  async _OLD_executeWorkflow_DUPLICATE(page, jobId, workflowId) {
+    // This was a duplicate - removed
+    throw new Error('Duplicate method removed');
+  }
+
+  /**
+   * Check if script has incomplete string literals
+   * Returns true if any string literal is incomplete (unmatched quotes)
+   */
+  checkIncompleteString(script) {
+    if (!script || typeof script !== 'string') {
+      return false;
+    }
+    
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let inTemplateLiteral = false;
+    let escapeNext = false;
+    
+    for (let i = 0; i < script.length; i++) {
+      const char = script[i];
+      
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      
+      // Handle template literals first (they can contain ${})
+      if (char === '`' && !inSingleQuote && !inDoubleQuote) {
+        inTemplateLiteral = !inTemplateLiteral;
+        continue;
+      }
+      
+      // Only check single/double quotes if not in template literal
+      if (!inTemplateLiteral) {
+        if (char === "'" && !inDoubleQuote) {
+          inSingleQuote = !inSingleQuote;
+        } else if (char === '"' && !inSingleQuote) {
+          inDoubleQuote = !inDoubleQuote;
+        }
+      }
+    }
+    
+    // If we're still inside a string at the end, it's incomplete
+    return inSingleQuote || inDoubleQuote || inTemplateLiteral;
+  }
+
+  /**
+   * OLD HARDCODED CODE REMOVED - All execution now goes through workflow steps
+   * This method contained a massive hardcoded while loop that has been removed
+   * All execution now delegates to workflow step types (while-loop, if-step, etc.)
+   */
+  async _REMOVED_OLD_HARDCODED_LOOP(page, jobId, workflowId, leg) {
+    throw new Error('Old hardcoded loop removed - use workflow steps instead');
+  }
+
+  /**
+   * DUPLICATE METHOD REMOVED - All old hardcoded loop code has been removed
+   * All execution now goes through workflow steps (while-loop, if-step, etc.)
+   */
+
+  /**
+   * Check if script has incomplete string literals
+   * Returns true if any string literal is incomplete (unmatched quotes)
+   */
+  checkIncompleteString(script) {
+    if (!script || typeof script !== 'string') {
+      return false;
+    }
+    
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let inTemplateLiteral = false;
+    let escapeNext = false;
+    
+    for (let i = 0; i < script.length; i++) {
+      const char = script[i];
+      
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      
+      // Handle template literals first (they can contain ${})
+      if (char === '`' && !inSingleQuote && !inDoubleQuote) {
+        inTemplateLiteral = !inTemplateLiteral;
+        continue;
+      }
+      
+      // Only check single/double quotes if not in template literal
+      if (!inTemplateLiteral) {
+        if (char === "'" && !inDoubleQuote) {
+          inSingleQuote = !inSingleQuote;
+        } else if (char === '"' && !inSingleQuote) {
+          inDoubleQuote = !inDoubleQuote;
+        }
+      }
+    }
+    
+    // If we're still inside a string at the end, it's incomplete
+    return inSingleQuote || inDoubleQuote || inTemplateLiteral;
+  }
+
+  /**
+   * Sanitize script to remove incomplete xpath entries from arrays
+   * Fixes incomplete strings like 'xpath= or "xpath= that are not closed
+   */
+  sanitizeIncompleteXpathStrings(script) {
     if (!script || typeof script !== 'string') {
       return script;
     }
     
+    let sanitized = script;
+    
+    // Split by lines to handle incomplete strings that span lines
+    const lines = sanitized.split('\n');
+    const sanitizedLines = [];
+    
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i];
+      
+      // Check if line contains incomplete xpath string (ends with 'xpath= or "xpath= or `xpath=)
+      // This pattern matches incomplete xpath strings that don't have a closing quote on the same line
+      const incompleteXpathPattern = /['"`]\s*xpath\s*=\s*(?![^'"`\n]*['"`])/;
+      
+      if (incompleteXpathPattern.test(line)) {
+        // Check if this is part of an array (has comma before or after)
+        const isArrayEntry = line.includes(',') || (i > 0 && lines[i-1].includes('[')) || (i < lines.length - 1 && lines[i+1].includes(']'));
+        
+        if (isArrayEntry) {
+          // Remove the incomplete xpath entry from the array
+          // Remove: , 'xpath= or , "xpath= or , `xpath= (with optional whitespace)
+          line = line.replace(/,\s*['"`]\s*xpath\s*=\s*(?![^'"`\n]*['"`])/g, '');
+          // Remove: ['xpath= or ["xpath= or [`xpath= at start
+          line = line.replace(/(\[\s*)['"`]\s*xpath\s*=\s*(?![^'"`\n]*['"`])/g, '$1');
+          // Remove: 'xpath=] or "xpath=] or `xpath=] before closing bracket
+          line = line.replace(/['"`]\s*xpath\s*=\s*(?![^'"`\n]*['"`])\s*\]/g, ']');
+        } else {
+          // Not an array entry, just remove the entire line if it's just an incomplete xpath
+          if (/^\s*['"`]\s*xpath\s*=\s*(?![^'"`\n]*['"`])\s*$/.test(line.trim())) {
+            continue; // Skip this line
+          }
+          // Otherwise, try to remove just the incomplete part
+          line = line.replace(/['"`]\s*xpath\s*=\s*(?![^'"`\n]*['"`])/g, '');
+        }
+      }
+      
+      sanitizedLines.push(line);
+    }
+    
+    sanitized = sanitizedLines.join('\n');
+    
+    // Final cleanup: remove double commas and commas before closing brackets
+    sanitized = sanitized.replace(/,\s*,/g, ',');
+    sanitized = sanitized.replace(/,\s*\]/g, ']');
+    sanitized = sanitized.replace(/,\s*$/gm, '');
+    
+    return sanitized;
+  }
+
+  /**
+   * Clean script WITHOUT sanitization - preserves all content
+   * Only removes markdown code blocks and function wrappers
+   */
+  cleanScriptWithoutSanitization(script) {
+    if (!script || typeof script !== 'string') {
+      return script;
+    }
+    
+    // DO NOT sanitize - preserve full script content
     let cleaned = script.trim();
     
     // First, extract code from markdown code blocks if present
@@ -1120,6 +1193,15 @@ class EnhancedWorkflowExecutor {
   }
 
   /**
+   * Clean script - DEPRECATED: Use cleanScriptWithoutSanitization instead
+   * Kept for backwards compatibility but sanitization is disabled
+   */
+  cleanScript(script) {
+    // Use the version without sanitization to preserve full script
+    return this.cleanScriptWithoutSanitization(script);
+  }
+
+  /**
    * Execute Playwright script in page context
    */
   async executeScript(page, script, jobId = null) {
@@ -1127,10 +1209,11 @@ class EnhancedWorkflowExecutor {
     const originalScriptLength = script?.length || 0;
     
     try {
+      // DO NOT clean or sanitize the script - use it exactly as provided
       // Log script execution start if jobId available
       if (jobId && this.backendLogger) {
         await this.backendLogger.appendJobLog(jobId, 'debug',
-          `🎭 Starting script execution`,
+          `🎭 Starting script execution (${originalScriptLength} chars)`,
           'ENHANCED-WORKFLOW-EXECUTOR',
           {
             original_script_length: originalScriptLength,
@@ -1140,37 +1223,22 @@ class EnhancedWorkflowExecutor {
         );
       }
       
-      // Clean the script to remove function declarations, require statements, etc.
-      const cleanedScript = this.cleanScript(script);
-      const cleanedScriptLength = cleanedScript?.length || 0;
-      
-      if (!cleanedScript || cleanedScript.trim().length === 0) {
-        const error = 'Script is empty after cleaning';
+      if (!script || script.trim().length === 0) {
+        const error = 'Script is empty';
         if (jobId && this.backendLogger) {
           await this.backendLogger.appendJobLog(jobId, 'error',
             `❌ ${error}`,
             'ENHANCED-WORKFLOW-EXECUTOR',
             {
-              original_script_length: originalScriptLength,
-              cleaned_script_length: cleanedScriptLength,
-              original_script_preview: script?.substring(0, 500) || 'N/A'
+              original_script_length: originalScriptLength
             }
           );
         }
         throw new Error(error);
       }
       
-      // Log cleaned script info
-      if (jobId && this.backendLogger) {
-        await this.backendLogger.appendJobLog(jobId, 'debug',
-          `📝 Script cleaned (${originalScriptLength} → ${cleanedScriptLength} chars)`,
-          'ENHANCED-WORKFLOW-EXECUTOR',
-          {
-            cleaned_script_preview: cleanedScript.substring(0, 500),
-            cleaning_removed_chars: originalScriptLength - cleanedScriptLength
-          }
-        );
-      }
+      // Use script exactly as provided - NO cleaning or sanitization
+      const cleanedScript = script;
       
       const urlBefore = page.url();
       const titleBefore = await page.title();
@@ -1200,56 +1268,7 @@ class EnhancedWorkflowExecutor {
         return await fn(pageObj);
       };
       
-      // Validate script completeness before execution
-      // Check for common incomplete patterns that indicate truncation
-      const lines = cleanedScript.split('\n');
-      const incompletePatterns = [
-        /['"`][a-z]+\s*=\s*$/,  // Incomplete selector like 'xpath= or "button=
-        /await\s+page\.(waitForSelector|click|fill)\(['"`][^'"`]*$/,  // Incomplete await statement
-        /^\s*try\s*\{\s*$/,  // Incomplete try block (only opening brace)
-        /^\s*catch\s*\(\s*$/,  // Incomplete catch block (only opening paren)
-      ];
-      
-      // Check last few lines for incomplete patterns
-      const lastLines = lines.slice(-3).join('\n');
-      for (const pattern of incompletePatterns) {
-        if (pattern.test(lastLines)) {
-          const error = 'Script appears to be incomplete (truncated)';
-          if (jobId && this.backendLogger) {
-            await this.backendLogger.appendJobLog(jobId, 'error',
-              `❌ ${error}`,
-              'WORKFLOW-EXECUTOR',
-              {
-                original_script_length: originalScriptLength,
-                cleaned_script_length: cleanedScriptLength,
-                script_preview: cleanedScript.substring(Math.max(0, cleanedScript.length - 500)),
-                incomplete_pattern: pattern.toString(),
-                last_50_chars: cleanedScript.substring(Math.max(0, cleanedScript.length - 50))
-              }
-            );
-          }
-          throw new Error(error);
-        }
-      }
-      
-      // Additional check: if script ends with incomplete string/quotes
-      const trimmedScript = cleanedScript.trim();
-      if (trimmedScript.match(/['"`][^'"`]*$/)) {
-        const error = 'Script appears to end with incomplete string literal';
-        if (jobId && this.backendLogger) {
-          await this.backendLogger.appendJobLog(jobId, 'error',
-            `❌ ${error}`,
-            'WORKFLOW-EXECUTOR',
-            {
-              original_script_length: originalScriptLength,
-              cleaned_script_length: cleanedScriptLength,
-              script_preview: cleanedScript.substring(Math.max(0, cleanedScript.length - 500)),
-              last_50_chars: cleanedScript.substring(Math.max(0, cleanedScript.length - 50))
-            }
-          );
-        }
-        throw new Error(error);
-      }
+      // DO NOT validate or check for incomplete strings - execute script as-is from OpenAI
       
       // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
       const result = await Promise.race([

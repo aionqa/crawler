@@ -251,6 +251,19 @@ async function executeLoginJob(job, streamInterval) {
     throw new Error('OpenAI API key not provided');
   }
 
+  const workflowExecutionContext = {
+    ...jobContext,
+    workflow_template_id: jobContext.workflow_template_id,
+    project_id: job.project_id || jobContext.project_id || job.projectId || null,
+    projectId: job.project_id || jobContext.projectId || null,
+    credentials: jobContext.credentials || { username, password },
+    options: {
+      ...(jobContext.options || {}),
+      openai_api_key: openaiApiKey
+    },
+    openai_api_key: openaiApiKey
+  };
+
   // Launch local browser (embedded) - SAME as crawl jobs
   console.log(`🌐 [UNIFIED-RUNNER] Launching local Chromium browser for login`);
   const { chromium } = await import('playwright');
@@ -277,54 +290,50 @@ async function executeLoginJob(job, streamInterval) {
   startVideoStream(page, job.id);
 
   try {
-    // Execute using workflow-based login operation (iterative AI-driven attempts)
+    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.waitForTimeout(1000);
+    console.log(`[DEBUG] Navigated to login URL: ${page.url()}`);
+
     const { performLoginWithWorkflow } = await import('./login-operations.js');
-    console.log(`[DEBUG] About to execute performLoginWithWorkflow with template ID: ${jobContext.workflow_template_id}`);
-    const result = await performLoginWithWorkflow(page, job.id, url, username, password, openaiApiKey, jobContext.workflow_template_id);
+    console.log(
+      `[DEBUG] About to execute performLoginWithWorkflow with context:`,
+      JSON.stringify({
+        workflow_template_id: workflowExecutionContext.workflow_template_id,
+        project_id: workflowExecutionContext.project_id
+      })
+    );
+    const result = await performLoginWithWorkflow(
+      page,
+      job.id,
+      url,
+      username,
+      password,
+      openaiApiKey,
+      workflowExecutionContext
+    );
 
-    // Extract auth tokens if successful
     if (result.success) {
-      // Look for auth tokens in workflow results
-      let authTokens = null;
-      
-      if (result.results && result.results.length > 0) {
-        // Find the last step that collected auth tokens
-        for (let i = result.results.length - 1; i >= 0; i--) {
-          const stepResult = result.results[i];
-          if (stepResult.result && (stepResult.result.cookies || stepResult.result.localStorage || stepResult.result.sessionStorage)) {
-            authTokens = {
-              cookies: stepResult.result.cookies || [],
-              localStorage: stepResult.result.localStorage || {},
-              sessionStorage: stepResult.result.sessionStorage || {},
-              finalUrl: stepResult.result.finalUrl || page.url()
-            };
-            console.log(`[LOGIN-WORKFLOW] Found auth tokens in step ${stepResult.step_id}: ${authTokens.cookies.length} cookies, ${Object.keys(authTokens.localStorage).length} localStorage items, ${Object.keys(authTokens.sessionStorage).length} sessionStorage items`);
-            break;
-          }
-        }
-      }
-      
-      // Fallback to collecting from current page context
-      if (!authTokens) {
-        console.log(`[LOGIN-WORKFLOW] No auth tokens found in workflow results, collecting from current page context`);
-        const cookies = await context.cookies();
-        // Import safe storage functions
-        const { safeGetLocalStorage, safeGetSessionStorage } = await import('./unified-operations.js');
-        
-        const localStorage = await safeGetLocalStorage(page);
-        const sessionStorage = await safeGetSessionStorage(page);
+      const { safeGetLocalStorage, safeGetSessionStorage } = await import('./unified-operations.js');
 
-        authTokens = {
-          cookies,
-          localStorage,
-          sessionStorage,
-          finalUrl: page.url()
-        };
+      let cookies = Array.isArray(result.cookies) ? result.cookies : [];
+      if ((!cookies || cookies.length === 0) && Array.isArray(result.iterationCookies)) {
+        cookies = result.iterationCookies;
       }
-      
-      result.authTokens = authTokens;
+      if (!cookies || cookies.length === 0) {
+        console.log(`[LOGIN-WORKFLOW] No cookies returned from workflow result, collecting from current page context`);
+        cookies = await context.cookies();
+      }
+
+      const localStorage = await safeGetLocalStorage(page);
+      const sessionStorage = await safeGetSessionStorage(page);
+
+      result.authTokens = {
+        cookies,
+        localStorage,
+        sessionStorage,
+        finalUrl: page.url()
+      };
     } else {
-      // Handle workflow execution failure
       console.log(`[LOGIN-WORKFLOW] Workflow execution failed: ${result.error || 'Unknown error'}`);
     }
 
@@ -359,13 +368,28 @@ async function executeCrawlJob(job, streamInterval) {
           ? jobOptions.execute_workflow
           : true);
 
+  const singleActionOnlyValue =
+    rawContext?.single_action_only !== undefined
+      ? rawContext.single_action_only
+      : (rawContext?.options?.single_action_only !== undefined
+          ? rawContext.options.single_action_only
+          : (jobOptions?.single_action_only !== undefined
+              ? jobOptions.single_action_only
+              : false));
+
+  const mergedOptions = {
+    ...jobOptions,
+    ...(rawContext?.options || {})
+  };
+
   const normalizedContext = {
     ...rawContext,
     execute_workflow: executeWorkflowFlag,
+    single_action_only: Boolean(singleActionOnlyValue),
     options: {
-      ...jobOptions,
-      ...(rawContext?.options || {}),
-      execute_workflow: executeWorkflowFlag
+      ...mergedOptions,
+      execute_workflow: executeWorkflowFlag,
+      single_action_only: Boolean(singleActionOnlyValue)
     }
   };
 
@@ -375,12 +399,16 @@ async function executeCrawlJob(job, streamInterval) {
     throw new Error('OpenAI API key not provided');
   }
 
+  // Track final video info so we can log once
+  let recordedVideoInfo = null;
+
   // Set job_id in context for logging and pass stream callback
   const executionContext = {
     ...normalizedContext,
     job_id: job.id,
     useRemoteBrowser: false, // Use local browser (embedded)
     runnerId: RUNNER_ID,
+    videoRecorder,
     onPageReady: (page) => {
       // Start real-time video streaming when page is ready
       currentPage = page;
@@ -390,6 +418,13 @@ async function executeCrawlJob(job, streamInterval) {
       // Start video recording when context is ready
       videoRecorder.startRecording(job.id, context, page);
       console.log(`[UNIFIED-RUNNER] Video recording and streaming started for crawl job ${job.id}`);
+    },
+    beforeBrowserClose: async () => {
+      try {
+        recordedVideoInfo = recordedVideoInfo || await videoRecorder.stopRecording(job.id);
+      } catch (error) {
+        console.error(`[UNIFIED-RUNNER] Failed to finalize video before browser close for job ${job.id}:`, error.message);
+      }
     }
   };
 
@@ -402,10 +437,18 @@ async function executeCrawlJob(job, streamInterval) {
     stopVideoStream(job.id);
     
     // Stop video recording and upload
-    console.log(`[UNIFIED-RUNNER] Finalizing video recording for crawl job ${job.id}...`);
-    const videoInfo = await videoRecorder.stopRecording(job.id);
-    if (videoInfo) {
-      console.log(`✅ [UNIFIED-RUNNER] Video uploaded: ${videoInfo.videoKey} (${videoInfo.sizeMB} MB, ${videoInfo.duration}s)`);
+    try {
+      if (!recordedVideoInfo) {
+        console.log(`[UNIFIED-RUNNER] Finalizing video recording for crawl job ${job.id}...`);
+        recordedVideoInfo = await videoRecorder.stopRecording(job.id);
+      }
+      if (recordedVideoInfo) {
+        console.log(`✅ [UNIFIED-RUNNER] Video uploaded: ${recordedVideoInfo.videoKey} (${recordedVideoInfo.sizeMB} MB, ${recordedVideoInfo.duration}s)`);
+      } else {
+        console.warn(`[UNIFIED-RUNNER] No video recorded for crawl job ${job.id}`);
+      }
+    } catch (videoError) {
+      console.error(`[UNIFIED-RUNNER] Error finalizing video recording for crawl job ${job.id}:`, videoError.message);
     }
   }
 }
