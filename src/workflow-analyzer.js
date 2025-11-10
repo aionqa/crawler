@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { StaticNodeExecutor } from './static-node-executor.js';
+import { appendRequirementToTemplate, getRequirementTextForNextStep } from './step-requirements.js';
 
 /**
  * WorkflowAnalyzer - Updated 2025-10-15
@@ -13,6 +14,21 @@ class WorkflowAnalyzer {
     this.context = context;
     this.workflowTemplate = null;
     this.workflowCapabilities = this.detectCapabilities([]);
+    this.loopDefaults = {
+      whileMaxIterations: 10,
+      forEachMaxItems: 100
+    };
+    this.templateLoopOverrides = {
+      // Enhanced Page Workflow
+      '68f9bca05f9b99aea734ebf5': {
+        whileMaxIterations: 5,
+        forEachMaxItems: 50
+      },
+      '690c996b5373f9053a41032d': {
+        whileMaxIterations: 5,
+        forEachMaxItems: 50
+      }
+    };
   }
 
   /**
@@ -386,6 +402,8 @@ class WorkflowAnalyzer {
         summary.completed += 1;
       } else if (status === 'failed' || status === 'error') {
         summary.failed += 1;
+      } else if (status === 'skipped') {
+        summary.pending += 1;
       } else if (status === 'in_progress') {
         summary.in_progress += 1;
       } else {
@@ -408,6 +426,422 @@ class WorkflowAnalyzer {
     });
 
     return summary;
+  }
+
+  enforceLegInstructionsInTemplate(template) {
+    if (!template || typeof template !== 'string') {
+      return template;
+    }
+
+    const normalized = template.toLowerCase();
+    if (normalized.includes('"legs"') || normalized.includes(' legs array') || normalized.includes('workflow legs')) {
+      return template;
+    }
+
+    return `${template.trim()}
+
+IMPORTANT OUTPUT REQUIREMENTS:
+- Return valid JSON that includes all of the page summary fields above.
+- ALSO include top-level "legs" and "actions" arrays describing the highest value interactive test actions (buttons, toggles, form submissions, input flows). The "actions" array MUST be identical to "legs" (duplicate entries to maintain backwards compatibility).
+- Each item in "legs" / "actions" MUST include:
+  - "leg_id": unique snake_case string identifier
+  - "description": concise sentence describing the action and purpose
+  - "type": one of click | form_submit | input | navigation_toggle | custom (avoid plain navigation link testing)
+  - "selector": CSS selector (or Playwright-compatible selector such as xpath=...) to locate the element
+  - "expected_outcome": what should be verified after performing the action
+  - "test_instructions": detailed steps or notes for running the action
+  - "priority": high | medium | low
+  - "confidence": number between 0 and 1
+  - "element_info": extra helpful selector/text/attribute data (ids, aria-labels, text, XPath, etc.)
+- Do NOT include duplicate actions or simple navigation links unless the navigation triggers a meaningful state change or workflow step.`;
+  }
+
+  async ensureVisibleText(page, workflowState) {
+    if (workflowState.visibleText && typeof workflowState.visibleText === 'string' && workflowState.visibleText.length > 0) {
+      return workflowState.visibleText;
+    }
+
+    try {
+      workflowState.visibleText = await page.evaluate(() => {
+        const walker = document.createTreeWalker(
+          document.body,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode: function(node) {
+              const parent = node.parentElement;
+              if (!parent) return NodeFilter.FILTER_REJECT;
+              const style = window.getComputedStyle(parent);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                return NodeFilter.FILTER_REJECT;
+              }
+              const text = node.textContent?.trim();
+              if (!text || text.length < 2) return NodeFilter.FILTER_REJECT;
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          }
+        );
+
+        const textNodes = [];
+        let node;
+        while (node = walker.nextNode()) {
+          textNodes.push(node.textContent.trim());
+        }
+
+        return textNodes.join(' ').replace(/\s+/g, ' ').trim().substring(0, 2000);
+      });
+    } catch (error) {
+      console.warn('[WorkflowAnalyzer] ⚠️ Failed to extract visible text:', error.message);
+      workflowState.visibleText = '';
+    }
+
+    return workflowState.visibleText;
+  }
+
+  applyLegsToWorkflowState(rawLegs, workflowState, source = 'page-summary') {
+    if (!Array.isArray(rawLegs) || rawLegs.length === 0 || !workflowState) {
+      return [];
+    }
+
+    const normalizeType = (rawType) => {
+      if (!rawType) return 'click';
+      const type = String(rawType).trim().toLowerCase();
+      if (!type) return 'click';
+      const mappings = {
+        press: 'click',
+        click: 'click',
+        tap: 'click',
+        submit: 'form_submit',
+        form: 'form_submit',
+        form_submit: 'form_submit',
+        input: 'input',
+        type_text: 'input',
+        fill: 'input',
+        toggle: 'navigation_toggle',
+        navigation_toggle: 'navigation_toggle',
+        dropdown: 'navigation_toggle',
+        custom: 'custom',
+        interaction: 'custom',
+        action: 'custom'
+      };
+      const normalized = mappings[type] || type;
+      if (normalized === 'navigate' || normalized === 'navigation') {
+        return 'navigation';
+      }
+      return normalized;
+    };
+
+    const normalizePriority = (rawPriority) => {
+      if (!rawPriority && rawPriority !== 0) return 'medium';
+      const value = String(rawPriority).trim().toLowerCase();
+      if (value === 'high' || value === 'medium' || value === 'low') {
+        return value;
+      }
+      if (value === 'critical' || value === 'highest') return 'high';
+      if (value === 'lowest') return 'low';
+      return 'medium';
+    };
+
+    const normalizeConfidence = (rawConfidence) => {
+      if (rawConfidence === null || rawConfidence === undefined) return null;
+      const numeric = Number(rawConfidence);
+      if (Number.isNaN(numeric)) return null;
+      return Math.max(0, Math.min(1, numeric));
+    };
+
+    const sanitizeSelector = (candidate) => {
+      if (!candidate && candidate !== 0) return null;
+      if (typeof candidate === 'string') {
+        const trimmed = candidate.trim();
+        if (!trimmed) return null;
+        if (trimmed.startsWith('//')) {
+          return trimmed.startsWith('xpath=') ? trimmed : `xpath=${trimmed}`;
+        }
+        return trimmed;
+      }
+      return null;
+    };
+
+    const pickSelector = (leg) => {
+      const candidates = [
+        leg.selector,
+        leg.css_selector,
+        leg.cssSelector,
+        leg.element_selector,
+        leg.elementSelector,
+        leg.target_selector,
+        leg.targetSelector,
+        leg.locator,
+        leg.element?.selector,
+        leg.element_info?.selector,
+        leg.element_info?.css_selector,
+        leg.element_info?.cssSelector,
+        ...(Array.isArray(leg.selectors) ? leg.selectors : []),
+        ...(Array.isArray(leg.element_info?.selectors) ? leg.element_info.selectors : []),
+        leg.xpath,
+        leg.element_info?.xpath
+      ];
+
+      for (const candidate of candidates) {
+        const selector = sanitizeSelector(candidate);
+        if (selector) {
+          return selector;
+        }
+      }
+      return null;
+    };
+
+    const seenIds = new Set();
+    const generateLegId = (leg, index) => {
+      const candidates = [
+        leg.leg_id,
+        leg.legId,
+        leg.id,
+        leg.action_id,
+        leg.source_leg_id,
+        leg.original_leg_id,
+        leg.slug,
+        leg.selector,
+        leg.description,
+        leg.name
+      ];
+
+      let baseId = null;
+      for (const candidate of candidates) {
+        if (!candidate && candidate !== 0) continue;
+        const candidateString = String(candidate).trim();
+        if (candidateString) {
+          baseId = candidateString;
+          break;
+        }
+      }
+
+      if (!baseId) {
+        baseId = `${source}_leg_${index + 1}`;
+      }
+
+      let sanitized = baseId
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+
+      if (!sanitized) {
+        sanitized = `${source}_leg_${index + 1}`;
+      }
+
+      let finalId = sanitized;
+      let suffix = 2;
+      while (seenIds.has(finalId)) {
+        finalId = `${sanitized}_${suffix}`;
+        suffix += 1;
+      }
+      seenIds.add(finalId);
+
+      return finalId;
+    };
+
+    const normalizedLegs = [];
+    rawLegs.forEach((rawLeg, index) => {
+      if (!rawLeg || typeof rawLeg !== 'object') {
+        return;
+      }
+
+      const type = normalizeType(rawLeg.type || rawLeg.action || rawLeg.action_type || rawLeg.kind);
+      if (type === 'navigation') {
+        console.log('[WorkflowAnalyzer] ⚠️ Skipping navigation leg emitted by page summary');
+        return;
+      }
+
+      const selector = pickSelector(rawLeg);
+      if (!selector) {
+        console.log('[WorkflowAnalyzer] ⚠️ Skipping leg because no selector was supplied:', rawLeg.description || rawLeg.leg_id || `index_${index}`);
+        return;
+      }
+
+      const legId = generateLegId(rawLeg, index);
+      const description = rawLeg.description || rawLeg.summary || rawLeg.name || rawLeg.label || `Leg ${index + 1}`;
+      const expectedOutcome = rawLeg.expected_outcome || rawLeg.expectedOutcome || rawLeg.expected_result || rawLeg.result || '';
+      const testInstructions = rawLeg.test_instructions || rawLeg.instructions || rawLeg.steps || '';
+      const priority = normalizePriority(rawLeg.priority || rawLeg.importance);
+      const confidence = normalizeConfidence(rawLeg.confidence ?? rawLeg.score ?? rawLeg.confidence_score);
+
+      const normalizedLeg = {
+        ...rawLeg,
+        leg_id: legId,
+        original_leg_id: rawLeg.original_leg_id || legId,
+        source_leg_id: rawLeg.source_leg_id || legId,
+        type,
+        description: String(description).trim(),
+        selector,
+        expected_outcome: expectedOutcome ? String(expectedOutcome).trim() : '',
+        test_instructions: testInstructions ? String(testInstructions).trim() : '',
+        priority,
+        confidence,
+        status: rawLeg.status || 'pending',
+        iterations: Array.isArray(rawLeg.iterations) ? rawLeg.iterations : [],
+        element_info: rawLeg.element_info || rawLeg.elementInfo || rawLeg.element || {},
+        metadata: {
+          ...(rawLeg.metadata || {}),
+          generated_from: source
+        }
+      };
+
+      if (!normalizedLeg.element_info.selector) {
+        normalizedLeg.element_info.selector = selector;
+      }
+
+      normalizedLegs.push(normalizedLeg);
+    });
+
+    if (normalizedLegs.length === 0) {
+      console.log(`[WorkflowAnalyzer] ⚠️ No valid legs produced from ${source} response`);
+      return [];
+    }
+
+    workflowState.legs = normalizedLegs;
+    workflowState.legsSource = source;
+    workflowState.legResults = new Array(normalizedLegs.length).fill(null);
+    workflowState.actionsSummary = this.buildActionsSummary(normalizedLegs);
+
+    // Ensure downstream steps can consume legs without additional scripts
+    workflowState.legsToExecute = normalizedLegs;
+    if (!workflowState.context) {
+      workflowState.context = {};
+    }
+    workflowState.context.legsToExecute = normalizedLegs;
+
+    workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
+    if (!workflowState.aiAnalysisResult.page_description && workflowState.pageDescription) {
+      workflowState.aiAnalysisResult.page_description = workflowState.pageDescription;
+    }
+    workflowState.aiAnalysisResult.legs = normalizedLegs;
+    workflowState.aiAnalysisResult.source = source;
+
+    console.log(`[WorkflowAnalyzer] ✅ Normalized ${normalizedLegs.length} legs from ${source}`);
+
+    return normalizedLegs;
+  }
+
+  collectIterationDataFromState(workflowState) {
+    if (!workflowState) {
+      return null;
+    }
+
+    const iteration = workflowState.currentIteration || 1;
+    const isLoginWorkflow = workflowState.isLoginWorkflow === true || workflowState.workflowType === 'login';
+    let currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
+    const determineResult = workflowState['determine_completion']?.result ||
+      workflowState.results?.['determine_completion']?.result || {};
+    const executeResult = workflowState['execute_action_script']?.result ||
+      workflowState.lastExecutionResult || {};
+    const screenshotBefore = workflowState['screenshot_before_leg']?.screenshotFileId || null;
+    const screenshotAfter = workflowState['screenshot_after']?.screenshotFileId || null;
+    const actionPlan = workflowState.currentActionPlan || workflowState.lastGeneratedActionPlan || null;
+
+    const status = determineResult.status || determineResult.completion_status || 'unknown';
+    const legFailed = status === 'failure' || determineResult.completion_status === 'failed';
+    const legSucceeded = status === 'success' || (determineResult.is_complete === true && !legFailed);
+
+    if (isLoginWorkflow && (!currentLeg || Object.keys(currentLeg).length === 0)) {
+      const fallbackLegId = `login_attempt_${iteration}`;
+      currentLeg = {
+        leg_id: fallbackLegId,
+        description: `Login attempt ${iteration}`,
+        type: 'login_attempt',
+        iteration
+      };
+      workflowState.currentLeg = currentLeg;
+      workflowState.currentLegOriginalId = fallbackLegId;
+      workflowState.currentLegResolvedId = fallbackLegId;
+    }
+
+    if (!workflowState.legs) {
+      workflowState.legs = [];
+    }
+
+    const resolvedLegId = workflowState.currentLegOriginalId ||
+      workflowState.currentLegResolvedId ||
+      currentLeg.original_leg_id ||
+      currentLeg.leg_id ||
+      currentLeg.source_leg_id;
+
+    let legEntry = resolvedLegId
+      ? workflowState.legs.find((leg) => leg && leg.leg_id === resolvedLegId)
+      : null;
+
+    if (!legEntry && resolvedLegId) {
+      const templateLeg = workflowState.legs.find((leg) => leg && leg.leg_id === currentLeg.leg_id) || {};
+      legEntry = { ...templateLeg, ...currentLeg, leg_id: resolvedLegId, iterations: [] };
+      workflowState.legs.push(legEntry);
+      console.log('[CollectIteration] Created new leg entry for', resolvedLegId);
+    } else if (!legEntry) {
+      legEntry = { ...currentLeg, iterations: [] };
+      workflowState.legs.push(legEntry);
+      console.log('[CollectIteration] Created fallback leg entry for', currentLeg.leg_id);
+    }
+
+    if (resolvedLegId) {
+      legEntry.leg_id = resolvedLegId;
+    }
+    if (workflowState.currentLegOriginalId) {
+      legEntry.original_leg_id = workflowState.currentLegOriginalId;
+    }
+
+    if (!Array.isArray(legEntry.iterations)) {
+      legEntry.iterations = [];
+    }
+
+    legEntry.iterations.push({
+      iteration_number: iteration,
+      attempt_number: iteration,
+      script_executed: workflowState.legScriptToExecute || null,
+      result: legSucceeded ? 'success' : (legFailed ? 'failure' : 'pending'),
+      error: executeResult?.error || null,
+      screenshot_before: screenshotBefore,
+      screenshot_after: screenshotAfter,
+      openai_response: determineResult || null,
+      action_description: actionPlan?.description || currentLeg?.description || null,
+      expected_result: actionPlan?.expected_result || currentLeg?.expected_outcome || currentLeg?.expectedOutcome || null,
+      analysis_notes: actionPlan?.analysis_notes || null,
+      timestamp: new Date().toISOString()
+    });
+
+    console.log('[CollectIteration] leg', legEntry.leg_id, 'iterations now:', legEntry.iterations.length);
+
+    legEntry.result = legSucceeded ? 'success' : (legFailed ? 'failure' : 'pending');
+    legEntry.script_executed = workflowState.legScriptToExecute || null;
+    legEntry.generated_action_plan = actionPlan || legEntry.generated_action_plan || null;
+
+    if (!Array.isArray(workflowState.executionHistory)) {
+      workflowState.executionHistory = [];
+    }
+    workflowState.executionHistory.push({
+      iteration,
+      leg_id: legEntry.leg_id,
+      step_type: legEntry.type || (isLoginWorkflow ? 'login_attempt' : 'leg'),
+      status,
+      success: legSucceeded,
+      failure: legFailed,
+      timestamp: new Date().toISOString(),
+      execution_result: executeResult && typeof executeResult === 'object'
+        ? Object.fromEntries(Object.entries(executeResult).slice(0, 10))
+        : executeResult,
+      determine_result: determineResult && typeof determineResult === 'object'
+        ? Object.fromEntries(Object.entries(determineResult).slice(0, 10))
+        : determineResult,
+      action_description: actionPlan?.description || currentLeg?.description || null,
+      expected_result: actionPlan?.expected_result || currentLeg?.expected_outcome || currentLeg?.expectedOutcome || null,
+      analysis_notes: actionPlan?.analysis_notes || null,
+      page_summary: actionPlan?.page_summary || workflowState.pageDescription || null
+    });
+    if (workflowState.executionHistory.length > 50) {
+      workflowState.executionHistory = workflowState.executionHistory.slice(-50);
+    }
+
+    const syntheticStep = { id: 'collect_iteration_data', name: 'Collect Iteration Data' };
+    const collectResult = { iteration, legSucceeded, legFailed, status };
+    this.storeStepResult(syntheticStep, collectResult, workflowState);
+
+    return collectResult;
   }
 
   createFallbackPageDescription(stats = {}, workflowState = {}) {
@@ -580,6 +1014,7 @@ class WorkflowAnalyzer {
         full_description: pageDescription?.full_description || pageDescription?.description || '',
         purpose: pageDescription?.purpose || '',
         conversation_context: pageDescription?.conversation_context || '',
+        legs_count: Array.isArray(pageDescription?.legs) ? pageDescription.legs.length : 0,
         ...metadata
       };
       
@@ -702,6 +1137,102 @@ class WorkflowAnalyzer {
     }
   }
   
+  /**
+   * Ensure workflow document exists when workflow template omits explicit create step
+   */
+  async ensureWorkflowInitialized(workflowState, jobId, pageId = null, projectId = null, reason = 'auto') {
+    if (!workflowState || workflowState.isLoginWorkflow) {
+      return null;
+    }
+
+    if (workflowState.workflowId) {
+      return workflowState.workflowId;
+    }
+
+    const effectivePageId = pageId || workflowState.pageId || null;
+    const effectiveProjectId = projectId || workflowState.projectId || null;
+
+    if (!effectivePageId || !effectiveProjectId) {
+      console.log('[WorkflowAnalyzer] ⚠️ Skipping auto workflow creation - pageId/projectId missing', {
+        pageId: effectivePageId,
+        projectId: effectiveProjectId,
+        reason
+      });
+      return null;
+    }
+
+    try {
+      const workflow = await this.createWorkflow(
+        effectivePageId,
+        effectiveProjectId,
+        workflowState.pageUrl,
+        workflowState.playwrightAnalysis || {}
+      );
+
+      workflowState.workflowId = workflow._id;
+      if (!workflowState.context) {
+        workflowState.context = {};
+      }
+      workflowState.context.workflowId = workflow._id;
+
+      await this.sendLogToBackend(jobId, 'info', `🆕 Auto-created workflow ${workflow._id} (${reason})`, 'WORKFLOW-ANALYZER', {
+        workflow_id: workflow._id,
+        page_id: effectivePageId,
+        project_id: effectiveProjectId,
+        reason
+      });
+
+      return workflow._id;
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Failed to auto-create workflow: ${error.message}`);
+      await this.sendLogToBackend(jobId, 'error', `❌ Auto-create workflow failed: ${error.message}`, 'WORKFLOW-ANALYZER', {
+        page_id: effectivePageId,
+        project_id: effectiveProjectId,
+        reason
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Clear iteration-scoped variables before each loop iteration to avoid leak between runs
+   */
+  resetIterationScopedVariables(workflowState) {
+    if (!workflowState) {
+      return;
+    }
+
+    const iterationKeys = [
+      'currentLegAttempt',
+      'currentLegRetryReason',
+      'legScriptToExecute',
+      'loginScriptToExecute',
+      'lastExecutionResult',
+      'lastDetermineResult',
+      'lastExecutionSummary',
+      'currentIterationResult',
+      'pageDescriptionLogged',
+      'currentActionPlan',
+      'currentActionDescription',
+      'currentActionExpectedResult',
+      'lastGeneratedActionPlan'
+    ];
+
+    iterationKeys.forEach((key) => {
+      if (Object.prototype.hasOwnProperty.call(workflowState, key)) {
+        delete workflowState[key];
+      }
+      if (workflowState.context && Object.prototype.hasOwnProperty.call(workflowState.context, key)) {
+        delete workflowState.context[key];
+      }
+    });
+
+    if (workflowState.context) {
+      delete workflowState.context.currentItem;
+      delete workflowState.context.currentItemIndex;
+    }
+  }
+ 
   /**
    * Send real-time page discovery/update to backend
    * @param {string} jobId - Job ID
@@ -913,6 +1444,32 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Helper to send log to backend (for crucial workflow execution logs)
+   */
+  async sendLogToBackend(jobId, level, message, component = 'WORKFLOW-ANALYZER', metadata = {}) {
+    if (!jobId) {
+      return;
+    }
+
+    try {
+      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId: jobId,
+        level: level,
+        message: message,
+        component: component,
+        metadata: {
+          ...metadata,
+          timestamp: new Date().toISOString()
+        }
+      }, {
+        headers: this.getAuthHeaders()
+      });
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ⚠️ Failed to send log to backend: ${error.message}`);
+    }
+  }
+
+  /**
    * Execute workflow template steps and return results
    * @param {Page} page - Playwright page object
    * @param {string} jobId - Job ID for logging
@@ -925,6 +1482,16 @@ class WorkflowAnalyzer {
     console.log(`[WorkflowAnalyzer] 🔄 EXECUTING WORKFLOW TEMPLATE STEPS`);
     console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
     
+    const resolvedOptions = {
+      ...(this.context?.options || {})
+    };
+    if (this.context?.single_action_only !== undefined && resolvedOptions.single_action_only === undefined) {
+      resolvedOptions.single_action_only = this.context.single_action_only;
+    }
+    const singleActionOnly =
+      resolvedOptions.single_action_only === true ||
+      resolvedOptions.single_action_only === 'true';
+
     // Initialize workflow state
     const workflowState = {
       pageTitle: null,
@@ -941,11 +1508,52 @@ class WorkflowAnalyzer {
       workflowId: null,
       legs: [],
       legResults: [],
+      options: resolvedOptions,
+      runtimeOptions: resolvedOptions,
+      singleActionOnly,
+      context: {
+        ...(this.context?.context || {}),
+        options: resolvedOptions
+      },
       inputCredentials: this.context?.credentials || {
         username: this.context?.username || null,
         password: this.context?.password || null
-      }
+      },
+      workflowType: this.workflowTemplate?.type || null,
+      isLoginWorkflow: this.workflowTemplate?.type === 'login'
     };
+    
+    workflowState.pageId = pageId || null;
+    workflowState.projectId = projectId || null;
+    workflowState.jobId = jobId;
+    if (!workflowState.context) {
+      workflowState.context = {};
+    }
+    workflowState.context.workflow_type = workflowState.workflowType;
+    
+    const templateHasCreateWorkflow = Array.isArray(this.workflowTemplate?.steps)
+      ? this.workflowTemplate.steps.some((step) => step?.type === 'create-workflow')
+      : false;
+    const templateHasUpdateWorkflow = Array.isArray(this.workflowTemplate?.steps)
+      ? this.workflowTemplate.steps.some((step) => step?.type === 'update-workflow')
+      : false;
+
+    const shouldAutoCreateWorkflow = !templateHasCreateWorkflow && !workflowState.isLoginWorkflow;
+    const shouldAutoUpdateWorkflow = !templateHasUpdateWorkflow && !workflowState.isLoginWorkflow;
+
+    workflowState.templateHasCreateWorkflow = templateHasCreateWorkflow;
+    workflowState.templateHasUpdateWorkflow = templateHasUpdateWorkflow;
+    workflowState.autoCreatedWorkflow = false;
+    workflowState.autoUpdatedWorkflow = false;
+    workflowState.shouldAutoCreateWorkflow = shouldAutoCreateWorkflow;
+    workflowState.shouldAutoUpdateWorkflow = shouldAutoUpdateWorkflow;
+
+    if (shouldAutoCreateWorkflow) {
+      const createdId = await this.ensureWorkflowInitialized(workflowState, jobId, pageId, projectId, 'pre-steps');
+      if (createdId) {
+        workflowState.autoCreatedWorkflow = true;
+      }
+    }
     
     // Check if we should retry from a specific step (after self-adjustable workflow)
     let startStepIndex = 0;
@@ -966,6 +1574,15 @@ class WorkflowAnalyzer {
       console.log(`[WorkflowAnalyzer] Type: ${step.type}`);
       console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
       
+      // Send log to backend
+      await this.sendLogToBackend(jobId, 'info', `🔄 EXECUTING STEP ${i + 1}/${this.workflowTemplate.steps.length}: ${step.name} (${step.type})`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        step_order: i + 1,
+        total_steps: this.workflowTemplate.steps.length
+      });
+      
       try {
         // Log step execution with parameters
         await this.logStepExecution(step, jobId);
@@ -980,15 +1597,24 @@ class WorkflowAnalyzer {
             break;
             
           case 'page-description':
-            await this.executePageDescriptionStep(page, step, workflowState, jobId, i);
+            await this.executePageDescriptionStep(page, step, workflowState, jobId, {
+              stepIndex: i,
+              siblings: this.workflowTemplate.steps
+            });
             break;
             
           case 'ai-prompt':
-            await this.executeAIPromptStep(page, step, workflowState, jobId, i);
+            await this.executeAIPromptStep(page, step, workflowState, jobId, {
+              stepIndex: i,
+              siblings: this.workflowTemplate.steps
+            });
             break;
             
           case 'workflow-analysis':
-            await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId, i);
+            await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId, {
+              stepIndex: i,
+              siblings: this.workflowTemplate.steps
+            });
             break;
           
           // Deterministic, hardcoded analysis for specific domains (e.g., Practical Test Automation)
@@ -1070,6 +1696,10 @@ class WorkflowAnalyzer {
             await this.executeSleepStep(step, workflowState);
             break;
             
+          case 'complete-leg':
+            await this.executeCompleteLegStep(step, workflowState, jobId);
+            break;
+            
           case 'for-each':
             await this.executeForEachStep(page, step, workflowState, jobId);
             break;
@@ -1096,6 +1726,15 @@ class WorkflowAnalyzer {
         
       } catch (stepError) {
         console.error(`[WorkflowAnalyzer] ❌ Step ${i + 1} failed: ${stepError.message}`);
+        
+        // Send error log to backend
+        await this.sendLogToBackend(jobId, 'error', `❌ Step ${i + 1} failed: ${stepError.message}`, 'WORKFLOW-ANALYZER', {
+          step_id: step.id,
+          step_name: step.name || step.type,
+          step_type: step.type,
+          step_order: i + 1,
+          error: stepError.message
+        });
         
         // Check if this is a script execution failure and next step is self-adjustable-ai-workflow
         const isScriptExecutionFailure = (
@@ -1140,6 +1779,45 @@ class WorkflowAnalyzer {
     console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
     console.log(`[WorkflowAnalyzer] ✅ ALL WORKFLOW STEPS COMPLETED`);
     console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
+
+    if (workflowState.shouldAutoUpdateWorkflow && workflowState.workflowId) {
+      const legsForUpdate = Array.isArray(workflowState.legs)
+        ? workflowState.legs
+        : (Array.isArray(workflowState.aiAnalysisResult?.legs) ? workflowState.aiAnalysisResult.legs : []);
+      const pageDescriptionForUpdate =
+        workflowState.aiAnalysisResult?.page_description ||
+        workflowState.pageDescription ||
+        null;
+
+      if (pageDescriptionForUpdate || legsForUpdate.length > 0) {
+        try {
+          await this.updateWorkflowWithAnalysis(
+            workflowState.workflowId,
+            pageDescriptionForUpdate,
+            legsForUpdate,
+            true
+          );
+          workflowState.autoUpdatedWorkflow = true;
+          await this.sendLogToBackend(jobId, 'info', `📝 Auto-updated workflow ${workflowState.workflowId} (finalize)`, 'WORKFLOW-ANALYZER', {
+            workflow_id: workflowState.workflowId,
+            legs_count: legsForUpdate.length,
+            auto_update: true
+          });
+        } catch (autoUpdateError) {
+          console.error(`[WorkflowAnalyzer] ❌ Auto-update workflow failed: ${autoUpdateError.message}`);
+          await this.sendLogToBackend(jobId, 'warn', `⚠️ Auto-update workflow failed: ${autoUpdateError.message}`, 'WORKFLOW-ANALYZER', {
+            workflow_id: workflowState.workflowId,
+            auto_update: true
+          });
+        }
+      }
+    }
+    
+    // Send log to backend
+    await this.sendLogToBackend(jobId, 'info', `✅ ALL WORKFLOW STEPS COMPLETED`, 'WORKFLOW-ANALYZER', {
+      total_steps: this.workflowTemplate.steps.length,
+      workflow_id: workflowState.workflowId
+    });
     
     // Return workflow results
     return {
@@ -1147,7 +1825,28 @@ class WorkflowAnalyzer {
       legs_count: workflowState.legs.length,
       page_description: workflowState.pageDescription,
       legs: workflowState.legs,
-      ai_analysis: workflowState.aiAnalysisResult
+      ai_analysis: workflowState.aiAnalysisResult,
+      login_status:
+        workflowState.loginStatus ||
+        workflowState.context?.login_status ||
+        workflowState['determine_completion']?.result?.status ||
+        workflowState.results?.['determine_completion']?.result?.status ||
+        null,
+      cookies:
+        workflowState.collectedCookies ||
+        workflowState.latestCookies ||
+        workflowState.context?.collectedCookies ||
+        [],
+      execution_history: workflowState.executionHistory || [],
+      context: workflowState.context || {},
+      results: workflowState.results
+        ? Object.entries(workflowState.results).map(([stepId, info]) => ({
+            step_id: stepId,
+            step_name: info.stepName || stepId,
+            step_type: info.stepType || null,
+            result: info.result
+          }))
+        : []
     };
   }
 
@@ -1326,6 +2025,9 @@ class WorkflowAnalyzer {
     
     const analysis = await this.performPlaywrightAnalysis(page);
     workflowState.playwrightAnalysis = analysis;
+    if (typeof step.name === 'string' && /after action/i.test(step.name)) {
+      workflowState.playwrightAnalysisAfter = analysis;
+    }
     
     this.storeStepResult(step, analysis, workflowState);
 
@@ -1352,50 +2054,87 @@ class WorkflowAnalyzer {
       `📊 [PLAYWRIGHT] Found ${analysis.forms.length} forms, ${analysis.links.length} links, ${analysis.interactive_elements.length} interactive elements, ${analysis.non_interactive_elements.length} non-interactive elements`,
       metadata
     );
+
+    if (workflowState.shouldAutoCreateWorkflow && !workflowState.workflowId) {
+      const createdId = await this.ensureWorkflowInitialized(
+        workflowState,
+        jobId,
+        workflowState.pageId,
+        workflowState.projectId,
+        'after-playwright-analysis'
+      );
+      if (createdId) {
+        workflowState.autoCreatedWorkflow = true;
+      }
+    }
+  }
+
+  resolveStepContext(step, stepContext, fallbackSiblings = null) {
+    const info = {
+      stepIndex: null,
+      siblings: Array.isArray(fallbackSiblings) ? fallbackSiblings : null,
+      nextStep: null
+    };
+
+    if (typeof stepContext === 'number') {
+      info.stepIndex = stepContext;
+    } else if (stepContext && typeof stepContext === 'object') {
+      if (typeof stepContext.stepIndex === 'number') {
+        info.stepIndex = stepContext.stepIndex;
+      }
+      if (Array.isArray(stepContext.siblings)) {
+        info.siblings = stepContext.siblings;
+      }
+      if (stepContext.nextStep) {
+        info.nextStep = stepContext.nextStep;
+      }
+    }
+
+    if (!Array.isArray(info.siblings) && Array.isArray(this.workflowTemplate?.steps)) {
+      info.siblings = this.workflowTemplate.steps;
+    }
+
+    if (Array.isArray(fallbackSiblings) && (!Array.isArray(info.siblings) || info.siblings.length === 0)) {
+      info.siblings = fallbackSiblings;
+    }
+
+    if (Array.isArray(info.siblings) && info.siblings.length > 0) {
+      if (info.stepIndex === null || info.stepIndex < 0) {
+        const derivedIndex = info.siblings.findIndex(candidate => {
+          if (!candidate) return false;
+          if (candidate === step) return true;
+          if (candidate.id && step.id && candidate.id === step.id) return true;
+          if (candidate.name && step.name && candidate.name === step.name) return true;
+          return false;
+        });
+        if (derivedIndex !== -1) {
+          info.stepIndex = derivedIndex;
+        }
+      }
+
+      if (!info.nextStep && info.stepIndex !== null && info.stepIndex >= 0) {
+        info.nextStep = info.siblings[info.stepIndex + 1] || null;
+      }
+    }
+
+    return {
+      ...info,
+      requirementText: getRequirementTextForNextStep(info.nextStep)
+    };
   }
 
   /**
    * Execute page description step
    */
-  async executePageDescriptionStep(page, step, workflowState, jobId, stepIndex = null) {
+  async executePageDescriptionStep(page, step, workflowState, jobId, stepContext = null) {
     console.log(`[WorkflowAnalyzer] 📝 Generating page description (${step.name})`);
-    
-    // Get page title and content if not already collected
     if (!workflowState.pageTitle) {
       workflowState.pageTitle = await page.title();
     }
     if (!workflowState.htmlContent) {
       workflowState.htmlContent = await page.content();
     }
-    if (!workflowState.visibleText) {
-      workflowState.visibleText = await page.evaluate(() => {
-        const walker = document.createTreeWalker(
-          document.body,
-          NodeFilter.SHOW_TEXT,
-          {
-            acceptNode: function(node) {
-              const parent = node.parentElement;
-              if (!parent) return NodeFilter.FILTER_REJECT;
-              const style = window.getComputedStyle(parent);
-              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-                return NodeFilter.FILTER_REJECT;
-              }
-              const text = node.textContent?.trim();
-              if (!text || text.length < 2) return NodeFilter.FILTER_REJECT;
-              return NodeFilter.FILTER_ACCEPT;
-            }
-          }
-        );
-        
-        const textNodes = [];
-        let node;
-        while (node = walker.nextNode()) {
-          textNodes.push(node.textContent.trim());
-        }
-        
-        return textNodes.join(' ').replace(/\s+/g, ' ').trim().substring(0, 2000);
-      });
-    }
+    await this.ensureVisibleText(page, workflowState);
     
     // Prompt template MUST be embedded directly in step config
     const customTemplate = step.config?.template || step.config?.user_message_template || null;
@@ -1406,6 +2145,10 @@ class WorkflowAnalyzer {
     
     const promptIdentifier = step.id || step.name || 'page-description';
     const promptSource = 'workflow-step';
+    const contextInfo = this.resolveStepContext(step, stepContext, this.workflowTemplate?.steps);
+    const requirementText = contextInfo.requirementText;
+    const decoratedTemplate = appendRequirementToTemplate(customTemplate, requirementText);
+    const templateForExecution = this.enforceLegInstructionsInTemplate(decoratedTemplate);
     
     const descriptionPayload = {
       page_title: workflowState.pageTitle,
@@ -1419,20 +2162,26 @@ class WorkflowAnalyzer {
       : [];
 
     if (attachments.includes('interactive_elements') && workflowState.playwrightAnalysis?.interactive_elements) {
-      descriptionPayload.interactive_elements = workflowState.playwrightAnalysis.interactive_elements.slice(0, 25);
+      const interactiveElements = workflowState.playwrightAnalysis.interactive_elements.slice(0, 50);
+      descriptionPayload.interactive_elements = interactiveElements;
+      descriptionPayload.interactive_elements_json = JSON.stringify(interactiveElements, null, 2);
     }
 
     if (attachments.includes('forms') && workflowState.playwrightAnalysis?.forms) {
-      descriptionPayload.forms = workflowState.playwrightAnalysis.forms.slice(0, 15);
+      const forms = workflowState.playwrightAnalysis.forms.slice(0, 30);
+      descriptionPayload.forms = forms;
+      descriptionPayload.forms_json = JSON.stringify(forms, null, 2);
     }
 
     if (attachments.includes('links') && workflowState.playwrightAnalysis?.links) {
-      descriptionPayload.links = workflowState.playwrightAnalysis.links.slice(0, 40);
+      const links = workflowState.playwrightAnalysis.links.slice(0, 40);
+      descriptionPayload.links = links;
+      descriptionPayload.links_json = JSON.stringify(links, null, 2);
     }
     
     // Log prompt usage with step information
-    const currentStepIndex = stepIndex !== null ? stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
-    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, descriptionPayload, {
+    const currentStepIndex = contextInfo.stepIndex !== null ? contextInfo.stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
+    await this.logPromptUsage(promptIdentifier, promptSource, templateForExecution, descriptionPayload, {
       step: step,
       stepIndex: currentStepIndex >= 0 ? currentStepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.type === step.type) ?? -1),
       totalSteps: this.workflowTemplate?.steps?.length
@@ -1447,7 +2196,7 @@ class WorkflowAnalyzer {
         workflowState.pageUrl,
         null,
         descriptionPayload,
-        customTemplate // Pass custom template (required - no fallback to database)
+        templateForExecution // Pass decorated template (required - no fallback to database)
       );
       
       // Extract short_description with fallbacks (handle different response structures)
@@ -1466,6 +2215,23 @@ class WorkflowAnalyzer {
         workflowState.pageDescription.short_description = shortDescription;
       }
       
+      // If the response includes actions/legs, normalize and store them immediately
+      const candidateLegs = Array.isArray(workflowState.pageDescription?.legs)
+        ? workflowState.pageDescription.legs
+        : Array.isArray(workflowState.pageDescription?.actions)
+          ? workflowState.pageDescription.actions
+          : [];
+
+      let normalizedFromSummary = [];
+      if (candidateLegs.length > 0) {
+        normalizedFromSummary = this.applyLegsToWorkflowState(candidateLegs, workflowState, 'page-summary');
+        if (normalizedFromSummary.length > 0) {
+          workflowState.pageDescription.legs = normalizedFromSummary;
+          workflowState.pageDescription.actions = normalizedFromSummary;
+          console.log(`[WorkflowAnalyzer] ✅ Page summary included ${normalizedFromSummary.length} legs`);
+        }
+      }
+      
       // Add to conversation history
       workflowState.conversationHistory.push({
         timestamp: new Date().toISOString(),
@@ -1477,14 +2243,24 @@ class WorkflowAnalyzer {
       await this.logPageDescription(jobId, workflowState.pageUrl, workflowState.pageTitle, workflowState.pageDescription, {
         visible_text_length: workflowState.visibleText.length,
         forms_count: workflowState.playwrightAnalysis?.forms?.length || 0,
-        interactive_elements_count: workflowState.playwrightAnalysis?.interactive_elements?.length || 0
+        interactive_elements_count: workflowState.playwrightAnalysis?.interactive_elements?.length || 0,
+        legs_count: Array.isArray(workflowState.pageDescription?.legs) ? workflowState.pageDescription.legs.length : 0
       }, workflowState.htmlContent, workflowState.screenshotBase64);
 
       this.storeStepResult(step, {
         description: workflowState.pageDescription,
+        legs: workflowState.pageDescription?.legs || [],
         visible_text_length: workflowState.visibleText.length,
         attachments: step.config?.attachments || []
       }, workflowState);
+
+      workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
+      workflowState.aiAnalysisResult.page_description = workflowState.pageDescription;
+      if (normalizedFromSummary.length > 0) {
+        workflowState.aiAnalysisResult.legs = normalizedFromSummary;
+        workflowState.aiAnalysisResult.actions = normalizedFromSummary;
+        workflowState.aiAnalysisResult.source = 'page-summary';
+      }
 
       await this.logStepOutcome(
         step,
@@ -1493,7 +2269,8 @@ class WorkflowAnalyzer {
         {
           short_description: shortDescription,
           attachments: step.config?.attachments || [],
-          visible_text_length: workflowState.visibleText.length
+          visible_text_length: workflowState.visibleText.length,
+          legs_count: Array.isArray(workflowState.pageDescription?.legs) ? workflowState.pageDescription.legs.length : 0
         }
       );
       
@@ -1505,6 +2282,9 @@ class WorkflowAnalyzer {
         purpose: 'Information page',
         conversation_context: 'Analyzing page structure and content'
       };
+
+      workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
+      workflowState.aiAnalysisResult.page_description = workflowState.pageDescription;
 
       this.storeStepResult(step, {
         description: workflowState.pageDescription,
@@ -1531,7 +2311,7 @@ class WorkflowAnalyzer {
   /**
    * Execute AI prompt step
    */
-  async executeAIPromptStep(page, step, workflowState, jobId, stepIndex = null) {
+  async executeAIPromptStep(page, step, workflowState, jobId, stepContext = null) {
     console.log(`[WorkflowAnalyzer] 🤖 Executing AI prompt (${step.name})`);
     
     // Prompt template MUST be embedded directly in step config, not fetched from database
@@ -1545,12 +2325,41 @@ class WorkflowAnalyzer {
     
     const promptIdentifier = step.id || step.name || 'workflow-step';
     const promptSource = 'workflow-step';
+    const contextInfo = this.resolveStepContext(step, stepContext, this.workflowTemplate?.steps);
+    const requirementText = contextInfo.requirementText;
+    const decoratedTemplate = appendRequirementToTemplate(customTemplate, requirementText);
+    
+    if (!workflowState.pageTitle) {
+      workflowState.pageTitle = await page.title();
+    }
+    if (!workflowState.htmlContent) {
+      workflowState.htmlContent = await page.content();
+    }
+
+    const attachments = Array.isArray(step.config?.attachments)
+      ? step.config.attachments
+      : [];
+
+    if (!workflowState.context) {
+      workflowState.context = {};
+    }
+    if (['generate_action_script', 'generate_login_script'].includes(step.id)) {
+      workflowState.legScriptToExecute = null;
+      workflowState.context.legScriptToExecute = null;
+      workflowState.loginScriptToExecute = null;
+      workflowState.context.loginScriptToExecute = null;
+    }
+
+    const needsVisibleText = attachments.includes('visible_text');
+    if (needsVisibleText) {
+      await this.ensureVisibleText(page, workflowState);
+    }
     
     // Prepare payload based on step configuration
     const stepPayload = {
       page_url: workflowState.pageUrl,
-      page_title: workflowState.pageTitle || await page.title(),
-      page_content: workflowState.htmlContent || await page.content(),
+      page_title: workflowState.pageTitle,
+      page_content: workflowState.htmlContent,
       additional_prompt_text: this.context.additional_prompt_text || ''
     };
     if (workflowState.inputCredentials) {
@@ -1558,41 +2367,50 @@ class WorkflowAnalyzer {
     }
     
     // Add additional data based on step attachments
-    if (step.config?.attachments) {
-      if (step.config.attachments.includes('visible_text') && workflowState.visibleText) {
+    if (attachments.length > 0) {
+      if (attachments.includes('visible_text') && workflowState.visibleText) {
         stepPayload.visible_text = workflowState.visibleText;
       }
-      if (step.config.attachments.includes('interactive_elements') && workflowState.playwrightAnalysis) {
+      if (attachments.includes('interactive_elements') && workflowState.playwrightAnalysis) {
         stepPayload.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
       }
-      if (step.config.attachments.includes('forms') && workflowState.playwrightAnalysis) {
+      if (attachments.includes('forms') && workflowState.playwrightAnalysis) {
         stepPayload.forms = workflowState.playwrightAnalysis.forms;
       }
-      if (step.config.attachments.includes('page_description') && workflowState.pageDescription) {
+      if (attachments.includes('page_description') && workflowState.pageDescription) {
         stepPayload.page_description = workflowState.pageDescription;
       }
-      if (step.config.attachments.includes('current_leg') && workflowState.currentLeg) {
+      if (attachments.includes('current_leg') && workflowState.currentLeg) {
         stepPayload.current_leg = workflowState.currentLeg;
       }
-      if (step.config.attachments.includes('last_execution_result') && workflowState.lastExecutionResult) {
+      if (attachments.includes('last_execution_result') && workflowState.lastExecutionResult) {
         stepPayload.execution_result = workflowState.lastExecutionResult;
       }
-      if (step.config.attachments.includes('playwright_analysis') && workflowState.playwrightAnalysis) {
+      if (attachments.includes('playwright_analysis') && workflowState.playwrightAnalysis) {
         stepPayload.playwright_analysis = workflowState.playwrightAnalysis;
       }
-      if (step.config.attachments.includes('url_before_action') && workflowState.urlBeforeAction) {
+      if (attachments.includes('url_before_action') && workflowState.urlBeforeAction) {
         stepPayload.url_before_action = workflowState.urlBeforeAction;
         stepPayload.before_url = workflowState.urlBeforeAction;
       }
-      if (step.config.attachments.includes('url_after_action') && workflowState.urlAfterAction) {
+      if (attachments.includes('url_after_action') && workflowState.urlAfterAction) {
         stepPayload.url_after_action = workflowState.urlAfterAction;
         stepPayload.after_url = workflowState.urlAfterAction;
+      }
+      if (attachments.includes('screenshot') && workflowState.screenshotBase64) {
+        stepPayload.screenshot = workflowState.screenshotBase64;
+      }
+      if (attachments.includes('login_strategy') && workflowState.loginStrategy) {
+        stepPayload.login_strategy = workflowState.loginStrategy;
+      }
+      if (attachments.includes('execution_history') && workflowState.executionHistory) {
+        stepPayload.execution_history = workflowState.executionHistory;
       }
     }
     
     // Log prompt usage with step information
-    const currentStepIndex = stepIndex !== null ? stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
-    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, stepPayload, {
+    const currentStepIndex = contextInfo.stepIndex !== null ? contextInfo.stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
+    await this.logPromptUsage(promptIdentifier, promptSource, decoratedTemplate, stepPayload, {
       step: step,
       stepIndex: currentStepIndex >= 0 ? currentStepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.type === step.type) ?? -1),
       totalSteps: this.workflowTemplate?.steps?.length
@@ -1601,7 +2419,7 @@ class WorkflowAnalyzer {
     try {
       // Use embedded template from step config (required - no fallback to database)
       const promptConfig = {
-        user_message_template: customTemplate,
+        user_message_template: decoratedTemplate,
         system_message: systemMessage,
         response_schema: responseSchema
       };
@@ -1628,9 +2446,215 @@ class WorkflowAnalyzer {
 
       // Debug: Log what was returned
       console.log(`[WorkflowAnalyzer] 🔍 AI Response for step ${step.id}:`, JSON.stringify(parsedResponse, null, 2).substring(0, 500));
+      let scriptProvided = false;
+
       if (parsedResponse && typeof parsedResponse === 'object') {
         console.log(`[WorkflowAnalyzer] 🔍 Response keys: ${Object.keys(parsedResponse).join(', ')}`);
-        if (parsedResponse.playwright_script) {
+
+        let normalizedSummary = null;
+        const summaryCandidate =
+          (parsedResponse.page_summary && typeof parsedResponse.page_summary === 'object' ? parsedResponse.page_summary : null) ||
+          (parsedResponse.page_summary_json && typeof parsedResponse.page_summary_json === 'object' ? parsedResponse.page_summary_json : null) ||
+          (parsedResponse.pageDescription && typeof parsedResponse.pageDescription === 'object' ? parsedResponse.pageDescription : null) ||
+          (parsedResponse.page_description && typeof parsedResponse.page_description === 'object' ? parsedResponse.page_description : null) ||
+          (parsedResponse.summary && typeof parsedResponse.summary === 'object' ? parsedResponse.summary : null) ||
+          null;
+
+        if (summaryCandidate || typeof parsedResponse.page_summary === 'string' || typeof parsedResponse.pageDescription === 'string') {
+          const summaryObject = summaryCandidate || {};
+          const shortDescription =
+            summaryObject.short_description ||
+            summaryObject.shortSummary ||
+            summaryObject.summary ||
+            summaryObject.description ||
+            (typeof parsedResponse.page_summary === 'string' ? parsedResponse.page_summary : null) ||
+            (typeof parsedResponse.pageDescription === 'string' ? parsedResponse.pageDescription : null) ||
+            workflowState.pageTitle ||
+            'Page summary';
+          const detailedDescription =
+            summaryObject.detailed_description ||
+            summaryObject.full_description ||
+            summaryObject.description ||
+            summaryObject.summary ||
+            '';
+
+          normalizedSummary = {
+            ...summaryObject,
+            short_description: shortDescription,
+            detailed_description: detailedDescription || summaryObject.detailed_description || ''
+          };
+
+          normalizedSummary.primary_purpose = normalizedSummary.primary_purpose || summaryObject.purpose || null;
+          normalizedSummary.key_features = Array.isArray(normalizedSummary.key_features) ? normalizedSummary.key_features : [];
+          normalizedSummary.user_actions = Array.isArray(normalizedSummary.user_actions) ? normalizedSummary.user_actions : [];
+
+          workflowState.pageDescription = normalizedSummary;
+          workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
+          workflowState.aiAnalysisResult.page_description = normalizedSummary;
+
+          if (!workflowState.pageDescriptionLogged) {
+            await this.logPageDescription(
+              jobId,
+              workflowState.pageUrl,
+              workflowState.pageTitle,
+              normalizedSummary,
+              {
+                visible_text_length: workflowState.visibleText?.length || 0,
+                forms_count: workflowState.playwrightAnalysis?.forms?.length || 0,
+                interactive_elements_count: workflowState.playwrightAnalysis?.interactive_elements?.length || 0,
+                source_step: step.id || step.name
+              },
+              workflowState.htmlContent,
+              workflowState.screenshotBase64
+            );
+            workflowState.pageDescriptionLogged = true;
+          }
+        }
+
+        if (parsedResponse.login_strategy && typeof parsedResponse.login_strategy === 'object') {
+          workflowState.loginStrategy = parsedResponse.login_strategy;
+          workflowState.context.login_strategy = parsedResponse.login_strategy;
+        } else if (step.id === 'login_page_intelligence') {
+          workflowState.loginStrategy = parsedResponse;
+          workflowState.context.login_strategy = parsedResponse;
+        }
+
+        const responseDescription =
+          parsedResponse.description ||
+          parsedResponse.action_description ||
+          parsedResponse.summary ||
+          parsedResponse.details ||
+          null;
+        const responseExpectedResult =
+          parsedResponse.expected_result ||
+          parsedResponse.expectedResult ||
+          parsedResponse.expected_outcome ||
+          parsedResponse.expectedOutcome ||
+          null;
+        const responseAnalysisNotes =
+          parsedResponse.analysis_notes ||
+          parsedResponse.analysisNotes ||
+          parsedResponse.notes ||
+          null;
+
+        const aiLegs = Array.isArray(parsedResponse.legs)
+          ? parsedResponse.legs
+          : Array.isArray(parsedResponse.actions)
+            ? parsedResponse.actions
+            : [];
+
+        if (aiLegs.length > 0) {
+          const normalizedLegs = this.applyLegsToWorkflowState(aiLegs, workflowState, step.id || 'ai-prompt');
+          if (normalizedLegs.length > 0) {
+            parsedResponse.legs = normalizedLegs;
+            parsedResponse.actions = normalizedLegs;
+            workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
+            workflowState.aiAnalysisResult.legs = normalizedLegs;
+            workflowState.aiAnalysisResult.actions = normalizedLegs;
+            workflowState.aiAnalysisResult.source = step.id || 'ai-prompt';
+          }
+        }
+
+        if (step.id === 'generate_login_script') {
+          const iterationNumber = workflowState.currentIteration || (Array.isArray(workflowState.executionHistory) ? workflowState.executionHistory.length + 1 : 1);
+          const flowStage = parsedResponse.flow_stage || parsedResponse.stage || 'login_attempt';
+          const legId = parsedResponse.leg_id || `login_attempt_${iterationNumber}`;
+          const actionSummary =
+            parsedResponse.action_summary ||
+            parsedResponse.description ||
+            parsedResponse.summary ||
+            `Login attempt ${iterationNumber}`;
+
+          const loginLeg = {
+            leg_id: legId,
+            description: actionSummary,
+            type: 'login_attempt',
+            stage: flowStage,
+            iteration: iterationNumber,
+            metadata: parsedResponse
+          };
+
+          workflowState.currentLeg = loginLeg;
+          workflowState.currentLegOriginalId = legId;
+          workflowState.currentLegResolvedId = legId;
+
+          if (!Array.isArray(workflowState.loginAttempts)) {
+            workflowState.loginAttempts = [];
+          }
+          workflowState.loginAttempts.push({
+            leg_id: legId,
+            stage: flowStage,
+            summary: actionSummary,
+            iteration: iterationNumber,
+            timestamp: new Date().toISOString()
+          });
+
+          workflowState.context.current_login_stage = flowStage;
+          workflowState.context.current_leg = loginLeg;
+        }
+
+        if (step.id === 'generate_action_script') {
+          const currentLeg = workflowState.currentLeg || workflowState.context?.currentLeg || null;
+          const defaultLegDescription = currentLeg?.description || currentLeg?.title || currentLeg?.name || null;
+          const defaultExpected = currentLeg?.expected_outcome || currentLeg?.expectedOutcome || null;
+
+          const actionPlan = {
+            description: responseDescription || defaultLegDescription || null,
+            expected_result: responseExpectedResult || defaultExpected || null,
+            analysis_notes: responseAnalysisNotes || null,
+            page_summary: normalizedSummary || parsedResponse.page_summary || parsedResponse.pageDescription || null
+          };
+
+          workflowState.currentActionPlan = actionPlan;
+          workflowState.lastGeneratedActionPlan = actionPlan;
+          workflowState.lastExecutionSummary = actionPlan;
+          if (!workflowState.context) {
+            workflowState.context = {};
+          }
+          workflowState.context.currentActionPlan = actionPlan;
+
+          if (currentLeg && typeof currentLeg === 'object') {
+            currentLeg.generated_action_plan = actionPlan;
+            if (Array.isArray(workflowState.legs)) {
+              const legIndex = workflowState.legs.findIndex((leg) => {
+                if (!leg) return false;
+                const legIdentifier = leg.leg_id || leg.id || leg.original_leg_id || leg.source_leg_id;
+                const currentIdentifier =
+                  workflowState.currentLegResolvedId ||
+                  workflowState.currentLegOriginalId ||
+                  currentLeg.leg_id ||
+                  currentLeg.id ||
+                  currentLeg.original_leg_id ||
+                  null;
+                return legIdentifier && currentIdentifier && legIdentifier === currentIdentifier;
+              });
+              if (legIndex >= 0) {
+                workflowState.legs[legIndex] = {
+                  ...workflowState.legs[legIndex],
+                  generated_action_plan: actionPlan
+                };
+              }
+            }
+          }
+
+          const actionLogMessage = actionPlan.description
+            ? `🛠️ [ACTION] ${actionPlan.description}`
+            : '🛠️ [ACTION] Generated Playwright script';
+          await this.logStepOutcome(
+            step,
+            jobId,
+            actionLogMessage,
+            {
+              expected_result: actionPlan.expected_result,
+              leg_id: workflowState.currentLegResolvedId || workflowState.currentLegOriginalId || currentLeg?.leg_id || null,
+              script_length: typeof parsedResponse.playwright_script === 'string'
+                ? parsedResponse.playwright_script.length
+                : (workflowState.legScriptToExecute ? workflowState.legScriptToExecute.length : 0)
+            }
+          );
+        }
+
+          if (parsedResponse.playwright_script) {
           console.log(`[WorkflowAnalyzer] ✅ playwright_script found: ${parsedResponse.playwright_script.length} chars`);
           // Log to job history
           if (jobId && this.backendLogger) {
@@ -1644,6 +2668,15 @@ class WorkflowAnalyzer {
                 script_ends_with: parsedResponse.playwright_script.substring(Math.max(0, parsedResponse.playwright_script.length - 100))
               }
             );
+          }
+
+          const cleanedScript = this.cleanScript(parsedResponse.playwright_script);
+          if (cleanedScript && cleanedScript.trim().length > 0) {
+            workflowState.legScriptToExecute = cleanedScript;
+            workflowState.context.legScriptToExecute = cleanedScript;
+            workflowState.loginScriptToExecute = cleanedScript;
+            workflowState.context.loginScriptToExecute = cleanedScript;
+            scriptProvided = true;
           }
         } else {
           console.log(`[WorkflowAnalyzer] ⚠️ playwright_script NOT found in response`);
@@ -1660,11 +2693,85 @@ class WorkflowAnalyzer {
             );
           }
         }
+
+        if (!workflowState.legScriptToExecute) {
+          const fallbackScript =
+            parsedResponse.script ||
+            parsedResponse.code ||
+            parsedResponse.legScriptToExecute ||
+            null;
+
+          if (typeof fallbackScript === 'string' && fallbackScript.trim().length > 0) {
+            const cleanedFallback = this.cleanScript(fallbackScript);
+            if (cleanedFallback && cleanedFallback.trim().length > 0) {
+              workflowState.legScriptToExecute = cleanedFallback;
+              workflowState.context.legScriptToExecute = cleanedFallback;
+              workflowState.loginScriptToExecute = cleanedFallback;
+              workflowState.context.loginScriptToExecute = cleanedFallback;
+              scriptProvided = true;
+            }
+          }
+        }
+
+      }
+
+      if (['generate_action_script', 'generate_login_script'].includes(step.id) && !scriptProvided) {
+        throw new Error('AI prompt did not return a playwright_script field');
+      }
+
+      if (step.id === 'determine_completion' && parsedResponse && typeof parsedResponse === 'object') {
+        const pageState = parsedResponse.page_state;
+        if (pageState && typeof pageState === 'object') {
+          workflowState.pageStateAfter = pageState;
+          workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
+          workflowState.aiAnalysisResult.page_state_after = pageState;
+
+          const metadata = {
+            source_step: step.id,
+            context: 'after_action',
+            short_description: pageState.short_description,
+            notable_changes_count: Array.isArray(pageState.notable_changes) ? pageState.notable_changes.length : 0
+          };
+
+          if (!workflowState.pageStateAfterLogged) {
+            await this.logPageDescription(
+              jobId,
+              workflowState.pageUrl,
+              workflowState.pageTitle,
+              {
+                short_description: pageState.short_description,
+                detailed_description: pageState.detailed_description,
+                primary_purpose: pageState.primary_purpose || null,
+                key_features: pageState.notable_changes || [],
+                user_actions: pageState.interactive_summary || []
+              },
+              metadata,
+              workflowState.htmlContent,
+              workflowState.screenshotBase64
+            );
+            workflowState.pageStateAfterLogged = true;
+          }
+        }
+
+        if (parsedResponse.status) {
+          workflowState.loginStatus = parsedResponse.status;
+          workflowState.context.login_status = parsedResponse.status;
+        }
+        if (parsedResponse.captcha_status) {
+          workflowState.lastCaptchaStatus = parsedResponse.captcha_status;
+          workflowState.context.captcha_status = parsedResponse.captcha_status;
+        }
+        if (Array.isArray(parsedResponse.cookies)) {
+          workflowState.latestCookies = parsedResponse.cookies;
+        }
       }
 
       // Store response in workflow state (legacy key and slug-based)
       workflowState[`${step.name}_response`] = parsedResponse;
       this.storeStepResult(step, parsedResponse, workflowState);
+      if (step.id === 'determine_completion') {
+        this.collectIterationDataFromState(workflowState);
+      }
       
       const logPreview = typeof aiResponse === 'string' ? aiResponse.substring(0, 100) : JSON.stringify(parsedResponse).substring(0, 100);
       console.log(`[WorkflowAnalyzer] ✅ AI prompt completed: ${logPreview}...`);
@@ -1677,7 +2784,7 @@ class WorkflowAnalyzer {
   /**
    * Execute workflow analysis step
    */
-  async executeWorkflowAnalysisStep(page, step, workflowState, jobId, stepIndex = null) {
+  async executeWorkflowAnalysisStep(page, step, workflowState, jobId, stepContext = null) {
     console.log(`[WorkflowAnalyzer] 🔍 Performing workflow analysis (${step.name})`);
     
     // Prompt template MUST be embedded directly in step config
@@ -1689,6 +2796,48 @@ class WorkflowAnalyzer {
     
     const promptIdentifier = step.id || step.name || 'workflow-analysis';
     const promptSource = 'workflow-step';
+    const contextInfo = this.resolveStepContext(step, stepContext, this.workflowTemplate?.steps);
+    const requirementText = contextInfo.requirementText;
+    const decoratedTemplate = appendRequirementToTemplate(customTemplate, requirementText);
+    const templateForExecution = this.enforceLegInstructionsInTemplate(decoratedTemplate);
+
+    const legsFromPageSummary = Array.isArray(workflowState.pageDescription?.legs)
+      ? workflowState.pageDescription.legs
+      : null;
+
+    const summaryLegCount = legsFromPageSummary ? legsFromPageSummary.length : 0;
+    const existingLegCount = Array.isArray(workflowState.legs) ? workflowState.legs.length : 0;
+    console.log(`[WorkflowAnalyzer] ♻️ Summary legs count before workflow-analysis: ${summaryLegCount} (existing legs: ${existingLegCount}, source: ${workflowState.legsSource || 'none'})`);
+
+    if (legsFromPageSummary && legsFromPageSummary.length > 0) {
+      if (!Array.isArray(workflowState.legs) || workflowState.legs.length === 0) {
+        this.applyLegsToWorkflowState(legsFromPageSummary, workflowState, 'page-summary');
+      } else if (workflowState.legsSource !== 'page-summary') {
+        this.applyLegsToWorkflowState(legsFromPageSummary, workflowState, 'page-summary');
+      }
+
+      console.log(`[WorkflowAnalyzer] ♻️ Reusing ${workflowState.legs.length} legs from page summary; skipping additional workflow-analysis request`);
+      workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
+      workflowState.aiAnalysisResult.page_description = workflowState.aiAnalysisResult.page_description || workflowState.pageDescription || null;
+      workflowState.aiAnalysisResult.legs = workflowState.legs;
+      workflowState.aiAnalysisResult.actions = workflowState.legs;
+      workflowState.aiAnalysisResult.source = workflowState.aiAnalysisResult.source || 'page-summary';
+      this.storeStepResult(step, {
+        legs: workflowState.legs,
+        reusedFrom: 'page-summary'
+      }, workflowState);
+
+      await this.logStepOutcome(
+        step,
+        jobId,
+        `🧠 [WORKFLOW-ANALYSIS] Reused ${workflowState.legs.length} legs from page summary`,
+        {
+          legs_count: workflowState.legs.length,
+          reused_from: 'page-summary'
+        }
+      );
+      return;
+    }
     
     // Prepare playbook data as JSON strings (trimmed to reasonable sizes for prompts)
     const formsData = Array.isArray(workflowState.playwrightAnalysis?.forms)
@@ -1719,8 +2868,8 @@ class WorkflowAnalyzer {
     };
     
     // Log prompt usage with step information
-    const currentStepIndex = stepIndex !== null ? stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
-    await this.logPromptUsage(promptIdentifier, promptSource, customTemplate, optimizedPayload, {
+    const currentStepIndex = contextInfo.stepIndex !== null ? contextInfo.stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
+    await this.logPromptUsage(promptIdentifier, promptSource, templateForExecution, optimizedPayload, {
       step: step,
       stepIndex: currentStepIndex >= 0 ? currentStepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.type === step.type) ?? -1),
       totalSteps: this.workflowTemplate?.steps?.length
@@ -1735,25 +2884,35 @@ class WorkflowAnalyzer {
         workflowState.pageUrl,
         null,
         optimizedPayload,
-        customTemplate // Pass custom template (required - no fallback to database)
+        templateForExecution // Pass decorated template (required - no fallback to database)
       );
       
-      if (workflowState.aiAnalysisResult && workflowState.aiAnalysisResult.legs) {
-        workflowState.legs = workflowState.aiAnalysisResult.legs;
-        console.log(`[WorkflowAnalyzer] ✅ Workflow analysis completed: ${workflowState.legs.length} legs identified`);
-        workflowState.legResults = new Array(workflowState.legs.length).fill(null);
+      if (workflowState.aiAnalysisResult && Array.isArray(workflowState.aiAnalysisResult.legs)) {
+        const normalizedLegs = this.applyLegsToWorkflowState(
+          workflowState.aiAnalysisResult.legs,
+          workflowState,
+          step.id || 'workflow-analysis'
+        );
+
+        if (normalizedLegs.length === 0) {
+          throw new Error('OpenAI did not return valid workflow legs');
+        }
+
+        workflowState.aiAnalysisResult.legs = normalizedLegs;
+        workflowState.aiAnalysisResult.actions = normalizedLegs;
+        console.log(`[WorkflowAnalyzer] ✅ Workflow analysis completed: ${normalizedLegs.length} legs identified`);
         this.storeStepResult(step, {
-          legs: workflowState.legs,
+          legs: normalizedLegs,
           aiAnalysis: workflowState.aiAnalysisResult
         }, workflowState);
 
         await this.logStepOutcome(
           step,
           jobId,
-          `🧠 [WORKFLOW-ANALYSIS] Identified ${workflowState.legs.length} workflow legs`,
+          `🧠 [WORKFLOW-ANALYSIS] Identified ${normalizedLegs.length} workflow legs`,
           {
-            legs_count: workflowState.legs.length,
-            sample_legs: workflowState.legs.slice(0, 3).map(leg => leg.description || leg.type || 'leg')
+            legs_count: normalizedLegs.length,
+            sample_legs: normalizedLegs.slice(0, 3).map(leg => leg.description || leg.type || 'leg')
           }
         );
       } else {
@@ -1897,11 +3056,28 @@ class WorkflowAnalyzer {
     const includeScreenshot = config.includeScreenshot !== false;
     const markAsAnalyzed = config.markAsAnalyzed !== false;
     const includeAiAnalysis = config.includeAiAnalysis !== false;
+    const includeActions = config.includeActions === true;
+    const actionsScope = config.actionsScope || 'all';
+    const saveLegsData = config.saveLegsData === true;
     
     const discoveryData = {
       title: workflowState.pageTitle,
       analyzed: markAsAnalyzed
     };
+
+    if (workflowState.shouldAutoCreateWorkflow && !workflowState.workflowId) {
+      const createdId = await this.ensureWorkflowInitialized(
+        workflowState,
+        jobId,
+        pageId,
+        projectId,
+        'before-page-discovery'
+      );
+      if (createdId) {
+        workflowState.autoCreatedWorkflow = true;
+        discoveryData.workflow_id = createdId;
+      }
+    }
     
     if (includeContent && workflowState.htmlContent) {
       discoveryData.content = workflowState.htmlContent;
@@ -1962,7 +3138,7 @@ class WorkflowAnalyzer {
 
     discoveryData.page_stats = stats;
 
-    if (actionsSummary.total > 0) {
+    if (includeActions && actionsSummary.total > 0) {
       discoveryData.actions_summary = actionsSummary;
     }
 
@@ -1972,6 +3148,9 @@ class WorkflowAnalyzer {
       workflowState.pageDescription = fallbackDescription;
     }
     
+    const jobIdentifier = workflowState.jobId || jobId;
+    const effectiveProjectId = workflowState.projectId || projectId;
+
     try {
       console.log('[WorkflowAnalyzer] 🚀 Page discovery payload summary:', {
         url: workflowState.pageUrl,
@@ -1980,38 +3159,62 @@ class WorkflowAnalyzer {
         actionsSummaryTotal: actionsSummary?.total || 0,
         includeFlags: config
       });
-      const response = await this.updatePageDiscovery(jobId, pageId, projectId, workflowState.pageUrl, discoveryData);
+      const resolvedLegId = workflowState.currentLeg?.original_leg_id ||
+        workflowState.currentLegOriginalId ||
+        workflowState.currentLegResolvedId ||
+        workflowState.currentLeg?.leg_id ||
+        workflowState.currentLeg?.source_leg_id ||
+        workflowState.currentLeg?.id ||
+        null;
+      const response = await this.updatePageDiscovery(jobIdentifier, pageId, effectiveProjectId, workflowState.pageUrl, discoveryData);
       console.log(`[WorkflowAnalyzer] ✅ Page discovery updated`);
+ 
+      let legSaveResults = null;
+      if (saveLegsData && workflowState.workflowId) {
+        let legsToSave = Array.isArray(workflowState.legs) ? workflowState.legs : [];
+        console.log('[WorkflowAnalyzer] 🧾 Leg save candidates before filtering:', {
+          total: Array.isArray(legsToSave) ? legsToSave.length : 0,
+          workflowId: workflowState.workflowId,
+          legIds: Array.isArray(legsToSave) ? legsToSave.map(leg => leg.leg_id) : []
+        });
+        console.log('[WorkflowAnalyzer] 🔎 Current leg id for save:', workflowState.currentLeg?.leg_id);
+        if (actionsScope === 'current_leg') {
+          if (resolvedLegId) {
+            legsToSave = legsToSave.filter(leg => leg.leg_id === resolvedLegId || leg.leg_id === workflowState.currentLeg?.leg_id);
+          } else if (workflowState.currentLeg?.description) {
+            const targetDescription = workflowState.currentLeg.description.toLowerCase();
+            legsToSave = legsToSave.filter(leg => (leg.description || '').toLowerCase() === targetDescription);
+          }
+        }
+        console.log('[WorkflowAnalyzer] 📊 Leg iterations snapshot:', legsToSave.map(leg => ({
+          leg_id: leg.leg_id,
+          iterations: Array.isArray(leg.iterations) ? leg.iterations.length : 0
+        })));
+        legsToSave = legsToSave.filter(leg => Array.isArray(leg.iterations) && leg.iterations.length > 0);
+        console.log('[WorkflowAnalyzer] 🧮 Leg save candidates after filtering:', {
+          total: legsToSave.length,
+          legIds: legsToSave.map(leg => leg.leg_id)
+        });
+        if (legsToSave.length > 0) {
+          legSaveResults = await this.saveLegIterationsToWorkflow(workflowState, legsToSave, jobId);
+        }
+      }
 
       const discoverySummary = {
         included: {
-          content: includeContent && !!workflowState.htmlContent,
-          forms: includeForms,
-          links: includeLinks,
-          interactive: includeInteractive,
-          non_interactive: includeNonInteractive,
-          description: includeDescription,
-          visible_text: includeVisibleText,
-          screenshot: includeScreenshot && !!workflowState.screenshotFileId,
-          ai_analysis: includeAiAnalysis
+          content: includeContent && !!discoveryData.content,
+          visible_text: includeVisibleText && !!discoveryData.visible_text,
+          forms: includeForms && !!discoveryData.forms,
+          interactive_elements: includeInteractive && !!discoveryData.interactive_elements,
+          non_interactive_elements: includeNonInteractive && !!discoveryData.non_interactive_elements,
+          links: includeLinks && !!discoveryData.links,
+          description: includeDescription && !!discoveryData.page_description,
+          ai_analysis: includeAiAnalysis && !!discoveryData.ai_analysis,
+          screenshot: includeScreenshot && !!discoveryData.screenshot_file_id,
+          actions: includeActions && !!discoveryData.actions_summary
         },
-        counts: {
-          forms: workflowState.playwrightAnalysis?.forms?.length || 0,
-          links: workflowState.playwrightAnalysis?.links?.length || 0,
-          interactive: workflowState.playwrightAnalysis?.interactive_elements?.length || 0,
-          non_interactive: workflowState.playwrightAnalysis?.non_interactive_elements?.length || 0
-        },
-        analyzed: discoveryData.analyzed,
-        response: {
-          isNew: response?.isNew,
-          skipped: response?.skipped,
-          pageId: response?.page?._id
-        },
-        stats,
-        actions: actionsSummary
+        counts: stats
       };
-
-      this.storeStepResult(step, discoverySummary, workflowState);
 
       await this.logStepOutcome(
         step,
@@ -2022,11 +3225,47 @@ class WorkflowAnalyzer {
           counts: discoverySummary.counts,
           analyzed: discoveryData.analyzed,
           page_stats: stats,
-          actions_summary: actionsSummary.total > 0 ? actionsSummary : null
+          actions_summary: includeActions && actionsSummary.total > 0 ? actionsSummary : null,
+          leg_save_results: legSaveResults
         }
       );
     } catch (error) {
       console.error(`[WorkflowAnalyzer] ❌ Failed to update page discovery: ${error.message}`);
+    }
+  }
+
+  async saveLegIterationsToWorkflow(workflowState, legs, jobId) {
+    if (!Array.isArray(legs) || legs.length === 0 || !workflowState.workflowId) {
+      return null;
+    }
+
+    try {
+      const legsPayload = JSON.parse(JSON.stringify(legs));
+
+      const response = await axios.post(
+        `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+        {
+          saveLegs: true,
+          saveInteractiveElements: false,
+          saveNonInteractiveElements: false,
+          saveLinks: false,
+          saveCookies: false,
+          legs: legsPayload,
+          job_id: jobId
+        },
+        {
+          headers: this.getAuthHeaders()
+        }
+      );
+
+      const results = response.data?.results || null;
+      if (results) {
+        console.log('[WorkflowAnalyzer] 💾 Saved leg iterations via page-discovery:', results.legs || results);
+      }
+      return results;
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Failed to save leg iterations: ${error.message}`);
+      return null;
     }
   }
 
@@ -2036,6 +3275,19 @@ class WorkflowAnalyzer {
   async executeSaveDataStep(page, step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 💾 Executing save-data step (${step.name})`);
     
+    if (!workflowState.workflowId && workflowState.shouldAutoCreateWorkflow) {
+      const createdId = await this.ensureWorkflowInitialized(
+        workflowState,
+        jobId,
+        workflowState.pageId,
+        workflowState.projectId,
+        'before-save-data'
+      );
+      if (createdId) {
+        workflowState.autoCreatedWorkflow = true;
+      }
+    }
+
     if (!workflowState.workflowId) {
       throw new Error('No workflow ID available for save-data step');
     }
@@ -2271,6 +3523,11 @@ class WorkflowAnalyzer {
     }
     
     let cleaned = script.trim();
+    // Preserve async IIFE wrappers (return await (async () => { ... })()) to avoid breaking structure
+    const asyncIifePattern = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{/;
+    if (asyncIifePattern.test(cleaned)) {
+      return cleaned;
+    }
     
     // First, extract code from markdown code blocks if present
     const codeBlockRegex = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
@@ -2633,6 +3890,16 @@ class WorkflowAnalyzer {
       }
       
       workflowState.lastExecutionResult = result;
+      if (result && typeof result === 'object') {
+        const scriptFromResult = result.legScriptToExecute || result.script || result.playwright_script || result.code || null;
+        if (typeof scriptFromResult === 'string' && scriptFromResult.trim().length > 0) {
+          workflowState.legScriptToExecute = scriptFromResult;
+          if (!workflowState.context) {
+            workflowState.context = {};
+          }
+          workflowState.context.legScriptToExecute = scriptFromResult;
+        }
+      }
       
       // If result contains workflowState updates (like legsToExecute, context updates), merge them
       const resultType = typeof result;
@@ -2782,8 +4049,23 @@ class WorkflowAnalyzer {
     }
     
     // Resolve the path with slug support
-    const code = this.resolvePath(sourceField, workflowState);
+    let code = this.resolvePath(sourceField, workflowState);
+
+    // Fall back to workflowState.context if direct resolution failed
+    if (!code && workflowState?.context) {
+      code = this.resolvePath(sourceField, workflowState.context);
+    }
+
+    // Fall back to checking plain context paths (e.g., context.legScriptToExecute)
+    if (!code && workflowState?.context) {
+      code = this.getNestedValue(workflowState.context, sourceField);
+    }
+
     if (!code) {
+      console.warn(`[WorkflowAnalyzer] ⚠️ Unable to resolve code for path "${sourceField}". Available keys:`, Object.keys(workflowState || {}));
+      if (workflowState?.context) {
+        console.warn(`[WorkflowAnalyzer] ⚠️ Context keys:`, Object.keys(workflowState.context));
+      }
       throw new Error(`Code not found at path "${sourceField}" in workflowState for step: ${step.name}`);
     }
     
@@ -2791,6 +4073,7 @@ class WorkflowAnalyzer {
     
     // Clean the code to remove markdown code blocks and function declarations
     code = this.cleanScript(code);
+    console.log(`[WorkflowAnalyzer] 🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
     
     if (!code || code.trim().length === 0) {
       throw new Error(`Script is empty after cleaning for step: ${step.name}`);
@@ -2846,123 +4129,77 @@ class WorkflowAnalyzer {
         console.warn(`[WorkflowAnalyzer] ⚠️ Failed to capture before screenshot: ${screenshotError.message}`);
       }
       
-      const result = await page.evaluate(
-        ({ code, workflowState, timeout }) => {
-          // Extract commonly used variables from workflowState for direct access in browser context
-          const analysis = workflowState?.analysis || workflowState?.playwrightAnalysis || {};
-          const playwrightAnalysis = workflowState?.playwrightAnalysis || {};
-          const collectedLinks = workflowState?.collectedLinks || playwrightAnalysis?.links || [];
-          const collectedForms = workflowState?.collectedForms || playwrightAnalysis?.forms || [];
-          const collectedInteractiveElements = workflowState?.collectedInteractiveElements || playwrightAnalysis?.interactive_elements || [];
-          const visibleText = workflowState?.visibleText || workflowState?.visible_text || '';
-          const interactiveElements = workflowState?.interactiveElements || workflowState?.interactive_elements || [];
-          const forms = workflowState?.forms || [];
-          const links = workflowState?.links || [];
-          const pageUrl = workflowState?.pageUrl || workflowState?.page_url || '';
-          const pageTitle = workflowState?.pageTitle || workflowState?.page_title || '';
-          const pageDescription = workflowState?.pageDescription || workflowState?.page_description || '';
-          const currentLeg = workflowState?.currentLeg || {};
-          const currentItem = workflowState?.currentItem || {};
-          const legsToExecute = workflowState?.legsToExecute || workflowState?.legs || [];
-          const context = workflowState?.context || {};
-          const lastExecutionResult = workflowState?.lastExecutionResult || null;
-          const executionResult = lastExecutionResult;
-          // Extract step results from workflowState (all stored step results)
-          const results = workflowState?.results || {};
-          // Common step result variables that might be referenced
-          // Try multiple possible locations for playwright analysis result
-          let playwrightStepResult = workflowState?.playwright_analysis?.result || 
-            workflowState?.playwrightAnalysis || 
-            results?.playwright_analysis?.result ||
-            workflowState?.playwright_analysis ||
-            {};
-          // Try to find any step with playwright in its name/id
-          if (!playwrightStepResult || typeof playwrightStepResult !== 'object' || Object.keys(playwrightStepResult).length === 0) {
-            for (const [key, value] of Object.entries(workflowState)) {
-              if (key && typeof key === 'string' && 
-                  (key.includes('playwright') || key.includes('analysis')) && 
-                  value && typeof value === 'object' && 
-                  (value.result || value.forms || value.links || value.interactive_elements)) {
-                playwrightStepResult = value.result || value;
-                break;
-              }
+      // Log execution start
+      if (jobId) {
+        try {
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'debug',
+            message: `▶️ Executing Playwright script in Node.js context...`,
+            component: 'WORKFLOW-ANALYZER',
+            metadata: {
+              step_id: step.id,
+              step_name: step.name,
+              url_before: urlBeforeAction,
+              timeout_ms: timeout,
+              script_length: code.length,
+              script_preview: code.substring(0, 300)
             }
-          }
-          // Fallback to empty object if still not found
-          if (!playwrightStepResult || typeof playwrightStepResult !== 'object') {
-            playwrightStepResult = {};
-          }
-          const stepResult = lastExecutionResult || {};
-          
-          // Create runner function with all extracted variables available in scope
-          // Note: 'page' is NOT available in browser context - scripts must use DOM APIs
-          const runner = new Function(
-            'workflowState',
-            'analysis',
-            'playwrightAnalysis',
-            'collectedLinks',
-            'collectedForms',
-            'collectedInteractiveElements',
-            'visibleText',
-            'interactiveElements',
-            'forms',
-            'links',
-            'pageUrl',
-            'pageTitle',
-            'pageDescription',
-            'currentLeg',
-            'currentItem',
-            'legsToExecute',
-            'context',
-            'lastExecutionResult',
-            'executionResult',
-            'results',
-            'playwrightStepResult',
-            'stepResult',
-            `return (async () => { ${code}\n })();`
-          );
-          
-          return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => {
-              reject(new Error(`Code execution timed out after ${timeout}ms`));
-            }, timeout);
-            
-            Promise.resolve(runner(
-              workflowState,
-              analysis,
-              playwrightAnalysis,
-              collectedLinks,
-              collectedForms,
-              collectedInteractiveElements,
-              visibleText,
-              interactiveElements,
-              forms,
-              links,
-              pageUrl,
-              pageTitle,
-              pageDescription,
-              currentLeg,
-              currentItem,
-              legsToExecute,
-              context,
-              lastExecutionResult,
-              executionResult,
-              results,
-              playwrightStepResult,
-              stepResult
-            ))
-              .then(result => {
-                clearTimeout(timer);
-                resolve(result);
-              })
-              .catch(error => {
-                clearTimeout(timer);
-                reject(error);
-              });
+          }, {
+            headers: this.getAuthHeaders()
           });
-        },
-        { code, workflowState, timeout }
-      );
+        } catch (e) {
+          // Silent fail - don't block execution
+        }
+      }
+      
+      // Playwright scripts must execute in Node.js context, not browser context
+      // The 'page' object is available in Node.js, not in browser
+      // Create an async function that has access to the page object
+      const executeInNodeContext = async (pageObj, scriptCode) => {
+        // Use string concatenation (not template literals) to avoid escaping issues
+        // This allows the script code to contain backticks, ${}, etc. without problems
+        const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
+        
+        // Create a function with page as parameter
+        const fn = new Function('page', functionBody);
+        return await fn(pageObj);
+      };
+      
+      // Wrap script execution with timeout
+      const executionStartTime = Date.now();
+      const result = await Promise.race([
+        executeInNodeContext(page, code),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(`Code execution timed out after ${timeout}ms`)), timeout)
+        )
+      ]);
+      
+      const executionTime = Date.now() - executionStartTime;
+      
+      // Log successful execution
+      if (jobId) {
+        try {
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'info',
+            message: `✅ Playwright script executed successfully (${executionTime}ms)`,
+            component: 'WORKFLOW-ANALYZER',
+            metadata: {
+              step_id: step.id,
+              step_name: step.name,
+              execution_time_ms: executionTime,
+              url_before: urlBeforeAction,
+              url_after: page.url(),
+              result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500)
+            }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        } catch (e) {
+          // Silent fail - don't block execution
+        }
+      }
       
       // After executing code, wait for page to stabilize (navigation, DOM updates, etc.)
       try {
@@ -3040,6 +4277,13 @@ class WorkflowAnalyzer {
         screenshotAfterKey
       };
       
+      try {
+        const execPreview = JSON.stringify(executionResult);
+        console.log(`[WorkflowAnalyzer] 🎯 Execution result preview: ${execPreview.substring(0, 300)}${execPreview.length > 300 ? '…' : ''}`);
+      } catch (e) {
+        console.log('[WorkflowAnalyzer] 🎯 Execution result (non-serializable)', executionResult);
+      }
+
       workflowState.lastExecutionResult = executionResult;
       this.storeStepResult(step, executionResult, workflowState);
       
@@ -3463,14 +4707,140 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Execute complete-leg step - marks a workflow leg as completed
+   */
+  async executeCompleteLegStep(step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] ✅ Executing complete-leg step (${step.name})`);
+    
+    const config = step.config || {};
+    
+    // Get leg ID from config or from currentLeg in workflowState
+    const legId = config.legId || config.leg_id || workflowState.currentLeg?.leg_id || workflowState.currentItem?.leg_id;
+    
+    if (!legId) {
+      throw new Error('complete-leg step requires leg_id in config or currentLeg in workflowState');
+    }
+    
+    if (!workflowState.workflowId) {
+      throw new Error('complete-leg step requires workflowId in workflowState');
+    }
+    
+    // Determine final result from config or from determine_completion result
+    let finalResult = config.final_result || config.finalResult || 'skipped';
+    let error = config.error || null;
+    
+    // Try to get result from determine_completion step if not specified
+    if (finalResult === 'skipped' || !config.final_result) {
+      const determineResult = workflowState['determine_completion']?.result || 
+                              workflowState.results?.['determine_completion']?.result ||
+                              workflowState.lastExecutionResult;
+      
+      if (determineResult) {
+        const status = determineResult.status || determineResult.completion_status || 'unknown';
+        finalResult = status === 'success' ? 'success' : (status === 'failure' ? 'failure' : 'skipped');
+        error = determineResult.error || determineResult.reason || null;
+      }
+    }
+    
+    // Try to get result from collect_iteration_data if still not found
+    if (finalResult === 'skipped' || !config.final_result) {
+      const collectResult = workflowState['collect_iteration_data']?.result || 
+                          workflowState.results?.['collect_iteration_data']?.result;
+      
+      if (collectResult) {
+        if (collectResult.legSucceeded !== undefined) {
+          finalResult = collectResult.legSucceeded ? 'success' : (collectResult.legFailed ? 'failure' : 'skipped');
+        }
+      }
+    }
+    
+    try {
+      await axios.post(
+        `${this.backendUrl}/api/workflows/${workflowState.workflowId}/legs/${legId}/complete`,
+        {
+          final_result: finalResult,
+          error: error
+        },
+        {
+          headers: this.getAuthHeaders()
+        }
+      );
+      
+      console.log(`[WorkflowAnalyzer] ✅ Marked leg ${legId} as ${finalResult}`);
+      
+      // Log to backend
+      await this.sendLogToBackend(jobId, 'info', `✅ Leg ${legId} completed with status: ${finalResult}`, 'WORKFLOW-ANALYZER', {
+        leg_id: legId,
+        final_result: finalResult,
+        error: error
+      });
+      
+      this.storeStepResult(step, { 
+        leg_id: legId,
+        final_result: finalResult,
+        error: error,
+        completed: true
+      }, workflowState);
+      
+    } catch (completeError) {
+      console.error(`[WorkflowAnalyzer] ❌ Failed to mark leg ${legId} as completed: ${completeError.message}`);
+      throw completeError;
+    }
+  }
+
+  /**
    * Execute print step - logs a message to job history
    */
   async executePrintStep(step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 📝 Printing message (${step.name})`);
     
     const config = step.config || {};
-    const message = config.message || 'No message provided';
+    const rawMessage = typeof config.message === 'string'
+      ? config.message
+      : (config.message?.toString?.() ?? 'No message provided');
     const level = config.level || 'info';
+
+    const scope = this.buildTemplateScope(step, workflowState, jobId);
+    let message = this.interpolateTemplate(rawMessage, scope);
+
+    const itemsToLog = this.selectItemsForPrint(step, workflowState, scope, config);
+    const itemsLabel = config.arrayLabel ||
+      config.itemsLabel ||
+      (itemsToLog === scope.legsToExecute ? 'Legs' : null) ||
+      'Items';
+    const formattedItems = Array.isArray(itemsToLog) && itemsToLog.length > 0
+      ? this.formatItemsForPrint(itemsToLog, {
+          maxItems: this.coerceToInteger(config.maxItemsToLog) ?? 10,
+          label: itemsLabel
+        })
+      : '';
+
+    if (formattedItems) {
+      message = `${message}\n${formattedItems}`;
+    }
+
+    const metadata = {
+      step_name: step.name,
+      step_slug: step.slug || null,
+      message: message,
+      level: level
+    };
+
+    if (Array.isArray(itemsToLog) && itemsToLog.length > 0) {
+      const preview = this.createItemsPreview(itemsToLog, config);
+      metadata.array_path = config.arrayPath || config.itemsPath || 'legsToExecute';
+      metadata.array_total = itemsToLog.length;
+      if (preview.length > 0) {
+        metadata.array_preview = preview;
+      }
+    }
+
+    const legIndex = scope.currentLegIndex ?? workflowState?.currentLegIndex ?? workflowState?.context?.currentLegIndex;
+    if (Number.isInteger(legIndex)) {
+      metadata.current_leg_index = legIndex;
+    }
+
+    this.enrichPrintMetadata(metadata, scope, workflowState);
 
     try {
       await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
@@ -3478,22 +4848,377 @@ class WorkflowAnalyzer {
         level: level,
         message: `📝 [PRINT] ${message}`,
         component: 'WORKFLOW-PRINT',
-        metadata: {
-          step_name: step.name,
-          step_slug: step.slug || null,
-          message: message,
-          level: level
-        }
+        metadata
       }, {
         headers: this.getAuthHeaders()
       });
 
-      this.storeStepResult(step, { message, level, printed: true }, workflowState);
+      this.storeStepResult(step, { 
+        message,
+        level,
+        printed: true,
+        items_logged: Array.isArray(itemsToLog) ? itemsToLog.length : 0
+      }, workflowState);
       console.log(`[WorkflowAnalyzer] ✅ Printed message: "${message}" (level: ${level})`);
     } catch (error) {
       console.error(`[WorkflowAnalyzer] ❌ Print step failed: ${error.message}`);
       throw error;
     }
+  }
+
+  buildTemplateScope(step, workflowState, jobId) {
+    const scope = {};
+
+    if (this.context && typeof this.context === 'object') {
+      scope.jobContext = this.context;
+      Object.entries(this.context).forEach(([key, value]) => {
+        scope[key] = value;
+      });
+    }
+
+    if (workflowState && typeof workflowState === 'object') {
+      Object.entries(workflowState).forEach(([key, value]) => {
+        scope[key] = value;
+      });
+    }
+
+    if (workflowState?.context && typeof workflowState.context === 'object') {
+      Object.entries(workflowState.context).forEach(([key, value]) => {
+        scope[key] = value;
+      });
+    }
+
+    scope.workflowState = workflowState;
+    scope.state = workflowState;
+    scope.context = workflowState?.context || {};
+    scope.step = step;
+    scope.config = step?.config || {};
+    scope.jobId = jobId;
+    scope.helpers = this.getTemplateHelpers();
+
+    return scope;
+  }
+
+  getTemplateHelpers() {
+    return {
+      json: (value, spacing = 2) => {
+        try {
+          return JSON.stringify(value, null, spacing);
+        } catch (error) {
+          return '';
+        }
+      },
+      list: (items, options = {}) => this.formatItemsForPrint(
+        Array.isArray(items) ? items : [],
+        { maxItems: this.coerceToInteger(options.maxItems) ?? 10, label: options.label }
+      ),
+      legs: (items, options = {}) => this.formatItemsForPrint(
+        Array.isArray(items) ? items : [],
+        { maxItems: this.coerceToInteger(options.maxItems) ?? 10, label: options.label || 'Legs' }
+      ),
+      describeLeg: (leg, index, options = {}) => this.describeLegForPrint(leg, index, options)
+    };
+  }
+
+  interpolateTemplate(template, scope) {
+    if (typeof template !== 'string' || !template.includes('{{')) {
+      return template;
+    }
+
+    const expressionRegex = /\{\{\s*([^}]+?)\s*\}\}/g;
+    return template.replace(expressionRegex, (_, expression) => {
+      try {
+        const fn = new Function(...Object.keys(scope), `return (${expression});`);
+        const result = fn(...Object.values(scope));
+        if (result === undefined || result === null) {
+          return '';
+        }
+        if (typeof result === 'object') {
+          return JSON.stringify(result, null, 2);
+        }
+        return String(result);
+      } catch (error) {
+        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to evaluate print expression "${expression}": ${error.message}`);
+        return '';
+      }
+    });
+  }
+
+  selectItemsForPrint(step, workflowState, scope, config) {
+    const candidates = [];
+    const arraySource = config.arraySource || config.sourceType || 'context';
+
+    if (config.arrayPath) {
+      const resolved = this.resolvePathValue(workflowState, config.arrayPath, arraySource);
+      if (Array.isArray(resolved)) {
+        candidates.push(resolved);
+      }
+    }
+
+    if (config.itemsPath) {
+      const resolvedItemsPath = this.resolvePathValue(workflowState, config.itemsPath, arraySource);
+      if (Array.isArray(resolvedItemsPath)) {
+        candidates.push(resolvedItemsPath);
+      }
+    }
+
+    if (Array.isArray(scope.legsToExecute)) {
+      candidates.push(scope.legsToExecute);
+    }
+
+    if (Array.isArray(workflowState?.legsToExecute)) {
+      candidates.push(workflowState.legsToExecute);
+    }
+
+    if (Array.isArray(workflowState?.context?.legsToExecute)) {
+      candidates.push(workflowState.context.legsToExecute);
+    }
+
+    const uniqueCandidates = candidates.filter((array, index, self) => {
+      return Array.isArray(array) && array.length > 0 && self.findIndex(candidate => candidate === array) === index;
+    });
+
+    return uniqueCandidates.length > 0 ? uniqueCandidates[0] : null;
+  }
+
+  formatItemsForPrint(items, options = {}) {
+    if (!Array.isArray(items) || items.length === 0) {
+      return '';
+    }
+
+    const maxItems = Math.max(1, options.maxItems ?? 10);
+    const label = options.label || 'Items';
+    const limitedItems = items.slice(0, maxItems);
+    const lines = limitedItems.map((item, index) => {
+      if (item && typeof item === 'object') {
+        const identifier = item.leg_id || item.id || item.action_id || item.name || `item_${index}`;
+        const type = item.type || item.action_type || 'unknown';
+        const description = item.description || item.title || item.text || item.name || item.selector || '';
+        const selector = item.selector || item.element_selector || item.elementSelector;
+        const parts = [
+          `${index + 1}. [${type}] ${description}`.trim()
+        ];
+        if (identifier) {
+          parts.push(`id: ${identifier}`);
+        }
+        if (selector) {
+          parts.push(`selector: ${selector}`);
+        }
+        return `  ${parts.join(' — ')}`.trimEnd();
+      }
+      return `  ${index + 1}. ${String(item)}`;
+    });
+
+    if (items.length > maxItems) {
+      lines.push(`  ... and ${items.length - maxItems} more`);
+    }
+
+    return `${label}:\n${lines.join('\n')}`;
+  }
+
+  createItemsPreview(items, config = {}) {
+    if (!Array.isArray(items) || items.length === 0) {
+      return [];
+    }
+
+    const previewLimit = Math.max(1, Math.min(this.coerceToInteger(config.previewItems) ?? 5, 20));
+    return items.slice(0, previewLimit).map(item => this.summarizeItemForMetadata(item));
+  }
+
+  summarizeItemForMetadata(item) {
+    if (!item || typeof item !== 'object') {
+      return item;
+    }
+
+    return {
+      id: item.leg_id || item.id || item.action_id || null,
+      type: item.type || item.action_type || null,
+      description: item.description || item.title || item.text || item.name || null,
+      selector: item.selector || item.element_selector || item.elementSelector || null
+    };
+  }
+
+  describeLegForPrint(leg, index, options = {}) {
+    const includeId = options.includeId !== false;
+    const includeSelector = options.includeSelector !== false;
+
+    if (!leg || typeof leg !== 'object') {
+      if (typeof index === 'number') {
+        return `Leg #${index + 1}`;
+      }
+      return 'Leg';
+    }
+
+    const parts = [];
+
+    if (typeof index === 'number') {
+      parts.push(`#${index + 1}`);
+    } else if (typeof leg.iteration === 'number') {
+      parts.push(`#${leg.iteration + 1}`);
+    }
+
+    const type = leg.type || leg.action_type;
+    if (type) {
+      parts.push(`[${type}]`);
+    }
+
+    const description = leg.title || leg.description || leg.text || leg.name || leg.selector || leg.action || null;
+    if (description) {
+      parts.push(description);
+    }
+
+    if (includeSelector) {
+      const selector = leg.selector || leg.element_selector || leg.elementSelector || null;
+      if (selector) {
+        parts.push(`selector: ${selector}`);
+      }
+    }
+
+    if (includeId) {
+      const identifier = leg.leg_id || leg.id || leg.action_id || leg.original_leg_id || null;
+      if (identifier) {
+        parts.push(`id: ${identifier}`);
+      }
+    }
+
+    if (parts.length === 0) {
+      return 'Leg';
+    }
+
+    return parts.join(' ');
+  }
+
+  enrichPrintMetadata(metadata, scope, workflowState) {
+    if (!metadata || typeof metadata !== 'object') {
+      return;
+    }
+
+    const currentLeg = this.resolveCurrentLeg(scope, workflowState);
+    if (currentLeg && typeof currentLeg === 'object') {
+      const legSummary = this.summarizeItemForMetadata(currentLeg);
+      if (legSummary) {
+        metadata.current_leg = legSummary;
+      }
+      const legId = this.toStringIdentifier(
+        currentLeg.leg_id ||
+        legSummary?.id ||
+        currentLeg.id ||
+        currentLeg.original_leg_id ||
+        currentLeg.source_leg_id
+      );
+      if (legId) {
+        metadata.current_leg_id = legId;
+      }
+      const actionId = this.toStringIdentifier(
+        currentLeg.action_id ||
+        currentLeg.actionId ||
+        currentLeg.action?.id ||
+        currentLeg.action?._id
+      );
+      if (actionId) {
+        metadata.action_id = actionId;
+      }
+      const stableActionId = this.toStringIdentifier(
+        currentLeg.stable_action_id || currentLeg.stableActionId
+      );
+      if (stableActionId) {
+        metadata.stable_action_id = stableActionId;
+      }
+      const selector = currentLeg.selector || currentLeg.element_selector || currentLeg.elementSelector;
+      if (selector && !metadata.current_selector) {
+        metadata.current_selector = selector;
+      }
+    }
+
+    const currentItem = scope.currentItem || workflowState?.currentItem;
+    if (currentItem && typeof currentItem === 'object') {
+      const itemSummary = this.summarizeItemForMetadata(currentItem);
+      if (itemSummary) {
+        metadata.current_item = itemSummary;
+      }
+      const itemLegId = this.toStringIdentifier(
+        currentItem.leg_id ||
+        currentItem.id ||
+        currentItem.original_leg_id ||
+        currentItem.source_leg_id
+      );
+      if (itemLegId && !metadata.current_leg_id) {
+        metadata.current_leg_id = itemLegId;
+      }
+      const itemActionId = this.toStringIdentifier(
+        currentItem.action_id ||
+        currentItem.actionId ||
+        currentItem.action?.id ||
+        currentItem.action?._id
+      );
+      if (itemActionId && !metadata.action_id) {
+        metadata.action_id = itemActionId;
+      }
+      const itemStableId = this.toStringIdentifier(
+        currentItem.stable_action_id || currentItem.stableActionId
+      );
+      if (itemStableId && !metadata.stable_action_id) {
+        metadata.stable_action_id = itemStableId;
+      }
+    }
+
+    const resolvedLegId = this.toStringIdentifier(
+      scope.currentLegResolvedId ||
+      workflowState?.currentLegResolvedId
+    );
+    if (resolvedLegId) {
+      metadata.current_leg_resolved_id = resolvedLegId;
+    }
+
+    const originalLegId = this.toStringIdentifier(
+      scope.currentLegOriginalId ||
+      workflowState?.currentLegOriginalId
+    );
+    if (originalLegId) {
+      metadata.current_leg_original_id = originalLegId;
+    }
+  }
+
+  resolveCurrentLeg(scope, workflowState) {
+    if (scope?.currentLeg) {
+      return scope.currentLeg;
+    }
+    if (workflowState?.currentLeg) {
+      return workflowState.currentLeg;
+    }
+    if (workflowState?.context?.currentLeg) {
+      return workflowState.context.currentLeg;
+    }
+    return null;
+  }
+
+  toStringIdentifier(value) {
+    if (value === undefined || value === null) {
+      return null;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    if (typeof value === 'object') {
+      if (value.$oid && typeof value.$oid === 'string') {
+        return value.$oid;
+      }
+      if (typeof value.toHexString === 'function') {
+        try {
+          return value.toHexString();
+        } catch (error) {
+          return null;
+        }
+      }
+      if (value._id || value.id) {
+        return this.toStringIdentifier(value._id || value.id);
+      }
+    }
+    return null;
   }
 
   /**
@@ -3614,8 +5339,44 @@ class WorkflowAnalyzer {
       throw new Error(`for-each step expected an array at path "${itemsPath}" (source: ${sourceType}), got: ${typeof items}. Checked: lastExecutionResult, workflowState.legsToExecute, context.legsToExecute`);
     }
 
+    const isSingleActionMode =
+      workflowState.singleActionOnly === true ||
+      workflowState.options?.single_action_only === true ||
+      this.context?.single_action_only === true ||
+      this.context?.options?.single_action_only === true;
+
+    if (isSingleActionMode && items.length > 1) {
+      console.log(`[WorkflowAnalyzer] 🎯 Single-action mode enabled - limiting items from ${items.length} to 1`);
+      items = items.slice(0, 1);
+      workflowState.legsToExecute = items;
+      if (!workflowState.context) {
+        workflowState.context = {};
+      }
+      workflowState.context.legsToExecute = items;
+    }
+
+    const loopLimits = this.getLoopLimitConfig();
     const numericMaxItems = this.coerceToInteger(maxItems);
-    const effectiveItems = numericMaxItems !== null ? items.slice(0, Math.max(numericMaxItems, 0)) : items;
+    let resolvedMaxItems = numericMaxItems !== null ? Math.max(1, numericMaxItems) : loopLimits.forEachMaxItems;
+    if (resolvedMaxItems > loopLimits.forEachMaxItems) {
+      console.warn(`[WorkflowAnalyzer] ⚠️ for-each step ${step.id || step.name} requested ${resolvedMaxItems} items but template limit is ${loopLimits.forEachMaxItems}. Truncating.`);
+      resolvedMaxItems = loopLimits.forEachMaxItems;
+    }
+    if (!config.maxItems || this.coerceToInteger(config.maxItems) !== resolvedMaxItems) {
+      step.config = { ...(step.config || {}), maxItems: resolvedMaxItems };
+    }
+
+    const effectiveItems = items.slice(0, resolvedMaxItems);
+    if (items.length > effectiveItems.length) {
+      console.warn(`[WorkflowAnalyzer] ⚠️ for-each step ${step.id || step.name} limited to ${effectiveItems.length} of ${items.length} items`);
+      await this.sendLogToBackend(jobId, 'warn', `⚠️ for-each step limited to ${effectiveItems.length} of ${items.length} items`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: 'for-each',
+        requested_items: items.length,
+        max_items: effectiveItems.length
+      });
+    }
     const resultKey = providedResultKey || `${step.id || 'for_each'}_results`;
 
     // Save previous values if they exist
@@ -3623,6 +5384,10 @@ class WorkflowAnalyzer {
     const previousItemValue = workflowState[itemVariable];
     const hadIndexVariable = Object.prototype.hasOwnProperty.call(workflowState, indexVariable);
     const previousIndexValue = workflowState[indexVariable];
+    const hadCurrentLeg = Object.prototype.hasOwnProperty.call(workflowState, 'currentLeg');
+    const previousCurrentLeg = workflowState.currentLeg;
+    const hadContextCurrentLeg = Boolean(workflowState.context && Object.prototype.hasOwnProperty.call(workflowState.context, 'currentLeg'));
+    const previousContextCurrentLeg = hadContextCurrentLeg ? workflowState.context.currentLeg : undefined;
 
     const nestedStepsArray = Array.isArray(nestedStepsConfig) ? nestedStepsConfig : [];
     const iterationSummaries = [];
@@ -3633,6 +5398,28 @@ class WorkflowAnalyzer {
       const item = effectiveItems[idx];
       workflowState[itemVariable] = item;
       workflowState[indexVariable] = idx;
+      if (!workflowState.context) {
+        workflowState.context = {};
+      }
+      workflowState.context[itemVariable] = item;
+      workflowState.context[indexVariable] = idx;
+      workflowState.currentLeg = item;
+      workflowState.context.currentLeg = item;
+
+      if (item && typeof item === 'object') {
+        const legId =
+          item.leg_id ||
+          item.original_leg_id ||
+          item.source_leg_id ||
+          item.id ||
+          null;
+        if (legId) {
+          workflowState.currentLegOriginalId = item.original_leg_id || legId;
+          workflowState.currentLegResolvedId = legId;
+          workflowState.context.currentLegOriginalId = workflowState.currentLegOriginalId;
+          workflowState.context.currentLegResolvedId = workflowState.currentLegResolvedId;
+        }
+      }
 
       console.log(`[WorkflowAnalyzer] 🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
       
@@ -3655,7 +5442,10 @@ class WorkflowAnalyzer {
           
           try {
             // Execute nested step using the same switch logic
-            await this.executeStepByType(page, nestedStepWithId, workflowState, jobId);
+            await this.executeStepByType(page, nestedStepWithId, workflowState, jobId, {
+              stepIndex: nestedIdx,
+              siblings: nestedStepsArray
+            });
           } catch (nestedError) {
             console.error(`[WorkflowAnalyzer] ❌ Nested step failed in iteration ${idx + 1}: ${nestedError.message}`);
             // Continue with next step unless critical
@@ -3696,6 +5486,25 @@ class WorkflowAnalyzer {
     } else {
       delete workflowState[indexVariable];
     }
+    if (hadCurrentLeg) {
+      workflowState.currentLeg = previousCurrentLeg;
+    } else {
+      delete workflowState.currentLeg;
+    }
+    if (workflowState.context) {
+      if (hadContextCurrentLeg) {
+        workflowState.context.currentLeg = previousContextCurrentLeg;
+      } else {
+        delete workflowState.context.currentLeg;
+      }
+    }
+
+    if (workflowState.context) {
+      delete workflowState.context[itemVariable];
+      delete workflowState.context[indexVariable];
+      delete workflowState.context.currentLegOriginalId;
+      delete workflowState.context.currentLegResolvedId;
+    }
 
     // Store results
     workflowState[resultKey] = iterationSummaries;
@@ -3721,11 +5530,27 @@ class WorkflowAnalyzer {
     console.log(`[WorkflowAnalyzer] 🔄 Executing while-loop (${step.name})`);
     
     const config = step.config || {};
-    const maxIterations = config.maxIterations || 10;
-    const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
-    const conditionType = config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
-    const invertCondition = config.invertCondition === true; // If true, loop while condition is false
-    const nestedSteps = config.steps || [];
+    const loopLimits = this.getLoopLimitConfig();
+    const configuredMax = this.coerceToInteger(config.maxIterations);
+    let maxIterations = configuredMax !== null ? Math.max(1, configuredMax) : loopLimits.whileMaxIterations;
+    if (maxIterations > loopLimits.whileMaxIterations) {
+      console.warn(`[WorkflowAnalyzer] ⚠️ while-loop ${step.id || step.name} requested ${maxIterations} iterations but template limit is ${loopLimits.whileMaxIterations}. Truncating.`);
+      await this.sendLogToBackend(jobId, 'warn', `⚠️ while-loop truncated to ${loopLimits.whileMaxIterations} iterations`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: 'while-loop',
+        requested_iterations: maxIterations,
+        limit: loopLimits.whileMaxIterations
+      });
+      maxIterations = loopLimits.whileMaxIterations;
+    }
+    config.maxIterations = maxIterations;
+    step.config = config;
+
+    const conditionPath = step.config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
+    const conditionType = step.config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
+    const invertCondition = step.config.invertCondition === true; // If true, loop while condition is false
+    const nestedSteps = step.config.steps || [];
     
     if (!nestedSteps.length) {
       console.log(`[WorkflowAnalyzer] ⚠️ While-loop has no nested steps`);
@@ -3735,8 +5560,20 @@ class WorkflowAnalyzer {
     let iteration = 0;
     let condition = true; // Start with true to enter loop
     let lastResult = null;
+    let lastConditionValue = null;
+    let expectedValue = step.config.conditionValue || 'continue';
     
     console.log(`[WorkflowAnalyzer] 🔄 Starting while-loop (max ${maxIterations} iterations)`);
+    
+    // Send log to backend
+    await this.sendLogToBackend(jobId, 'info', `🔄 Starting while-loop (max ${maxIterations} iterations)`, 'WORKFLOW-ANALYZER', {
+      step_id: step.id,
+      step_name: step.name || step.type,
+      step_type: 'while-loop',
+      max_iterations: maxIterations,
+      condition_path: conditionPath,
+      condition_type: conditionType
+    });
     
     // Initialize loop state
     if (!workflowState.loopState) {
@@ -3754,9 +5591,25 @@ class WorkflowAnalyzer {
     // Loop while condition is true (or false if inverted) and under max iterations
     while ((invertCondition ? !condition : condition) && iteration < maxIterations) {
       iteration++;
+      this.resetIterationScopedVariables(workflowState);
       loopState.currentIteration = iteration;
+      // Also set workflowState.currentIteration for use by other steps
+      workflowState.currentIteration = iteration;
+      if (!workflowState.context) {
+        workflowState.context = {};
+      }
+      workflowState.context.currentIteration = iteration;
       
       console.log(`[WorkflowAnalyzer] 🔄 While-loop iteration ${iteration}/${maxIterations}`);
+      
+      // Send log to backend
+      await this.sendLogToBackend(jobId, 'info', `🔄 While-loop iteration ${iteration}/${maxIterations}`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: 'while-loop',
+        iteration: iteration,
+        max_iterations: maxIterations
+      });
       
       try {
         // Execute nested steps
@@ -3764,7 +5617,10 @@ class WorkflowAnalyzer {
           const nestedStep = nestedSteps[nestedIdx];
           
           try {
-            await this.executeStepByType(page, nestedStep, workflowState, jobId);
+            await this.executeStepByType(page, nestedStep, workflowState, jobId, {
+              stepIndex: nestedIdx,
+              siblings: nestedSteps
+            });
           } catch (nestedError) {
             console.error(`[WorkflowAnalyzer] ❌ Nested step ${nestedIdx + 1} failed in iteration ${iteration}: ${nestedError.message}`);
             if (nestedStep.config?.critical) {
@@ -3793,6 +5649,7 @@ class WorkflowAnalyzer {
         } else if (conditionType === 'ai-response' || conditionType === 'path') {
           // Get condition from workflowState path (check multiple locations)
           let conditionValue = this.resolvePathValue(workflowState, conditionPath || 'determine_completion.status', 'results');
+          lastConditionValue = conditionValue;
           
           // If not found, try finding the determine_completion step result directly
           if (conditionValue === undefined || conditionValue === null) {
@@ -3818,18 +5675,14 @@ class WorkflowAnalyzer {
               // Default: check status, fallback to is_complete
               conditionValue = determineStepResult.status || determineStepResult.is_complete;
             }
+            lastConditionValue = conditionValue;
           }
           
           if (conditionValue !== undefined && conditionValue !== null) {
             // Support both new status field (success/failure/continue/stuck) and legacy is_complete
             if (typeof conditionValue === 'string') {
               // New format: status field with 'success', 'failure', 'continue', 'stuck'
-              const expectedValue = config.conditionValue || 'continue';
               condition = conditionValue === expectedValue;
-              // If status is 'stuck', exit loop (don't continue)
-              if (conditionValue === 'stuck' || conditionValue === 'failure' || conditionValue === 'success') {
-                condition = false; // Exit loop for stuck, failure, or success
-              }
               console.log(`[WorkflowAnalyzer] 🔍 Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
             } else {
               // Legacy format: boolean is_complete
@@ -3839,6 +5692,16 @@ class WorkflowAnalyzer {
             // If path not found and it's required, default to false (exit loop)
             if (conditionPath) {
               console.log(`[WorkflowAnalyzer] ⚠️ Condition path "${conditionPath}" not found, exiting loop`);
+              
+              // Send log to backend
+              await this.sendLogToBackend(jobId, 'warn', `⚠️ Condition path "${conditionPath}" not found, exiting loop`, 'WORKFLOW-ANALYZER', {
+                step_id: step.id,
+                step_name: step.name || step.type,
+                step_type: 'while-loop',
+                condition_path: conditionPath,
+                iteration: iteration
+              });
+              
               condition = invertCondition ? true : false;
             } else {
               // No condition path specified, default to false (exit loop)
@@ -3857,6 +5720,19 @@ class WorkflowAnalyzer {
         
         console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: condition=${condition} (inverted=${invertCondition}, should continue=${invertCondition ? !condition : condition})`);
         
+        // Send log to backend
+        await this.sendLogToBackend(jobId, 'info', `🔄 Iteration ${iteration} complete: condition=${condition} (should continue=${invertCondition ? !condition : condition})`, 'WORKFLOW-ANALYZER', {
+          step_id: step.id,
+          step_name: step.name || step.type,
+          step_type: 'while-loop',
+          iteration: iteration,
+          condition: condition,
+          inverted: invertCondition,
+          should_continue: invertCondition ? !condition : condition,
+          condition_value: lastConditionValue,
+          expected_value: expectedValue
+        });
+        
         // Small delay between iterations
         if (iteration < maxIterations && (invertCondition ? !condition : condition)) {
           await new Promise(resolve => setTimeout(resolve, 1000));
@@ -3864,6 +5740,16 @@ class WorkflowAnalyzer {
         
       } catch (iterationError) {
         console.error(`[WorkflowAnalyzer] ❌ Iteration ${iteration} failed: ${iterationError.message}`);
+        
+        // Send error log to backend
+        await this.sendLogToBackend(jobId, 'error', `❌ Iteration ${iteration} failed: ${iterationError.message}`, 'WORKFLOW-ANALYZER', {
+          step_id: step.id,
+          step_name: step.name || step.type,
+          step_type: 'while-loop',
+          iteration: iteration,
+          error: iterationError.message
+        });
+        
         loopState.iterations.push({
           iteration,
           error: iterationError.message,
@@ -3889,6 +5775,39 @@ class WorkflowAnalyzer {
     
     this.storeStepResult(step, finalResult, workflowState);
     console.log(`[WorkflowAnalyzer] ✅ While-loop completed after ${iteration} iterations`);
+    
+    // Send log to backend for job history
+    if (jobId) {
+      try {
+        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+          jobId: jobId,
+          level: 'info',
+          message: `✅ While-loop completed after ${iteration} iterations`,
+          component: 'WORKFLOW-ANALYZER',
+          metadata: {
+            step_id: step.id,
+            step_name: step.name || step.type,
+            step_type: 'while-loop',
+            iterations: iteration,
+            max_iterations: maxIterations,
+            exited_early: finalResult.exitedEarly,
+            final_condition: finalResult.finalCondition,
+            timestamp: new Date().toISOString()
+          }
+        }, {
+          headers: this.getAuthHeaders()
+        });
+      } catch (error) {
+        console.error(`[WorkflowAnalyzer] ⚠️ Failed to log while-loop completion: ${error.message}`);
+      }
+    }
+
+    if (workflowState.context && Object.prototype.hasOwnProperty.call(workflowState.context, 'currentIteration')) {
+      delete workflowState.context.currentIteration;
+    }
+    if (Object.prototype.hasOwnProperty.call(workflowState, 'currentIteration')) {
+      delete workflowState.currentIteration;
+    }
   }
 
   /**
@@ -3897,6 +5816,13 @@ class WorkflowAnalyzer {
    */
   async executeIfStep(page, step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 🔀 Executing if-step (${step.name})`);
+    
+    // Send log to backend
+    await this.sendLogToBackend(jobId, 'info', `🔀 Executing if-step (${step.name})`, 'WORKFLOW-ANALYZER', {
+      step_id: step.id,
+      step_name: step.name || step.type,
+      step_type: 'if-step'
+    });
     
     const config = step.config || {};
     const conditionCode = config.conditionCode; // JavaScript code that returns boolean
@@ -3941,6 +5867,15 @@ class WorkflowAnalyzer {
       
       console.log(`[WorkflowAnalyzer] 🔀 Condition evaluated: ${condition}`);
       
+      // Send log to backend
+      await this.sendLogToBackend(jobId, 'info', `🔀 Condition evaluated: ${condition}`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: 'if-step',
+        condition: condition,
+        condition_type: conditionType
+      });
+      
       // Execute appropriate branch
       const stepsToExecute = condition ? nestedSteps : elseSteps;
       
@@ -3949,7 +5884,10 @@ class WorkflowAnalyzer {
           const nestedStep = stepsToExecute[nestedIdx];
           
           try {
-            await this.executeStepByType(page, nestedStep, workflowState, jobId);
+            await this.executeStepByType(page, nestedStep, workflowState, jobId, {
+              stepIndex: nestedIdx,
+              siblings: stepsToExecute
+            });
           } catch (nestedError) {
             console.error(`[WorkflowAnalyzer] ❌ Nested step ${nestedIdx + 1} failed in if-step: ${nestedError.message}`);
             if (nestedStep.config?.critical) {
@@ -3969,8 +5907,27 @@ class WorkflowAnalyzer {
       this.storeStepResult(step, result, workflowState);
       console.log(`[WorkflowAnalyzer] ✅ If-step completed: executed ${condition ? 'then' : 'else'} branch (${stepsToExecute.length} steps)`);
       
+      // Send log to backend
+      await this.sendLogToBackend(jobId, 'info', `✅ If-step completed: executed ${condition ? 'then' : 'else'} branch (${stepsToExecute.length} steps)`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: 'if-step',
+        condition: condition,
+        executed_branch: condition ? 'then' : 'else',
+        steps_executed: stepsToExecute.length
+      });
+      
     } catch (error) {
       console.error(`[WorkflowAnalyzer] ❌ If-step failed: ${error.message}`);
+      
+      // Send error log to backend
+      await this.sendLogToBackend(jobId, 'error', `❌ If-step failed: ${error.message}`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: 'if-step',
+        error: error.message
+      });
+      
       throw error;
     }
   }
@@ -3984,7 +5941,6 @@ class WorkflowAnalyzer {
     
     const config = step.config || {};
     const maxIterations = config.maxIterations || 10;
-    const maxDepth = config.maxDepth || 5;
     
     // Get current leg from context
     const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
@@ -3994,30 +5950,19 @@ class WorkflowAnalyzer {
       throw new Error(`No current leg found for iterative testing`);
     }
     
-    // Initialize testing history
-    if (!workflowState.legTestingHistory) {
-      workflowState.legTestingHistory = {};
-    }
-    if (!workflowState.legTestingHistory[currentLeg.leg_id]) {
-      workflowState.legTestingHistory[currentLeg.leg_id] = [];
-    }
-    
-    const testingHistory = workflowState.legTestingHistory[currentLeg.leg_id];
     let iteration = 0;
-    let depth = 0;
-    let isComplete = false;
     let lastExecutionResult = null;
     let finalResult = null;
     
     console.log(`[WorkflowAnalyzer] 🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id}`);
     
-    // Iterate until complete or max iterations reached
-    while (!isComplete && iteration < maxIterations && depth < maxDepth) {
+    // Iterate until leg succeeded, leg failed, or max iterations reached
+    while (iteration < maxIterations) {
       iteration++;
-      console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration}/${maxIterations} (depth ${depth + 1}/${maxDepth}) for leg: ${currentLeg.leg_id}`);
+      console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration}/${maxIterations} for leg: ${currentLeg.leg_id}`);
       
       try {
-        // Step 1: Capture page state before action
+        // Step 1: Capture page state before action (only visible elements)
         await this.executePlaywrightAnalysisStep(page, {
           id: `${step.id}_iteration_${iteration}_analysis`,
           name: `Page Analysis (Iteration ${iteration})`,
@@ -4046,13 +5991,52 @@ class WorkflowAnalyzer {
         
         // Step 3: Generate action script (only on first iteration, or if new content detected, or if no script is stored)
         if (iteration === 1 || (lastExecutionResult && lastExecutionResult.new_content_detected) || !workflowState.legScriptToExecute) {
+          // Get previous execution history for this leg (only what's needed for testification)
+          let previousExecutionHistory = [];
+          
+          // Try to get leg iterations from workflow if available
+          if (workflowState.workflowId && currentLeg.leg_id) {
+            try {
+              const workflowResponse = await axios.get(
+                `${this.backendUrl}/api/workflows/${workflowState.workflowId}`,
+                { headers: this.getAuthHeaders() }
+              );
+              const workflow = workflowResponse.data;
+              const leg = workflow.legs?.find(l => l.leg_id === currentLeg.leg_id);
+              
+              if (leg && leg.iterations && leg.iterations.length > 0) {
+                // Build minimal execution history (only what's needed for testification)
+                previousExecutionHistory = leg.iterations
+                  .filter(iter => iter.script_executed || iter.error) // Only include attempts with scripts or errors
+                  .map(iter => ({
+                    attempt_number: iter.attempt_number || iter.iteration_number || 0,
+                    iteration_number: iter.iteration_number || null,
+                    script_executed: iter.script_executed ? iter.script_executed.substring(0, 1000) : null, // Truncate for context
+                    result: iter.result || 'unknown',
+                    error: iter.error || null,
+                    is_retry: iter.is_retry || (iter.attempt_number > 1) || false
+                  }))
+                  .slice(-5); // Only last 5 attempts to avoid too much context
+              }
+            } catch (error) {
+              console.warn(`[WorkflowAnalyzer] Could not fetch leg iterations from workflow: ${error.message}`);
+            }
+          }
+          
+          // Store execution history for attachment (only if there's history)
+          if (previousExecutionHistory.length > 0) {
+            workflowState.execution_history = JSON.stringify(previousExecutionHistory, null, 2);
+          }
+          
           await this.executeAIPromptStep(page, {
             id: `${step.id}_iteration_${iteration}_generate_script`,
             name: `Generate Action Script (Iteration ${iteration})`,
             type: 'ai-prompt',
             config: {
               prompt_slug: 'generate-playwright-script',
-              attachments: ['page_description', 'interactive_elements', 'forms', 'current_leg', 'playwright_analysis'],
+              attachments: previousExecutionHistory.length > 0 
+                ? ['page_description', 'interactive_elements', 'forms', 'current_leg', 'playwright_analysis', 'execution_history']
+                : ['page_description', 'interactive_elements', 'forms', 'current_leg', 'playwright_analysis'],
               maxRetries: 2
             }
           }, workflowState, jobId);
@@ -4064,28 +6048,6 @@ class WorkflowAnalyzer {
           
           if (!script || script.trim() === '') {
             throw new Error(`No Playwright script generated for iteration ${iteration}`);
-          }
-          
-          // Validate script completeness BEFORE cleaning
-          // Check if script ends with an incomplete string literal (unmatched quote)
-          const originalScriptLength = script.length;
-          const hasIncompleteString = this.checkIncompleteString(script);
-          if (hasIncompleteString) {
-            const error = 'Script appears to end with incomplete string literal';
-            if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'error',
-                `❌ ${error}`,
-                'WORKFLOW-ANALYZER',
-                {
-                  original_script_length: originalScriptLength,
-                  script_preview: script.substring(Math.max(0, script.length - 500)),
-                  last_50_chars: script.substring(Math.max(0, script.length - 50)),
-                  step_id: generateStepId,
-                  iteration: iteration
-                }
-              );
-            }
-            throw new Error(error);
           }
           
           // Clean the script to remove markdown code blocks and function declarations
@@ -4112,7 +6074,7 @@ class WorkflowAnalyzer {
         const executeStepId = `${step.id}_iteration_${iteration}_execute`;
         lastExecutionResult = workflowState[executeStepId]?.result || workflowState.lastExecutionResult || {};
         
-        // Step 5: Capture page state after action
+        // Step 5: Capture page state after action (only visible elements)
         await this.executePlaywrightAnalysisStep(page, {
           id: `${step.id}_iteration_${iteration}_analysis_after`,
           name: `Page Analysis After Action (Iteration ${iteration})`,
@@ -4139,26 +6101,13 @@ class WorkflowAnalyzer {
         }, workflowState, jobId);
         
         // Step 6: Use AI to determine if leg testing is complete
-        // Prepare testing history for attachment
-        const testingHistoryForAttachment = testingHistory.map((record, idx) => ({
-          iteration: record.iteration,
-          depth: record.depth,
-          what_happened: record.completionDecision?.what_happened || record.executionResult?.message || 'N/A',
-          content_type: record.completionDecision?.content_type || 'unknown',
-          is_complete: record.isComplete || false,
-          timestamp: record.timestamp
-        }));
-        
-        // Store formatted testing history
-        workflowState.testing_history = JSON.stringify(testingHistoryForAttachment, null, 2);
-        
         await this.executeAIPromptStep(page, {
           id: `${step.id}_iteration_${iteration}_determine_completion`,
           name: `Determine Completion (Iteration ${iteration})`,
           type: 'ai-prompt',
           config: {
             prompt_slug: 'determine-leg-completion',
-            attachments: ['current_leg', 'last_execution_result', 'page_description', 'visible_text', 'interactive_elements', 'forms', 'testing_history'],
+            attachments: ['current_leg', 'last_execution_result', 'page_description', 'visible_text', 'interactive_elements', 'forms'],
             maxRetries: 1
           }
         }, workflowState, jobId);
@@ -4167,121 +6116,60 @@ class WorkflowAnalyzer {
         const completionResult = workflowState[completionStepId]?.result || workflowState.results?.[completionStepId]?.result || {};
         
         // Extract completion decision
-        isComplete = completionResult.is_complete === true || completionResult.completion_status === 'complete';
-        const needsMoreTesting = completionResult.needs_more_testing === true && !isComplete;
+        const status = completionResult.status || completionResult.completion_status || 'unknown';
+        const legFailed = status === 'failure' || completionResult.completion_status === 'failed';
+        const legSucceeded = status === 'success' || (completionResult.is_complete === true && !legFailed);
         
-        // Record iteration
-        const iterationRecord = {
-          iteration,
-          depth,
-          executionResult: lastExecutionResult,
-          completionDecision: completionResult,
-          isComplete,
-          needsMoreTesting,
-          timestamp: new Date().toISOString()
-        };
-        testingHistory.push(iterationRecord);
+        // NOTE: Saving is now handled by workflow steps (save-data elements), not hardcoded here
+        // This deprecated method should not be used - use while-loop workflow step instead
         
-        console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: isComplete=${isComplete}, needsMoreTesting=${needsMoreTesting}`);
+        console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: legSucceeded=${legSucceeded}, legFailed=${legFailed}`);
         
-        // If complete, break
-        if (isComplete) {
-          console.log(`[WorkflowAnalyzer] ✅ Leg testing completed after ${iteration} iterations. Reason: ${completionResult.reason || 'AI determined complete'}`);
+        // Clear exit conditions: if OpenAI says succeeded or failed - exit the loop
+        if (legSucceeded) {
+          console.log(`[WorkflowAnalyzer] ✅ Leg testing succeeded after ${iteration} iterations. Reason: ${completionResult.reason || 'AI determined success'}`);
           finalResult = {
             success: true,
             completed: true,
             iterations: iteration,
-            depth,
             finalExecutionResult: lastExecutionResult,
-            completionReason: completionResult.reason,
-            testingHistory
+            completionReason: completionResult.reason
           };
           break;
         }
         
-        // If needs more testing, continue
-        if (needsMoreTesting) {
-          console.log(`[WorkflowAnalyzer] 🔄 More testing needed: ${completionResult.next_action_suggestion || 'Continue testing'}`);
-          depth++;
-          
-          // Store playwright_script from determine_completion if provided (for next iteration)
-          if (completionResult.playwright_script && completionResult.playwright_script.trim()) {
-            let script = completionResult.playwright_script;
-            
-            // Validate script completeness BEFORE cleaning
-            const originalScriptLength = script.length;
-            if (script.match(/['"`][^'"`]*$/)) {
-              const error = 'Script from determine_completion appears to end with incomplete string literal';
-              if (jobId && this.backendLogger) {
-                await this.backendLogger.appendJobLog(jobId, 'error',
-                  `❌ ${error}`,
-                  'WORKFLOW-ANALYZER',
-                  {
-                    original_script_length: originalScriptLength,
-                    script_preview: script.substring(Math.max(0, script.length - 500)),
-                    last_50_chars: script.substring(Math.max(0, script.length - 50)),
-                    step_id: step.id,
-                    iteration: iteration
-                  }
-                );
-              }
-              throw new Error(error);
-            }
-            
-            // Clean the script to remove markdown code blocks and function declarations
-            script = this.cleanScript(script);
-            if (script && script.trim().length > 0) {
-              workflowState.legScriptToExecute = script;
-              console.log(`[WorkflowAnalyzer] ✅ Stored playwright_script from determine_completion (${script.length} chars) for next iteration`);
-            } else {
-              console.warn(`[WorkflowAnalyzer] ⚠️ playwright_script from determine_completion is empty after cleaning`);
-            }
-          }
-          
-          // Update current leg context with next action suggestion
-          if (completionResult.next_action_suggestion) {
-            workflowState.currentLeg = {
-              ...currentLeg,
-              next_action_suggestion: completionResult.next_action_suggestion,
-              content_type: completionResult.content_type
-            };
-          }
-          
-          // Small delay before next iteration
-          await new Promise(resolve => setTimeout(resolve, 1000));
-        } else {
-          // No more testing needed but not marked complete - break anyway
-          console.log(`[WorkflowAnalyzer] ⚠️ No more testing needed but not marked complete. Breaking.`);
+        if (legFailed) {
+          console.log(`[WorkflowAnalyzer] ❌ Leg testing failed after ${iteration} iterations. Reason: ${completionResult.reason || 'AI determined failure'}`);
           finalResult = {
-            success: completionResult.completion_status !== 'failed',
-            completed: false,
+            success: false,
+            completed: true,
             iterations: iteration,
-            depth,
             finalExecutionResult: lastExecutionResult,
-            completionReason: completionResult.reason || 'No more testing needed',
-            testingHistory
+            completionReason: completionResult.reason || 'Leg failed',
+            error: completionResult.reason || 'Leg failed completely'
           };
           break;
         }
+        
+        // Otherwise, continue to next iteration
+        console.log(`[WorkflowAnalyzer] 🔄 Continuing iteration - leg not yet succeeded or failed`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
         
       } catch (iterationError) {
         console.error(`[WorkflowAnalyzer] ❌ Iteration ${iteration} failed: ${iterationError.message}`);
-        testingHistory.push({
-          iteration,
-          depth,
-          error: iterationError.message,
-          timestamp: new Date().toISOString()
-        });
         
-        // If max iterations reached or critical error, break
-        if (iteration >= maxIterations || iterationError.message.includes('critical')) {
+        // NOTE: Saving is now handled by workflow steps (save-data elements), not hardcoded here
+        // This deprecated method should not be used - use while-loop workflow step instead
+        
+        // If max iterations reached, exit
+        if (iteration >= maxIterations) {
+          console.log(`[WorkflowAnalyzer] ⚠️ Max iterations (${maxIterations}) reached`);
           finalResult = {
             success: false,
             completed: false,
             iterations: iteration,
-            depth,
-            error: iterationError.message,
-            testingHistory
+            error: `Max iterations reached: ${iterationError.message}`,
+            maxIterationsReached: true
           };
           break;
         }
@@ -4291,15 +6179,14 @@ class WorkflowAnalyzer {
       }
     }
     
-    // Final result
+    // Final result - if loop exited without setting finalResult, it means max iterations reached
     if (!finalResult) {
       finalResult = {
         success: false,
         completed: false,
         iterations: iteration,
-        depth,
-        reason: 'Max iterations or depth reached',
-        testingHistory
+        reason: 'Max iterations reached',
+        maxIterationsReached: true
       };
     }
     
@@ -4325,7 +6212,7 @@ class WorkflowAnalyzer {
   /**
    * Execute step by type (used by for-each to execute nested steps)
    */
-  async executeStepByType(page, step, workflowState, jobId) {
+  async executeStepByType(page, step, workflowState, jobId, stepContext = null) {
     switch (step.type) {
       case 'screenshot':
         await this.executeScreenshotStep(page, step, workflowState, jobId, workflowState.pageId);
@@ -4334,13 +6221,13 @@ class WorkflowAnalyzer {
         await this.executePlaywrightAnalysisStep(page, step, workflowState, jobId);
         break;
       case 'page-description':
-        await this.executePageDescriptionStep(page, step, workflowState, jobId);
+        await this.executePageDescriptionStep(page, step, workflowState, jobId, stepContext);
         break;
       case 'ai-prompt':
-        await this.executeAIPromptStep(page, step, workflowState, jobId);
+        await this.executeAIPromptStep(page, step, workflowState, jobId, stepContext);
         break;
       case 'workflow-analysis':
-        await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId);
+        await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId, stepContext);
         break;
       case 'create-workflow':
         await this.executeCreateWorkflowStep(step, workflowState, workflowState.pageId, workflowState.projectId, jobId);
@@ -4428,7 +6315,15 @@ class WorkflowAnalyzer {
         }
         current = current[index];
       } else if (typeof current === 'object') {
-        current = current[segment];
+        if (Object.prototype.hasOwnProperty.call(current, segment)) {
+          current = current[segment];
+        } else if (current.result && typeof current.result === 'object' && Object.prototype.hasOwnProperty.call(current.result, segment)) {
+          current = current.result[segment];
+        } else if (current.metadata && typeof current.metadata === 'object' && Object.prototype.hasOwnProperty.call(current.metadata, segment)) {
+          current = current.metadata[segment];
+        } else {
+          current = undefined;
+        }
       } else {
         return undefined;
       }
@@ -4485,6 +6380,15 @@ class WorkflowAnalyzer {
       return result;
     }
     return data;
+  }
+
+  getLoopLimitConfig() {
+    const templateId = this.workflowTemplate?._id?.toString() || this.context?.workflow_template_id;
+    const overrides = templateId && this.templateLoopOverrides[templateId] ? this.templateLoopOverrides[templateId] : {};
+    return {
+      whileMaxIterations: overrides.whileMaxIterations ?? this.loopDefaults.whileMaxIterations,
+      forEachMaxItems: overrides.forEachMaxItems ?? this.loopDefaults.forEachMaxItems
+    };
   }
 
   /**
@@ -4802,3 +6706,4 @@ export default WorkflowAnalyzer;
 
 // Force rebuild Wed 15 Oct 2025 23:26:24 AEDT
 // Force rebuild Tue 28 Oct 2025 15:43:46 AEDT
+

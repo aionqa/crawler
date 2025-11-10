@@ -6,11 +6,12 @@ import axios from 'axios';
  * Each leg is tested until OpenAI confirms completion or failure
  */
 class WorkflowExecutor {
-  constructor(backendUrl, aiLogger, backendLogger, context = {}) {
+  constructor(backendUrl, aiLogger, backendLogger, context = {}, videoRecorder = null) {
     this.backendUrl = backendUrl;
     this.aiLogger = aiLogger;
     this.backendLogger = backendLogger;
     this.context = context;
+    this.videoRecorder = videoRecorder;
     this.workflowTemplate = null;
     // For page analysis workflows, don't retry legs on failure (maxIterations = 1)
     // For other workflows, allow 1 retry (maxIterations = 2)
@@ -208,6 +209,37 @@ class WorkflowExecutor {
   }
 
   /**
+   * Start a video segment for the leg if video recorder available
+   */
+  startLegSegment(jobId, leg) {
+    if (!this.videoRecorder) {
+      return null;
+    }
+    const label = leg?.description
+      ? `Leg: ${leg.description}`
+      : (leg?.leg_id ? `Leg ${leg.leg_id}` : 'Workflow Step');
+    return this.videoRecorder.startSegment(jobId, `leg-${leg?.leg_id || Date.now()}`, label, {
+      type: 'workflow_leg',
+      leg_id: leg?.leg_id || null,
+      description: leg?.description || null
+    });
+  }
+
+  /**
+   * End a previously started leg segment
+   */
+  endLegSegment(jobId, segmentId, leg, result = null, lastError = null) {
+    if (!this.videoRecorder || !segmentId) {
+      return;
+    }
+    this.videoRecorder.endSegment(jobId, segmentId, {
+      result,
+      error: lastError,
+      leg_id: leg?.leg_id || null
+    });
+  }
+
+  /**
    * Execute a single workflow leg
    * @param {Page} page - Playwright page object
    * @param {string} jobId - Job ID for logging
@@ -254,34 +286,40 @@ class WorkflowExecutor {
       await this.markActionStarted(leg.action_id, jobId);
     }
 
+    const segmentToken = this.startLegSegment(jobId, leg);
+    let finalSegmentResult = 'failure';
+    let finalSegmentError = null;
+    let outcome = null;
+
     let iteration = 0;
     let completed = false;
     let finalResult = 'failure';
     let lastError = null;
     let aiRequestCount = 0;
 
-    while (iteration < this.maxIterations && !completed && aiRequestCount < this.maxAiRequestsPerLeg) {
-      iteration++;
-      console.log(`[WorkflowExecutor] Leg ${leg.leg_id} - Iteration ${iteration}/${this.maxIterations} (AI requests: ${aiRequestCount}/${this.maxAiRequestsPerLeg})`);
+    try {
+      while (iteration < this.maxIterations && !completed && aiRequestCount < this.maxAiRequestsPerLeg) {
+        iteration++;
+        console.log(`[WorkflowExecutor] Leg ${leg.leg_id} - Iteration ${iteration}/${this.maxIterations} (AI requests: ${aiRequestCount}/${this.maxAiRequestsPerLeg})`);
 
-      // Check job status before each iteration
-      const jobStatus = await this.checkJobStatus(jobId);
-      if (jobStatus !== 'running') {
-        console.log(`[WorkflowExecutor] Job ${jobId} status changed to ${jobStatus}, stopping leg execution`);
-        finalResult = 'cancelled';
-        completed = true;
-        lastError = `Job status changed to ${jobStatus}`;
-        break;
-      }
+        // Check job status before each iteration
+        const jobStatus = await this.checkJobStatus(jobId);
+        if (jobStatus !== 'running') {
+          console.log(`[WorkflowExecutor] Job ${jobId} status changed to ${jobStatus}, stopping leg execution`);
+          finalResult = 'cancelled';
+          completed = true;
+          lastError = `Job status changed to ${jobStatus}`;
+          break;
+        }
 
-      // Refetch workflow to get latest leg state with iterations
-      if (iteration > 1) {
-        const latestWorkflow = await this.getWorkflow(workflowId);
-        leg = latestWorkflow.legs.find(l => l.leg_id === leg.leg_id) || leg;
-        console.log(`[WorkflowExecutor] Refetched leg with ${leg.iterations?.length || 0} previous iterations`);
-      }
+        // Refetch workflow to get latest leg state with iterations
+        if (iteration > 1) {
+          const latestWorkflow = await this.getWorkflow(workflowId);
+          leg = latestWorkflow.legs.find(l => l.leg_id === leg.leg_id) || leg;
+          console.log(`[WorkflowExecutor] Refetched leg with ${leg.iterations?.length || 0} previous iterations`);
+        }
 
-      try {
+        try {
         // Step 1: Take screenshot before action
         const screenshotBefore = await page.screenshot({ fullPage: true, type: 'png' });
         const screenshotBeforeKey = await this.uploadScreenshot(jobId, screenshotBefore, 'before');
@@ -596,34 +634,22 @@ class WorkflowExecutor {
             throw new Error(`OpenAI did not return a valid Playwright script. Response keys: ${scriptResponse ? Object.keys(scriptResponse).join(', ') : 'null'}`);
           }
           
-          // Validate script completeness BEFORE cleaning
-          // Check if script ends with an incomplete string literal (unmatched quote)
-          const originalScriptLength = playwrightScript.length;
-          const hasIncompleteString = this.checkIncompleteString(playwrightScript);
-          if (hasIncompleteString) {
-            const error = 'Script appears to end with incomplete string literal';
-            if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'error',
-                `❌ ${error}`,
-                'WORKFLOW-EXECUTOR',
-                {
-                  original_script_length: originalScriptLength,
-                  script_preview: playwrightScript.substring(Math.max(0, playwrightScript.length - 500)),
-                  last_50_chars: playwrightScript.substring(Math.max(0, playwrightScript.length - 50))
-                }
-              );
+          // DO NOT sanitize, clean, or validate - use script exactly as OpenAI returned it
+          // Only extract from markdown code blocks if present (but preserve all content)
+          if (playwrightScript.includes('```')) {
+            const codeBlockRegex = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
+            const codeBlockMatches = [...playwrightScript.matchAll(codeBlockRegex)];
+            if (codeBlockMatches.length > 0) {
+              // Extract code from first code block
+              playwrightScript = codeBlockMatches[0][1].trim();
             }
-            throw new Error(error);
           }
-          
-          // Clean the script immediately after extraction to remove markdown code blocks
-          playwrightScript = this.cleanScript(playwrightScript);
           
           if (!playwrightScript || playwrightScript.trim().length === 0) {
-            throw new Error(`Script is empty after cleaning`);
+            throw new Error(`Script is empty`);
           }
           
-          console.log(`[WorkflowExecutor] ✅ Successfully extracted and cleaned Playwright script (${playwrightScript.length} characters)`);
+          console.log(`[WorkflowExecutor] ✅ Successfully extracted Playwright script (${playwrightScript.length} characters) - NO sanitization applied`);
           
           // Update leg with script
           await this.updateLeg(workflowId, leg.leg_id, { 
@@ -635,7 +661,35 @@ class WorkflowExecutor {
         console.log(`[WorkflowExecutor] Executing script for leg ${leg.leg_id}`);
 
         // Step 4: Execute Playwright script
+        // Retries should be handled by workflow steps (e.g., self-adjustable-ai-workflow), not hardcoded here
         const executionResult = await this.executeScript(page, playwrightScript, jobId);
+        
+        // Record attempt with attempt number for tracking
+        const attemptNumber = (leg.iterations?.length || 0) + 1;
+        
+        // If execution failed, record it but don't retry here - let workflow steps handle retries
+        if (executionResult && (executionResult.error || executionResult.success === false)) {
+          const scriptExecutionError = executionResult.error || executionResult.message || 'Script execution failed';
+          console.log(`[WorkflowExecutor] Script execution failed: ${scriptExecutionError}`);
+          
+          // Record failed attempt - workflow steps will handle retries
+          await this.addIteration(workflowId, leg.leg_id, {
+            screenshot_before: screenshotBeforeKey,
+            screenshot_after: null,
+            html_sent: htmlContent,
+            html_after: null,
+            script_executed: playwrightScript,
+            openai_request: null,
+            openai_response: null,
+            result: 'failure',
+            error: scriptExecutionError,
+            attempt_number: attemptNumber,
+            is_retry: false // First attempt, retries handled by workflow steps
+          });
+          
+          // Throw error so workflow steps can handle it
+          throw new Error(`Script execution failed: ${scriptExecutionError}`);
+        }
 
         // Step 5: Take screenshot after action
         const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
@@ -765,23 +819,31 @@ class WorkflowExecutor {
           completed = true;
         }
       }
+      }
+
+      // Mark leg as completed
+      await this.completeLeg(workflowId, leg.leg_id, finalResult, lastError, jobId);
+
+      // Mark associated action as completed if it exists
+      if (leg.action_id) {
+        const success = finalResult === 'success';
+        await this.markActionCompleted(leg.action_id, success, lastError);
+      }
+
+      finalSegmentResult = finalResult;
+      finalSegmentError = lastError;
+
+      outcome = {
+        leg_id: leg.leg_id,
+        result: finalResult,
+        iterations: iteration,
+        error: lastError
+      };
+    } finally {
+      this.endLegSegment(jobId, segmentToken, leg, finalSegmentResult, finalSegmentError);
     }
 
-    // Mark leg as completed
-    await this.completeLeg(workflowId, leg.leg_id, finalResult, lastError, jobId);
-
-    // Mark associated action as completed if it exists
-    if (leg.action_id) {
-      const success = finalResult === 'success';
-      await this.markActionCompleted(leg.action_id, success, lastError);
-    }
-
-    return {
-      leg_id: leg.leg_id,
-      result: finalResult,
-      iterations: iteration,
-      error: lastError
-    };
+    return outcome;
   }
 
   /**
@@ -798,12 +860,47 @@ class WorkflowExecutor {
     }
 
     const results = [];
+    const singleActionOnly =
+      this.context?.single_action_only === true ||
+      this.context?.options?.single_action_only === true ||
+      workflow?.options?.single_action_only === true;
+    const effectiveJobId = jobId || this.context?.job_id || null;
+
+    if (singleActionOnly) {
+      console.log(`[WorkflowExecutor] 🎯 Single-action mode enabled for workflow ${workflowId}`);
+      if (effectiveJobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(effectiveJobId, 'info', '🎯 Single-action mode: will execute only the first pending leg', 'WORKFLOW-EXECUTOR', {
+          workflow_id: workflowId,
+          single_action_only: true
+        });
+      }
+    }
+
+    let executedCount = 0;
 
     // Execute each leg sequentially
     for (const leg of workflow.legs) {
+      if (singleActionOnly && executedCount >= 1) {
+        if (leg.status === 'pending') {
+          console.log(`[WorkflowExecutor] ⏭️ Skipping leg ${leg.leg_id} due to single-action mode`);
+          await this.completeLeg(workflowId, leg.leg_id, 'skipped', null, effectiveJobId);
+          if (effectiveJobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(effectiveJobId, 'info', `⏭️ Skipped leg ${leg.leg_id} (single-action mode)`, 'WORKFLOW-EXECUTOR', {
+              workflow_id: workflowId,
+              leg_id: leg.leg_id,
+              reason: 'single_action_only'
+            });
+          }
+        } else {
+          console.log(`[WorkflowExecutor] Skipping leg ${leg.leg_id} - status: ${leg.status}`);
+        }
+        continue;
+      }
+
       if (leg.status === 'pending') {
-        const result = await this.executeLeg(page, jobId, workflowId, leg);
+        const result = await this.executeLeg(page, effectiveJobId, workflowId, leg);
         results.push(result);
+        executedCount += 1;
       } else {
         console.log(`[WorkflowExecutor] Skipping leg ${leg.leg_id} - status: ${leg.status}`);
       }
@@ -1011,37 +1108,23 @@ class WorkflowExecutor {
         );
       }
       
-      // Clean the script to remove function declarations, require statements, etc.
-      const cleanedScript = this.cleanScript(script);
-      const cleanedScriptLength = cleanedScript?.length || 0;
-      
-      if (!cleanedScript || cleanedScript.trim().length === 0) {
-        const error = 'Script is empty after cleaning';
+      // DO NOT clean or sanitize the script - use it exactly as provided
+      if (!script || script.trim().length === 0) {
+        const error = 'Script is empty';
         if (jobId && this.backendLogger) {
           await this.backendLogger.appendJobLog(jobId, 'error',
             `❌ ${error}`,
             'WORKFLOW-EXECUTOR',
             {
-              original_script_length: originalScriptLength,
-              cleaned_script_length: cleanedScriptLength,
-              original_script_preview: script?.substring(0, 500) || 'N/A'
+              original_script_length: originalScriptLength
             }
           );
         }
         throw new Error(error);
       }
       
-      // Log cleaned script info
-      if (jobId && this.backendLogger) {
-        await this.backendLogger.appendJobLog(jobId, 'debug',
-          `📝 Script cleaned (${originalScriptLength} → ${cleanedScriptLength} chars)`,
-          'WORKFLOW-EXECUTOR',
-          {
-            cleaned_script_preview: cleanedScript.substring(0, 500),
-            cleaning_removed_chars: originalScriptLength - cleanedScriptLength
-          }
-        );
-      }
+      // Use script exactly as provided - NO cleaning or sanitization
+      const cleanedScript = script;
       
       const urlBefore = page.url();
       const titleBefore = await page.title();
@@ -1071,56 +1154,7 @@ class WorkflowExecutor {
         return await fn(pageObj);
       };
       
-      // Validate script completeness before execution
-      // Check for common incomplete patterns that indicate truncation
-      const lines = cleanedScript.split('\n');
-      const incompletePatterns = [
-        /['"`][a-z]+\s*=\s*$/,  // Incomplete selector like 'xpath= or "button=
-        /await\s+page\.(waitForSelector|click|fill)\(['"`][^'"`]*$/,  // Incomplete await statement
-        /^\s*try\s*\{\s*$/,  // Incomplete try block (only opening brace)
-        /^\s*catch\s*\(\s*$/,  // Incomplete catch block (only opening paren)
-      ];
-      
-      // Check last few lines for incomplete patterns
-      const lastLines = lines.slice(-3).join('\n');
-      for (const pattern of incompletePatterns) {
-        if (pattern.test(lastLines)) {
-          const error = 'Script appears to be incomplete (truncated)';
-          if (jobId && this.backendLogger) {
-            await this.backendLogger.appendJobLog(jobId, 'error',
-              `❌ ${error}`,
-              'WORKFLOW-EXECUTOR',
-              {
-                original_script_length: originalScriptLength,
-                cleaned_script_length: cleanedScriptLength,
-                script_preview: cleanedScript.substring(Math.max(0, cleanedScript.length - 500)),
-                incomplete_pattern: pattern.toString(),
-                last_50_chars: cleanedScript.substring(Math.max(0, cleanedScript.length - 50))
-              }
-            );
-          }
-          throw new Error(error);
-        }
-      }
-      
-      // Additional check: if script ends with incomplete string/quotes
-      const trimmedScript = cleanedScript.trim();
-      if (trimmedScript.match(/['"`][^'"`]*$/)) {
-        const error = 'Script appears to end with incomplete string literal';
-        if (jobId && this.backendLogger) {
-          await this.backendLogger.appendJobLog(jobId, 'error',
-            `❌ ${error}`,
-            'WORKFLOW-EXECUTOR',
-            {
-              original_script_length: originalScriptLength,
-              cleaned_script_length: cleanedScriptLength,
-              script_preview: cleanedScript.substring(Math.max(0, cleanedScript.length - 500)),
-              last_50_chars: cleanedScript.substring(Math.max(0, cleanedScript.length - 50))
-            }
-          );
-        }
-        throw new Error(error);
-      }
+      // DO NOT validate or check for incomplete strings - execute script as-is from OpenAI
       
       // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
       const result = await Promise.race([

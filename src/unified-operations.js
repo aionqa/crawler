@@ -1432,6 +1432,15 @@ async function withBrowser(action, options = {}) {
     };
     
   } finally {
+    if (options.beforeBrowserClose && typeof options.beforeBrowserClose === 'function') {
+      try {
+        await options.beforeBrowserClose({ browser, context, page });
+      } catch (callbackError) {
+        const jobIdForLogs = options.job_id || options.jobId || 'unknown';
+        await sendLog(jobIdForLogs, 'warn', `⚠️ Video finalization callback failed: ${callbackError.message}`);
+        console.error('[CRAWLER] beforeBrowserClose callback error:', callbackError);
+      }
+    }
     await browser.close();
   }
 }
@@ -1498,10 +1507,16 @@ const modeHandlers = {
     // Initialize workflow analyzer and enhanced executor with context
     const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger, context);
     // For page analysis workflows, don't retry legs on failure (no second attempt)
-    const workflowExecutor = new WorkflowExecutor(backendUrl, aiConversationLogger, backendLogger, {
-      ...context,
-      maxIterations: 1 // No retry for page analysis workflows
-    });
+    const workflowExecutor = new WorkflowExecutor(
+      backendUrl,
+      aiConversationLogger,
+      backendLogger,
+      {
+        ...context,
+        maxIterations: 1 // No retry for page analysis workflows
+      },
+      context.videoRecorder || null
+    );
     const executeWorkflowFlag =
       context.execute_workflow !== undefined
         ? context.execute_workflow
