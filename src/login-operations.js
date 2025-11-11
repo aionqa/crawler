@@ -751,9 +751,23 @@ export async function performLoginWithWorkflow(
   workflowContext = {}
 ) {
   const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
+  const previousUsernameEnv = process.env.LOGIN_USERNAME;
+  const previousPasswordEnv = process.env.LOGIN_PASSWORD;
 
   try {
     const axios = (await import('axios')).default;
+
+    if (typeof username === 'string' && username.length > 0) {
+      process.env.LOGIN_USERNAME = username;
+    } else {
+      delete process.env.LOGIN_USERNAME;
+    }
+
+    if (typeof password === 'string' && password.length > 0) {
+      process.env.LOGIN_PASSWORD = password;
+    } else {
+      delete process.env.LOGIN_PASSWORD;
+    }
 
     console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
     console.log(`[LOGIN-WORKFLOW] 🔐 Starting workflow-based login for ${pageUrl}`);
@@ -904,6 +918,18 @@ export async function performLoginWithWorkflow(
       finalUrl: page.url(),
       finalTitle
     };
+  } finally {
+    if (previousUsernameEnv !== undefined) {
+      process.env.LOGIN_USERNAME = previousUsernameEnv;
+    } else {
+      delete process.env.LOGIN_USERNAME;
+    }
+
+    if (previousPasswordEnv !== undefined) {
+      process.env.LOGIN_PASSWORD = previousPasswordEnv;
+    } else {
+      delete process.env.LOGIN_PASSWORD;
+    }
   }
 }
 

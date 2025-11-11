@@ -13,6 +13,7 @@ class WorkflowAnalyzer {
     this.aiLogger = aiLogger;
     this.context = context;
     this.workflowTemplate = null;
+    this.jobDetailsCache = new Map();
     this.workflowCapabilities = this.detectCapabilities([]);
     this.loopDefaults = {
       whileMaxIterations: 10,
@@ -1679,6 +1680,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             
           case 'cookie-collect':
             await this.executeCookieCollectStep(page, step, workflowState, jobId);
+            break;
+
+          case 'validate-login':
+            await this.executeValidateLoginStep(step, workflowState, jobId);
             break;
             
           case 'self-adjustable-ai-workflow':
@@ -4791,6 +4796,49 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   /**
+   * Fetch job details from backend with fallback between legacy and /api routes
+   */
+  async fetchJobDetails(jobId) {
+    if (!jobId) {
+      throw new Error('Job ID is required to fetch job details');
+    }
+
+    if (this.jobDetailsCache.has(jobId)) {
+      return this.jobDetailsCache.get(jobId);
+    }
+
+    const endpoints = [
+      `${this.backendUrl}/jobs/${jobId}`,
+      `${this.backendUrl}/api/jobs/${jobId}`
+    ];
+
+    let lastError = null;
+
+    for (const url of endpoints) {
+      try {
+        const response = await axios.get(url, {
+          headers: this.getAuthHeaders()
+        });
+        const data = response.data;
+        this.jobDetailsCache.set(jobId, data);
+        return data;
+      } catch (error) {
+        lastError = error;
+        if (error?.response?.status === 404) {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    const message = lastError?.response?.status === 404
+      ? `Job ${jobId} not found on backend`
+      : lastError?.message || `Failed to fetch job ${jobId}`;
+
+    throw new Error(message);
+  }
+
+  /**
    * Execute cookie add step
    */
   async executeVarExportStep(step, workflowState, jobId) {
@@ -4940,7 +4988,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     this.storeStepResult(step, result, workflowState, { forceShared: true });
 
-    await this.logStepOutcome(step, jobId, `📝 Var dump captured (${displayScopes})`, {
+    await this.logStepOutcome(step, jobId, `📝 Var dump captured (${displayScopes}) — view in Vars tab`, {
       scopes: scopesIncluded,
       snapshot: snapshotPayload,
       generatedAt
@@ -4959,10 +5007,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     try {
       // Get project ID from job
-      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
-        headers: this.getAuthHeaders()
-      });
-      const projectId = jobResponse.data?.project_id;
+      const jobData = await this.fetchJobDetails(jobId);
+      const projectId = jobData?.project_id;
       
       if (!projectId) {
         throw new Error(`Could not find project ID for job: ${jobId}`);
@@ -5018,10 +5064,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     try {
       // Get project ID from job
-      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
-        headers: this.getAuthHeaders()
-      });
-      const projectId = jobResponse.data?.project_id;
+      const jobData = await this.fetchJobDetails(jobId);
+      const projectId = jobData?.project_id;
       
       if (!projectId) {
         throw new Error(`Could not find project ID for job: ${jobId}`);
@@ -5088,10 +5132,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     try {
       // Get project ID from job
-      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
-        headers: this.getAuthHeaders()
-      });
-      const projectId = jobResponse.data?.project_id;
+      const jobData = await this.fetchJobDetails(jobId);
+      const projectId = jobData?.project_id;
       
       if (!projectId) {
         throw new Error(`Could not find project ID for job: ${jobId}`);
@@ -5144,10 +5186,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     try {
       // Get project ID from job
-      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
-        headers: this.getAuthHeaders()
-      });
-      const projectId = jobResponse.data?.project_id;
+      const jobData = await this.fetchJobDetails(jobId);
+      const projectId = jobData?.project_id;
       
       if (!projectId) {
         throw new Error(`Could not find project ID for job: ${jobId}`);
@@ -5172,10 +5212,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (!config.jobId) {
           throw new Error(`Job ID is required when source is 'job'`);
         }
-        const jobDataResponse = await axios.get(`${this.backendUrl}/api/jobs/${config.jobId}`, {
-          headers: this.getAuthHeaders()
-        });
-        const jobData = jobDataResponse.data;
+        const jobData = await this.fetchJobDetails(config.jobId);
         if (jobData && jobData.result && jobData.result.cookies) {
           collectedCookies = jobData.result.cookies;
         }
@@ -5211,9 +5248,94 @@ IMPORTANT OUTPUT REQUIREMENTS:
       this.storeStepResult(step, { cookies: collectedCookies, count: collectedCookies.length }, workflowState);
       console.log(`[WorkflowAnalyzer] ✅ Collected ${collectedCookies.length} cookie(s) successfully`);
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Cookie collect failed: ${error.message}`);
+      const status = error?.response?.status;
+      const requestUrl =
+        error?.response?.config?.url ||
+        error?.config?.url ||
+        null;
+      const requestMethod =
+        error?.response?.config?.method ||
+        error?.config?.method ||
+        null;
+      const extra = [];
+      if (status) {
+        extra.push(`status=${status}`);
+      }
+      if (requestMethod) {
+        extra.push(`method=${requestMethod.toUpperCase()}`);
+      }
+      if (requestUrl) {
+        extra.push(`url=${requestUrl}`);
+      }
+      const extraInfo = extra.length ? ` (${extra.join(' ')})` : '';
+      console.error(`[WorkflowAnalyzer] ❌ Cookie collect failed${extraInfo}: ${error.message}`);
+      if (!extra.length || status >= 400) {
+        try {
+          const debugPayload = {
+            status,
+            method: requestMethod ? requestMethod.toUpperCase() : null,
+            url: requestUrl,
+            responseData: error?.response?.data ?? null,
+            code: error?.code ?? null
+          };
+          console.error('[WorkflowAnalyzer] ❌ Cookie collect debug payload:', JSON.stringify(debugPayload));
+        } catch (serializationError) {
+          console.error('[WorkflowAnalyzer] ❌ Cookie collect debug payload serialization failed:', serializationError.message);
+        }
+      }
       throw error;
     }
+  }
+
+  /**
+   * Execute validate-login step
+   */
+  async executeValidateLoginStep(step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🔐 Validating login state (${step.name})`);
+    
+    const determineResult =
+      workflowState.lastDetermineResult ||
+      workflowState['determine_completion']?.result ||
+      workflowState.results?.['determine_completion']?.result ||
+      null;
+    
+    const loginStatus =
+      workflowState.loginStatus ||
+      workflowState.context?.login_status ||
+      determineResult?.status ||
+      'unknown';
+    
+    const validation = {
+      status: loginStatus,
+      is_complete: determineResult?.is_complete ?? (loginStatus === 'success'),
+      reason: determineResult?.reason || null,
+      what_happened: determineResult?.what_happened || null,
+      timestamp: new Date().toISOString()
+    };
+    
+    if (determineResult?.captcha_status !== undefined) {
+      validation.captcha_status = determineResult.captcha_status;
+    }
+    if (determineResult?.page_state) {
+      validation.page_state = determineResult.page_state;
+    }
+    
+    workflowState.loginStatus = loginStatus;
+    workflowState.lastValidationResult = validation;
+    this.storeStepResult(step, validation, workflowState, { forceShared: true });
+    
+    if (jobId) {
+      await this.sendLogToBackend(jobId, 'info', `🔐 Login validation result: ${loginStatus}`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        status: loginStatus,
+        is_complete: validation.is_complete,
+        reason: validation.reason
+      });
+    }
+    
+    return validation;
   }
 
   /**
@@ -5542,8 +5664,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const expressionRegex = /\{\{\s*([^}]+?)\s*\}\}/g;
     return template.replace(expressionRegex, (_, expression) => {
       try {
-        const fn = new Function(...Object.keys(scope), `return (${expression});`);
-        const result = fn(...Object.values(scope));
+        const evaluationScope = { ...scope };
+        const fn = new Function('scope', `
+          if (!scope || typeof scope !== 'object') {
+            return undefined;
+          }
+          with (scope) {
+            return (${expression});
+          }
+        `);
+        const result = fn(evaluationScope);
         if (result === undefined || result === null) {
           return '';
         }
@@ -6959,6 +7089,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
       case 'filter-response':
         await this.executeFilterResponseStep(step, workflowState);
         break;
+      case 'cookie-add':
+        await this.executeCookieAddStep(step, workflowState, jobId);
+        break;
+      case 'cookie-update':
+        await this.executeCookieUpdateStep(step, workflowState, jobId);
+        break;
+      case 'cookie-remove':
+        await this.executeCookieRemoveStep(step, workflowState, jobId);
+        break;
+      case 'cookie-collect':
+        await this.executeCookieCollectStep(page, step, workflowState, jobId);
+        break;
       case 'print':
         await this.executePrintStep(step, workflowState, jobId);
         break;
@@ -6977,6 +7119,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         break;
       case 'save-data':
         await this.executeSaveDataStep(page, step, workflowState, jobId);
+        break;
+      case 'validate-login':
+        await this.executeValidateLoginStep(step, workflowState, jobId);
         break;
       default:
         console.log(`[WorkflowAnalyzer] ⚠️ Unknown nested step type: ${step.type}`);
