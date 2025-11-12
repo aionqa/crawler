@@ -684,7 +684,9 @@ class WorkflowExecutor {
             result: 'failure',
             error: scriptExecutionError,
             attempt_number: attemptNumber,
-            is_retry: false // First attempt, retries handled by workflow steps
+            is_retry: false, // First attempt, retries handled by workflow steps
+            job_id: jobId,
+            video_segment_id: segmentToken || null
           });
           
           // Throw error so workflow steps can handle it
@@ -776,7 +778,9 @@ class WorkflowExecutor {
           openai_request: verificationRequest,
           openai_response: verificationResponse,
           result: verificationResponse.status || 'incomplete',
-          error: executionResult.error || null
+          error: executionResult.error || null,
+          job_id: jobId,
+          video_segment_id: segmentToken || null
         });
 
         // Step 9: Check if OpenAI says we're done
@@ -810,7 +814,9 @@ class WorkflowExecutor {
           openai_request: null,
           openai_response: null,
           result: 'failure',
-          error: error.message
+          error: error.message,
+          job_id: jobId,
+          video_segment_id: segmentToken || null
         });
 
         // If this was the last iteration, mark as failed

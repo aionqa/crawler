@@ -16,11 +16,17 @@ import * as backendLogger from './backend-logger.js';
  */
 export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = {}) {
   const startTime = Date.now();
+  const categories = Array.isArray(options.categories) && options.categories.length > 0
+    ? options.categories
+    : ['performance', 'accessibility', 'best-practices', 'seo'];
+  const device = typeof options.device === 'string' ? options.device : 'desktop';
   
   try {
     await backendLogger.appendJobLog(jobId, 'info', `🔍 Starting performance analysis for ${pageUrl}`, 'performance-analyzer', {
       page_url: pageUrl,
-      action: 'performance_analysis_start'
+      action: 'performance_analysis_start',
+      categories,
+      device
     });
 
     // Wait for page to be fully loaded
@@ -101,6 +107,8 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
         downloadTime: performanceMetrics.downloadTime,
         resourceCount: performanceMetrics.resourceCount
       },
+      categories,
+      device,
       analysisDuration,
       timestamp: new Date().toISOString()
     };
@@ -119,6 +127,8 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
     return {
       success: false,
       error: error.message,
+      categories,
+      device,
       analysisDuration,
       timestamp: new Date().toISOString()
     };
