@@ -1,5 +1,6 @@
 import axios from 'axios';
 import fetch from 'node-fetch';
+import { analyzePageWithLighthouse } from './lighthouse-analyzer.js';
 
 /**
  * SimpleWorkflowExecutor
@@ -134,6 +135,9 @@ class SimpleWorkflowExecutor {
         case 'screenshot':
           result = await this.executeScreenshot(page, step);
           break;
+        case 'unlighthouse':
+          result = await this.executeUnlighthouse(page, step);
+          break;
         case 'ai-request':
           result = await this.executeAiRequest(page, step);
           break;
@@ -223,6 +227,47 @@ class SimpleWorkflowExecutor {
       screenshot: screenshot.toString('base64'),
       fullPage: config.fullPage !== false
     };
+  }
+
+  async executeUnlighthouse(page, step) {
+    const jobId = this.context.jobId || this.context.job_id || 'unknown-job';
+    const config = step.config || {};
+    const categories = Array.isArray(config.categories) && config.categories.length > 0
+      ? config.categories
+      : ['performance', 'accessibility', 'best-practices', 'seo'];
+    const device = typeof config.device === 'string' ? config.device : 'desktop';
+    const saveReport = config.saveReport !== false;
+    const pageUrl = page.url();
+
+    await this.sendLog('info', `📊 Running Unlighthouse audit (${device})`, {
+      step_type: step.type,
+      categories,
+      device,
+      saveReport
+    });
+
+    const analysisResult = await analyzePageWithLighthouse(page, jobId, pageUrl, {
+      categories,
+      device,
+      saveReport
+    });
+
+    if (analysisResult.success) {
+      await this.sendLog('info', `✅ Unlighthouse audit complete (performance ${analysisResult.metrics?.performance ?? 'n/a'}/100)`, {
+        categories,
+        device,
+        metrics: analysisResult.metrics,
+        analysis_duration_ms: analysisResult.analysisDuration
+      });
+    } else {
+      await this.sendLog('warn', `⚠️ Unlighthouse audit failed: ${analysisResult.error}`, {
+        categories,
+        device,
+        error: analysisResult.error
+      });
+    }
+
+    return analysisResult;
   }
 
   /**

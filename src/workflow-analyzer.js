@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { analyzePageWithLighthouse } from './lighthouse-analyzer.js';
 import { StaticNodeExecutor } from './static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from './step-requirements.js';
 
@@ -31,9 +32,9 @@ class WorkflowAnalyzer {
       }
     };
     this.variableSnapshotLimits = {
-      maxDepth: 5,
-      maxArrayItems: 25,
-      maxStringLength: 1200,
+      maxDepth: Number.POSITIVE_INFINITY,
+      maxArrayItems: Number.POSITIVE_INFINITY,
+      maxStringLength: 50000,
       maxHistory: 200
     };
   }
@@ -1240,7 +1241,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       delete workflowState.context.currentItemIndex;
     }
   }
- 
   /**
    * Send real-time page discovery/update to backend
    * @param {string} jobId - Job ID
@@ -1601,6 +1601,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
           case 'screenshot':
             await this.executeScreenshotStep(page, step, workflowState, jobId, pageId);
             break;
+          
+          case 'unlighthouse':
+            await this.executeUnlighthouseStep(page, step, workflowState, jobId, {
+              stepIndex: i,
+              totalSteps: this.workflowTemplate.steps.length
+            });
+            break;
             
           case 'playwright-analysis':
             await this.executePlaywrightAnalysisStep(page, step, workflowState, jobId);
@@ -1908,7 +1915,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     workflowState.aiAnalysisResult.legs = legs;
     console.log(`[WorkflowAnalyzer] ✅ Hardcoded analysis completed: ${legs.length} legs identified`);
   }
-
   /**
    * Execute screenshot step
    */
@@ -2037,6 +2043,79 @@ IMPORTANT OUTPUT REQUIREMENTS:
       'info',
       screenshotAttachments
     );
+  }
+
+  async executeUnlighthouseStep(page, step, workflowState, jobId, stepContext = {}) {
+    const config = step.config || {};
+    const categories = Array.isArray(config.categories) && config.categories.length > 0
+      ? config.categories
+      : ['performance', 'accessibility', 'best-practices', 'seo'];
+    const device = typeof config.device === 'string' ? config.device : 'desktop';
+    const saveReport = config.saveReport !== false;
+    const pageUrl = page.url();
+
+    await this.sendLogToBackend(jobId, 'info', `📊 Running Unlighthouse audit (${device})`, 'WORKFLOW-ANALYZER', {
+      step_id: step.id,
+      step_name: step.name || step.type,
+      step_type: step.type,
+      categories,
+      device,
+      saveReport
+    });
+
+    const analysisResult = await analyzePageWithLighthouse(page, jobId, pageUrl, {
+      categories,
+      device,
+      saveReport
+    });
+
+    if (analysisResult.success) {
+      await this.sendLogToBackend(jobId, 'info', `✅ Unlighthouse audit complete (performance ${analysisResult.metrics?.performance ?? 'n/a'}/100)`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        categories,
+        device,
+        metrics: analysisResult.metrics,
+        analysis_duration_ms: analysisResult.analysisDuration,
+        timestamp: analysisResult.timestamp
+      });
+    } else {
+      await this.sendLogToBackend(jobId, 'warn', `⚠️ Unlighthouse audit failed: ${analysisResult.error}`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        categories,
+        device,
+        error: analysisResult.error,
+        analysis_duration_ms: analysisResult.analysisDuration,
+        timestamp: analysisResult.timestamp
+      });
+    }
+
+    const resultPayload = {
+      success: analysisResult.success,
+      categories,
+      device,
+      analysis_duration_ms: analysisResult.analysisDuration,
+      metrics: analysisResult.metrics || null,
+      raw_result: analysisResult,
+      timestamp: analysisResult.timestamp || new Date().toISOString()
+    };
+
+    workflowState.performanceAudit = resultPayload;
+    workflowState.performance_audit = resultPayload;
+    this.storeStepResult(step, resultPayload, workflowState);
+
+    if (stepContext && stepContext.stepIndex !== undefined) {
+      await this.sendLogToBackend(jobId, 'info', `📊 Unlighthouse audit stored (step ${stepContext.stepIndex + 1}/${stepContext.totalSteps || '?'})`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        categories,
+        device
+      });
+    }
   }
 
   /**
@@ -2329,7 +2408,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       );
     }
   }
-
   /**
    * Execute AI prompt step
    */
@@ -2427,6 +2505,39 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       if (attachments.includes('execution_history') && workflowState.executionHistory) {
         stepPayload.execution_history = workflowState.executionHistory;
+      }
+    }
+    
+    const promptSlug = step.config?.prompt_slug || '';
+    const stepIdentity = (step.id || step.name || '').toLowerCase();
+    const humanLikeSlugs = new Set([
+      'generate-playwright-script',
+      'generate-workflow-script',
+      'generate_action_script',
+      'generate-login-script',
+      'generate_login_script',
+      'generate-playwright-login-script'
+    ]);
+    const shouldEnforceHumanLike = humanLikeSlugs.has(promptSlug) || (stepIdentity.includes('generate') && stepIdentity.includes('script'));
+    if (shouldEnforceHumanLike) {
+      const humanInstructionMarker = '[[HUMAN_INTERACTION_GUIDELINES]]';
+      const humanInstruction = [
+        humanInstructionMarker,
+        'Produce Playwright JavaScript that behaves like a careful human operator interacting with the page.',
+        '- Prefer high-level Playwright APIs (`page.locator`, `page.click`, `page.hover`, `page.fill`, `page.keyboard.type`).',
+        '- Never mutate the DOM directly with `document.querySelector(...).value = ...` or similar shortcuts.',
+        '- Before clicking important elements, hover them first and insert a small human pause (`await page.waitForTimeout(200 + Math.floor(Math.random() * 200))`).',
+        '- When typing, use `await page.fill` or `await page.keyboard.type` with slight delays between groups of characters.',
+        '- Scroll into view when needed (`await locator.scrollIntoViewIfNeeded()`).',
+        '- After each major interaction, wait for the UI to settle (`await page.waitForTimeout(250 + Math.floor(Math.random() * 250))`) and, when appropriate, `await page.waitForLoadState` or locator-based waits.',
+        '- Keep the script inside an async function body that will run in Node context with the `page` object available.',
+        '- Include concise comments explaining human intent for each cluster of steps.'
+      ].join('\n');
+      if (!stepPayload.additional_prompt_text || !stepPayload.additional_prompt_text.includes(humanInstructionMarker)) {
+        stepPayload.additional_prompt_text = [
+          stepPayload.additional_prompt_text,
+          humanInstruction
+        ].filter(Boolean).join('\n\n');
       }
     }
     
@@ -3105,7 +3216,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       throw error;
     }
   }
-
   /**
    * Execute page discovery step
    */
@@ -3610,6 +3720,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
       maxStringLength: options.maxStringLength ?? this.variableSnapshotLimits.maxStringLength
     };
 
+    if (Number.isFinite(limits.maxDepth) && depth >= limits.maxDepth) {
+      return {
+        __truncated__: true,
+        reason: `Max depth ${limits.maxDepth} reached`,
+        valueType: this.getValueTypeForSnapshot(value)
+      };
+    }
+
     if (value === undefined) {
       return '[Undefined]';
     }
@@ -3645,16 +3763,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       seen.add(value);
 
-      if (depth >= limits.maxDepth) {
-        return '[Depth limit]';
-      }
-
       if (Array.isArray(value)) {
-        const result = value.slice(0, limits.maxArrayItems).map(item =>
-          this.cloneForVariablePool(item, options, depth + 1, seen)
-        );
-        if (value.length > limits.maxArrayItems) {
-          result.push(`… ${value.length - limits.maxArrayItems} more items`);
+        const limit = Number.isFinite(limits.maxArrayItems) ? limits.maxArrayItems : value.length;
+        const result = [];
+        const sliceLength = Math.max(0, Math.min(limit, value.length));
+        for (let i = 0; i < sliceLength; i++) {
+          result.push(this.cloneForVariablePool(value[i], options, depth + 1, seen));
+        }
+        if (sliceLength < value.length) {
+          result.push({
+            __truncated__: true,
+            reason: `Array truncated to ${sliceLength} items`,
+            remaining: value.length - sliceLength
+          });
         }
         seen.delete(value);
         return result;
@@ -3662,26 +3783,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       if (value instanceof Map) {
         const obj = {};
-        let index = 0;
         for (const [key, mapValue] of value.entries()) {
-          if (index >= limits.maxArrayItems) {
-            obj.__truncated = `${value.size - limits.maxArrayItems} more entries`;
-            break;
-          }
           obj[key] = this.cloneForVariablePool(mapValue, options, depth + 1, seen);
-          index++;
         }
         seen.delete(value);
         return obj;
       }
 
       if (value instanceof Set) {
-        const arr = Array.from(value).slice(0, limits.maxArrayItems).map(item =>
+        const arr = Array.from(value).map(item =>
           this.cloneForVariablePool(item, options, depth + 1, seen)
         );
-        if (value.size > limits.maxArrayItems) {
-          arr.push(`… ${value.size - limits.maxArrayItems} more items`);
-        }
         seen.delete(value);
         return arr;
       }
@@ -3689,10 +3801,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const keys = Object.keys(value);
       const resultObj = {};
       for (let i = 0; i < keys.length; i++) {
-        if (i >= limits.maxArrayItems) {
-          resultObj.__truncated = `${keys.length - limits.maxArrayItems} more keys`;
-          break;
-        }
         const key = keys[i];
         resultObj[key] = this.cloneForVariablePool(value[key], options, depth + 1, seen);
       }
@@ -3701,6 +3809,382 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
 
     return String(value);
+  }
+
+  getValueTypeForSnapshot(value) {
+    if (value === null) return 'null';
+    if (Array.isArray(value)) return 'array';
+    if (value instanceof Date) return 'date';
+    if (value instanceof Map) return 'map';
+    if (value instanceof Set) return 'set';
+    if (Buffer.isBuffer(value)) return 'buffer';
+    if (value && typeof value === 'object' && value.constructor && value.constructor.name) {
+      return value.constructor.name;
+    }
+    return typeof value;
+  }
+
+  computeVarDumpStatistics(snapshotPayload) {
+    try {
+      const jsonString = JSON.stringify(snapshotPayload ?? {});
+      const byteSize = Buffer.byteLength(jsonString, 'utf8');
+      const metrics = this.countSnapshotStructure(snapshotPayload);
+      return {
+        byteSize,
+        totalKeys: metrics.totalKeys,
+        objectCount: metrics.objectCount,
+        arrayCount: metrics.arrayCount,
+        primitiveCount: metrics.primitiveCount
+      };
+    } catch (error) {
+      return {
+        byteSize: 0,
+        totalKeys: 0,
+        objectCount: 0,
+        arrayCount: 0,
+        primitiveCount: 0,
+        error: error?.message || String(error)
+      };
+    }
+  }
+
+  countSnapshotStructure(value, seen = new WeakSet()) {
+    const metrics = {
+      totalKeys: 0,
+      objectCount: 0,
+      arrayCount: 0,
+      primitiveCount: 0
+    };
+
+    const walk = (node) => {
+      if (node === null || node === undefined) {
+        metrics.primitiveCount += 1;
+        return;
+      }
+
+      if (typeof node !== 'object') {
+        metrics.primitiveCount += 1;
+        return;
+      }
+
+      if (seen.has(node)) {
+        return;
+      }
+      seen.add(node);
+
+      if (Array.isArray(node)) {
+        metrics.arrayCount += 1;
+        node.forEach(item => walk(item));
+        seen.delete(node);
+        return;
+      }
+
+      metrics.objectCount += 1;
+      const keys = Object.keys(node);
+      metrics.totalKeys += keys.length;
+      keys.forEach(key => walk(node[key]));
+      seen.delete(node);
+    };
+
+    walk(value);
+    return metrics;
+  }
+
+  computeVarDumpSequenceContext(workflowState) {
+    if (!workflowState) {
+      return {
+        type: 'root',
+        globalIndex: 1
+      };
+    }
+
+    if (!workflowState.__varDumpState) {
+      workflowState.__varDumpState = {
+        globalCount: 0,
+        loopCounters: {}
+      };
+    }
+
+    const state = workflowState.__varDumpState;
+    state.globalCount += 1;
+
+    const activeScope = this.getActiveLoopScope(workflowState);
+    const sequence = {
+      type: activeScope ? 'loop' : 'root',
+      globalIndex: state.globalCount
+    };
+
+    if (activeScope) {
+      const stepId = activeScope.metadata?.stepId || 'loop';
+      const iteration = activeScope.metadata?.iteration ?? null;
+      const loopKey = `${stepId}:${iteration ?? 'none'}`;
+      state.loopCounters[loopKey] = (state.loopCounters[loopKey] || 0) + 1;
+      sequence.loop = {
+        stepId,
+        stepName: activeScope.metadata?.stepName || null,
+        iteration,
+        indexWithinIteration: state.loopCounters[loopKey]
+      };
+    }
+
+    return sequence;
+  }
+
+  extractRequirementDetails(requirementText) {
+    if (!requirementText || typeof requirementText !== 'string') {
+      return {
+        lines: [],
+        keys: []
+      };
+    }
+
+    const lines = requirementText
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('---') && !/^requirements enforced/i.test(line))
+      .map(line => (line.startsWith('-') ? line.substring(1).trim() : line))
+      .filter(Boolean);
+
+    const reservedWords = new Set([
+      'json', 'object', 'array', 'arrays', 'values', 'value', 'items', 'item',
+      'fields', 'field', 'should', 'must', 'return', 'include', 'includes',
+      'expected', 'previous', 'step', 'context', 'workflow', 'ai', 'analysis',
+      'data', 'structure', 'schema', 'list', 'string', 'number', 'boolean',
+      'true', 'false', 'null', 'arrayof', 'each', 'response', 'request'
+    ]);
+
+    const keys = new Set();
+    const addToken = (token) => {
+      if (!token) return;
+      const cleaned = token
+        .replace(/[`"'\\]/g, '')
+        .replace(/[()]/g, ' ')
+        .trim();
+      if (!cleaned) return;
+
+      const potentialTokens = cleaned.split(/[\s/]+/).filter(Boolean);
+      potentialTokens.forEach(entry => {
+        const normalized = entry.replace(/[^a-zA-Z0-9_.-]/g, '').trim();
+        if (!normalized) return;
+        const lowered = normalized.toLowerCase();
+        if (normalized.length < 2) return;
+        if (reservedWords.has(lowered)) return;
+        if (!/^[a-zA-Z0-9_.-]+$/.test(normalized)) return;
+        keys.add(normalized);
+      });
+    };
+
+    lines.forEach(line => {
+      let match;
+      const quoteRegex = /"([^"]+)"/g;
+      while ((match = quoteRegex.exec(line)) !== null) {
+        addToken(match[1]);
+      }
+
+      const backtickRegex = /`([^`]+)`/g;
+      while ((match = backtickRegex.exec(line)) !== null) {
+        addToken(match[1]);
+      }
+
+      const colonIndex = line.indexOf(':');
+      if (colonIndex !== -1) {
+        const tail = line.slice(colonIndex + 1);
+        tail.split(/[•,]/).forEach(fragment => {
+          fragment.split(/\band\b|\bor\b/gi).forEach(part => addToken(part));
+        });
+      }
+    });
+
+    return {
+      lines,
+      keys: Array.from(keys)
+    };
+  }
+  resolveRelevantSnapshotForNextStep(snapshotPayload, nextStep) {
+    if (!snapshotPayload || typeof snapshotPayload !== 'object') {
+      return {
+        data: snapshotPayload,
+        source: 'snapshot',
+        sourcePath: 'snapshot'
+      };
+    }
+
+    const shared = snapshotPayload.shared || {};
+    const byStep = shared.byStep || {};
+    const slug = nextStep
+      ? (nextStep.slug || this.generateSlug(nextStep.name || nextStep.type || 'next-step'))
+      : null;
+
+    const candidates = [];
+    if (slug) {
+      candidates.push({
+        data: byStep?.[slug]?.result,
+        source: 'shared.byStep.result',
+        sourcePath: `shared.byStep.${slug}.result`
+      });
+      candidates.push({
+        data: byStep?.[slug],
+        source: 'shared.byStep',
+        sourcePath: `shared.byStep.${slug}`
+      });
+      candidates.push({
+        data: shared?.[slug],
+        source: 'shared',
+        sourcePath: `shared.${slug}`
+      });
+      candidates.push({
+        data: snapshotPayload.currentLoop?.variables?.[slug],
+        source: 'currentLoop.variables',
+        sourcePath: `currentLoop.variables.${slug}`
+      });
+    }
+
+    candidates.push({
+      data: snapshotPayload.currentLoop?.variables,
+      source: 'currentLoop.variables',
+      sourcePath: 'currentLoop.variables'
+    });
+
+    candidates.push({
+      data: shared,
+      source: 'shared',
+      sourcePath: 'shared'
+    });
+
+    candidates.push({
+      data: snapshotPayload,
+      source: 'snapshot',
+      sourcePath: 'snapshot'
+    });
+
+    for (const candidate of candidates) {
+      if (!candidate.data) {
+        continue;
+      }
+      if (typeof candidate.data === 'object') {
+        if (Array.isArray(candidate.data)) {
+          if (candidate.data.length > 0) {
+            return candidate;
+          }
+        } else {
+          if (Object.keys(candidate.data).length > 0) {
+            return candidate;
+          }
+        }
+      }
+    }
+
+    return candidates[candidates.length - 1];
+  }
+
+  collectSnapshotKeyCoverage(data) {
+    if (!data || typeof data !== 'object') {
+      return {
+        keyPaths: {},
+        uniqueKeys: [],
+        topLevelKeys: []
+      };
+    }
+
+    const keyMap = new Map();
+    const topLevelKeys = new Set();
+    const seen = new WeakSet();
+
+    const recordPath = (key, path) => {
+      if (!keyMap.has(key)) {
+        keyMap.set(key, new Set());
+      }
+      const entries = keyMap.get(key);
+      if (entries.size < 8) {
+        entries.add(path);
+      }
+    };
+
+    const walk = (node, pathSegments = []) => {
+      if (node === null || node === undefined) {
+        return;
+      }
+
+      if (typeof node !== 'object') {
+        return;
+      }
+
+      if (seen.has(node)) {
+        return;
+      }
+      seen.add(node);
+
+      if (Array.isArray(node)) {
+        node.forEach((item, index) => {
+          walk(item, [...pathSegments, `[${index}]`]);
+        });
+        seen.delete(node);
+        return;
+      }
+
+      const keys = Object.keys(node);
+      keys.forEach(key => {
+        if (pathSegments.length === 0) {
+          topLevelKeys.add(key);
+        }
+        const newPath = [...pathSegments, key].join('.');
+        recordPath(key, newPath);
+        walk(node[key], [...pathSegments, key]);
+      });
+
+      seen.delete(node);
+    };
+
+    walk(data, []);
+
+    const keyPaths = {};
+    keyMap.forEach((paths, key) => {
+      keyPaths[key] = Array.from(paths);
+    });
+
+    return {
+      keyPaths,
+      uniqueKeys: Array.from(keyMap.keys()),
+      topLevelKeys: Array.from(topLevelKeys)
+    };
+  }
+
+  compareSnapshotToRequirements(snapshotPayload, nextStep, requirementDetails) {
+    const comparison = {
+      source: null,
+      sourcePath: null,
+      expectedKeys: requirementDetails?.keys || [],
+      missingKeys: [],
+      matchedKeys: [],
+      extraKeys: [],
+      availableKeys: [],
+      requirementLines: requirementDetails?.lines || []
+    };
+
+    const { data: relevantData, source, sourcePath } = this.resolveRelevantSnapshotForNextStep(snapshotPayload, nextStep);
+    comparison.source = source;
+    comparison.sourcePath = sourcePath;
+
+    const coverage = this.collectSnapshotKeyCoverage(relevantData);
+    comparison.availableKeys = coverage.uniqueKeys;
+
+    const expectedKeys = requirementDetails?.keys || [];
+    expectedKeys.forEach(key => {
+      const paths = coverage.keyPaths[key] || [];
+      if (paths.length > 0) {
+        comparison.matchedKeys.push({
+          key,
+          paths: paths.slice(0, 5),
+          hasMore: paths.length > 5
+        });
+      } else {
+        comparison.missingKeys.push(key);
+      }
+    });
+
+    comparison.extraKeys = coverage.topLevelKeys.filter(key => !expectedKeys.includes(key));
+
+    return comparison;
   }
 
   updateVariablePool(step, result, workflowState, options = {}) {
@@ -4082,7 +4566,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     return cleaned;
   }
-
   /**
    * Execute code step (static code)
    */
@@ -4837,7 +5320,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     throw new Error(message);
   }
-
   /**
    * Execute cookie add step
    */
@@ -4977,13 +5459,30 @@ IMPORTANT OUTPUT REQUIREMENTS:
       scopesIncluded.push('context');
     }
 
+    const contextInfo = this.resolveStepContext(step, null, this.workflowTemplate?.steps);
+    const requirementDetails = this.extractRequirementDetails(contextInfo.requirementText);
+    const sequenceContext = this.computeVarDumpSequenceContext(workflowState);
+    const statistics = this.computeVarDumpStatistics(snapshotPayload);
+    const schemaComparison = this.compareSnapshotToRequirements(snapshotPayload, contextInfo.nextStep, requirementDetails);
+    const nextStepInfo = contextInfo.nextStep ? {
+      id: contextInfo.nextStep.id || null,
+      slug: contextInfo.nextStep.slug || null,
+      name: contextInfo.nextStep.name || null,
+      type: contextInfo.nextStep.type || null
+    } : null;
+
     const generatedAt = new Date().toISOString();
     const displayScopes = scopesIncluded.length > 0 ? scopesIncluded.join(', ') : 'none';
 
     const result = {
       scopes: scopesIncluded,
       snapshot: snapshotPayload,
-      generatedAt
+      generatedAt,
+      statistics,
+      sequence: sequenceContext,
+      requirementSummary: requirementDetails.lines,
+      schemaComparison,
+      nextStep: nextStepInfo
     };
 
     this.storeStepResult(step, result, workflowState, { forceShared: true });
@@ -4991,7 +5490,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
     await this.logStepOutcome(step, jobId, `📝 Var dump captured (${displayScopes}) — view in Vars tab`, {
       scopes: scopesIncluded,
       snapshot: snapshotPayload,
-      generatedAt
+      generatedAt,
+      statistics,
+      sequence: sequenceContext,
+      requirementSummary: requirementDetails.lines,
+      schemaComparison,
+      nextStep: nextStepInfo
     }, 'info');
 
     return result;
@@ -5601,7 +6105,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       throw error;
     }
   }
-
   buildTemplateScope(step, workflowState, jobId) {
     const scope = {};
 
@@ -6276,7 +6779,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     console.log(`[WorkflowAnalyzer] ✅ For-each step completed: ${iterationSummaries.length} iterations`);
   }
-
   /**
    * Execute while-loop step - loops while condition is true
    * General-purpose looping element that can loop based on conditions from code or AI
@@ -7041,7 +7543,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     return finalResult;
   }
-
   /**
    * Execute step by type (used by for-each to execute nested steps)
    */
@@ -7579,4 +8080,3 @@ export default WorkflowAnalyzer;
 
 // Force rebuild Wed 15 Oct 2025 23:26:24 AEDT
 // Force rebuild Tue 28 Oct 2025 15:43:46 AEDT
-
