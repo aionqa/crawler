@@ -1149,22 +1149,118 @@ class WorkflowExecutor {
       
       // Playwright scripts must execute in Node.js context, not browser context
       // The 'page' object is available in Node.js, not in browser
-      // Create an async function that has access to the page object
-      const executeInNodeContext = async (pageObj, scriptCode) => {
+      // Create a wrapper page object that intercepts clicks and fills to send timeline markers
+      const createPageWrapper = (pageObj, jobId, backendLogger) => {
+        const wrapper = Object.create(pageObj);
+        
+        // Wrap click method to send timeline marker
+        const originalClick = pageObj.click.bind(pageObj);
+        wrapper.click = async function(selector, options) {
+          try {
+            // Get element text for marker label
+            let label = 'Click';
+            try {
+              const element = await pageObj.locator(selector).first();
+              const text = await element.textContent({ timeout: 1000 }).catch(() => null);
+              if (text && text.trim()) {
+                label = `Click: ${text.trim().substring(0, 30)}`;
+              } else {
+                label = `Click: ${selector.substring(0, 30)}`;
+              }
+            } catch (e) {
+              label = `Click: ${selector.substring(0, 30)}`;
+            }
+            
+            // Send timeline marker
+            if (jobId && backendLogger) {
+              await backendLogger.appendJobLog(jobId, 'info',
+                `🖱️ ${label}`,
+                'WORKFLOW-ACTION',
+                {
+                  action_type: 'click',
+                  selector: selector,
+                  timestamp: Date.now(),
+                  is_timeline_marker: true,
+                  marker_color: '#3b82f6' // Blue for clicks
+                }
+              );
+            }
+          } catch (markerError) {
+            // Don't fail script execution if marker sending fails
+            console.warn(`[WorkflowExecutor] Failed to send click marker: ${markerError.message}`);
+          }
+          
+          return await originalClick(selector, options);
+        };
+        
+        // Wrap fill method to send timeline marker
+        const originalFill = pageObj.fill.bind(pageObj);
+        wrapper.fill = async function(selector, value, options) {
+          try {
+            // Get element label for marker
+            let label = 'Input';
+            try {
+              const element = await pageObj.locator(selector).first();
+              const placeholder = await element.getAttribute('placeholder').catch(() => null);
+              const name = await element.getAttribute('name').catch(() => null);
+              if (placeholder) {
+                label = `Input: ${placeholder.substring(0, 30)}`;
+              } else if (name) {
+                label = `Input: ${name.substring(0, 30)}`;
+              } else {
+                label = `Input: ${selector.substring(0, 30)}`;
+              }
+            } catch (e) {
+              label = `Input: ${selector.substring(0, 30)}`;
+            }
+            
+            // Send timeline marker
+            if (jobId && backendLogger) {
+              await backendLogger.appendJobLog(jobId, 'info',
+                `⌨️ ${label}`,
+                'WORKFLOW-ACTION',
+                {
+                  action_type: 'input',
+                  selector: selector,
+                  value_preview: String(value).substring(0, 50),
+                  timestamp: Date.now(),
+                  is_timeline_marker: true,
+                  marker_color: '#10b981' // Green for inputs
+                }
+              );
+            }
+          } catch (markerError) {
+            // Don't fail script execution if marker sending fails
+            console.warn(`[WorkflowExecutor] Failed to send input marker: ${markerError.message}`);
+          }
+          
+          return await originalFill(selector, value, options);
+        };
+        
+        // Copy all other methods and properties
+        Object.setPrototypeOf(wrapper, pageObj);
+        return wrapper;
+      };
+      
+      // Create an async function that has access to the wrapped page object
+      const executeInNodeContext = async (pageObj, scriptCode, jobId) => {
+        // Create wrapped page with action interception
+        const wrappedPage = createPageWrapper(pageObj, jobId, this.backendLogger);
+        
         // Use string concatenation (not template literals) to avoid escaping issues
         // This allows the script code to contain backticks, ${}, etc. without problems
         const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
         
         // Create a function with page as parameter
         const fn = new Function('page', functionBody);
-        return await fn(pageObj);
+        return await fn(wrappedPage);
       };
       
       // DO NOT validate or check for incomplete strings - execute script as-is from OpenAI
       
       // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
       const result = await Promise.race([
-        executeInNodeContext(page, cleanedScript),
+        executeInNodeContext(page, cleanedScript, jobId),
         new Promise((_, reject) => 
           setTimeout(() => reject(new Error('Script execution timeout after 45 seconds')), 45000)
         )

@@ -4731,16 +4731,117 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   try {
     const openaiClient = new OpenAI({ apiKey: openaiApiKey });
     
+    // Load workflow template to check for cookie-collect steps that need to run before navigation
+    let preNavigationCookieSteps = [];
+    const projectId = context.project_id || context.projectId || null;
+    const workflowTemplateId = context.workflow_template_id || null;
+    
+    if (workflowTemplateId && projectId) {
+      try {
+        const axios = (await import('axios')).default;
+        await sendLog(jobId, 'info', `🔍 Loading workflow template ${workflowTemplateId} to check for pre-navigation cookie steps...`);
+        const workflowResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/workflow-templates/${workflowTemplateId}`);
+        const workflowTemplate = workflowResponse.data;
+        
+        // Find cookie-collect steps that should run before navigation
+        preNavigationCookieSteps = workflowTemplate.steps?.filter(step => 
+          step.type === 'cookie-collect' && 
+          step.config?.reloadFromProject === true
+        ) || [];
+        
+        if (preNavigationCookieSteps.length > 0) {
+          await sendLog(jobId, 'info', `🍪 Found ${preNavigationCookieSteps.length} pre-navigation cookie-collect step(s) in workflow`);
+        } else {
+          await sendLog(jobId, 'info', `ℹ️ No pre-navigation cookie-collect steps found in workflow`);
+        }
+      } catch (workflowError) {
+        await sendLog(jobId, 'warn', `⚠️ Could not load workflow template for pre-navigation cookie steps: ${workflowError.message}`);
+      }
+    } else {
+      await sendLog(jobId, 'warn', `⚠️ Missing workflow_template_id (${workflowTemplateId}) or project_id (${projectId}), skipping pre-navigation cookie check`);
+    }
+    
     const result = await withBrowser(async ({ page, context: browserContext }) => {
       await sendLog(jobId, 'info', 'Browser session started', { mode });
       
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {
         await sendLog(jobId, 'info', `🍪 Setting ${cookies.length} cookies for authentication...`);
-        await browserContext.addCookies(cookies);
-        await sendLog(jobId, 'info', `✅ Successfully set ${cookies.length} cookies in browser context`);
+        try {
+          await browserContext.addCookies(cookies);
+          await sendLog(jobId, 'info', `✅ Successfully set ${cookies.length} cookies in browser context`);
+        } catch (cookieError) {
+          await sendLog(jobId, 'warn', `⚠️ Failed to set some cookies: ${cookieError.message}`);
+          // Try to set cookies one by one to identify which ones fail
+          let successCount = 0;
+          for (const cookie of cookies) {
+            try {
+              await browserContext.addCookies([cookie]);
+              successCount++;
+            } catch (err) {
+              await sendLog(jobId, 'warn', `⚠️ Failed to set cookie ${cookie.name} for domain ${cookie.domain}: ${err.message}`);
+            }
+          }
+          await sendLog(jobId, 'info', `✅ Set ${successCount}/${cookies.length} cookies successfully`);
+        }
       } else {
         await sendLog(jobId, 'info', `ℹ️ No cookies provided, proceeding without authentication`);
+      }
+      
+      // Execute cookie-collect steps that need to run before navigation (workflow-driven)
+      if (preNavigationCookieSteps.length > 0 && projectId) {
+        try {
+          const axios = (await import('axios')).default;
+          await sendLog(jobId, 'info', `🍪 Executing ${preNavigationCookieSteps.length} pre-navigation cookie-collect step(s) from workflow...`);
+          
+          for (const step of preNavigationCookieSteps) {
+            const stepConfig = step.config || {};
+            const reloadFromProject = stepConfig.reloadFromProject !== false; // Default to true
+            
+            if (reloadFromProject) {
+              // Handle both string and ObjectId project_id
+              const projectIdStr = typeof projectId === 'object' 
+                ? projectId.toString() 
+                : String(projectId || '');
+              
+              if (!projectIdStr) {
+                await sendLog(jobId, 'warn', `⚠️ [${step.name}] No project_id available, skipping cookie reload`);
+                continue;
+              }
+              
+              const projectCookiesResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/projects/${projectIdStr}/cookies`, {
+                headers: {
+                  'Authorization': `Bearer ${context.runner_token || ''}`
+                }
+              });
+              
+              if (projectCookiesResponse.data && Array.isArray(projectCookiesResponse.data) && projectCookiesResponse.data.length > 0) {
+                const projectCookies = projectCookiesResponse.data;
+                const currentCookies = await browserContext.cookies();
+                const currentCookieMap = new Map(currentCookies.map(c => [`${c.name}:${c.domain}`, c]));
+                
+                const cookiesToAdd = projectCookies.filter(cookie => {
+                  const key = `${cookie.name}:${cookie.domain}`;
+                  const existing = currentCookieMap.get(key);
+                  return !existing || existing.value !== cookie.value || existing.expires !== cookie.expires;
+                });
+                
+                if (cookiesToAdd.length > 0) {
+                  try {
+                    await browserContext.addCookies(cookiesToAdd);
+                    await sendLog(jobId, 'info', `🍪 [${step.name}] Reloaded ${cookiesToAdd.length} cookies from project before navigation`);
+                  } catch (reloadError) {
+                    await sendLog(jobId, 'warn', `⚠️ [${step.name}] Failed to reload some cookies: ${reloadError.message}`);
+                  }
+                } else {
+                  await sendLog(jobId, 'info', `🍪 [${step.name}] All project cookies already set in browser context`);
+                }
+              }
+            }
+          }
+        } catch (cookieStepError) {
+          await sendLog(jobId, 'warn', `⚠️ Pre-navigation cookie steps failed: ${cookieStepError.message}`);
+        }
       }
       
       // Set authentication tokens from login if provided

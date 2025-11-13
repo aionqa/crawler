@@ -1809,38 +1809,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] ✅ ALL WORKFLOW STEPS COMPLETED`);
     console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
 
-    if (workflowState.shouldAutoUpdateWorkflow && workflowState.workflowId) {
-      const legsForUpdate = Array.isArray(workflowState.legs)
-        ? workflowState.legs
-        : (Array.isArray(workflowState.aiAnalysisResult?.legs) ? workflowState.aiAnalysisResult.legs : []);
-      const pageDescriptionForUpdate =
-        workflowState.aiAnalysisResult?.page_description ||
-        workflowState.pageDescription ||
-        null;
-
-      if (pageDescriptionForUpdate || legsForUpdate.length > 0) {
-        try {
-          await this.updateWorkflowWithAnalysis(
-            workflowState.workflowId,
-            pageDescriptionForUpdate,
-            legsForUpdate,
-            true
-          );
-          workflowState.autoUpdatedWorkflow = true;
-          await this.sendLogToBackend(jobId, 'info', `📝 Auto-updated workflow ${workflowState.workflowId} (finalize)`, 'WORKFLOW-ANALYZER', {
-            workflow_id: workflowState.workflowId,
-            legs_count: legsForUpdate.length,
-            auto_update: true
-          });
-        } catch (autoUpdateError) {
-          console.error(`[WorkflowAnalyzer] ❌ Auto-update workflow failed: ${autoUpdateError.message}`);
-          await this.sendLogToBackend(jobId, 'warn', `⚠️ Auto-update workflow failed: ${autoUpdateError.message}`, 'WORKFLOW-ANALYZER', {
-            workflow_id: workflowState.workflowId,
-            auto_update: true
-          });
-        }
-      }
-    }
+    // Workflow updates are now handled only during workflow step execution
+    // No auto-update during finalization to keep workflows predictable and consistent
     
     // Send log to backend
     await this.sendLogToBackend(jobId, 'info', `✅ ALL WORKFLOW STEPS COMPLETED`, 'WORKFLOW-ANALYZER', {
@@ -2529,6 +2499,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         '- Before clicking important elements, hover them first and insert a small human pause (`await page.waitForTimeout(200 + Math.floor(Math.random() * 200))`).',
         '- When typing, use `await page.fill` or `await page.keyboard.type` with slight delays between groups of characters.',
         '- Scroll into view when needed (`await locator.scrollIntoViewIfNeeded()`).',
+        '- CRITICAL: After opening menus, dropdowns, or navigation panels, ALWAYS wait 800-1200ms before the next action to allow the menu to fully render and become interactive. Use: `await page.waitForTimeout(800 + Math.floor(Math.random() * 400))`.',
+        '- CRITICAL: After clicking elements that trigger UI changes (modals, sidebars, dropdowns), wait 500-1000ms before interacting with the newly revealed content.',
         '- After each major interaction, wait for the UI to settle (`await page.waitForTimeout(250 + Math.floor(Math.random() * 250))`) and, when appropriate, `await page.waitForLoadState` or locator-based waits.',
         '- Keep the script inside an async function body that will run in Node context with the `page` object available.',
         '- Include concise comments explaining human intent for each cluster of steps.'
@@ -5686,7 +5658,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] 🔍 Collecting cookies (${step.name})`);
     
     const config = step.config || {};
-    const source = config.source || 'latest';
+    const source = config.source || 'browser';
+    const reloadFromProject = config.reloadFromProject !== false; // Default to true
 
     try {
       // Get project ID from job
@@ -5697,6 +5670,42 @@ IMPORTANT OUTPUT REQUIREMENTS:
         throw new Error(`Could not find project ID for job: ${jobId}`);
       }
 
+      // Step 1: Reload cookies from project into browser context (if enabled)
+      if (reloadFromProject && page) {
+        try {
+          const response = await axios.get(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+            headers: this.getAuthHeaders()
+          });
+          
+          if (response.data && Array.isArray(response.data) && response.data.length > 0) {
+            const projectCookies = response.data;
+            // Get current cookies to compare
+            const currentCookies = await page.context().cookies();
+            const currentCookieMap = new Map(currentCookies.map(c => [`${c.name}:${c.domain}`, c]));
+            
+            // Add/update cookies from project
+            const cookiesToAdd = projectCookies.filter(cookie => {
+              const key = `${cookie.name}:${cookie.domain}`;
+              const existing = currentCookieMap.get(key);
+              // Add if new or if value/expires changed
+              return !existing || existing.value !== cookie.value || existing.expires !== cookie.expires;
+            });
+            
+            if (cookiesToAdd.length > 0) {
+              await page.context().addCookies(cookiesToAdd);
+              console.log(`[WorkflowAnalyzer] 🍪 Reloaded ${cookiesToAdd.length} cookies from project into browser context`);
+              await this.sendLogToBackend(jobId, 'info', `🍪 Reloaded ${cookiesToAdd.length} cookies from project`, 'WORKFLOW-ANALYZER', {
+                step_id: step.id,
+                cookies_reloaded: cookiesToAdd.length
+              });
+            }
+          }
+        } catch (reloadError) {
+          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to reload cookies from project: ${reloadError.message}`);
+        }
+      }
+
+      // Step 2: Collect cookies based on source
       let collectedCookies = [];
 
       if (source === 'browser') {
@@ -5706,11 +5715,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
         const contextCookies = await page.context().cookies();
         collectedCookies = contextCookies;
       } else if (source === 'latest') {
-        // Collect from latest login job
-        const latestCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/latest-cookies`, {
+        // Collect from project cookies (which includes latest from login)
+        const projectCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
           headers: this.getAuthHeaders()
         });
-        collectedCookies = latestCookiesResponse.data || [];
+        collectedCookies = projectCookiesResponse.data || [];
       } else if (source === 'job') {
         // Collect from specific job
         if (!config.jobId) {
@@ -5733,20 +5742,50 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
 
+      // Step 3: Enrich cookies with metadata if collecting from browser
+      if (source === 'browser' && page && collectedCookies.length > 0) {
+        const currentUrl = page.url();
+        const currentDomain = new URL(currentUrl).hostname;
+        collectedCookies = collectedCookies.map(cookie => ({
+          ...cookie,
+          _metadata: {
+            source: 'page-visit',
+            collectedAt: new Date().toISOString(),
+            targetDomain: currentDomain,
+            originalDomain: cookie.domain || 'unknown',
+            pageUrl: currentUrl
+          }
+        }));
+      }
+
       // Store collected cookies in workflow state
       if (config.outputVariable) {
         workflowState[config.outputVariable] = collectedCookies;
       }
       workflowState.collectedCookies = collectedCookies;
 
-      // Optionally save to project
-      if (config.saveToProject !== false) {
-        await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
-          cookies: collectedCookies,
-          source: 'workflow'
-        }, {
-          headers: this.getAuthHeaders()
-        });
+      // Step 4: Save to project (if enabled)
+      if (config.saveToProject !== false && collectedCookies.length > 0) {
+        try {
+          const saveResponse = await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+            cookies: collectedCookies,
+            source: 'workflow'
+          }, {
+            headers: this.getAuthHeaders()
+          });
+          
+          if (saveResponse.data) {
+            const result = saveResponse.data;
+            console.log(`[WorkflowAnalyzer] 🍪 Updated project cookies: +${result.addedCount || 0} new, ~${result.updatedCount || 0} updated`);
+            await this.sendLogToBackend(jobId, 'info', `🍪 Updated project cookies: +${result.addedCount || 0} new, ~${result.updatedCount || 0} updated`, 'WORKFLOW-ANALYZER', {
+              step_id: step.id,
+              cookies_added: result.addedCount || 0,
+              cookies_updated: result.updatedCount || 0
+            });
+          }
+        } catch (saveError) {
+          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to save cookies to project: ${saveError.message}`);
+        }
       }
 
       this.storeStepResult(step, { cookies: collectedCookies, count: collectedCookies.length }, workflowState);
