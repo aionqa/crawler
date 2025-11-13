@@ -360,7 +360,15 @@ async function executeLoginJob(job, streamInterval) {
  */
 async function executeCrawlJob(job, streamInterval) {
   // Extract job parameters
-  const { url, cookies = [], context: rawContext = {}, options: jobOptions = {} } = job;
+  // CRITICAL: URL can be at job.url or job.start_url (from runner_jobs structure)
+  const url = job.url || job.start_url || null;
+  const cookies = job.cookies || [];
+  const rawContext = job.context || {};
+  const jobOptions = job.options || {};
+  
+  if (!url) {
+    throw new Error(`Missing URL in job object. Available keys: ${Object.keys(job).join(', ')}`);
+  }
   const executeWorkflowFlag =
     rawContext?.execute_workflow !== undefined
       ? rawContext.execute_workflow
@@ -403,11 +411,25 @@ async function executeCrawlJob(job, streamInterval) {
   let recordedVideoInfo = null;
 
   // Set job_id in context for logging and pass stream callback
+  // Ensure project_id is in context (it might be at job.project_id or in context)
+  // CRITICAL: Extract workflow_template_id from job object (can be at multiple locations)
+  const workflowTemplateId = 
+    normalizedContext.workflow_template_id || 
+    job.workflow_template_id || 
+    job.context?.workflow_template_id || 
+    jobOptions.workflow_template_id || 
+    mergedOptions.workflow_template_id || 
+    null;
+  
   const executionContext = {
     ...normalizedContext,
     job_id: job.id,
+    project_id: job.project_id || normalizedContext.project_id || job.context?.project_id || null,
+    projectId: job.project_id || normalizedContext.projectId || job.context?.projectId || null,
+    workflow_template_id: workflowTemplateId, // CRITICAL: Must be set for workflow mode
     useRemoteBrowser: false, // Use local browser (embedded)
     runnerId: RUNNER_ID,
+    runner_token: RUNNER_TOKEN, // Add runner token for API calls
     videoRecorder,
     onPageReady: (page) => {
       // Start real-time video streaming when page is ready

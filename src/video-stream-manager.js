@@ -56,7 +56,22 @@ class VideoStreamManager {
   async _captureLoop(streamInfo) {
     while (streamInfo.isActive) {
       try {
-        if (!streamInfo.page || streamInfo.page.isClosed()) {
+        // Check if page is valid
+        if (!streamInfo.page) {
+          console.log(`[VIDEO-STREAM] Page is null for job ${streamInfo.jobId}, stopping stream`);
+          break;
+        }
+        
+        // Check if page is closed
+        let isClosed = false;
+        try {
+          isClosed = streamInfo.page.isClosed();
+        } catch (e) {
+          // If we can't check, assume it's closed
+          isClosed = true;
+        }
+        
+        if (isClosed) {
           console.log(`[VIDEO-STREAM] Page closed for job ${streamInfo.jobId}, stopping stream`);
           break;
         }
@@ -67,6 +82,11 @@ class VideoStreamManager {
           quality: 70, // Balance between quality and size
           fullPage: false // Just viewport for performance
         });
+        
+        // Log first few frames to verify capture is working
+        if (streamInfo.frameCount < 3) {
+          console.log(`[VIDEO-STREAM] Captured frame ${streamInfo.frameCount + 1} for job ${streamInfo.jobId} (${screenshot.length} bytes)`);
+        }
 
         // Get URL safely
         let currentUrl = 'unknown';
