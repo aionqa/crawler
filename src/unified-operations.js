@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import * as backendLogger from './backend-logger.js';
 import fs from 'fs';
+import { createOpenAIClient } from './openai-client-factory.js';
 import ffmpeg from 'fluent-ffmpeg';
 import WorkflowAnalyzer from './workflow-analyzer.js';
 import WorkflowExecutor from './workflow-executor.js';
@@ -4729,7 +4730,8 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   }
   
   try {
-    const openaiClient = new OpenAI({ apiKey: openaiApiKey });
+    // Use configured endpoint if available, otherwise fall back to direct OpenAI
+    const openaiClient = createOpenAIClient(context, openaiApiKey);
     
     // Load workflow template to check for cookie-collect steps that need to run before navigation
     let preNavigationCookieSteps = [];

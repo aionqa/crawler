@@ -91,7 +91,7 @@ class WorkflowAnalyzer {
       hasSteps: stepList.length > 0,
       usesPlaywrightAnalysis: hasStep('playwright-analysis', 'workflow-analysis', 'hardcoded-workflow-analysis', 'page-discovery'),
       usesAIModel: hasStep('ai-request', 'ai-prompt', 'page-description', 'workflow-analysis', 'hardcoded-workflow-analysis', 'create-workflow', 'update-workflow'),
-      usesLinkDiscovery: hasStep('page-discovery'),
+      usesLinkDiscovery: hasStep('page-discovery', 'sitemap-exploration'),
       usesPerformanceAudit: hasStep('unlighthouse'),
       usesScreenshotStep: hasStep('screenshot'),
       usesCookieOperations: hasStep('cookie-add', 'cookie-update', 'cookie-remove', 'cookie-collect')
@@ -146,13 +146,14 @@ class WorkflowAnalyzer {
   /**
    * Perform Playwright analysis to extract forms, links, interactive elements
    */
-  async performPlaywrightAnalysis(page) {
+  async performPlaywrightAnalysis(page, options = {}) {
     const analysis = {
       forms: [],
       links: [],
       interactive_elements: [],
       non_interactive_elements: []
     };
+    const onlyVisibleInteractiveElements = options.onlyVisibleInteractiveElements === true;
 
     try {
       // Extract forms
@@ -229,19 +230,30 @@ class WorkflowAnalyzer {
       // Extract interactive elements (buttons, clickable divs, etc.)
       const buttons = await page.$$('button:not(form button), input[type="button"], [role="button"], [onclick]');
       for (const button of buttons) {
-        const text = await button.textContent();
-        const role = await button.getAttribute('role');
-        const onclick = await button.getAttribute('onclick');
+        let isVisible = true;
+        try {
+          isVisible = await button.isVisible();
+        } catch (visibilityError) {
+          console.warn('[WorkflowAnalyzer] ⚠️ Unable to determine visibility for interactive element:', visibilityError.message);
+          isVisible = true;
+        }
 
-        const buttonSelectors = await this.getElementSelector(button);
-        analysis.interactive_elements.push({
-          type: 'button',
-          text: text?.trim(),
-          role,
-          onclick: onclick ? 'yes' : 'no',
-          selector: buttonSelectors[0]?.selector, // Primary selector
-          selectors: buttonSelectors // All strategies
-        });
+        if (!onlyVisibleInteractiveElements || isVisible) {
+          const text = await button.textContent();
+          const role = await button.getAttribute('role');
+          const onclick = await button.getAttribute('onclick');
+
+          const buttonSelectors = await this.getElementSelector(button);
+          analysis.interactive_elements.push({
+            type: 'button',
+            text: text?.trim(),
+            role,
+            onclick: onclick ? 'yes' : 'no',
+            selector: buttonSelectors[0]?.selector, // Primary selector
+            selectors: buttonSelectors, // All strategies
+            visible: isVisible
+          });
+        }
       }
 
       // Extract non-interactive elements (informational content, headings, labels)
@@ -1132,12 +1144,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
             analyzed_at: new Date().toISOString()
           },
           legs: legs,
-          create_actions: createActions  // Signal backend to create action documents
+          create_actions: createActions  // Signal backend to create action documents IMMEDIATELY
         },
         {
           headers: this.getAuthHeaders()
         }
       );
+
+      // Actions are created immediately in the backend route
+      if (createActions && legs && legs.length > 0) {
+        console.log(`[WorkflowAnalyzer] ✅ Actions creation requested for ${legs.length} legs (will be created immediately)`);
+      }
 
       return response.data;
     } catch (error) {
@@ -1651,6 +1668,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executePageDiscoveryStep(step, workflowState, jobId, pageId, projectId);
             break;
             
+          case 'sitemap-exploration':
+            await this.executeSitemapExplorationStep(step, workflowState, jobId, pageId, projectId);
+            break;
+            
           case 'save-data':
             await this.executeSaveDataStep(page, step, workflowState, jobId);
             break;
@@ -1860,7 +1881,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     // Ensure Playwright analysis exists (forms, links, interactive elements)
     if (!workflowState.playwrightAnalysis) {
-      const analysis = await this.performPlaywrightAnalysis(page);
+      const analysis = await this.performPlaywrightAnalysis(
+        page,
+        workflowState.playwrightAnalysisOptions || {}
+      );
       workflowState.playwrightAnalysis = analysis;
     }
 
@@ -2094,8 +2118,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
   async executePlaywrightAnalysisStep(page, step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 🔍 Performing Playwright analysis (${step.name})`);
     
-    const analysis = await this.performPlaywrightAnalysis(page);
+    const stepConfig = step?.config || {};
+    const analysis = await this.performPlaywrightAnalysis(page, stepConfig);
     workflowState.playwrightAnalysis = analysis;
+    workflowState.playwrightAnalysisOptions = { ...stepConfig };
     if (typeof step.name === 'string' && /after action/i.test(step.name)) {
       workflowState.playwrightAnalysisAfter = analysis;
     }
@@ -3081,24 +3107,48 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] 📝 Creating workflow document (${step.name})`);
     
     try {
+      const config = step.config || {};
+      const createActions = config.createActions !== false; // Default to true
+      
       const workflow = await this.createWorkflow(pageId, projectId, workflowState.pageUrl, workflowState.playwrightAnalysis);
       workflowState.workflowId = workflow._id;
       console.log(`[WorkflowAnalyzer] ✅ Created workflow: ${workflow._id}`);
 
+      // If legs are already discovered, create actions immediately
+      const hasLegs = Array.isArray(workflowState.legs) && workflowState.legs.length > 0;
+      if (hasLegs && createActions) {
+        console.log(`[WorkflowAnalyzer] 🚀 Creating actions immediately upon discovery (${workflowState.legs.length} legs)`);
+        try {
+          await this.updateWorkflowWithAnalysis(
+            workflow._id,
+            workflowState.aiAnalysisResult?.page_description || workflowState.pageDescription || '',
+            workflowState.legs,
+            true // Force createActions = true for immediate creation
+          );
+          console.log(`[WorkflowAnalyzer] ✅ Actions created immediately for ${workflowState.legs.length} legs`);
+        } catch (actionError) {
+          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to create actions immediately: ${actionError.message}`);
+          // Don't fail the step if action creation fails
+        }
+      }
+
       this.storeStepResult(step, {
         workflowId: workflow._id,
         pageId,
-        projectId
+        projectId,
+        actionsCreated: hasLegs && createActions
       }, workflowState);
 
       await this.logStepOutcome(
         step,
         jobId,
-        `📝 [CREATE-WORKFLOW] Created workflow ${workflow._id}`,
+        `📝 [CREATE-WORKFLOW] Created workflow ${workflow._id}${hasLegs && createActions ? ` (${workflowState.legs.length} actions created immediately)` : ''}`,
         {
           workflow_id: workflow._id,
           page_id: pageId,
-          project_id: projectId
+          project_id: projectId,
+          legs_count: workflowState.legs?.length || 0,
+          actions_created_immediately: hasLegs && createActions
         }
       );
     } catch (error) {
@@ -3118,7 +3168,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     try {
-      const createActions = step.config?.createActions !== false;
+      const createActions = step.config?.createActions !== false; // Default to true - actions must be populated immediately
 
       const hasExistingLegs = Array.isArray(workflowState.legs) && workflowState.legs.length > 0;
       const canGenerateFromAnalysis = !!workflowState.playwrightAnalysis;
@@ -3130,6 +3180,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
         );
         workflowState.legs = derivedLegs;
         console.log(`[WorkflowAnalyzer] ✅ Derived ${derivedLegs.length} default legs from Playwright analysis`);
+        
+        // CRITICAL: Create actions immediately when legs are discovered
+        if (derivedLegs.length > 0 && createActions) {
+          console.log(`[WorkflowAnalyzer] 🚀 Creating actions immediately upon discovery (${derivedLegs.length} legs)`);
+        }
       } else if (!hasExistingLegs && !canGenerateFromAnalysis) {
         console.warn('[WorkflowAnalyzer] ⚠️ Missing Playwright analysis, unable to derive fallback legs');
         workflowState.legs = [];
@@ -3153,9 +3208,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         workflowState.workflowId,
         workflowState.aiAnalysisResult?.page_description || workflowState.pageDescription,
         workflowState.legs,
-        createActions
+        createActions // Actions are created IMMEDIATELY in the backend
       );
-      console.log(`[WorkflowAnalyzer] ✅ Workflow updated with analysis${createActions ? ' (actions queued for creation)' : ''}`);
+      console.log(`[WorkflowAnalyzer] ✅ Workflow updated with analysis${createActions ? ` (${workflowState.legs?.length || 0} actions created immediately)` : ''}`);
 
       if (updateResult?.legs && Array.isArray(updateResult.legs)) {
         workflowState.legs = updateResult.legs;
@@ -3191,6 +3246,401 @@ IMPORTANT OUTPUT REQUIREMENTS:
   /**
    * Execute page discovery step
    */
+  /**
+   * Execute Sitemap Exploration Step
+   * Fetches and parses sitemap.xml to discover all pages
+   */
+  async executeSitemapExplorationStep(step, workflowState, jobId, pageId, projectId) {
+    console.log(`[WorkflowAnalyzer] 🗺️ Exploring sitemap.xml (${step.name})`);
+    
+    const config = step.config || {};
+    const sitemapUrl = config.sitemapUrl || null;
+    const baseUrl = workflowState.pageUrl || workflowState.baseUrl || null;
+    const projectIdValue = workflowState.projectId || projectId;
+    const normalizedProjectId = this.toStringIdentifier(projectIdValue);
+    const includeImages = config.includeImages === true;
+    
+    if (!baseUrl) {
+      const errorMsg = 'No base URL available for sitemap exploration';
+      console.error(`[WorkflowAnalyzer] ❌ ${errorMsg}`);
+      await this.sendLogToBackend(jobId, 'error', `❌ ${errorMsg}`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type
+      });
+      throw new Error(errorMsg);
+    }
+    
+    try {
+      // Determine sitemap URL
+      let sitemapUrlToFetch = sitemapUrl;
+      if (!sitemapUrlToFetch) {
+        // Try common sitemap locations
+        const urlObj = new URL(baseUrl);
+        const possibleSitemaps = [
+          `${urlObj.origin}/sitemap.xml`,
+          `${urlObj.origin}/sitemap_index.xml`,
+          `${urlObj.origin}/sitemaps.xml`
+        ];
+        
+        // Try each possible location
+        for (const possibleUrl of possibleSitemaps) {
+          try {
+            const testResponse = await axios.head(possibleUrl, { timeout: 5000 });
+            if (testResponse.status === 200) {
+              sitemapUrlToFetch = possibleUrl;
+              console.log(`[WorkflowAnalyzer] ✅ Found sitemap at: ${possibleUrl}`);
+              break;
+            }
+          } catch (e) {
+            // Continue to next possible location
+          }
+        }
+        
+        if (!sitemapUrlToFetch) {
+          throw new Error(`Could not find sitemap.xml at common locations: ${possibleSitemaps.join(', ')}`);
+        }
+      }
+      
+      await this.sendLogToBackend(jobId, 'info', `🗺️ Fetching sitemap from: ${sitemapUrlToFetch}`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        sitemap_url: sitemapUrlToFetch
+      });
+      
+      // Fetch sitemap
+      const sitemapResponse = await axios.get(sitemapUrlToFetch, {
+        timeout: 30000,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; AionQA/1.0)'
+        },
+        responseType: 'text',
+        transitional: {
+          silentJSONParsing: true
+        }
+      });
+      
+      const sitemapContent = typeof sitemapResponse.data === 'string'
+        ? sitemapResponse.data
+        : sitemapResponse.data?.toString?.() || '';
+      if (!sitemapContent) {
+        throw new Error('Sitemap response is empty');
+      }
+      
+      // Parse sitemap XML
+      const sitemapEntries = await this.parseSitemapXML(sitemapContent, sitemapUrlToFetch, { includeImages });
+      const pageEntries = Array.isArray(sitemapEntries)
+        ? sitemapEntries.filter(entry => entry.type === 'page')
+        : [];
+      const imageEntries = Array.isArray(sitemapEntries)
+        ? sitemapEntries.filter(entry => entry.type === 'image')
+        : [];
+      
+      if (!sitemapEntries || sitemapEntries.length === 0) {
+        throw new Error('No URLs found in sitemap');
+      }
+      
+      const summaryMsg = includeImages
+        ? `✅ Discovered ${pageEntries.length} pages and ${imageEntries.length} images from sitemap`
+        : `✅ Discovered ${pageEntries.length} URLs from sitemap`;
+      console.log(`[WorkflowAnalyzer] ${summaryMsg}`);
+      await this.sendLogToBackend(jobId, 'info', summaryMsg, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        total_entries: sitemapEntries.length,
+        total_pages: pageEntries.length,
+        total_images: imageEntries.length,
+        include_images: includeImages
+      });
+      
+      // Store discovered URLs in workflowState
+      if (!workflowState.discoveredPages) {
+        workflowState.discoveredPages = [];
+      }
+      
+      // Create page records in backend for each discovered URL
+      const createdPages = [];
+      const maxPages = config.maxPages || 1000; // Limit to prevent overwhelming the system
+      const pagesToProcess = pageEntries.slice(0, maxPages);
+      const limitedImageEntries = includeImages ? imageEntries.slice(0, maxPages) : [];
+      
+      for (const entry of pagesToProcess) {
+        const url = entry.url;
+        try {
+          // Create page record in backend
+          const pageData = {
+            project_id: normalizedProjectId || projectIdValue,
+            job_id: jobId,
+            url: url,
+            title: null, // Will be updated when page is analyzed
+            analyzed: false,
+            discovered_from: 'sitemap',
+            sitemap_url: sitemapUrlToFetch
+          };
+          
+          const pageResponse = await axios.post(
+            `${this.backendUrl}/api/pages/discover`,
+            pageData,
+            {
+              timeout: 10000,
+              headers: this.getAuthHeaders()
+            }
+          );
+          
+          if (pageResponse.data && pageResponse.data._id) {
+            createdPages.push({
+              pageId: pageResponse.data._id,
+              url: url
+            });
+            workflowState.discoveredPages.push({
+              pageId: pageResponse.data._id,
+              url: url,
+              title: pageResponse.data.title || null,
+              type: entry.type || 'page',
+              source: sitemapUrlToFetch
+            });
+          }
+        } catch (pageError) {
+          // If page already exists, that's okay - continue
+          if (pageError.response?.status === 409 || pageError.response?.status === 400) {
+            console.log(`[WorkflowAnalyzer] ℹ️ Page already exists: ${url}`);
+          } else {
+            console.warn(`[WorkflowAnalyzer] ⚠️ Failed to create page for ${url}: ${pageError.message}`);
+          }
+        }
+      }
+      
+      if (includeImages && limitedImageEntries.length > 0) {
+        limitedImageEntries.forEach(entry => {
+          workflowState.discoveredPages.push({
+            pageId: null,
+            url: entry.url,
+            title: null,
+            type: 'image',
+            source: entry.parent || sitemapUrlToFetch,
+            metadata: { parent_page: entry.parent || null }
+          });
+        });
+      }
+      
+      if (Array.isArray(workflowState.discoveredPages) && workflowState.discoveredPages.length > 0) {
+        const seenDiscovered = new Set();
+        workflowState.discoveredPages = workflowState.discoveredPages.filter(item => {
+          const normalizedUrl = (item.url || '').trim();
+          const key = `${normalizedUrl}|${item.type || 'page'}`;
+          if (!normalizedUrl) {
+            return false;
+          }
+          if (seenDiscovered.has(key)) {
+            return false;
+          }
+          seenDiscovered.add(key);
+          return true;
+        });
+      }
+      
+      const slug = step.slug || this.generateSlug(step.name || step.type);
+      const stepId = step.id || slug;
+      
+      const snapshotEntriesPayload = pageEntries.map(entry => ({
+        url: entry.url,
+        lastmod: entry.lastmod || null,
+        changefreq: entry.changefreq || null,
+        priority: entry.priority || null
+      }));
+      
+      try {
+        await axios.post(
+          `${this.backendUrl}/sitemaps/snapshots`,
+          {
+            project_id: normalizedProjectId || projectIdValue,
+            job_id: jobId,
+            sitemap_url: sitemapUrlToFetch,
+            step: {
+              id: stepId,
+              name: step.name || step.type,
+              type: step.type
+            },
+            include_images: includeImages,
+            entry_count: pageEntries.length,
+            image_count: imageEntries.length,
+            entries: snapshotEntriesPayload,
+            raw_xml: sitemapContent
+          },
+          {
+            headers: this.getAuthHeaders(),
+            timeout: 15000,
+            maxContentLength: Infinity,
+            maxBodyLength: Infinity
+          }
+        );
+      } catch (snapshotError) {
+        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to persist sitemap snapshot: ${snapshotError.message}`);
+      }
+      
+      // Store result in workflowState
+      const result = {
+        sitemapUrl: sitemapUrlToFetch,
+        totalEntries: sitemapEntries.length,
+        totalPages: pageEntries.length,
+        totalImages: imageEntries.length,
+        processedUrls: pagesToProcess.length,
+        createdPages: createdPages.length,
+        pages: workflowState.discoveredPages,
+        includeImages
+      };
+      
+      this.storeStepResult(step, result, workflowState);
+      
+      const outcomeMsg = includeImages
+        ? `🗺️ [SITEMAP-EXPLORATION] ${pageEntries.length} pages + ${imageEntries.length} images discovered, ${createdPages.length} page records created`
+        : `🗺️ [SITEMAP-EXPLORATION] Discovered ${pageEntries.length} URLs, created ${createdPages.length} page records`;
+      await this.logStepOutcome(
+        step,
+        jobId,
+        outcomeMsg,
+        {
+          sitemap_url: sitemapUrlToFetch,
+          total_entries: sitemapEntries.length,
+          total_pages: pageEntries.length,
+          total_images: imageEntries.length,
+          processed_urls: pagesToProcess.length,
+          created_pages: createdPages.length,
+          include_images: includeImages
+        }
+      );
+      
+      console.log(`[WorkflowAnalyzer] ✅ Sitemap exploration completed: ${createdPages.length} pages created${includeImages ? `, ${imageEntries.length} images cataloged` : ''}`);
+      
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Sitemap exploration failed: ${error.message}`);
+      await this.sendLogToBackend(jobId, 'error', `❌ Sitemap exploration failed: ${error.message}`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+  
+  /**
+   * Parse sitemap XML content and extract URLs
+   * Supports both regular sitemaps and sitemap index files
+   */
+  async parseSitemapXML(xmlContent, sitemapUrl, options = {}) {
+    const entries = [];
+    const includeImages = options.includeImages === true;
+    const seenPageUrls = new Set();
+    const xmlString = typeof xmlContent === 'string'
+      ? xmlContent
+      : xmlContent?.toString?.() || '';
+    
+    if (!xmlString) {
+      return entries;
+    }
+    
+    const looksLikeIndex = /<\s*sitemapindex/i.test(xmlString);
+    
+    try {
+      if (looksLikeIndex) {
+        const sitemapBlocks = xmlString.match(/<\s*sitemap\b[\s\S]*?<\/\s*sitemap>/gi) || [];
+        const childSitemapUrls = sitemapBlocks
+          .map(block => this.extractXmlTagValue(block, 'loc'))
+          .filter(Boolean);
+        
+        for (const childUrl of childSitemapUrls) {
+          try {
+            const subResponse = await axios.get(childUrl, {
+              timeout: 30000,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (compatible; AionQA/1.0)'
+              },
+              responseType: 'text'
+            });
+            const nestedEntries = await this.parseSitemapXML(subResponse.data, childUrl, options);
+            entries.push(...nestedEntries);
+          } catch (nestedError) {
+            console.warn(`[WorkflowAnalyzer] ⚠️ Failed to fetch sub-sitemap ${childUrl}: ${nestedError.message}`);
+          }
+        }
+        return entries;
+      }
+      
+      const urlBlocks = xmlString.match(/<\s*url\b[\s\S]*?<\/\s*url>/gi);
+      if (urlBlocks && urlBlocks.length) {
+        for (const block of urlBlocks) {
+          const pageUrl = this.extractXmlTagValue(block, 'loc');
+          if (pageUrl) {
+            const normalized = pageUrl.trim();
+            if (normalized && !seenPageUrls.has(normalized)) {
+              seenPageUrls.add(normalized);
+              entries.push({
+                url: normalized,
+                type: 'page',
+                lastmod: this.extractXmlTagValue(block, 'lastmod'),
+                changefreq: this.extractXmlTagValue(block, 'changefreq'),
+                priority: this.extractXmlTagValue(block, 'priority')
+              });
+            }
+          }
+          
+          if (includeImages) {
+            const imageBlocks = block.match(/<\s*image:image[\s\S]*?<\/\s*image:image>/gi) || [];
+            imageBlocks.forEach(imageBlock => {
+              const imageUrl = this.extractXmlTagValue(imageBlock, 'image:loc') || this.extractXmlTagValue(imageBlock, 'loc');
+              if (imageUrl) {
+                entries.push({
+                  url: imageUrl.trim(),
+                  type: 'image',
+                  parent: pageUrl || sitemapUrl,
+                  caption: this.extractXmlTagValue(imageBlock, 'image:caption') || this.extractXmlTagValue(imageBlock, 'caption'),
+                  title: this.extractXmlTagValue(imageBlock, 'image:title') || this.extractXmlTagValue(imageBlock, 'title')
+                });
+              }
+            });
+          }
+        }
+        return entries;
+      }
+      
+      // Fallback to simple <loc> matches
+      const urlMatches = xmlString.match(/<\s*loc>(.*?)<\/\s*loc>/gi);
+      if (urlMatches) {
+        urlMatches.forEach(match => {
+          const urlValue = match.replace(/<\/?loc>/gi, '').trim();
+          if (urlValue && !seenPageUrls.has(urlValue)) {
+            seenPageUrls.add(urlValue);
+            entries.push({
+              url: urlValue,
+              type: 'page'
+            });
+          }
+        });
+      }
+    } catch (parseError) {
+      console.error(`[WorkflowAnalyzer] ❌ Error parsing sitemap XML: ${parseError.message}`);
+      throw new Error(`Failed to parse sitemap XML: ${parseError.message}`);
+    }
+    
+    return entries;
+  }
+
+  extractXmlTagValue(content, tagName) {
+    if (!content || !tagName) {
+      return null;
+    }
+    const escapedTag = tagName.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const regex = new RegExp(`<\\s*${escapedTag}[^>]*>([\\s\\S]*?)<\\s*/\\s*${escapedTag}>`, 'i');
+    const match = content.match(regex);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+    return null;
+  }
+
   async executePageDiscoveryStep(step, workflowState, jobId, pageId, projectId) {
     console.log(`[WorkflowAnalyzer] 📡 Updating page discovery (${step.name})`);
     
@@ -3208,6 +3658,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const includeActions = config.includeActions === true;
     const actionsScope = config.actionsScope || 'all';
     const saveLegsData = config.saveLegsData === true;
+    const includeDiscoveredPages = config.includeDiscoveredPages === true;
+    const includeActionsArray = config.includeActionsArray === true;
+    const maxDiscoveredPages = Number.isFinite(Number(config.maxDiscoveredPages))
+      ? Math.max(1, Number(config.maxDiscoveredPages))
+      : 100;
+    const maxActionItems = Number.isFinite(Number(config.maxActionItems))
+      ? Math.max(1, Number(config.maxActionItems))
+      : 100;
     
     const discoveryData = {
       title: workflowState.pageTitle,
@@ -3265,13 +3723,43 @@ IMPORTANT OUTPUT REQUIREMENTS:
       };
       discoveryData.analyzed = true;
     }
+    
+    if (includeDiscoveredPages && Array.isArray(workflowState.discoveredPages) && workflowState.discoveredPages.length > 0) {
+      discoveryData.discovered_pages = workflowState.discoveredPages
+        .slice(0, maxDiscoveredPages)
+        .map(page => ({
+          page_id: page.pageId || page.page_id || null,
+          url: page.url,
+          title: page.title || null,
+          discovered_from: page.discovered_from || page.source || 'sitemap',
+          metadata: page.metadata || null
+        }));
+      discoveryData.discovered_pages_count = workflowState.discoveredPages.length;
+    }
+
+    if (includeActionsArray && Array.isArray(workflowState.legs) && workflowState.legs.length > 0) {
+      discoveryData.actions = workflowState.legs
+        .slice(0, maxActionItems)
+        .map(leg => ({
+          leg_id: leg.leg_id,
+          description: leg.description,
+          action_type: leg.action_type || leg.type || null,
+          status: leg.status || null,
+          priority: leg.priority || null,
+          confidence: leg.confidence || null,
+          metadata: leg.metadata || null
+        }));
+      discoveryData.actions_count = workflowState.legs.length;
+    }
 
     const stats = {
       forms: workflowState.playwrightAnalysis?.forms?.length || 0,
       links: workflowState.playwrightAnalysis?.links?.length || 0,
       interactive: workflowState.playwrightAnalysis?.interactive_elements?.length || 0,
       non_interactive: workflowState.playwrightAnalysis?.non_interactive_elements?.length || 0,
-      generated_at: new Date().toISOString()
+      generated_at: new Date().toISOString(),
+      discovered_pages: workflowState.discoveredPages?.length || 0,
+      actions_listed: workflowState.legs?.length || 0
     };
 
     let actionsSummary = workflowState.actionsSummary;
@@ -4892,6 +5380,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         if (resultObj.context && typeof resultObj.context === 'object') {
           workflowState.context = { ...workflowState.context, ...resultObj.context };
+          // If context has legsToExecute, ensure it's also on workflowState
+          if (resultObj.context.legsToExecute && Array.isArray(resultObj.context.legsToExecute)) {
+            workflowState.legsToExecute = resultObj.context.legsToExecute;
+          }
         }
         if (resultObj.legs && Array.isArray(resultObj.legs)) {
           workflowState.legs = resultObj.legs;
@@ -4900,7 +5392,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
         console.log(`[WorkflowAnalyzer] ⚠️ Result is empty array - code may have failed or returned nothing`);
       }
       
+      // Store step result - this will also store the result in workflowState.results[step.id]
       this.storeStepResult(step, result, workflowState);
+      
+      // After storing, ensure legsToExecute is accessible from the step result as well
+      if (step.id === 'prepare_legs_for_execution' || step.id === 'prepare-legs-for-execution') {
+        const storedResult = workflowState.results?.[step.id]?.result || workflowState[step.id]?.result;
+        if (storedResult && typeof storedResult === 'object' && storedResult.legsToExecute && Array.isArray(storedResult.legsToExecute)) {
+          if (!workflowState.context) {
+            workflowState.context = {};
+          }
+          workflowState.context.legsToExecute = storedResult.legsToExecute;
+          workflowState.legsToExecute = storedResult.legsToExecute;
+          console.log(`[WorkflowAnalyzer] ✅ Ensured legsToExecute is accessible from prepare step result (${storedResult.legsToExecute.length} items)`);
+        }
+      }
       console.log(`[WorkflowAnalyzer] ✅ Code execution completed: ${JSON.stringify(result).substring(0, 100)}...`);
     } catch (error) {
       const executionTime = Date.now() - startTime;
@@ -6588,23 +7094,41 @@ IMPORTANT OUTPUT REQUIREMENTS:
         const possibleSlugs = ['prepare-legs-for-execution', 'prepare_legs_for_execution', 'prepare-legs-for-execution'];
         let found = false;
         for (const slug of possibleSlugs) {
-          const prepareResult = workflowState[slug]?.result || workflowState.results?.[slug]?.result;
-          if (prepareResult && prepareResult.legsToExecute && Array.isArray(prepareResult.legsToExecute)) {
-            items = prepareResult.legsToExecute;
-            found = true;
-            break;
+          // Try multiple locations for the step result
+          const prepareResult = workflowState[slug]?.result || 
+                                workflowState.results?.[slug]?.result ||
+                                workflowState.results?.[slug] ||
+                                workflowState[slug];
+          if (prepareResult && typeof prepareResult === 'object') {
+            if (prepareResult.legsToExecute && Array.isArray(prepareResult.legsToExecute)) {
+              items = prepareResult.legsToExecute;
+              found = true;
+              console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in prepare step result (${items.length} items)`);
+              break;
+            }
           }
         }
         
         // If still not found, search all workflowState keys for legsToExecute
         if (!found) {
           for (const key of Object.keys(workflowState)) {
-            if (workflowState[key] && typeof workflowState[key] === 'object' && workflowState[key].result) {
-              const stepResult = workflowState[key].result;
-              if (stepResult && stepResult.legsToExecute && Array.isArray(stepResult.legsToExecute)) {
-                items = stepResult.legsToExecute;
+            if (workflowState[key] && typeof workflowState[key] === 'object') {
+              // Check direct property
+              if (workflowState[key].legsToExecute && Array.isArray(workflowState[key].legsToExecute)) {
+                items = workflowState[key].legsToExecute;
                 found = true;
+                console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in workflowState.${key} (${items.length} items)`);
                 break;
+              }
+              // Check result property
+              if (workflowState[key].result) {
+                const stepResult = workflowState[key].result;
+                if (stepResult && typeof stepResult === 'object' && stepResult.legsToExecute && Array.isArray(stepResult.legsToExecute)) {
+                  items = stepResult.legsToExecute;
+                  found = true;
+                  console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in workflowState.${key}.result (${items.length} items)`);
+                  break;
+                }
               }
             }
           }
@@ -6617,6 +7141,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             workflowState.context = {};
           }
           workflowState.context.legsToExecute = items;
+          console.log(`[WorkflowAnalyzer] ✅ Updated workflowState.legsToExecute and context.legsToExecute (${items.length} items)`);
         }
       }
     }
@@ -7610,6 +8135,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         break;
       case 'page-discovery':
         await this.executePageDiscoveryStep(step, workflowState, jobId, workflowState.pageId, workflowState.projectId);
+        break;
+      case 'sitemap-exploration':
+        await this.executeSitemapExplorationStep(step, workflowState, jobId, workflowState.pageId, workflowState.projectId);
         break;
       case 'execute-code':
         await this.executeCodeStep(page, step, workflowState);

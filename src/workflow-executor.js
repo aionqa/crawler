@@ -13,10 +13,9 @@ class WorkflowExecutor {
     this.context = context;
     this.videoRecorder = videoRecorder;
     this.workflowTemplate = null;
-    // For page analysis workflows, don't retry legs on failure (maxIterations = 1)
-    // For other workflows, allow 1 retry (maxIterations = 2)
-    this.maxIterations = context.maxIterations !== undefined ? context.maxIterations : 2;
-    this.maxAiRequestsPerLeg = this.maxIterations * 2; // Maximum AI requests per leg (iterations × 2 requests each)
+    // CRITICAL: 1 job = 1 attempt per leg (strictly enforced - no retries)
+    this.maxIterations = 1;
+    this.maxAiRequestsPerLeg = 2; // Maximum AI requests per leg (1 iteration × 2 requests: script generation + verification)
   }
 
   /**
@@ -151,6 +150,44 @@ class WorkflowExecutor {
     }
     
     return scriptStep;
+  }
+
+  /**
+   * Find the determine completion step in workflow template
+   */
+  findDetermineCompletionStep() {
+    if (!this.workflowTemplate || !this.workflowTemplate.steps) {
+      return null;
+    }
+
+    const findInSteps = (steps) => {
+      for (const s of steps || []) {
+        if (s.type === 'ai-prompt') {
+          const stepId = s.id || s.name || '';
+          const stepName = (s.name || '').toLowerCase();
+          const template = s.config?.template || s.config?.user_message_template || '';
+          
+          // Check if this is a determine completion step
+          const isDetermineStep = 
+            stepId.includes('determine') && (stepId.includes('completion') || stepId.includes('complete')) ||
+            stepName.includes('determine') && (stepName.includes('completion') || stepName.includes('complete')) ||
+            template.toLowerCase().includes('determine') && (template.toLowerCase().includes('completion') || template.toLowerCase().includes('complete')) ||
+            template.toLowerCase().includes('determine-leg-completion');
+          
+          if (isDetermineStep && template) {
+            return s;
+          }
+        }
+        // Check nested steps (for-each, while-loop, etc.)
+        if (s.config?.steps && Array.isArray(s.config.steps)) {
+          const found = findInSteps(s.config.steps);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+
+    return findInSteps(this.workflowTemplate.steps);
   }
 
   /**
@@ -291,42 +328,36 @@ class WorkflowExecutor {
     let finalSegmentError = null;
     let outcome = null;
 
-    let iteration = 0;
     let completed = false;
     let finalResult = 'failure';
     let lastError = null;
     let aiRequestCount = 0;
+    const iteration = 1; // Always 1 - no retries
+    let screenshotBeforeKey = null; // Initialize to avoid undefined errors
+    let htmlContent = null; // Initialize to avoid undefined errors
 
     try {
-      while (iteration < this.maxIterations && !completed && aiRequestCount < this.maxAiRequestsPerLeg) {
-        iteration++;
-        console.log(`[WorkflowExecutor] Leg ${leg.leg_id} - Iteration ${iteration}/${this.maxIterations} (AI requests: ${aiRequestCount}/${this.maxAiRequestsPerLeg})`);
+      console.log(`[WorkflowExecutor] Leg ${leg.leg_id} - Single execution (AI requests: ${aiRequestCount}/${this.maxAiRequestsPerLeg})`);
 
-        // Check job status before each iteration
-        const jobStatus = await this.checkJobStatus(jobId);
-        if (jobStatus !== 'running') {
-          console.log(`[WorkflowExecutor] Job ${jobId} status changed to ${jobStatus}, stopping leg execution`);
-          finalResult = 'cancelled';
-          completed = true;
-          lastError = `Job status changed to ${jobStatus}`;
-          break;
-        }
-
-        // Refetch workflow to get latest leg state with iterations
-        if (iteration > 1) {
-          const latestWorkflow = await this.getWorkflow(workflowId);
-          leg = latestWorkflow.legs.find(l => l.leg_id === leg.leg_id) || leg;
-          console.log(`[WorkflowExecutor] Refetched leg with ${leg.iterations?.length || 0} previous iterations`);
-        }
-
+      // Check job status before execution
+      const jobStatus = await this.checkJobStatus(jobId);
+      if (jobStatus !== 'running') {
+        console.log(`[WorkflowExecutor] Job ${jobId} status changed to ${jobStatus}, stopping leg execution`);
+        finalResult = 'cancelled';
+        completed = true;
+        lastError = `Job status changed to ${jobStatus}`;
+      } else {
         try {
-        // Step 1: Take screenshot before action
+        // Step 1: Capture page URL before action (for execution state)
+        const pageUrlBefore = page.url();
+        
+        // Step 2: Take screenshot before action
         const screenshotBefore = await page.screenshot({ fullPage: true, type: 'png' });
-        const screenshotBeforeKey = await this.uploadScreenshot(jobId, screenshotBefore, 'before');
+        screenshotBeforeKey = await this.uploadScreenshot(jobId, screenshotBefore, 'before');
         const screenshotBeforeBase64 = screenshotBefore.toString('base64');
 
         // Step 2: Get HTML content (FULL - no trimming)
-        const htmlContent = await page.content();
+        htmlContent = await page.content();
         
         // Get interactive elements for context
         // Collect interactive elements with proper selectors and IDs
@@ -485,20 +516,12 @@ class WorkflowExecutor {
           };
         });
 
-        // Step 3: Ask OpenAI for Playwright script with FULL context and previous logs
+        // Step 3: Ask OpenAI for Playwright script with FULL context
         let playwrightScript = leg.playwright_script;
         
-        if (!playwrightScript || iteration > 1) {
-          // Build previous logs context from leg iterations
-          let previousLogs = '';
-          if (leg.iterations && leg.iterations.length > 0) {
-            previousLogs = leg.iterations.map((iter, idx) => 
-              `Iteration ${iter.iteration_number}:
-  Script: ${iter.script_executed?.substring(0, 500) || 'N/A'}
-  Result: ${iter.result}
-  Error: ${iter.error || 'None'}`
-            ).join('\n\n');
-          }
+        if (!playwrightScript) {
+          // No previous logs - single attempt only
+          const previousLogs = '';
           
           const scriptRequest = {
             page_url: page.url(),
@@ -661,39 +684,9 @@ class WorkflowExecutor {
         console.log(`[WorkflowExecutor] Executing script for leg ${leg.leg_id}`);
 
         // Step 4: Execute Playwright script
-        // Retries should be handled by workflow steps (e.g., self-adjustable-ai-workflow), not hardcoded here
         const executionResult = await this.executeScript(page, playwrightScript, jobId);
         
-        // Record attempt with attempt number for tracking
-        const attemptNumber = (leg.iterations?.length || 0) + 1;
-        
-        // If execution failed, record it but don't retry here - let workflow steps handle retries
-        if (executionResult && (executionResult.error || executionResult.success === false)) {
-          const scriptExecutionError = executionResult.error || executionResult.message || 'Script execution failed';
-          console.log(`[WorkflowExecutor] Script execution failed: ${scriptExecutionError}`);
-          
-          // Record failed attempt - workflow steps will handle retries
-          await this.addIteration(workflowId, leg.leg_id, {
-            screenshot_before: screenshotBeforeKey,
-            screenshot_after: null,
-            html_sent: htmlContent,
-            html_after: null,
-            script_executed: playwrightScript,
-            openai_request: null,
-            openai_response: null,
-            result: 'failure',
-            error: scriptExecutionError,
-            attempt_number: attemptNumber,
-            is_retry: false, // First attempt, retries handled by workflow steps
-            job_id: jobId,
-            video_segment_id: segmentToken || null
-          });
-          
-          // Throw error so workflow steps can handle it
-          throw new Error(`Script execution failed: ${scriptExecutionError}`);
-        }
-
-        // Step 5: Take screenshot after action
+        // Step 5: Take screenshot after action (always, even if script failed)
         const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
         const screenshotAfterKey = await this.uploadScreenshot(jobId, screenshotAfter, 'after');
         const screenshotAfterBase64 = screenshotAfter.toString('base64');
@@ -701,41 +694,53 @@ class WorkflowExecutor {
         // Step 6: Get HTML after action (FULL - no trimming)
         const htmlAfter = await page.content();
 
-        // Build previous logs for verification context
-        const verificationLogs = leg.iterations ? leg.iterations.map((iter, idx) => 
-          `Iteration ${iter.iteration_number}: ${iter.result} - ${iter.error || 'No error'}`
-        ).join('\n') : '';
-
-        // Step 7: Ask OpenAI to verify with FULL context and previous logs
-        const verificationRequest = {
+        // Step 7: Always call determine completion to get clear reasoning (even if script failed)
+        // This provides clear failure/success reasons for all outcomes
+        const determineCompletionRequest = {
           // Map to template field names
-          leg_name: leg.description,
-          leg_action: leg.type,
-          expected_outcome: leg.test_instructions,
-          before_url: page.url(),
-          before_title: await page.title(),
-          after_url: page.url(),
-          after_title: await page.title(),
-          after_visible_text: await page.evaluate(() => document.body.innerText),
-          dom_snapshot: htmlAfter,  // Use HTML after action as DOM snapshot
-          // Additional context for AI
+          current_leg: JSON.stringify({
+            leg_id: leg.leg_id,
+            description: leg.description,
+            type: leg.type,
+            test_instructions: leg.test_instructions,
+            element_info: leg.element_info
+          }, null, 2),
+          execution_result: JSON.stringify(executionResult, null, 2), // Include script execution result/error
+          page_description: await page.evaluate(() => document.body.innerText?.substring(0, 2000) || ''),
+          visible_text: await page.evaluate(() => document.body.innerText || ''),
+          interactive_elements: JSON.stringify(await page.$$eval('[role="button"], button, a, input, select, textarea', els => 
+            els.slice(0, 50).map(el => ({
+              tag: el.tagName,
+              text: el.textContent?.trim().substring(0, 100) || '',
+              id: el.id || '',
+              class: el.className || ''
+            }))
+          ), null, 2),
+          forms: JSON.stringify(await page.$$eval('form', forms => 
+            forms.slice(0, 10).map(form => ({
+              id: form.id || '',
+              action: form.action || '',
+              method: form.method || 'get'
+            }))
+          ), null, 2),
+          testing_history: '', // No previous iterations - single attempt
+          // Additional context
           page_url: page.url(),
-          html_before: htmlContent,  // FULL HTML - no trimming
-          html_after: htmlAfter,     // FULL HTML - no trimming
-          screenshot_base64: screenshotAfterBase64,  // Include after screenshot inline for Vision API
+          before_url: page.url(),
+          after_url: page.url(),
+          html_before: htmlContent.substring(0, 50000), // Truncate for AI context
+          html_after: htmlAfter.substring(0, 50000),
+          screenshot_base64: screenshotAfterBase64,
+          script_executed: playwrightScript,
+          script_error: executionResult?.error || executionResult?.message || null, // Include script error if any
           leg_description: leg.description,
           leg_type: leg.type,
           test_instructions: leg.test_instructions,
-          script: playwrightScript,
-          execution_result: JSON.stringify(executionResult, null, 2),
-          screenshot_before: screenshotBeforeKey,
-          screenshot_after: screenshotAfterKey,
-          previous_logs: verificationLogs,
           iteration_number: iteration,
-          additional_prompt_text: this.context.additional_prompt_text || ''  // Project-specific additional context
+          additional_prompt_text: this.context.additional_prompt_text || ''
         };
 
-        console.log(`[WorkflowExecutor] Verifying with OpenAI (HTML before: ${htmlContent.length} chars, after: ${htmlAfter.length} chars, screenshot: ${screenshotAfterBase64.length} chars)`);
+        console.log(`[WorkflowExecutor] Calling determine completion (script success: ${!executionResult?.error}, HTML after: ${htmlAfter.length} chars)`);
 
         aiRequestCount++;
         if (aiRequestCount > this.maxAiRequestsPerLeg) {
@@ -743,88 +748,162 @@ class WorkflowExecutor {
           throw new Error(`AI request limit exceeded: ${aiRequestCount}/${this.maxAiRequestsPerLeg}`);
         }
 
-        // Find prompt from workflow steps - prompts are embedded in step configs
-        const verifyStep = this.findAIPromptStep();
-        const customVerifyTemplate = verifyStep ? (verifyStep.config?.template || verifyStep.config?.user_message_template) : null;
+        // Find determine completion step - prioritize determine completion step
+        const determineStep = this.findDetermineCompletionStep();
+        let determineTemplate = determineStep ? (determineStep.config?.template || determineStep.config?.user_message_template) : null;
         
-        if (!customVerifyTemplate) {
-          throw new Error(`No embedded prompt template found in workflow steps for verification. All prompts must be embedded in workflow step configs. Step: ${verifyStep?.name || 'unknown'}`);
+        // Fallback to any AI prompt step if determine completion step not found
+        if (!determineTemplate) {
+          const verifyStep = this.findAIPromptStep();
+          determineTemplate = verifyStep ? (verifyStep.config?.template || verifyStep.config?.user_message_template) : null;
         }
         
-        const verifyPromptSource = 'workflow-step';
-        const verifyPromptIdentifier = verifyStep ? (verifyStep.id || verifyStep.name || 'workflow-step') : 'workflow-executor';
+        if (!determineTemplate) {
+          throw new Error(`No embedded prompt template found in workflow steps for determine completion. All prompts must be embedded in workflow step configs.`);
+        }
+        
+        const determinePromptSource = 'workflow-step';
+        const determinePromptIdentifier = determineStep ? (determineStep.id || determineStep.name || 'determine-completion') : 'workflow-executor';
         
         // Log prompt usage
-        await this.logPromptUsage(verifyPromptIdentifier, verifyPromptSource, customVerifyTemplate, verificationRequest);
+        await this.logPromptUsage(determinePromptIdentifier, determinePromptSource, determineTemplate, determineCompletionRequest);
         
-        const verificationResponse = await this.aiLogger.makeAICallWithPrompt(
-          verifyPromptIdentifier,
-          verificationRequest,
+        const determineCompletionResponse = await this.aiLogger.makeAICallWithPrompt(
+          determinePromptIdentifier,
+          determineCompletionRequest,
           jobId,
           'workflow-executor',
           page.url(),
-          screenshotAfterKey,  // screenshotId for tracking
-          verificationRequest,  // Pass verificationRequest as sourcePayload for full attachment logging
-          customVerifyTemplate // Pass custom template (required - no fallback to database)
+          screenshotAfterKey,
+          determineCompletionRequest,
+          determineTemplate
         );
 
-        // Step 8: Record iteration with FULL data (no trimming)
+        // Extract reason from determine completion response
+        const completionReason = determineCompletionResponse.reason || 
+                                 determineCompletionResponse.description || 
+                                 determineCompletionResponse.what_happened ||
+                                 (executionResult?.error ? `Script execution failed: ${executionResult.error}` : 'Unknown outcome');
+
+        // Collect execution state for redo capability
+        const pageUrlAfter = page.url();
+        const cookies = await page.context().cookies();
+        const viewport = page.viewportSize();
+        const userAgent = await page.evaluate(() => navigator.userAgent);
+        
+        const executionState = {
+          page_url: pageUrlAfter,
+          page_url_before: pageUrlBefore, // URL before script execution
+          cookies: cookies.map(c => ({
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path,
+            expires: c.expires,
+            httpOnly: c.httpOnly,
+            secure: c.secure,
+            sameSite: c.sameSite
+          })),
+          connection_settings: {
+            viewport: viewport ? { width: viewport.width, height: viewport.height } : null,
+            user_agent: userAgent,
+            timezone: await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone),
+            locale: await page.evaluate(() => navigator.language)
+          },
+          script: playwrightScript,
+          timestamp: new Date().toISOString()
+        };
+
+        // Step 8: Record iteration with FULL data including determine completion reasoning and execution state
         await this.addIteration(workflowId, leg.leg_id, {
           screenshot_before: screenshotBeforeKey,
           screenshot_after: screenshotAfterKey,
-          html_sent: htmlContent,  // FULL HTML - no trimming for proper context
-          html_after: htmlAfter,   // FULL HTML after execution
+          html_sent: htmlContent,
+          html_after: htmlAfter,
           script_executed: playwrightScript,
-          openai_request: verificationRequest,
-          openai_response: verificationResponse,
-          result: verificationResponse.status || 'incomplete',
-          error: executionResult.error || null,
+          openai_request: determineCompletionRequest,
+          openai_response: determineCompletionResponse,
+          result: determineCompletionResponse.status === 'success' ? 'success' : 
+                  (determineCompletionResponse.status === 'failure' ? 'failure' : 'incomplete'),
+          error: executionResult?.error || null, // Keep script error for technical details
+          failure_reason: completionReason, // Clear reasoning from determine completion
+          execution_state: executionState, // Save state for redo capability
           job_id: jobId,
           video_segment_id: segmentToken || null
         });
 
-        // Step 9: Check if OpenAI says we're done
-        // FIX: Handle both old format (status/completed) and new format (success/confidence)
-        if (verificationResponse.success === true || verificationResponse.status === 'completed' || verificationResponse.completed === true) {
-          console.log(`[WorkflowExecutor] Leg ${leg.leg_id} completed successfully`);
+        // Step 9: Check result - always complete after single attempt (no retries)
+        const completionStatus = determineCompletionResponse.status || determineCompletionResponse.completion_status;
+        if (completionStatus === 'success' || determineCompletionResponse.is_complete === true) {
+          console.log(`[WorkflowExecutor] Leg ${leg.leg_id} completed successfully. Reason: ${completionReason}`);
           completed = true;
           finalResult = 'success';
-        } else if (verificationResponse.success === false || (verificationResponse.status === 'failed' && verificationResponse.can_retry === false)) {
-          console.log(`[WorkflowExecutor] Leg ${leg.leg_id} failed permanently`);
-          completed = true;
-          finalResult = 'failure';
-          lastError = verificationResponse.description || verificationResponse.reason || 'Unknown failure';
+          lastError = null;
         } else {
-          // Continue to next iteration
-          console.log(`[WorkflowExecutor] Leg ${leg.leg_id} incomplete, continuing... Reason: ${verificationResponse.description || verificationResponse.reason || 'Unknown'}`);
-          lastError = verificationResponse.description || verificationResponse.reason;
+          // Any non-success result is a failure - use clear reason from determine completion
+          console.log(`[WorkflowExecutor] Leg ${leg.leg_id} failed. Reason: ${completionReason}`);
+          completed = true;
+          finalResult = 'failure';
+          lastError = completionReason; // Use clear reasoning from determine completion
         }
 
-      } catch (error) {
-        console.error(`[WorkflowExecutor] Error in iteration ${iteration}:`, error.message);
-        console.error(`[WorkflowExecutor] Error stack:`, error.stack);
-        lastError = error.message;
+        } catch (error) {
+          console.error(`[WorkflowExecutor] Error in execution:`, error.message);
+          console.error(`[WorkflowExecutor] Error stack:`, error.stack);
+          lastError = error.message;
 
-        // Record failed iteration
-        await this.addIteration(workflowId, leg.leg_id, {
-          screenshot_before: null,
-          screenshot_after: null,
-          html_sent: null,
-          script_executed: typeof playwrightScript !== 'undefined' ? playwrightScript : null,
-          openai_request: null,
-          openai_response: null,
-          result: 'failure',
-          error: error.message,
-          job_id: jobId,
-          video_segment_id: segmentToken || null
-        });
+          // Try to collect execution state even on error (if page is still available)
+          let executionState = null;
+          try {
+            const pageUrl = page.url();
+            const cookies = await page.context().cookies();
+            const viewport = page.viewportSize();
+            const userAgent = await page.evaluate(() => navigator.userAgent);
+            
+            executionState = {
+              page_url: pageUrl,
+              cookies: cookies.map(c => ({
+                name: c.name,
+                value: c.value,
+                domain: c.domain,
+                path: c.path,
+                expires: c.expires,
+                httpOnly: c.httpOnly,
+                secure: c.secure,
+                sameSite: c.sameSite
+              })),
+              connection_settings: {
+                viewport: viewport ? { width: viewport.width, height: viewport.height } : null,
+                user_agent: userAgent,
+                timezone: await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone),
+                locale: await page.evaluate(() => navigator.language)
+              },
+              script: typeof playwrightScript !== 'undefined' ? playwrightScript : null,
+              timestamp: new Date().toISOString()
+            };
+          } catch (stateError) {
+            console.warn(`[WorkflowExecutor] Could not collect execution state: ${stateError.message}`);
+          }
 
-        // If this was the last iteration, mark as failed
-        if (iteration >= this.maxIterations) {
+          // Record failed attempt (single attempt only)
+          await this.addIteration(workflowId, leg.leg_id, {
+            screenshot_before: screenshotBeforeKey || null,
+            screenshot_after: null,
+            html_sent: htmlContent || null,
+            script_executed: typeof playwrightScript !== 'undefined' ? playwrightScript : null,
+            openai_request: null,
+            openai_response: null,
+            result: 'failure',
+            error: error.message,
+            execution_state: executionState, // Save state even on error if available
+            job_id: jobId,
+            video_segment_id: segmentToken || null
+          });
+
+          // Always mark as failed - no retries
           finalResult = 'failure';
           completed = true;
         }
-      }
       }
 
       // Mark leg as completed
@@ -842,7 +921,7 @@ class WorkflowExecutor {
       outcome = {
         leg_id: leg.leg_id,
         result: finalResult,
-        iterations: iteration,
+        iterations: 1, // Always 1 - single attempt
         error: lastError
       };
     } finally {

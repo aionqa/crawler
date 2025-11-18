@@ -271,6 +271,7 @@ export class WorkflowStepExecutor {
       }
       
       // Collect interactive elements if requested
+      const onlyVisibleInteractiveElements = parameters.onlyVisibleInteractiveElements === true;
       if (parameters.collectInteractiveElements !== false) {
         const interactiveSelectors = [
           'button', 'input', 'select', 'textarea', 'a[href]',
@@ -281,7 +282,7 @@ export class WorkflowStepExecutor {
           const elements = await page.$$(selector);
           for (const element of elements) {
             const isVisible = await element.isVisible();
-            if (isVisible) {
+            if (!onlyVisibleInteractiveElements || isVisible) {
               const elementData = {
                 tag: await element.evaluate(el => el.tagName.toLowerCase()),
                 text: await element.textContent(),
