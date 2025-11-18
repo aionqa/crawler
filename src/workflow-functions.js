@@ -211,17 +211,37 @@ export async function executePlaywrightAnalysis(page, jobId, stepId, parameters,
     }
 
     if (parameters.collectInteractiveElements !== false) {
+      const onlyVisibleInteractiveElements = parameters.onlyVisibleInteractiveElements === true;
       analysis.interactiveElements = await page.$$eval(
         'button, input, select, textarea, [onclick], [role="button"]',
-        elements => elements.map(el => ({
-          tagName: el.tagName,
-          type: el.type,
-          text: el.textContent?.trim(),
-          placeholder: el.placeholder,
-          id: el.id,
-          className: el.className,
-          onclick: el.onclick?.toString()
-        }))
+        (elements, onlyVisible) => elements
+          .map(el => {
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            const isVisible = !!style &&
+              style.visibility !== 'hidden' &&
+              style.display !== 'none' &&
+              style.opacity !== '0' &&
+              rect.width > 0 &&
+              rect.height > 0;
+            
+            if (onlyVisible && !isVisible) {
+              return null;
+            }
+            
+            return {
+              tagName: el.tagName,
+              type: el.type,
+              text: el.textContent?.trim(),
+              placeholder: el.placeholder,
+              id: el.id,
+              className: el.className,
+              onclick: el.onclick?.toString(),
+              visible: isVisible
+            };
+          })
+          .filter(Boolean),
+        onlyVisibleInteractiveElements
       );
     }
 

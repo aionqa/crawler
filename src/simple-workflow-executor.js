@@ -188,7 +188,23 @@ class SimpleWorkflowExecutor {
 
     if (config.collectInteractiveElements) {
       const interactiveElements = await page.$$('input, button, select, textarea');
-      result.interactiveElements = interactiveElements.length;
+      if (config.onlyVisibleInteractiveElements === true) {
+        let visibleCount = 0;
+        for (const element of interactiveElements) {
+          try {
+            if (await element.isVisible()) {
+              visibleCount += 1;
+            }
+          } catch (visibilityError) {
+            console.warn('[SimpleWorkflowExecutor] Unable to determine element visibility:', visibilityError.message);
+            visibleCount += 1;
+          }
+        }
+        result.interactiveElements = visibleCount;
+      } else {
+        // Default: include all interactive elements (including hidden)
+        result.interactiveElements = interactiveElements.length;
+      }
     }
 
     if (config.collectDOM) {
@@ -291,7 +307,9 @@ class SimpleWorkflowExecutor {
         throw new Error('OPENAI_API_KEY environment variable is required');
       }
       
-      const openaiClient = new (await import('openai')).OpenAI({ apiKey: openaiApiKey });
+      // Use configured endpoint if available
+      const { createOpenAIClient } = await import('./openai-client-factory.js');
+      const openaiClient = createOpenAIClient(this.context, openaiApiKey);
       
       // Get current page context
       const pageUrl = page.url();

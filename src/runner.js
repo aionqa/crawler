@@ -16,6 +16,10 @@ import VideoRecorder from './video-recorder.js';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
 const RUNNER_TOKEN = process.env.RUNNER_TOKEN; // GitHub Actions-style runner token
+const MAX_SITEMAP_SCAN_DEPTH = 5;
+const MAX_SITEMAP_SCAN_CHILD_SITEMAPS = 25;
+const MAX_SITEMAP_SCAN_ENTRIES = 5000;
+const DEFAULT_AVAILABILITY_TIMEOUT_MS = 10000;
 // Generate unique runner ID if not provided (includes hostname and UUID for uniqueness)
 const RUNNER_ID = process.env.RUNNER_ID || `unified-runner-${hostname()}-${randomUUID().substring(0, 8)}`;
 const STREAM_INTERVAL = 2000; // Stream browser frame every 2 seconds
@@ -68,6 +72,22 @@ function getAuthHeaders() {
   };
 }
 
+async function appendJobLog(jobId, level, message, metadata = {}) {
+  try {
+    await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+      jobId,
+      level,
+      message,
+      component: 'sitemap-runner',
+      metadata
+    }, {
+      timeout: 10000
+    });
+  } catch (error) {
+    console.error(`[UNIFIED-RUNNER] Failed to append log for job ${jobId}:`, error.message);
+  }
+}
+
 /**
  * Poll backend for next available job (login or crawl)
  */
@@ -85,8 +105,21 @@ async function pollForJob() {
     }
   } catch (error) {
     // 404 means no crawl jobs available, continue to check login jobs
-    if (error.response?.status !== 404) {
+    if (error.response?.status === 404) {
+      // Normal - no jobs available
+    } else if (error.response?.status === 401) {
+      console.error(`❌ [UNIFIED-RUNNER] Authentication failed when polling for crawl jobs!`);
+      console.error(`   Status: 401 Unauthorized`);
+      console.error(`   Error: ${error.response?.data?.error || error.message}`);
+      console.error(`   Runner ID: ${RUNNER_ID}`);
+      console.error(`   Token configured: ${RUNNER_TOKEN ? 'Yes (length: ' + RUNNER_TOKEN.length + ')' : 'NO - THIS IS THE PROBLEM!'}`);
+      console.error(`   Fix: Set RUNNER_TOKEN environment variable to a valid token from Settings > Runners`);
+    } else {
       console.error(`❌ [UNIFIED-RUNNER] Error polling for crawl jobs:`, error.message);
+      if (error.response) {
+        console.error(`   Status: ${error.response.status}`);
+        console.error(`   Response:`, error.response.data);
+      }
     }
   }
 
@@ -103,8 +136,21 @@ async function pollForJob() {
     }
   } catch (error) {
     // 404 means no login jobs available
-    if (error.response?.status !== 404) {
+    if (error.response?.status === 404) {
+      // Normal - no jobs available
+    } else if (error.response?.status === 401) {
+      console.error(`❌ [UNIFIED-RUNNER] Authentication failed when polling for login jobs!`);
+      console.error(`   Status: 401 Unauthorized`);
+      console.error(`   Error: ${error.response?.data?.error || error.message}`);
+      console.error(`   Runner ID: ${RUNNER_ID}`);
+      console.error(`   Token configured: ${RUNNER_TOKEN ? 'Yes (length: ' + RUNNER_TOKEN.length + ')' : 'NO - THIS IS THE PROBLEM!'}`);
+      console.error(`   Fix: Set RUNNER_TOKEN environment variable to a valid token from Settings > Runners`);
+    } else {
       console.error(`❌ [UNIFIED-RUNNER] Error polling for login jobs:`, error.message);
+      if (error.response) {
+        console.error(`   Status: ${error.response.status}`);
+        console.error(`   Response:`, error.response.data);
+      }
     }
   }
 
@@ -359,6 +405,14 @@ async function executeLoginJob(job, streamInterval) {
  * Execute a crawl job
  */
 async function executeCrawlJob(job, streamInterval) {
+  const operation = job.operation || job.options?.operation || job.context?.operation;
+  if (operation === 'sitemap_scan') {
+    return executeSitemapScanJob(job);
+  }
+  if (operation === 'availability_check') {
+    return executeAvailabilityCheckJob(job);
+  }
+
   // Extract job parameters
   // CRITICAL: URL can be at job.url or job.start_url (from runner_jobs structure)
   const url = job.url || job.start_url || null;
@@ -472,6 +526,311 @@ async function executeCrawlJob(job, streamInterval) {
     } catch (videoError) {
       console.error(`[UNIFIED-RUNNER] Error finalizing video recording for crawl job ${job.id}:`, videoError.message);
     }
+  }
+}
+
+async function executeSitemapScanJob(job) {
+  const jobId = job.id;
+  const context = job.context || {};
+  const projectId = job.project_id || context.project_id || job.projectId || null;
+  const baseUrl = context.base_url || job.start_url || job.url;
+  if (!baseUrl) {
+    throw new Error('Sitemap scan job missing base_url');
+  }
+
+  await appendJobLog(jobId, 'info', `🗺️ Starting sitemap scan for ${baseUrl}`, { project_id: projectId });
+
+  const includeImages = context.include_images === true || job.options?.include_images === true;
+  const sitemapUrl = await discoverSitemapUrl(jobId, baseUrl, context.sitemap_url);
+  const xmlContent = await fetchSitemapXml(jobId, sitemapUrl);
+  const parsed = await parseSitemapDocument(jobId, xmlContent, sitemapUrl, includeImages);
+
+  const snapshotPayload = {
+    project_id: projectId,
+    job_id: jobId,
+    sitemap_url: sitemapUrl,
+    include_images: includeImages,
+    entries: parsed.entries,
+    entry_count: parsed.totalEntries,
+    image_count: parsed.imageCount,
+    raw_xml: xmlContent
+  };
+
+  await axios.post(`${BACKEND_URL}/sitemaps/snapshots`, snapshotPayload, {
+    timeout: 20000,
+    headers: getAuthHeaders()
+  });
+
+  await appendJobLog(jobId, 'info', `✅ Sitemap scan completed (${parsed.entries.length}/${parsed.totalEntries} URLs stored)`, {
+    sitemap_url: sitemapUrl,
+    total_entries: parsed.totalEntries,
+    stored_entries: parsed.entries.length,
+    image_count: parsed.imageCount,
+    truncated: parsed.truncated
+  });
+
+  return {
+    success: true,
+    sitemap_url: sitemapUrl,
+    entry_count: parsed.totalEntries,
+    stored_entries: parsed.entries.length,
+    image_count: parsed.imageCount,
+    truncated: parsed.truncated
+  };
+}
+
+async function discoverSitemapUrl(jobId, baseUrl, overrideUrl) {
+  if (overrideUrl) {
+    return overrideUrl;
+  }
+
+  let origin;
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch (error) {
+    throw new Error(`Invalid base URL: ${baseUrl}`);
+  }
+
+  const candidates = [
+    `${origin}/sitemap.xml`,
+    `${origin}/sitemap_index.xml`,
+    `${origin}/sitemaps.xml`
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const response = await axios.head(candidate, {
+        timeout: 5000,
+        validateStatus: () => true
+      });
+      if (response.status >= 200 && response.status < 400) {
+        await appendJobLog(jobId, 'info', `🔎 Found sitemap at ${candidate}`);
+        return candidate;
+      }
+    } catch (error) {
+      // Continue to next candidate
+    }
+  }
+
+  throw new Error(`Could not find sitemap at common locations`);
+}
+
+async function fetchSitemapXml(jobId, sitemapUrl) {
+  try {
+    const response = await axios.get(sitemapUrl, {
+      timeout: 30000,
+      responseType: 'text',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; AionQA/1.0)'
+      }
+    });
+    if (!response.data) {
+      throw new Error('Sitemap response is empty');
+    }
+    return typeof response.data === 'string' ? response.data : response.data.toString();
+  } catch (error) {
+    await appendJobLog(jobId, 'error', `❌ Failed to fetch sitemap ${sitemapUrl}: ${error.message}`);
+    throw new Error(`Failed to fetch sitemap: ${error.message}`);
+  }
+}
+
+async function parseSitemapDocument(jobId, xmlContent, sitemapUrl, includeImages, depth = 0, visited = new Set()) {
+  if (!xmlContent || typeof xmlContent !== 'string') {
+    throw new Error('Invalid sitemap content');
+  }
+
+  const entries = [];
+  let totalEntries = 0;
+  let imageCount = 0;
+  let truncated = false;
+  visited.add(sitemapUrl);
+
+  const isIndex = /<\s*sitemapindex/i.test(xmlContent);
+  if (isIndex && depth < MAX_SITEMAP_SCAN_DEPTH) {
+    const sitemapMatches = xmlContent.match(/<\s*loc>([\s\S]*?)<\/\s*loc>/gi) || [];
+    for (const match of sitemapMatches.slice(0, MAX_SITEMAP_SCAN_CHILD_SITEMAPS)) {
+      const childUrl = extractXmlTagValue(match, 'loc');
+      if (!childUrl) continue;
+      if (visited.has(childUrl)) {
+        continue;
+      }
+      try {
+        const childXml = await fetchSitemapXml(jobId, childUrl);
+        const childParsed = await parseSitemapDocument(jobId, childXml, childUrl, includeImages, depth + 1, visited);
+        totalEntries += childParsed.totalEntries;
+        imageCount += childParsed.imageCount;
+        truncated = truncated || childParsed.truncated;
+        for (const entry of childParsed.entries) {
+          if (entries.length >= MAX_SITEMAP_SCAN_ENTRIES) {
+            truncated = true;
+            break;
+          }
+          entries.push(entry);
+        }
+        if (entries.length >= MAX_SITEMAP_SCAN_ENTRIES) {
+          break;
+        }
+      } catch (error) {
+        await appendJobLog(jobId, 'warn', `⚠️ Failed to parse child sitemap ${childUrl}: ${error.message}`);
+      }
+    }
+  } else {
+    const urlBlocks = xmlContent.match(/<\s*url\b[\s\S]*?<\/\s*url>/gi) || [];
+    totalEntries = urlBlocks.length;
+    for (const block of urlBlocks) {
+      if (entries.length >= MAX_SITEMAP_SCAN_ENTRIES) {
+        truncated = true;
+        break;
+      }
+      const pageUrl = extractXmlTagValue(block, 'loc');
+      if (!pageUrl) continue;
+
+      entries.push({
+        url: pageUrl.trim(),
+        type: 'page',
+        lastmod: extractXmlTagValue(block, 'lastmod'),
+        changefreq: extractXmlTagValue(block, 'changefreq'),
+        priority: extractXmlTagValue(block, 'priority')
+      });
+
+      if (includeImages) {
+        const imageBlocks = block.match(/<\s*image:image[\s\S]*?<\/\s*image:image>/gi) || [];
+        imageCount += imageBlocks.length;
+      }
+    }
+  }
+
+  return {
+    entries,
+    totalEntries,
+    imageCount,
+    truncated
+  };
+}
+
+function extractXmlTagValue(content, tagName) {
+  if (!content || !tagName) {
+    return null;
+  }
+  const escapedTag = tagName.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+  const regex = new RegExp(`<\\s*${escapedTag}[^>]*>([\\s\\S]*?)<\\s*/\\s*${escapedTag}>`, 'i');
+  const match = content.match(regex);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+  return null;
+}
+
+async function executeAvailabilityCheckJob(job) {
+  const jobId = job.id;
+  const context = job.context || {};
+  const snapshotId = context.snapshot_id;
+  const urls = Array.isArray(context.urls) ? context.urls.filter(Boolean) : [];
+  if (!snapshotId || urls.length === 0) {
+    throw new Error('Availability job missing snapshot_id or urls');
+  }
+
+  const timeoutMs = Number(job.options?.timeout_ms) || DEFAULT_AVAILABILITY_TIMEOUT_MS;
+  await appendJobLog(jobId, 'info', `🔍 Checking availability for ${urls.length} URLs`, { snapshot_id: snapshotId, timeout_ms: timeoutMs });
+
+  const results = [];
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    const index = i + 1;
+    await appendJobLog(jobId, 'info', `🔍 [${index}/${urls.length}] Checking: ${url}`, { 
+      snapshot_id: snapshotId, 
+      url_index: index,
+      total_urls: urls.length,
+      url: url
+    });
+    
+    const result = await checkSingleUrlAvailability(url, timeoutMs);
+    results.push(result);
+    
+    // Log result
+    if (result.ok) {
+      await appendJobLog(jobId, 'info', `✅ [${index}/${urls.length}] ${url} - Status: ${result.status} (${result.response_time_ms}ms)`, {
+        snapshot_id: snapshotId,
+        url_index: index,
+        total_urls: urls.length,
+        url: url,
+        status: result.status,
+        response_time_ms: result.response_time_ms,
+        ok: true
+      });
+    } else {
+      await appendJobLog(jobId, 'warn', `❌ [${index}/${urls.length}] ${url} - Failed: ${result.error || `Status ${result.status}`} (${result.response_time_ms}ms)`, {
+        snapshot_id: snapshotId,
+        url_index: index,
+        total_urls: urls.length,
+        url: url,
+        status: result.status,
+        response_time_ms: result.response_time_ms,
+        error: result.error,
+        ok: false
+      });
+    }
+  }
+
+  await axios.post(`${BACKEND_URL}/api/runner/sitemaps/${snapshotId}/availability-results`, {
+    job_id: jobId,
+    results
+  }, {
+    headers: getAuthHeaders(),
+    timeout: 20000
+  });
+
+  const upCount = results.filter(r => r.ok).length;
+  const downCount = results.filter(r => !r.ok).length;
+
+  await appendJobLog(jobId, 'info', `✅ Availability check complete (up: ${upCount}, down: ${downCount})`, {
+    snapshot_id: snapshotId,
+    total: results.length,
+    up: upCount,
+    down: downCount
+  });
+
+  return {
+    success: true,
+    snapshot_id: snapshotId,
+    checked: results.length,
+    up: upCount,
+    down: downCount
+  };
+}
+
+async function checkSingleUrlAvailability(url, timeoutMs) {
+  const startedAt = Date.now();
+  try {
+    let response = await axios.head(url, {
+      timeout: timeoutMs,
+      validateStatus: () => true
+    });
+
+    if (!response || response.status === 405 || response.status === 501) {
+      response = await axios.get(url, {
+        timeout: timeoutMs,
+        maxContentLength: 0,
+        validateStatus: () => true
+      });
+    }
+
+    const ok = response.status >= 200 && response.status < 400;
+    return {
+      url,
+      status: response.status,
+      ok,
+      response_time_ms: Date.now() - startedAt,
+      error: null
+    };
+  } catch (error) {
+    return {
+      url,
+      status: null,
+      ok: false,
+      response_time_ms: Date.now() - startedAt,
+      error: error.message
+    };
   }
 }
 
