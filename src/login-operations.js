@@ -473,7 +473,11 @@ export async function performLogin(page, jobId, pageUrl, username, password, max
 
     try {
       // Navigate to page
-      await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      // Check if DOM is ready after 30s, continue anyway if not
+      await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+        console.warn(`[LOGIN-SERVICE] Page DOM not fully loaded after 30s, continuing anyway`);
+      });
 
       // Save before state
       const beforeUrl = page.url();
@@ -719,7 +723,11 @@ export async function performLogin(page, jobId, pageUrl, username, password, max
         await page.waitForTimeout(2000);
         // Try to navigate back to login page
         try {
-          await page.goto(pageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+          await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      // Check if DOM is ready after 30s, continue anyway if not
+      await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+        console.warn(`[LOGIN-SERVICE] Page DOM not fully loaded after 30s, continuing anyway`);
+      });
         } catch (e) {
           console.error(`[LOGIN-SERVICE] Failed to navigate back to login page: ${e.message}`);
         }
@@ -803,6 +811,7 @@ export async function performLoginWithWorkflow(
       username,
       password,
       credentials: context.credentials || { username, password },
+      runner_token: context.runner_token, // Preserve runner token for API authentication
       options: {
         ...(context.options || {})
       }
@@ -846,31 +855,65 @@ export async function performLoginWithWorkflow(
       analysisResult?.context?.determine_completion ||
       {};
 
-    const loginStatus =
-      analysisResult?.login_status ||
-      analysisResult?.context?.login_status ||
-      determineResult.status ||
-      determineResult.completion_status ||
-      null;
-
-    const loginSuccess =
-      loginStatus === 'success' ||
-      (determineResult.is_complete === true && loginStatus !== 'failure');
-
+    // Extract cookies from multiple possible locations FIRST
     const iterationCookies =
       analysisResult?.collect_iteration_cookies?.result?.cookies ||
       analysisResult?.iterationCookies ||
       analysisResult?.context?.iterationCookies ||
       [];
 
-    const finalCookies =
+    // Try multiple paths to find final cookies
+    let finalCookies =
       analysisResult?.collect_final_cookies?.result?.cookies ||
       analysisResult?.finalCookies ||
       analysisResult?.context?.finalCookies ||
+      analysisResult?.collectedCookies ||  // From cookie-collect step
+      analysisResult?.context?.collectedCookies ||
       iterationCookies ||
       [];
 
+    // If no cookies found, try to get them from browser context directly
+    if (!finalCookies || finalCookies.length === 0) {
+      try {
+        const browserCookies = await page.context().cookies();
+        if (browserCookies && browserCookies.length > 0) {
+          console.log(`[LOGIN-WORKFLOW] 🔍 No cookies in workflow result, collecting from browser: ${browserCookies.length} cookies`);
+          finalCookies = browserCookies;
+        }
+      } catch (cookieError) {
+        console.warn(`[LOGIN-WORKFLOW] ⚠️ Failed to collect cookies from browser: ${cookieError.message}`);
+      }
+    }
+
     const finalUrl = page.url();
+    
+    // Infer login success from final URL if status not explicitly set
+    const isDashboardOrAuthenticatedPage = 
+      finalUrl.includes('/dashboard') ||
+      finalUrl.includes('/home') ||
+      finalUrl.includes('/profile') ||
+      finalUrl.includes('/account') ||
+      finalUrl.includes('/settings') ||
+      (!finalUrl.includes('/login') && !finalUrl.includes('/signin') && finalUrl !== url);
+    
+    console.log(`[LOGIN-WORKFLOW] 🔍 Login inference: URL=${finalUrl}, isDashboard=${isDashboardOrAuthenticatedPage}, cookies=${finalCookies.length}`);
+    
+    const loginStatus =
+      analysisResult?.login_status ||
+      analysisResult?.context?.login_status ||
+      analysisResult?.loginStatus ||
+      determineResult.status ||
+      determineResult.completion_status ||
+      (isDashboardOrAuthenticatedPage && finalCookies.length > 0 ? 'success' : null);
+
+    const loginSuccess =
+      loginStatus === 'success' ||
+      (determineResult.is_complete === true && loginStatus !== 'failure') ||
+      (isDashboardOrAuthenticatedPage && finalCookies.length > 0);
+    
+    console.log(`[LOGIN-WORKFLOW] 🔍 Final inference: loginStatus=${loginStatus}, loginSuccess=${loginSuccess}`);
+
+
     let finalTitle = 'Unknown';
     try {
       finalTitle = await page.title();

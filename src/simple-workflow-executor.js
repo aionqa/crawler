@@ -564,7 +564,9 @@ Please analyze this login page and provide a detailed response in JSON format.`;
             console.log('✅ Clicked submit button');
             
             // Wait for page to load
-            await page.waitForLoadState('networkidle');
+            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+              console.warn('Page DOM not fully loaded after 30s, continuing anyway');
+            });
             await page.waitForTimeout(3000);
             
             // Step 3: Check if password field appears
@@ -578,7 +580,9 @@ Please analyze this login page and provide a detailed response in JSON format.`;
               if (finalSubmit) {
                 await finalSubmit.click();
                 console.log('✅ Clicked final submit button');
-                await page.waitForLoadState('networkidle');
+                await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+              console.warn('Page DOM not fully loaded after 30s, continuing anyway');
+            });
                 await page.waitForTimeout(3000);
               }
             } else {
@@ -617,7 +621,9 @@ Please analyze this login page and provide a detailed response in JSON format.`;
           if (submitButton) {
             await submitButton.click();
             console.log('✅ Clicked submit button');
-            await page.waitForLoadState('networkidle');
+            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+              console.warn('Page DOM not fully loaded after 30s, continuing anyway');
+            });
             await page.waitForTimeout(3000);
           }
         }
@@ -794,11 +800,24 @@ Please analyze this login page and provide a detailed response in JSON format.`;
   }
 
   /**
+   * Get authentication headers for API calls
+   */
+  getAuthHeaders() {
+    const headers = {};
+    if (this.context.runner_token) {
+      headers['Authorization'] = `Bearer ${this.context.runner_token}`;
+    }
+    return headers;
+  }
+
+  /**
    * Get workflow from backend
    */
   async getWorkflow(workflowId) {
     try {
-      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${workflowId}`);
+      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${workflowId}`, {
+        headers: this.getAuthHeaders()
+      });
       return response.data;
     } catch (error) {
       console.error('[SimpleWorkflowExecutor] Error getting workflow:', error.message);

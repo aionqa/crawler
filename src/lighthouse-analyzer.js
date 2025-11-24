@@ -29,8 +29,10 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
       device
     });
 
-    // Wait for page to be fully loaded
-    await page.waitForLoadState('networkidle');
+    // Wait for page to be fully loaded (with timeout)
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+      console.warn('Page DOM not fully loaded after 30s, continuing with Lighthouse analysis');
+    });
 
     // Get performance metrics using Playwright's evaluate
     const performanceMetrics = await page.evaluate(() => {

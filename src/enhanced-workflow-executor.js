@@ -27,7 +27,9 @@ class EnhancedWorkflowExecutor {
     }
 
     try {
-      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`);
+      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`, {
+        headers: this.getAuthHeaders()
+      });
       this.workflowTemplate = response.data;
       console.log(`[EnhancedWorkflowExecutor] ✅ Loaded workflow: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`);
       console.log(`[EnhancedWorkflowExecutor] 📄 Workflow contains ${this.workflowTemplate.prompts?.length || 0} prompts`);
@@ -1366,7 +1368,9 @@ class EnhancedWorkflowExecutor {
    */
   async getWorkflow(workflowId) {
     try {
-      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${workflowId}`);
+      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${workflowId}`, {
+        headers: this.getAuthHeaders()
+      });
       return response.data;
     } catch (error) {
       console.error('[EnhancedWorkflowExecutor] Error getting workflow:', error.message);

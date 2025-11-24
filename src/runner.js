@@ -307,7 +307,8 @@ async function executeLoginJob(job, streamInterval) {
       ...(jobContext.options || {}),
       openai_api_key: openaiApiKey
     },
-    openai_api_key: openaiApiKey
+    openai_api_key: openaiApiKey,
+    runner_token: RUNNER_TOKEN // Add runner token for API authentication
   };
 
   // Launch local browser (embedded) - SAME as crawl jobs
@@ -336,7 +337,11 @@ async function executeLoginJob(job, streamInterval) {
   startVideoStream(page, job.id);
 
   try {
-    await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    // Check if DOM is ready after 30s, continue anyway if not
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+      console.warn(`[UNIFIED-RUNNER] Page DOM not fully loaded after 30s, continuing anyway`);
+    });
     await page.waitForTimeout(1000);
     console.log(`[DEBUG] Navigated to login URL: ${page.url()}`);
 

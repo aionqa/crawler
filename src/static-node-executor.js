@@ -319,7 +319,10 @@ export class StaticNodeExecutor {
 
     // Step announcement already done in executeNode
     try {
-      await this.page.goto(targetUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await this.page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this.page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+        console.warn('Page DOM not fully loaded after 30s, continuing anyway');
+      });
       
       return {
         success: true,

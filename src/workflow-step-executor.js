@@ -141,7 +141,10 @@ export class WorkflowStepExecutor {
     // Navigate to URL if provided
     if (context.pageUrl) {
       try {
-        await page.goto(context.pageUrl, { waitUntil: 'networkidle', timeout: 30000 });
+        await page.goto(context.pageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+          console.warn(`[WorkflowStepExecutor] Page DOM not fully loaded after 30s, continuing anyway`);
+        });
       } catch (error) {
         console.warn(`[WorkflowStepExecutor] Navigation failed: ${error.message}`);
         // Continue without navigation for testing

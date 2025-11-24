@@ -954,7 +954,9 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
     }
     
     // Ensure page is properly loaded and sized
-    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+      console.warn('Page DOM not fully loaded after 30s, continuing anyway');
+    });
     
     // Scroll to bottom and back to top to ensure full page is loaded
     try {
@@ -1535,7 +1537,32 @@ const modeHandlers = {
     const hasAdvancedAnalysis = (workflowCapabilities.usesPlaywrightAnalysis === true) || (workflowCapabilities.usesAIModel === true);
     
     const visitedUrls = new Set();
-    const urlQueue = [{ url: page.url(), depth: 0 }];
+    // Get initial URL - handle case where page might navigate after cookies are loaded
+    // IMPORTANT: Don't access page.url() immediately - page might not be ready or context might be destroyed
+    // Use the seed URL from context instead
+    let seedUrl = context.seed_url || context.start_url || context.url || (context.options && context.options.start_url);
+    
+    // If no seed URL in context, try to get from page as last resort
+    if (!seedUrl || seedUrl === 'about:blank') {
+      try {
+        seedUrl = page.url();
+        if (seedUrl && seedUrl !== 'about:blank') {
+          await sendLog(jobId, 'info', `📍 Using page URL as seed URL: ${seedUrl}`);
+        }
+      } catch (pageError) {
+        // Page context might be destroyed, continue with what we have
+        await sendLog(jobId, 'warn', `⚠️ Could not get page URL: ${pageError.message}`);
+      }
+    }
+    
+    // Final check - if still no URL, throw error
+    if (!seedUrl || seedUrl === 'about:blank') {
+      await sendLog(jobId, 'error', `❌ No seed URL found in context (seed_url: ${context.seed_url}, start_url: ${context.start_url}, url: ${context.url})`);
+      throw new Error('No seed URL found in context - cannot start crawl');
+    }
+    
+    const urlQueue = [{ url: seedUrl, depth: 0 }];
+    await sendLog(jobId, 'info', `📍 Starting workflow crawl from seed URL: ${seedUrl}`);
     let pagesAnalyzed = 0;
     const allWorkflows = [];
     
@@ -1568,9 +1595,56 @@ const modeHandlers = {
         await sendLog(jobId, 'info', `📄 Page ${pagesAnalyzed}/${maxPages} (depth ${depth}): ${currentUrl}`);
         
         // Navigate to page if it's not the current page
-        if (page.url() !== currentUrl) {
-          await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+        // First, check current URL safely (might have navigated due to cookies)
+        let currentPageUrl;
+        try {
+          currentPageUrl = page.url();
+        } catch (urlError) {
+          await sendLog(jobId, 'warn', `⚠️ Could not get current page URL: ${urlError.message}, navigating to ${currentUrl}`);
+          currentPageUrl = null; // Force navigation
+        }
+        let finalUrl = currentUrl;
+        if (currentPageUrl !== currentUrl) {
+          try {
+            await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+              console.warn('Page DOM not fully loaded after 30s, continuing with analysis');
+            });
+            // Wait a bit for any post-navigation redirects
+            await page.waitForTimeout(1000);
+            // Get the final URL after navigation (may have redirected)
+            try {
+              finalUrl = page.url();
+              if (finalUrl !== currentUrl) {
+                await sendLog(jobId, 'info', `🔄 Page redirected from ${currentUrl} to ${finalUrl}`);
+              }
+            } catch (urlError) {
+              console.warn(`[CRAWLER] Could not get page URL after navigation: ${urlError.message}`);
+            }
+          } catch (navError) {
+            await sendLog(jobId, 'warn', `⚠️ Navigation failed: ${navError.message}`);
+            // Try to continue with current page
+            try {
+              finalUrl = page.url();
+            } catch (urlError) {
+              // Page context might be destroyed, skip this page
+              await sendLog(jobId, 'error', `❌ Page context destroyed after navigation, skipping page`);
+              continue;
+            }
+          }
+        } else {
+          // Already on the page, but cookies might have caused a navigation
+          // Wait a bit and check if URL changed
+          await page.waitForTimeout(1000);
+          try {
+            const actualUrl = page.url();
+            if (actualUrl !== currentUrl) {
+              finalUrl = actualUrl;
+              await sendLog(jobId, 'info', `🔄 Page navigated from ${currentUrl} to ${finalUrl} (likely due to cookies)`);
+            }
+          } catch (urlError) {
+            console.warn(`[CRAWLER] Could not get page URL: ${urlError.message}`);
+          }
         }
         
         // Run Lighthouse analysis on the page if requested by workflow
@@ -1579,11 +1653,11 @@ const modeHandlers = {
           try {
             await sendLog(jobId, 'info', `🔍 Running performance analysis...`);
             const { analyzePageWithLighthouse } = await import('./lighthouse-analyzer.js');
-            lighthouseResults = await analyzePageWithLighthouse(page, jobId, currentUrl);
+            lighthouseResults = await analyzePageWithLighthouse(page, jobId, finalUrl);
             
             if (lighthouseResults.success) {
               await sendLog(jobId, 'info', `✅ Lighthouse analysis completed - Performance: ${lighthouseResults.metrics.performance}/100`, {
-                page_url: currentUrl,
+                page_url: finalUrl,
                 performance_score: lighthouseResults.metrics.performance,
                 accessibility_score: lighthouseResults.metrics.accessibility,
                 best_practices_score: lighthouseResults.metrics.bestPractices,
@@ -1606,10 +1680,33 @@ const modeHandlers = {
         }
         
         // Create basic page document first
-        const pageTitle = await page.title();
+        // Handle case where execution context was destroyed due to navigation
+        let pageTitle = 'Unknown';
+        let actualPageUrl = finalUrl;
+        try {
+          // Wait for page to stabilize after potential navigation from cookies
+          await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+          await page.waitForTimeout(1000);
+          pageTitle = await page.title();
+          actualPageUrl = page.url();
+        } catch (titleError) {
+          // Execution context might have been destroyed due to navigation
+          await sendLog(jobId, 'warn', `⚠️ Could not get page title/URL (context may have been destroyed): ${titleError.message}`);
+          // Try to wait for page to stabilize and retry
+          try {
+            await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+            await page.waitForTimeout(2000);
+            pageTitle = await page.title().catch(() => 'Unknown');
+            actualPageUrl = await page.url().catch(() => finalUrl);
+          } catch (retryError) {
+            await sendLog(jobId, 'error', `❌ Page context still unavailable after retry: ${retryError.message}`);
+            // Skip this page and continue
+            continue;
+          }
+        }
         // Use project's start_url for domain filtering, not the current page URL
-        const projectStartUrl = context.start_url || page.url(); // Fallback to current URL if not provided
-        const pageResult = await sendBasicPageToBackend(jobId, currentUrl, pageTitle, projectId, projectStartUrl, lighthouseResults);
+        const projectStartUrl = context.start_url || actualPageUrl; // Fallback to current URL if not provided
+        const pageResult = await sendBasicPageToBackend(jobId, actualPageUrl, pageTitle, projectId, projectStartUrl, lighthouseResults);
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
         // Check if we should skip AI analysis
@@ -1678,12 +1775,26 @@ const modeHandlers = {
       }
       
       // Return comprehensive results
+      // Get final page info safely (context might be destroyed)
+      let finalPageUrl = 'unknown';
+      let finalPageTitle = 'Unknown';
+      try {
+        finalPageUrl = page.url();
+        finalPageTitle = await page.title();
+      } catch (finalError) {
+        await sendLog(jobId, 'warn', `⚠️ Could not get final page info: ${finalError.message}`);
+        // Use last known URL if available
+        if (urlQueue.length > 0) {
+          finalPageUrl = urlQueue[0].url;
+        }
+      }
+      
       return {
         success: true,
         approach: 'workflow',
         message: `Analyzed ${pagesAnalyzed} pages with workflow-based testing`,
-        url: page.url(),
-        title: await page.title(),
+        url: finalPageUrl,
+        title: finalPageTitle,
         details: {
           total_pages: pagesAnalyzed,
           total_workflows: allWorkflows.length,
@@ -3179,7 +3290,9 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         await updateJobSubstatus(jobId, 'waiting_for_page_ready', { current_page: currentUrl });
         
         // Wait for page to settle
-        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+          console.warn('Page DOM not fully loaded after 30s, continuing anyway');
+        });
         await page.waitForTimeout(1000);
         
         await sendLog(jobId, 'info', `✓ Page loaded successfully`, currentPageContext);
@@ -4742,7 +4855,11 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       try {
         const axios = (await import('axios')).default;
         await sendLog(jobId, 'info', `🔍 Loading workflow template ${workflowTemplateId} to check for pre-navigation cookie steps...`);
-        const workflowResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/workflow-templates/${workflowTemplateId}`);
+        const workflowResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/workflow-templates/${workflowTemplateId}`, {
+          headers: {
+            'Authorization': `Bearer ${context.runner_token || ''}`
+          }
+        });
         const workflowTemplate = workflowResponse.data;
         
         // Find cookie-collect steps that should run before navigation
@@ -4791,59 +4908,109 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       }
       
       // Execute cookie-collect steps that need to run before navigation (workflow-driven)
-      if (preNavigationCookieSteps.length > 0 && projectId) {
+      // ALSO: Always try to load cookies from project if projectId is available (even if no pre-navigation steps)
+      if (projectId) {
         try {
           const axios = (await import('axios')).default;
-          await sendLog(jobId, 'info', `🍪 Executing ${preNavigationCookieSteps.length} pre-navigation cookie-collect step(s) from workflow...`);
           
-          for (const step of preNavigationCookieSteps) {
-            const stepConfig = step.config || {};
-            const reloadFromProject = stepConfig.reloadFromProject !== false; // Default to true
+          // If there are pre-navigation cookie steps, execute them
+          if (preNavigationCookieSteps.length > 0) {
+            await sendLog(jobId, 'info', `🍪 Executing ${preNavigationCookieSteps.length} pre-navigation cookie-collect step(s) from workflow...`);
             
-            if (reloadFromProject) {
-              // Handle both string and ObjectId project_id
-              const projectIdStr = typeof projectId === 'object' 
-                ? projectId.toString() 
-                : String(projectId || '');
+            for (const step of preNavigationCookieSteps) {
+              const stepConfig = step.config || {};
+              const reloadFromProject = stepConfig.reloadFromProject !== false; // Default to true
               
-              if (!projectIdStr) {
-                await sendLog(jobId, 'warn', `⚠️ [${step.name}] No project_id available, skipping cookie reload`);
-                continue;
-              }
-              
-              const projectCookiesResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/projects/${projectIdStr}/cookies`, {
-                headers: {
-                  'Authorization': `Bearer ${context.runner_token || ''}`
-                }
-              });
-              
-              if (projectCookiesResponse.data && Array.isArray(projectCookiesResponse.data) && projectCookiesResponse.data.length > 0) {
-                const projectCookies = projectCookiesResponse.data;
-                const currentCookies = await browserContext.cookies();
-                const currentCookieMap = new Map(currentCookies.map(c => [`${c.name}:${c.domain}`, c]));
+              if (reloadFromProject) {
+                // Handle both string and ObjectId project_id
+                const projectIdStr = typeof projectId === 'object' 
+                  ? projectId.toString() 
+                  : String(projectId || '');
                 
-                const cookiesToAdd = projectCookies.filter(cookie => {
-                  const key = `${cookie.name}:${cookie.domain}`;
-                  const existing = currentCookieMap.get(key);
-                  return !existing || existing.value !== cookie.value || existing.expires !== cookie.expires;
+                if (!projectIdStr) {
+                  await sendLog(jobId, 'warn', `⚠️ [${step.name}] No project_id available, skipping cookie reload`);
+                  continue;
+                }
+                
+                const projectCookiesResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/projects/${projectIdStr}/cookies`, {
+                  headers: {
+                    'Authorization': `Bearer ${context.runner_token || ''}`
+                  }
                 });
                 
-                if (cookiesToAdd.length > 0) {
-                  try {
-                    await browserContext.addCookies(cookiesToAdd);
-                    await sendLog(jobId, 'info', `🍪 [${step.name}] Reloaded ${cookiesToAdd.length} cookies from project before navigation`);
-                  } catch (reloadError) {
-                    await sendLog(jobId, 'warn', `⚠️ [${step.name}] Failed to reload some cookies: ${reloadError.message}`);
+                if (projectCookiesResponse.data && Array.isArray(projectCookiesResponse.data) && projectCookiesResponse.data.length > 0) {
+                  const projectCookies = projectCookiesResponse.data;
+                  const currentCookies = await browserContext.cookies();
+                  const currentCookieMap = new Map(currentCookies.map(c => [`${c.name}:${c.domain}`, c]));
+                  
+                  const cookiesToAdd = projectCookies.filter(cookie => {
+                    const key = `${cookie.name}:${cookie.domain}`;
+                    const existing = currentCookieMap.get(key);
+                    return !existing || existing.value !== cookie.value || existing.expires !== cookie.expires;
+                  });
+                  
+                  if (cookiesToAdd.length > 0) {
+                    try {
+                      await browserContext.addCookies(cookiesToAdd);
+                      await sendLog(jobId, 'info', `🍪 [${step.name}] Reloaded ${cookiesToAdd.length} cookies from project before navigation`);
+                    } catch (reloadError) {
+                      await sendLog(jobId, 'warn', `⚠️ [${step.name}] Failed to reload some cookies: ${reloadError.message}`);
+                    }
+                  } else {
+                    await sendLog(jobId, 'info', `🍪 [${step.name}] All project cookies already set in browser context`);
+                  }
+                }
+              }
+            }
+          } else {
+            // No pre-navigation steps, but we have projectId - load cookies anyway
+            const projectIdStr = typeof projectId === 'object' 
+              ? projectId.toString() 
+              : String(projectId || '');
+            
+            if (projectIdStr) {
+              await sendLog(jobId, 'info', `🍪 Loading cookies from project (no pre-navigation steps defined)...`);
+              try {
+                const projectCookiesResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/projects/${projectIdStr}/cookies`, {
+                  headers: {
+                    'Authorization': `Bearer ${context.runner_token || ''}`
+                  }
+                });
+                
+                if (projectCookiesResponse.data && Array.isArray(projectCookiesResponse.data) && projectCookiesResponse.data.length > 0) {
+                  const projectCookies = projectCookiesResponse.data;
+                  const currentCookies = await browserContext.cookies();
+                  const currentCookieMap = new Map(currentCookies.map(c => [`${c.name}:${c.domain}`, c]));
+                  
+                  const cookiesToAdd = projectCookies.filter(cookie => {
+                    const key = `${cookie.name}:${cookie.domain}`;
+                    const existing = currentCookieMap.get(key);
+                    return !existing || existing.value !== cookie.value || existing.expires !== cookie.expires;
+                  });
+                  
+                  if (cookiesToAdd.length > 0) {
+                    try {
+                      await browserContext.addCookies(cookiesToAdd);
+                      await sendLog(jobId, 'info', `🍪 Reloaded ${cookiesToAdd.length} cookies from project before navigation`);
+                    } catch (reloadError) {
+                      await sendLog(jobId, 'warn', `⚠️ Failed to reload some cookies: ${reloadError.message}`);
+                    }
+                  } else {
+                    await sendLog(jobId, 'info', `🍪 All project cookies already set in browser context`);
                   }
                 } else {
-                  await sendLog(jobId, 'info', `🍪 [${step.name}] All project cookies already set in browser context`);
+                  await sendLog(jobId, 'info', `ℹ️ No cookies found in project`);
                 }
+              } catch (cookieLoadError) {
+                await sendLog(jobId, 'warn', `⚠️ Failed to load cookies from project: ${cookieLoadError.message}`);
               }
             }
           }
         } catch (cookieStepError) {
           await sendLog(jobId, 'warn', `⚠️ Pre-navigation cookie steps failed: ${cookieStepError.message}`);
         }
+      } else {
+        await sendLog(jobId, 'warn', `⚠️ No project_id available, cannot load cookies from project`);
       }
       
       // Set authentication tokens from login if provided
@@ -4877,21 +5044,31 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         }
       }
 
-      // Navigate to URL
+      // Navigate to URL (cookies should already be set in browser context)
       await sendLog(jobId, 'info', `Navigate: ${url}`, { mode });
+      
+      // Verify cookies are set before navigation
+      const cookiesBeforeNav = await browserContext.cookies();
+      await sendLog(jobId, 'info', `🍪 Browser context has ${cookiesBeforeNav.length} cookie(s) before navigation`);
+      
       await page.goto(url, { 
         waitUntil: 'domcontentloaded', 
         timeout: 30000 
       });
       
+      // Check if navigation redirected (cookies might have caused redirect)
+      const finalUrl = page.url();
+      if (finalUrl !== url) {
+        await sendLog(jobId, 'info', `🔄 Navigation redirected from ${url} to ${finalUrl} (likely due to cookies)`);
+      }
+      
       // Wait for navigation if DOM is loaded, otherwise wait for timeout then analyze
       try {
-        await page.waitForLoadState('networkidle', { timeout: 10000 });
-        await sendLog(jobId, 'info', '✅ Page fully loaded', { mode });
+        await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
+        await sendLog(jobId, 'info', '✅ Page DOM loaded', { mode });
       } catch (error) {
-        await sendLog(jobId, 'warn', '⚠️ Page not fully loaded, proceeding with analysis');
-        // Wait for timeout then analyze the page with AI
-        await page.waitForTimeout(5000);
+        await sendLog(jobId, 'warn', '⚠️ Page DOM not fully loaded after 30s, proceeding with analysis');
+        // Continue anyway - don't wait additional time
         await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', { mode });
       }
 
