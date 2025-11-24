@@ -1067,6 +1067,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   /**
+   * Update job progress with current iteration and step information
+   */
+  async updateJobProgress(jobId, progress = {}) {
+    try {
+      await axios.put(`${this.backendUrl}/api/jobs/${jobId}/progress`, {
+        ...progress,
+        timestamp: new Date().toISOString()
+      }, {
+        headers: this.getAuthHeaders()
+      });
+    } catch (error) {
+      // Silent fail - don't block execution
+      console.error(`Failed to update job progress: ${error.message}`);
+    }
+  }
+
+  /**
    * Log workflow decision to job history
    * Shows which workflow from MongoDB is being used (ID and name)
    */
@@ -4786,42 +4803,68 @@ IMPORTANT OUTPUT REQUIREMENTS:
         console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in context (${workflowState.context.legsToExecute.length} items)`);
         items = workflowState.context.legsToExecute;
       }
+      // Try from legs (alternative name)
+      else if (workflowState.legs && Array.isArray(workflowState.legs)) {
+        console.log(`[WorkflowAnalyzer] 🔄 Found legs directly on workflowState (${workflowState.legs.length} items)`);
+        items = workflowState.legs;
+      }
+      else if (workflowState.context?.legs && Array.isArray(workflowState.context.legs)) {
+        console.log(`[WorkflowAnalyzer] 🔄 Found legs in context (${workflowState.context.legs.length} items)`);
+        items = workflowState.context.legs;
+      }
       // Try from lastExecutionResult (from previous step)
       else if (workflowState.lastExecutionResult) {
         const lastResult = workflowState.lastExecutionResult;
         if (Array.isArray(lastResult)) {
           // Check if it's an array of leg objects
-          if (lastResult.length > 0 && typeof lastResult[0] === 'object' && lastResult[0].leg_id) {
+          if (lastResult.length > 0 && typeof lastResult[0] === 'object' && (lastResult[0].leg_id || lastResult[0].id)) {
             console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in lastExecutionResult as array (${lastResult.length} items)`);
             items = lastResult;
           }
-        } else if (lastResult && typeof lastResult === 'object' && lastResult.legsToExecute && Array.isArray(lastResult.legsToExecute)) {
-          console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in lastExecutionResult object (${lastResult.legsToExecute.length} items)`);
-          items = lastResult.legsToExecute;
+        } else if (lastResult && typeof lastResult === 'object') {
+          if (lastResult.legsToExecute && Array.isArray(lastResult.legsToExecute)) {
+            console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in lastExecutionResult object (${lastResult.legsToExecute.length} items)`);
+            items = lastResult.legsToExecute;
+          } else if (lastResult.legs && Array.isArray(lastResult.legs)) {
+            console.log(`[WorkflowAnalyzer] 🔄 Found legs in lastExecutionResult object (${lastResult.legs.length} items)`);
+            items = lastResult.legs;
+          }
         }
       }
       // Try from previous step result by slug - search all possible slugs
       else {
-        const possibleSlugs = ['prepare-legs-for-execution', 'prepare_legs_for_execution', 'prepare-legs-for-execution'];
+        const possibleSlugs = ['prepare-legs-for-execution', 'prepare_legs_for_execution', 'workflow-analysis', 'workflow_analysis', 'ai-analysis', 'ai_analysis'];
         let found = false;
         for (const slug of possibleSlugs) {
           const prepareResult = workflowState[slug]?.result || workflowState.results?.[slug]?.result;
-          if (prepareResult && prepareResult.legsToExecute && Array.isArray(prepareResult.legsToExecute)) {
-            items = prepareResult.legsToExecute;
-            found = true;
-            break;
+          if (prepareResult) {
+            if (prepareResult.legsToExecute && Array.isArray(prepareResult.legsToExecute)) {
+              items = prepareResult.legsToExecute;
+              found = true;
+              break;
+            } else if (prepareResult.legs && Array.isArray(prepareResult.legs)) {
+              items = prepareResult.legs;
+              found = true;
+              break;
+            }
           }
         }
         
-        // If still not found, search all workflowState keys for legsToExecute
+        // If still not found, search all workflowState keys for legsToExecute or legs
         if (!found) {
           for (const key of Object.keys(workflowState)) {
-            if (workflowState[key] && typeof workflowState[key] === 'object' && workflowState[key].result) {
-              const stepResult = workflowState[key].result;
-              if (stepResult && stepResult.legsToExecute && Array.isArray(stepResult.legsToExecute)) {
-                items = stepResult.legsToExecute;
-                found = true;
-                break;
+            if (workflowState[key] && typeof workflowState[key] === 'object') {
+              const stepResult = workflowState[key].result || workflowState[key];
+              if (stepResult && typeof stepResult === 'object') {
+                if (stepResult.legsToExecute && Array.isArray(stepResult.legsToExecute)) {
+                  items = stepResult.legsToExecute;
+                  found = true;
+                  break;
+                } else if (stepResult.legs && Array.isArray(stepResult.legs)) {
+                  items = stepResult.legs;
+                  found = true;
+                  break;
+                }
               }
             }
           }
@@ -4839,7 +4882,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
 
     if (!Array.isArray(items)) {
-      throw new Error(`for-each step expected an array at path "${itemsPath}" (source: ${sourceType}), got: ${typeof items}. Checked: lastExecutionResult, workflowState.legsToExecute, context.legsToExecute`);
+      // Log available keys for debugging
+      const availableKeys = Object.keys(workflowState || {}).slice(0, 20);
+      const contextKeys = workflowState?.context ? Object.keys(workflowState.context).slice(0, 20) : [];
+      console.error(`[WorkflowAnalyzer] ❌ For-each step failed to find array. Available workflowState keys: ${availableKeys.join(', ')}`);
+      console.error(`[WorkflowAnalyzer] ❌ Available context keys: ${contextKeys.join(', ')}`);
+      throw new Error(`for-each step expected an array at path "${itemsPath}" (source: ${sourceType}), got: ${typeof items}. Checked: lastExecutionResult, workflowState.legsToExecute, context.legsToExecute, workflowState.legs, context.legs`);
     }
 
     const isSingleActionMode =
@@ -4880,6 +4928,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       console.log(`[WorkflowAnalyzer] 🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
       
+      // Report progress: current iteration
+      await this.updateJobProgress(jobId, {
+        current_iteration: idx + 1,
+        total_iterations: effectiveItems.length,
+        current_step: null, // Will be updated per nested step
+        current_activity: `Iteration ${idx + 1} of ${effectiveItems.length} legs`
+      });
+      
       // Execute nested steps for this item
       if (nestedStepsArray.length > 0) {
         for (let nestedIdx = 0; nestedIdx < nestedStepsArray.length; nestedIdx++) {
@@ -4895,7 +4951,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
             originalId: nestedStep.id || baseId
           };
           
-          console.log(`[WorkflowAnalyzer] 🔁 Executing nested step ${nestedIdx + 1}/${nestedStepsArray.length}: ${nestedStep.name || nestedStep.type} (iteration ${idx + 1})`);
+          const stepName = nestedStep.name || nestedStep.type || 'Unknown step';
+          const stepTypeLabel = nestedStep.type === 'ai-prompt' ? 'AI prompt' : 
+                                nestedStep.type === 'execute-code' || nestedStep.type === 'execute-code-from-variable' ? 'Code execution' :
+                                nestedStep.type === 'screenshot' ? 'Screenshot' :
+                                nestedStep.type === 'playwright-analysis' ? 'Page analysis' :
+                                stepName;
+          
+          console.log(`[WorkflowAnalyzer] 🔁 Executing nested step ${nestedIdx + 1}/${nestedStepsArray.length}: ${stepName} (iteration ${idx + 1})`);
+          
+          // Report progress: current step
+          await this.updateJobProgress(jobId, {
+            current_iteration: idx + 1,
+            total_iterations: effectiveItems.length,
+            current_step: stepName,
+            current_activity: `Iteration ${idx + 1} of ${effectiveItems.length} legs • Current step: "${stepName}" (${stepTypeLabel})`
+          });
           
           try {
             // Execute nested step using the same switch logic
