@@ -28,7 +28,9 @@ class WorkflowExecutor {
     }
 
     try {
-      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`);
+      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`, {
+        headers: this.getAuthHeaders()
+      });
       this.workflowTemplate = response.data;
       console.log(`[WorkflowExecutor] ✅ Loaded workflow: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`);
       console.log(`[WorkflowExecutor] 📄 Workflow contains ${this.workflowTemplate.prompts?.length || 0} prompts`);
@@ -51,6 +53,17 @@ class WorkflowExecutor {
       console.error(`[WorkflowExecutor] ❌ Failed to load workflow template: ${error.message}`);
       throw new Error(`Failed to load workflow template ${this.context.workflow_template_id}: ${error.message}`);
     }
+  }
+
+  /**
+   * Get authentication headers for API calls
+   */
+  getAuthHeaders() {
+    const headers = {};
+    if (this.context.runner_token) {
+      headers['Authorization'] = `Bearer ${this.context.runner_token}`;
+    }
+    return headers;
   }
 
   /**

@@ -1,5 +1,4 @@
 import axios from 'axios';
-import { analyzePageWithLighthouse } from './lighthouse-analyzer.js';
 import { StaticNodeExecutor } from './static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from './step-requirements.js';
 
@@ -14,29 +13,7 @@ class WorkflowAnalyzer {
     this.aiLogger = aiLogger;
     this.context = context;
     this.workflowTemplate = null;
-    this.jobDetailsCache = new Map();
     this.workflowCapabilities = this.detectCapabilities([]);
-    this.loopDefaults = {
-      whileMaxIterations: 10,
-      forEachMaxItems: 100
-    };
-    this.templateLoopOverrides = {
-      // Enhanced Page Workflow
-      '68f9bca05f9b99aea734ebf5': {
-        whileMaxIterations: 5,
-        forEachMaxItems: 50
-      },
-      '690c996b5373f9053a41032d': {
-        whileMaxIterations: 5,
-        forEachMaxItems: 50
-      }
-    };
-    this.variableSnapshotLimits = {
-      maxDepth: Number.POSITIVE_INFINITY,
-      maxArrayItems: Number.POSITIVE_INFINITY,
-      maxStringLength: 50000,
-      maxHistory: 200
-    };
   }
 
   /**
@@ -55,7 +32,9 @@ class WorkflowAnalyzer {
         return this.workflowTemplate;
       }
 
-      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`);
+      const response = await axios.get(`${this.backendUrl}/api/workflow-templates/${this.context.workflow_template_id}`, {
+        headers: this.getAuthHeaders()
+      });
       this.workflowTemplate = response.data;
       console.log(`[WorkflowAnalyzer] ✅ Loaded workflow: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`);
       console.log(`[WorkflowAnalyzer] 📄 Workflow contains ${this.workflowTemplate.prompts?.length || 0} prompts`);
@@ -83,6 +62,53 @@ class WorkflowAnalyzer {
     }
   }
 
+  /**
+   * Get timeout for a workflow step (in milliseconds)
+   * Returns step-specific timeout or default based on step type
+   * Range: 1 minute (60000ms) to 10 minutes (600000ms)
+   */
+  getStepTimeout(step) {
+    // If step has explicit timeout config, use it (clamped to 1m-10m range)
+    if (step.config?.timeout_ms !== undefined) {
+      const timeout = Math.max(60000, Math.min(600000, step.config.timeout_ms));
+      return timeout;
+    }
+    if (step.config?.timeout !== undefined) {
+      const timeout = Math.max(60000, Math.min(600000, step.config.timeout));
+      return timeout;
+    }
+
+    // Default timeouts by step type (in milliseconds)
+    const defaultTimeouts = {
+      'ai-prompt': 180000,           // 3 minutes - AI calls can take time
+      'workflow-analysis': 180000,   // 3 minutes - Complex analysis
+      'page-description': 120000,    // 2 minutes - Page analysis
+      'playwright-analysis': 120000, // 2 minutes - Playwright analysis
+      'execute-code': 120000,        // 2 minutes - Code execution
+      'execute-code-from-variable': 120000, // 2 minutes
+      'while-loop': 300000,          // 5 minutes - Loops can take longer
+      'for-each': 300000,            // 5 minutes - Iterations
+      'self-adjustable-ai-workflow': 240000, // 4 minutes - Complex workflow
+      'screenshot': 60000,           // 1 minute - Quick operation
+      'cookie-collect': 60000,       // 1 minute - Quick operation
+      'validate-login': 60000,      // 1 minute - Quick validation
+      'var-export': 60000,           // 1 minute - Quick operation
+      'var-dump': 60000,            // 1 minute - Quick operation
+      'print': 30000,               // 30 seconds - Very quick
+      'sleep': 60000,               // 1 minute - Sleep operations
+      'page-discovery': 180000,     // 3 minutes - Discovery can take time
+      'sitemap-exploration': 240000, // 4 minutes - Sitemap exploration
+      'unlighthouse': 300000,       // 5 minutes - Performance audit
+      'save-data': 120000,          // 2 minutes - Data saving
+      'create-workflow': 120000,    // 2 minutes
+      'update-workflow': 120000,    // 2 minutes
+      'hardcoded-workflow-analysis': 120000, // 2 minutes
+    };
+
+    const stepType = step.type || 'ai-prompt';
+    return defaultTimeouts[stepType] || 120000; // Default: 2 minutes
+  }
+
   detectCapabilities(steps = []) {
     const stepList = Array.isArray(steps) ? steps : [];
     const hasStep = (...types) => stepList.some(step => types.includes(step.type));
@@ -91,7 +117,7 @@ class WorkflowAnalyzer {
       hasSteps: stepList.length > 0,
       usesPlaywrightAnalysis: hasStep('playwright-analysis', 'workflow-analysis', 'hardcoded-workflow-analysis', 'page-discovery'),
       usesAIModel: hasStep('ai-request', 'ai-prompt', 'page-description', 'workflow-analysis', 'hardcoded-workflow-analysis', 'create-workflow', 'update-workflow'),
-      usesLinkDiscovery: hasStep('page-discovery', 'sitemap-exploration'),
+      usesLinkDiscovery: hasStep('page-discovery'),
       usesPerformanceAudit: hasStep('unlighthouse'),
       usesScreenshotStep: hasStep('screenshot'),
       usesCookieOperations: hasStep('cookie-add', 'cookie-update', 'cookie-remove', 'cookie-collect')
@@ -146,14 +172,13 @@ class WorkflowAnalyzer {
   /**
    * Perform Playwright analysis to extract forms, links, interactive elements
    */
-  async performPlaywrightAnalysis(page, options = {}) {
+  async performPlaywrightAnalysis(page) {
     const analysis = {
       forms: [],
       links: [],
       interactive_elements: [],
       non_interactive_elements: []
     };
-    const onlyVisibleInteractiveElements = options.onlyVisibleInteractiveElements === true;
 
     try {
       // Extract forms
@@ -230,30 +255,19 @@ class WorkflowAnalyzer {
       // Extract interactive elements (buttons, clickable divs, etc.)
       const buttons = await page.$$('button:not(form button), input[type="button"], [role="button"], [onclick]');
       for (const button of buttons) {
-        let isVisible = true;
-        try {
-          isVisible = await button.isVisible();
-        } catch (visibilityError) {
-          console.warn('[WorkflowAnalyzer] ⚠️ Unable to determine visibility for interactive element:', visibilityError.message);
-          isVisible = true;
-        }
+        const text = await button.textContent();
+        const role = await button.getAttribute('role');
+        const onclick = await button.getAttribute('onclick');
 
-        if (!onlyVisibleInteractiveElements || isVisible) {
-          const text = await button.textContent();
-          const role = await button.getAttribute('role');
-          const onclick = await button.getAttribute('onclick');
-
-          const buttonSelectors = await this.getElementSelector(button);
-          analysis.interactive_elements.push({
-            type: 'button',
-            text: text?.trim(),
-            role,
-            onclick: onclick ? 'yes' : 'no',
-            selector: buttonSelectors[0]?.selector, // Primary selector
-            selectors: buttonSelectors, // All strategies
-            visible: isVisible
-          });
-        }
+        const buttonSelectors = await this.getElementSelector(button);
+        analysis.interactive_elements.push({
+          type: 'button',
+          text: text?.trim(),
+          role,
+          onclick: onclick ? 'yes' : 'no',
+          selector: buttonSelectors[0]?.selector, // Primary selector
+          selectors: buttonSelectors // All strategies
+        });
       }
 
       // Extract non-interactive elements (informational content, headings, labels)
@@ -462,8 +476,8 @@ class WorkflowAnalyzer {
 
 IMPORTANT OUTPUT REQUIREMENTS:
 - Return valid JSON that includes all of the page summary fields above.
-- ALSO include top-level "legs" and "actions" arrays describing the highest value interactive test actions (buttons, toggles, form submissions, input flows). The "actions" array MUST be identical to "legs" (duplicate entries to maintain backwards compatibility).
-- Each item in "legs" / "actions" MUST include:
+- ALSO include a top-level "legs" array describing the highest value interactive test actions (buttons, toggles, form submissions, input flows).
+- Each item in "legs" MUST include:
   - "leg_id": unique snake_case string identifier
   - "description": concise sentence describing the action and purpose
   - "type": one of click | form_submit | input | navigation_toggle | custom (avoid plain navigation link testing)
@@ -474,47 +488,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
   - "confidence": number between 0 and 1
   - "element_info": extra helpful selector/text/attribute data (ids, aria-labels, text, XPath, etc.)
 - Do NOT include duplicate actions or simple navigation links unless the navigation triggers a meaningful state change or workflow step.`;
-  }
-
-  async ensureVisibleText(page, workflowState) {
-    if (workflowState.visibleText && typeof workflowState.visibleText === 'string' && workflowState.visibleText.length > 0) {
-      return workflowState.visibleText;
-    }
-
-    try {
-      workflowState.visibleText = await page.evaluate(() => {
-        const walker = document.createTreeWalker(
-          document.body,
-          NodeFilter.SHOW_TEXT,
-          {
-            acceptNode: function(node) {
-              const parent = node.parentElement;
-              if (!parent) return NodeFilter.FILTER_REJECT;
-              const style = window.getComputedStyle(parent);
-              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-                return NodeFilter.FILTER_REJECT;
-              }
-              const text = node.textContent?.trim();
-              if (!text || text.length < 2) return NodeFilter.FILTER_REJECT;
-              return NodeFilter.FILTER_ACCEPT;
-            }
-          }
-        );
-
-        const textNodes = [];
-        let node;
-        while (node = walker.nextNode()) {
-          textNodes.push(node.textContent.trim());
-        }
-
-        return textNodes.join(' ').replace(/\s+/g, ' ').trim().substring(0, 2000);
-      });
-    } catch (error) {
-      console.warn('[WorkflowAnalyzer] ⚠️ Failed to extract visible text:', error.message);
-      workflowState.visibleText = '';
-    }
-
-    return workflowState.visibleText;
   }
 
   applyLegsToWorkflowState(rawLegs, workflowState, source = 'page-summary') {
@@ -722,13 +695,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     workflowState.legResults = new Array(normalizedLegs.length).fill(null);
     workflowState.actionsSummary = this.buildActionsSummary(normalizedLegs);
 
-    // Ensure downstream steps can consume legs without additional scripts
-    workflowState.legsToExecute = normalizedLegs;
-    if (!workflowState.context) {
-      workflowState.context = {};
-    }
-    workflowState.context.legsToExecute = normalizedLegs;
-
     workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
     if (!workflowState.aiAnalysisResult.page_description && workflowState.pageDescription) {
       workflowState.aiAnalysisResult.page_description = workflowState.pageDescription;
@@ -739,130 +705,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] ✅ Normalized ${normalizedLegs.length} legs from ${source}`);
 
     return normalizedLegs;
-  }
-
-  collectIterationDataFromState(workflowState) {
-    if (!workflowState) {
-      return null;
-    }
-
-    const iteration = workflowState.currentIteration || 1;
-    const isLoginWorkflow = workflowState.isLoginWorkflow === true || workflowState.workflowType === 'login';
-    let currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
-    const determineResult = workflowState['determine_completion']?.result ||
-      workflowState.results?.['determine_completion']?.result || {};
-    const executeResult = workflowState['execute_action_script']?.result ||
-      workflowState.lastExecutionResult || {};
-    const screenshotBefore = workflowState['screenshot_before_leg']?.screenshotFileId || null;
-    const screenshotAfter = workflowState['screenshot_after']?.screenshotFileId || null;
-    const actionPlan = workflowState.currentActionPlan || workflowState.lastGeneratedActionPlan || null;
-
-    const status = determineResult.status || determineResult.completion_status || 'unknown';
-    const legFailed = status === 'failure' || determineResult.completion_status === 'failed';
-    const legSucceeded = status === 'success' || (determineResult.is_complete === true && !legFailed);
-
-    if (isLoginWorkflow && (!currentLeg || Object.keys(currentLeg).length === 0)) {
-      const fallbackLegId = `login_attempt_${iteration}`;
-      currentLeg = {
-        leg_id: fallbackLegId,
-        description: `Login attempt ${iteration}`,
-        type: 'login_attempt',
-        iteration
-      };
-      workflowState.currentLeg = currentLeg;
-      workflowState.currentLegOriginalId = fallbackLegId;
-      workflowState.currentLegResolvedId = fallbackLegId;
-    }
-
-    if (!workflowState.legs) {
-      workflowState.legs = [];
-    }
-
-    const resolvedLegId = workflowState.currentLegOriginalId ||
-      workflowState.currentLegResolvedId ||
-      currentLeg.original_leg_id ||
-      currentLeg.leg_id ||
-      currentLeg.source_leg_id;
-
-    let legEntry = resolvedLegId
-      ? workflowState.legs.find((leg) => leg && leg.leg_id === resolvedLegId)
-      : null;
-
-    if (!legEntry && resolvedLegId) {
-      const templateLeg = workflowState.legs.find((leg) => leg && leg.leg_id === currentLeg.leg_id) || {};
-      legEntry = { ...templateLeg, ...currentLeg, leg_id: resolvedLegId, iterations: [] };
-      workflowState.legs.push(legEntry);
-      console.log('[CollectIteration] Created new leg entry for', resolvedLegId);
-    } else if (!legEntry) {
-      legEntry = { ...currentLeg, iterations: [] };
-      workflowState.legs.push(legEntry);
-      console.log('[CollectIteration] Created fallback leg entry for', currentLeg.leg_id);
-    }
-
-    if (resolvedLegId) {
-      legEntry.leg_id = resolvedLegId;
-    }
-    if (workflowState.currentLegOriginalId) {
-      legEntry.original_leg_id = workflowState.currentLegOriginalId;
-    }
-
-    if (!Array.isArray(legEntry.iterations)) {
-      legEntry.iterations = [];
-    }
-
-    legEntry.iterations.push({
-      iteration_number: iteration,
-      attempt_number: iteration,
-      script_executed: workflowState.legScriptToExecute || null,
-      result: legSucceeded ? 'success' : (legFailed ? 'failure' : 'pending'),
-      error: executeResult?.error || null,
-      screenshot_before: screenshotBefore,
-      screenshot_after: screenshotAfter,
-      openai_response: determineResult || null,
-      action_description: actionPlan?.description || currentLeg?.description || null,
-      expected_result: actionPlan?.expected_result || currentLeg?.expected_outcome || currentLeg?.expectedOutcome || null,
-      analysis_notes: actionPlan?.analysis_notes || null,
-        page_summary: actionPlan?.page_summary || determineResult?.page_state || null,
-      timestamp: new Date().toISOString()
-    });
-
-    console.log('[CollectIteration] leg', legEntry.leg_id, 'iterations now:', legEntry.iterations.length);
-
-    legEntry.result = legSucceeded ? 'success' : (legFailed ? 'failure' : 'pending');
-    legEntry.script_executed = workflowState.legScriptToExecute || null;
-    legEntry.generated_action_plan = actionPlan || legEntry.generated_action_plan || null;
-
-    if (!Array.isArray(workflowState.executionHistory)) {
-      workflowState.executionHistory = [];
-    }
-    workflowState.executionHistory.push({
-      iteration,
-      leg_id: legEntry.leg_id,
-      step_type: legEntry.type || (isLoginWorkflow ? 'login_attempt' : 'leg'),
-      status,
-      success: legSucceeded,
-      failure: legFailed,
-      timestamp: new Date().toISOString(),
-      execution_result: executeResult && typeof executeResult === 'object'
-        ? Object.fromEntries(Object.entries(executeResult).slice(0, 10))
-        : executeResult,
-      determine_result: determineResult && typeof determineResult === 'object'
-        ? Object.fromEntries(Object.entries(determineResult).slice(0, 10))
-        : determineResult,
-      action_description: actionPlan?.description || currentLeg?.description || null,
-      expected_result: actionPlan?.expected_result || currentLeg?.expected_outcome || currentLeg?.expectedOutcome || null,
-      analysis_notes: actionPlan?.analysis_notes || null,
-        page_summary: actionPlan?.page_summary || determineResult?.page_state || null
-    });
-    if (workflowState.executionHistory.length > 50) {
-      workflowState.executionHistory = workflowState.executionHistory.slice(-50);
-    }
-
-    const syntheticStep = { id: 'collect_iteration_data', name: 'Collect Iteration Data' };
-    const collectResult = { iteration, legSucceeded, legFailed, status };
-    this.storeStepResult(syntheticStep, collectResult, workflowState);
-
-    return collectResult;
   }
 
   createFallbackPageDescription(stats = {}, workflowState = {}) {
@@ -1144,17 +986,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
             analyzed_at: new Date().toISOString()
           },
           legs: legs,
-          create_actions: createActions  // Signal backend to create action documents IMMEDIATELY
+          create_actions: createActions  // Signal backend to create action documents
         },
         {
           headers: this.getAuthHeaders()
         }
       );
-
-      // Actions are created immediately in the backend route
-      if (createActions && legs && legs.length > 0) {
-        console.log(`[WorkflowAnalyzer] ✅ Actions creation requested for ${legs.length} legs (will be created immediately)`);
-      }
 
       return response.data;
     } catch (error) {
@@ -1163,101 +1000,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
   }
   
-  /**
-   * Ensure workflow document exists when workflow template omits explicit create step
-   */
-  async ensureWorkflowInitialized(workflowState, jobId, pageId = null, projectId = null, reason = 'auto') {
-    if (!workflowState || workflowState.isLoginWorkflow) {
-      return null;
-    }
-
-    if (workflowState.workflowId) {
-      return workflowState.workflowId;
-    }
-
-    const effectivePageId = pageId || workflowState.pageId || null;
-    const effectiveProjectId = projectId || workflowState.projectId || null;
-
-    if (!effectivePageId || !effectiveProjectId) {
-      console.log('[WorkflowAnalyzer] ⚠️ Skipping auto workflow creation - pageId/projectId missing', {
-        pageId: effectivePageId,
-        projectId: effectiveProjectId,
-        reason
-      });
-      return null;
-    }
-
-    try {
-      const workflow = await this.createWorkflow(
-        effectivePageId,
-        effectiveProjectId,
-        workflowState.pageUrl,
-        workflowState.playwrightAnalysis || {}
-      );
-
-      workflowState.workflowId = workflow._id;
-      if (!workflowState.context) {
-        workflowState.context = {};
-      }
-      workflowState.context.workflowId = workflow._id;
-
-      await this.sendLogToBackend(jobId, 'info', `🆕 Auto-created workflow ${workflow._id} (${reason})`, 'WORKFLOW-ANALYZER', {
-        workflow_id: workflow._id,
-        page_id: effectivePageId,
-        project_id: effectiveProjectId,
-        reason
-      });
-
-      return workflow._id;
-    } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Failed to auto-create workflow: ${error.message}`);
-      await this.sendLogToBackend(jobId, 'error', `❌ Auto-create workflow failed: ${error.message}`, 'WORKFLOW-ANALYZER', {
-        page_id: effectivePageId,
-        project_id: effectiveProjectId,
-        reason
-      });
-      return null;
-    }
-  }
-
-  /**
-   * Clear iteration-scoped variables before each loop iteration to avoid leak between runs
-   */
-  resetIterationScopedVariables(workflowState) {
-    if (!workflowState) {
-      return;
-    }
-
-    const iterationKeys = [
-      'currentLegAttempt',
-      'currentLegRetryReason',
-      'legScriptToExecute',
-      'loginScriptToExecute',
-      'lastExecutionResult',
-      'lastDetermineResult',
-      'lastExecutionSummary',
-      'currentIterationResult',
-      'pageDescriptionLogged',
-      'currentActionPlan',
-      'currentActionDescription',
-      'currentActionExpectedResult',
-      'lastGeneratedActionPlan'
-    ];
-
-    iterationKeys.forEach((key) => {
-      if (Object.prototype.hasOwnProperty.call(workflowState, key)) {
-        delete workflowState[key];
-      }
-      if (workflowState.context && Object.prototype.hasOwnProperty.call(workflowState.context, key)) {
-        delete workflowState.context[key];
-      }
-    });
-
-    if (workflowState.context) {
-      delete workflowState.context.currentItem;
-      delete workflowState.context.currentItemIndex;
-    }
-  }
   /**
    * Send real-time page discovery/update to backend
    * @param {string} jobId - Job ID
@@ -1543,44 +1285,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
       inputCredentials: this.context?.credentials || {
         username: this.context?.username || null,
         password: this.context?.password || null
-      },
-      workflowType: this.workflowTemplate?.type || null,
-      isLoginWorkflow: this.workflowTemplate?.type === 'login'
+      }
     };
     
     workflowState.pageId = pageId || null;
     workflowState.projectId = projectId || null;
     workflowState.jobId = jobId;
-    if (!workflowState.context) {
-      workflowState.context = {};
-    }
-    workflowState.context.workflow_type = workflowState.workflowType;
-    
-    this.initializeVariablePool(workflowState);
-
-    const templateHasCreateWorkflow = Array.isArray(this.workflowTemplate?.steps)
-      ? this.workflowTemplate.steps.some((step) => step?.type === 'create-workflow')
-      : false;
-    const templateHasUpdateWorkflow = Array.isArray(this.workflowTemplate?.steps)
-      ? this.workflowTemplate.steps.some((step) => step?.type === 'update-workflow')
-      : false;
-
-    const shouldAutoCreateWorkflow = !templateHasCreateWorkflow && !workflowState.isLoginWorkflow;
-    const shouldAutoUpdateWorkflow = !templateHasUpdateWorkflow && !workflowState.isLoginWorkflow;
-
-    workflowState.templateHasCreateWorkflow = templateHasCreateWorkflow;
-    workflowState.templateHasUpdateWorkflow = templateHasUpdateWorkflow;
-    workflowState.autoCreatedWorkflow = false;
-    workflowState.autoUpdatedWorkflow = false;
-    workflowState.shouldAutoCreateWorkflow = shouldAutoCreateWorkflow;
-    workflowState.shouldAutoUpdateWorkflow = shouldAutoUpdateWorkflow;
-
-    if (shouldAutoCreateWorkflow) {
-      const createdId = await this.ensureWorkflowInitialized(workflowState, jobId, pageId, projectId, 'pre-steps');
-      if (createdId) {
-        workflowState.autoCreatedWorkflow = true;
-      }
-    }
     
     // Check if we should retry from a specific step (after self-adjustable workflow)
     let startStepIndex = 0;
@@ -1611,19 +1321,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
       });
       
       try {
+        // Get step timeout
+        const stepTimeout = this.getStepTimeout(step);
+        console.log(`[WorkflowAnalyzer] ⏱️  Step timeout: ${Math.round(stepTimeout / 1000)}s`);
+        
         // Log step execution with parameters
         await this.logStepExecution(step, jobId);
         
-        switch (step.type) {
+        // Execute step with timeout
+        await Promise.race([
+          (async () => {
+            switch (step.type) {
           case 'screenshot':
             await this.executeScreenshotStep(page, step, workflowState, jobId, pageId);
-            break;
-          
-          case 'unlighthouse':
-            await this.executeUnlighthouseStep(page, step, workflowState, jobId, {
-              stepIndex: i,
-              totalSteps: this.workflowTemplate.steps.length
-            });
             break;
             
           case 'playwright-analysis':
@@ -1668,10 +1378,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executePageDiscoveryStep(step, workflowState, jobId, pageId, projectId);
             break;
             
-          case 'sitemap-exploration':
-            await this.executeSitemapExplorationStep(step, workflowState, jobId, pageId, projectId);
-            break;
-            
           case 'save-data':
             await this.executeSaveDataStep(page, step, workflowState, jobId);
             break;
@@ -1681,14 +1387,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executeCodeStep(page, step, workflowState, jobId, nextStepForCode);
             break;
             
-          case 'var-export':
-            await this.executeVarExportStep(step, workflowState, jobId);
-            break;
-
-          case 'var-dump':
-            await this.executeVarDumpStep(step, workflowState, jobId);
-            break;
-
           case 'execute-code-from-variable':
             const nextStep = i + 1 < this.workflowTemplate.steps.length ? this.workflowTemplate.steps[i + 1] : null;
             await this.executeCodeFromVariableStep(page, step, workflowState, jobId, nextStep);
@@ -1708,10 +1406,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
             
           case 'cookie-collect':
             await this.executeCookieCollectStep(page, step, workflowState, jobId);
-            break;
-
-          case 'validate-login':
-            await this.executeValidateLoginStep(step, workflowState, jobId);
             break;
             
           case 'self-adjustable-ai-workflow':
@@ -1770,6 +1464,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
           default:
             console.log(`[WorkflowAnalyzer] ⚠️ Unknown step type: ${step.type}`);
         }
+          })(),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error(`Step "${step.name || step.id}" timed out after ${Math.round(stepTimeout / 1000)}s`)), stepTimeout)
+          )
+        ]);
         
         // Add delay between steps
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1829,9 +1528,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
     console.log(`[WorkflowAnalyzer] ✅ ALL WORKFLOW STEPS COMPLETED`);
     console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
-
-    // Workflow updates are now handled only during workflow step execution
-    // No auto-update during finalization to keep workflows predictable and consistent
     
     // Send log to backend
     await this.sendLogToBackend(jobId, 'info', `✅ ALL WORKFLOW STEPS COMPLETED`, 'WORKFLOW-ANALYZER', {
@@ -1839,34 +1535,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflow_id: workflowState.workflowId
     });
     
-    // Return workflow results
+    // Return workflow results including context and cookies for login workflows
     return {
       workflow_id: workflowState.workflowId,
       legs_count: workflowState.legs.length,
       page_description: workflowState.pageDescription,
       legs: workflowState.legs,
       ai_analysis: workflowState.aiAnalysisResult,
-      login_status:
-        workflowState.loginStatus ||
-        workflowState.context?.login_status ||
-        workflowState['determine_completion']?.result?.status ||
-        workflowState.results?.['determine_completion']?.result?.status ||
-        null,
-      cookies:
-        workflowState.collectedCookies ||
-        workflowState.latestCookies ||
-        workflowState.context?.collectedCookies ||
-        [],
-      execution_history: workflowState.executionHistory || [],
       context: workflowState.context || {},
-      results: workflowState.results
-        ? Object.entries(workflowState.results).map(([stepId, info]) => ({
-            step_id: stepId,
-            step_name: info.stepName || stepId,
-            step_type: info.stepType || null,
-            result: info.result
-          }))
-        : []
+      collectedCookies: workflowState.collectedCookies || [],
+      login_status: workflowState.context?.login_status || workflowState.loginStatus || null,
+      screenshotUrl: workflowState.screenshotUrl || null,
+      screenshotFileId: workflowState.screenshotFileId || null
     };
   }
 
@@ -1881,10 +1561,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     // Ensure Playwright analysis exists (forms, links, interactive elements)
     if (!workflowState.playwrightAnalysis) {
-      const analysis = await this.performPlaywrightAnalysis(
-        page,
-        workflowState.playwrightAnalysisOptions || {}
-      );
+      const analysis = await this.performPlaywrightAnalysis(page);
       workflowState.playwrightAnalysis = analysis;
     }
 
@@ -1909,6 +1586,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     workflowState.aiAnalysisResult.legs = legs;
     console.log(`[WorkflowAnalyzer] ✅ Hardcoded analysis completed: ${legs.length} legs identified`);
   }
+
   /**
    * Execute screenshot step
    */
@@ -2039,92 +1717,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
     );
   }
 
-  async executeUnlighthouseStep(page, step, workflowState, jobId, stepContext = {}) {
-    const config = step.config || {};
-    const categories = Array.isArray(config.categories) && config.categories.length > 0
-      ? config.categories
-      : ['performance', 'accessibility', 'best-practices', 'seo'];
-    const device = typeof config.device === 'string' ? config.device : 'desktop';
-    const saveReport = config.saveReport !== false;
-    const pageUrl = page.url();
-
-    await this.sendLogToBackend(jobId, 'info', `📊 Running Unlighthouse audit (${device})`, 'WORKFLOW-ANALYZER', {
-      step_id: step.id,
-      step_name: step.name || step.type,
-      step_type: step.type,
-      categories,
-      device,
-      saveReport
-    });
-
-    const analysisResult = await analyzePageWithLighthouse(page, jobId, pageUrl, {
-      categories,
-      device,
-      saveReport
-    });
-
-    if (analysisResult.success) {
-      await this.sendLogToBackend(jobId, 'info', `✅ Unlighthouse audit complete (performance ${analysisResult.metrics?.performance ?? 'n/a'}/100)`, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: step.type,
-        categories,
-        device,
-        metrics: analysisResult.metrics,
-        analysis_duration_ms: analysisResult.analysisDuration,
-        timestamp: analysisResult.timestamp
-      });
-    } else {
-      await this.sendLogToBackend(jobId, 'warn', `⚠️ Unlighthouse audit failed: ${analysisResult.error}`, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: step.type,
-        categories,
-        device,
-        error: analysisResult.error,
-        analysis_duration_ms: analysisResult.analysisDuration,
-        timestamp: analysisResult.timestamp
-      });
-    }
-
-    const resultPayload = {
-      success: analysisResult.success,
-      categories,
-      device,
-      analysis_duration_ms: analysisResult.analysisDuration,
-      metrics: analysisResult.metrics || null,
-      raw_result: analysisResult,
-      timestamp: analysisResult.timestamp || new Date().toISOString()
-    };
-
-    workflowState.performanceAudit = resultPayload;
-    workflowState.performance_audit = resultPayload;
-    this.storeStepResult(step, resultPayload, workflowState);
-
-    if (stepContext && stepContext.stepIndex !== undefined) {
-      await this.sendLogToBackend(jobId, 'info', `📊 Unlighthouse audit stored (step ${stepContext.stepIndex + 1}/${stepContext.totalSteps || '?'})`, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: step.type,
-        categories,
-        device
-      });
-    }
-  }
-
   /**
    * Execute Playwright analysis step
    */
   async executePlaywrightAnalysisStep(page, step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 🔍 Performing Playwright analysis (${step.name})`);
     
-    const stepConfig = step?.config || {};
-    const analysis = await this.performPlaywrightAnalysis(page, stepConfig);
+    const analysis = await this.performPlaywrightAnalysis(page);
     workflowState.playwrightAnalysis = analysis;
-    workflowState.playwrightAnalysisOptions = { ...stepConfig };
-    if (typeof step.name === 'string' && /after action/i.test(step.name)) {
-      workflowState.playwrightAnalysisAfter = analysis;
-    }
     
     this.storeStepResult(step, analysis, workflowState);
 
@@ -2151,19 +1751,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       `📊 [PLAYWRIGHT] Found ${analysis.forms.length} forms, ${analysis.links.length} links, ${analysis.interactive_elements.length} interactive elements, ${analysis.non_interactive_elements.length} non-interactive elements`,
       metadata
     );
-
-    if (workflowState.shouldAutoCreateWorkflow && !workflowState.workflowId) {
-      const createdId = await this.ensureWorkflowInitialized(
-        workflowState,
-        jobId,
-        workflowState.pageId,
-        workflowState.projectId,
-        'after-playwright-analysis'
-      );
-      if (createdId) {
-        workflowState.autoCreatedWorkflow = true;
-      }
-    }
   }
 
   resolveStepContext(step, stepContext, fallbackSiblings = null) {
@@ -2225,13 +1812,43 @@ IMPORTANT OUTPUT REQUIREMENTS:
    */
   async executePageDescriptionStep(page, step, workflowState, jobId, stepContext = null) {
     console.log(`[WorkflowAnalyzer] 📝 Generating page description (${step.name})`);
+    
+    // Get page title and content if not already collected
     if (!workflowState.pageTitle) {
       workflowState.pageTitle = await page.title();
     }
     if (!workflowState.htmlContent) {
       workflowState.htmlContent = await page.content();
     }
-    await this.ensureVisibleText(page, workflowState);
+    if (!workflowState.visibleText) {
+      workflowState.visibleText = await page.evaluate(() => {
+        const walker = document.createTreeWalker(
+          document.body,
+          NodeFilter.SHOW_TEXT,
+          {
+            acceptNode: function(node) {
+              const parent = node.parentElement;
+              if (!parent) return NodeFilter.FILTER_REJECT;
+              const style = window.getComputedStyle(parent);
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                return NodeFilter.FILTER_REJECT;
+              }
+              const text = node.textContent?.trim();
+              if (!text || text.length < 2) return NodeFilter.FILTER_REJECT;
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          }
+        );
+        
+        const textNodes = [];
+        let node;
+        while (node = walker.nextNode()) {
+          textNodes.push(node.textContent.trim());
+        }
+        
+        return textNodes.join(' ').replace(/\s+/g, ' ').trim().substring(0, 2000);
+      });
+    }
     
     // Prompt template MUST be embedded directly in step config
     const customTemplate = step.config?.template || step.config?.user_message_template || null;
@@ -2324,7 +1941,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         normalizedFromSummary = this.applyLegsToWorkflowState(candidateLegs, workflowState, 'page-summary');
         if (normalizedFromSummary.length > 0) {
           workflowState.pageDescription.legs = normalizedFromSummary;
-          workflowState.pageDescription.actions = normalizedFromSummary;
+          if (!Array.isArray(workflowState.pageDescription.actions) || workflowState.pageDescription.actions.length === 0) {
+            workflowState.pageDescription.actions = normalizedFromSummary;
+          }
           console.log(`[WorkflowAnalyzer] ✅ Page summary included ${normalizedFromSummary.length} legs`);
         }
       }
@@ -2355,7 +1974,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState.aiAnalysisResult.page_description = workflowState.pageDescription;
       if (normalizedFromSummary.length > 0) {
         workflowState.aiAnalysisResult.legs = normalizedFromSummary;
-        workflowState.aiAnalysisResult.actions = normalizedFromSummary;
         workflowState.aiAnalysisResult.source = 'page-summary';
       }
 
@@ -2404,6 +2022,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       );
     }
   }
+
   /**
    * Execute AI prompt step
    */
@@ -2425,37 +2044,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const requirementText = contextInfo.requirementText;
     const decoratedTemplate = appendRequirementToTemplate(customTemplate, requirementText);
     
-    if (!workflowState.pageTitle) {
-      workflowState.pageTitle = await page.title();
-    }
-    if (!workflowState.htmlContent) {
-      workflowState.htmlContent = await page.content();
-    }
-
-    const attachments = Array.isArray(step.config?.attachments)
-      ? step.config.attachments
-      : [];
-
-    if (!workflowState.context) {
-      workflowState.context = {};
-    }
-    if (['generate_action_script', 'generate_login_script'].includes(step.id)) {
-      workflowState.legScriptToExecute = null;
-      workflowState.context.legScriptToExecute = null;
-      workflowState.loginScriptToExecute = null;
-      workflowState.context.loginScriptToExecute = null;
-    }
-
-    const needsVisibleText = attachments.includes('visible_text');
-    if (needsVisibleText) {
-      await this.ensureVisibleText(page, workflowState);
-    }
-    
     // Prepare payload based on step configuration
     const stepPayload = {
       page_url: workflowState.pageUrl,
-      page_title: workflowState.pageTitle,
-      page_content: workflowState.htmlContent,
+      page_title: workflowState.pageTitle || await page.title(),
+      page_content: workflowState.htmlContent || await page.content(),
       additional_prompt_text: this.context.additional_prompt_text || ''
     };
     if (workflowState.inputCredentials) {
@@ -2463,79 +2056,35 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     // Add additional data based on step attachments
-    if (attachments.length > 0) {
-      if (attachments.includes('visible_text') && workflowState.visibleText) {
+    if (step.config?.attachments) {
+      if (step.config.attachments.includes('visible_text') && workflowState.visibleText) {
         stepPayload.visible_text = workflowState.visibleText;
       }
-      if (attachments.includes('interactive_elements') && workflowState.playwrightAnalysis) {
+      if (step.config.attachments.includes('interactive_elements') && workflowState.playwrightAnalysis) {
         stepPayload.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
       }
-      if (attachments.includes('forms') && workflowState.playwrightAnalysis) {
+      if (step.config.attachments.includes('forms') && workflowState.playwrightAnalysis) {
         stepPayload.forms = workflowState.playwrightAnalysis.forms;
       }
-      if (attachments.includes('page_description') && workflowState.pageDescription) {
+      if (step.config.attachments.includes('page_description') && workflowState.pageDescription) {
         stepPayload.page_description = workflowState.pageDescription;
       }
-      if (attachments.includes('current_leg') && workflowState.currentLeg) {
+      if (step.config.attachments.includes('current_leg') && workflowState.currentLeg) {
         stepPayload.current_leg = workflowState.currentLeg;
       }
-      if (attachments.includes('last_execution_result') && workflowState.lastExecutionResult) {
+      if (step.config.attachments.includes('last_execution_result') && workflowState.lastExecutionResult) {
         stepPayload.execution_result = workflowState.lastExecutionResult;
       }
-      if (attachments.includes('playwright_analysis') && workflowState.playwrightAnalysis) {
+      if (step.config.attachments.includes('playwright_analysis') && workflowState.playwrightAnalysis) {
         stepPayload.playwright_analysis = workflowState.playwrightAnalysis;
       }
-      if (attachments.includes('url_before_action') && workflowState.urlBeforeAction) {
+      if (step.config.attachments.includes('url_before_action') && workflowState.urlBeforeAction) {
         stepPayload.url_before_action = workflowState.urlBeforeAction;
         stepPayload.before_url = workflowState.urlBeforeAction;
       }
-      if (attachments.includes('url_after_action') && workflowState.urlAfterAction) {
+      if (step.config.attachments.includes('url_after_action') && workflowState.urlAfterAction) {
         stepPayload.url_after_action = workflowState.urlAfterAction;
         stepPayload.after_url = workflowState.urlAfterAction;
-      }
-      if (attachments.includes('screenshot') && workflowState.screenshotBase64) {
-        stepPayload.screenshot = workflowState.screenshotBase64;
-      }
-      if (attachments.includes('login_strategy') && workflowState.loginStrategy) {
-        stepPayload.login_strategy = workflowState.loginStrategy;
-      }
-      if (attachments.includes('execution_history') && workflowState.executionHistory) {
-        stepPayload.execution_history = workflowState.executionHistory;
-      }
-    }
-    
-    const promptSlug = step.config?.prompt_slug || '';
-    const stepIdentity = (step.id || step.name || '').toLowerCase();
-    const humanLikeSlugs = new Set([
-      'generate-playwright-script',
-      'generate-workflow-script',
-      'generate_action_script',
-      'generate-login-script',
-      'generate_login_script',
-      'generate-playwright-login-script'
-    ]);
-    const shouldEnforceHumanLike = humanLikeSlugs.has(promptSlug) || (stepIdentity.includes('generate') && stepIdentity.includes('script'));
-    if (shouldEnforceHumanLike) {
-      const humanInstructionMarker = '[[HUMAN_INTERACTION_GUIDELINES]]';
-      const humanInstruction = [
-        humanInstructionMarker,
-        'Produce Playwright JavaScript that behaves like a careful human operator interacting with the page.',
-        '- Prefer high-level Playwright APIs (`page.locator`, `page.click`, `page.hover`, `page.fill`, `page.keyboard.type`).',
-        '- Never mutate the DOM directly with `document.querySelector(...).value = ...` or similar shortcuts.',
-        '- Before clicking important elements, hover them first and insert a small human pause (`await page.waitForTimeout(200 + Math.floor(Math.random() * 200))`).',
-        '- When typing, use `await page.fill` or `await page.keyboard.type` with slight delays between groups of characters.',
-        '- Scroll into view when needed (`await locator.scrollIntoViewIfNeeded()`).',
-        '- CRITICAL: After opening menus, dropdowns, or navigation panels, ALWAYS wait 800-1200ms before the next action to allow the menu to fully render and become interactive. Use: `await page.waitForTimeout(800 + Math.floor(Math.random() * 400))`.',
-        '- CRITICAL: After clicking elements that trigger UI changes (modals, sidebars, dropdowns), wait 500-1000ms before interacting with the newly revealed content.',
-        '- After each major interaction, wait for the UI to settle (`await page.waitForTimeout(250 + Math.floor(Math.random() * 250))`) and, when appropriate, `await page.waitForLoadState` or locator-based waits.',
-        '- Keep the script inside an async function body that will run in Node context with the `page` object available.',
-        '- Include concise comments explaining human intent for each cluster of steps.'
-      ].join('\n');
-      if (!stepPayload.additional_prompt_text || !stepPayload.additional_prompt_text.includes(humanInstructionMarker)) {
-        stepPayload.additional_prompt_text = [
-          stepPayload.additional_prompt_text,
-          humanInstruction
-        ].filter(Boolean).join('\n\n');
       }
     }
     
@@ -2577,215 +2126,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       // Debug: Log what was returned
       console.log(`[WorkflowAnalyzer] 🔍 AI Response for step ${step.id}:`, JSON.stringify(parsedResponse, null, 2).substring(0, 500));
-      let scriptProvided = false;
-
       if (parsedResponse && typeof parsedResponse === 'object') {
         console.log(`[WorkflowAnalyzer] 🔍 Response keys: ${Object.keys(parsedResponse).join(', ')}`);
-
-        let normalizedSummary = null;
-        const summaryCandidate =
-          (parsedResponse.page_summary && typeof parsedResponse.page_summary === 'object' ? parsedResponse.page_summary : null) ||
-          (parsedResponse.page_summary_json && typeof parsedResponse.page_summary_json === 'object' ? parsedResponse.page_summary_json : null) ||
-          (parsedResponse.pageDescription && typeof parsedResponse.pageDescription === 'object' ? parsedResponse.pageDescription : null) ||
-          (parsedResponse.page_description && typeof parsedResponse.page_description === 'object' ? parsedResponse.page_description : null) ||
-          (parsedResponse.summary && typeof parsedResponse.summary === 'object' ? parsedResponse.summary : null) ||
-          null;
-
-        if (summaryCandidate || typeof parsedResponse.page_summary === 'string' || typeof parsedResponse.pageDescription === 'string') {
-          const summaryObject = summaryCandidate || {};
-          const shortDescription =
-            summaryObject.short_description ||
-            summaryObject.shortSummary ||
-            summaryObject.summary ||
-            summaryObject.description ||
-            (typeof parsedResponse.page_summary === 'string' ? parsedResponse.page_summary : null) ||
-            (typeof parsedResponse.pageDescription === 'string' ? parsedResponse.pageDescription : null) ||
-            workflowState.pageTitle ||
-            'Page summary';
-          const detailedDescription =
-            summaryObject.detailed_description ||
-            summaryObject.full_description ||
-            summaryObject.description ||
-            summaryObject.summary ||
-            '';
-
-          normalizedSummary = {
-            ...summaryObject,
-            short_description: shortDescription,
-            detailed_description: detailedDescription || summaryObject.detailed_description || ''
-          };
-
-          normalizedSummary.primary_purpose = normalizedSummary.primary_purpose || summaryObject.purpose || null;
-          normalizedSummary.key_features = Array.isArray(normalizedSummary.key_features) ? normalizedSummary.key_features : [];
-          normalizedSummary.user_actions = Array.isArray(normalizedSummary.user_actions) ? normalizedSummary.user_actions : [];
-
-          workflowState.pageDescription = normalizedSummary;
-          workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
-          workflowState.aiAnalysisResult.page_description = normalizedSummary;
-
-          if (!workflowState.pageDescriptionLogged) {
-            await this.logPageDescription(
-              jobId,
-              workflowState.pageUrl,
-              workflowState.pageTitle,
-              normalizedSummary,
-              {
-                visible_text_length: workflowState.visibleText?.length || 0,
-                forms_count: workflowState.playwrightAnalysis?.forms?.length || 0,
-                interactive_elements_count: workflowState.playwrightAnalysis?.interactive_elements?.length || 0,
-                source_step: step.id || step.name
-              },
-              workflowState.htmlContent,
-              workflowState.screenshotBase64
-            );
-            workflowState.pageDescriptionLogged = true;
-          }
-        }
-
-        if (parsedResponse.login_strategy && typeof parsedResponse.login_strategy === 'object') {
-          workflowState.loginStrategy = parsedResponse.login_strategy;
-          workflowState.context.login_strategy = parsedResponse.login_strategy;
-        } else if (step.id === 'login_page_intelligence') {
-          workflowState.loginStrategy = parsedResponse;
-          workflowState.context.login_strategy = parsedResponse;
-        }
-
-        const responseDescription =
-          parsedResponse.description ||
-          parsedResponse.action_description ||
-          parsedResponse.summary ||
-          parsedResponse.details ||
-          null;
-        const responseExpectedResult =
-          parsedResponse.expected_result ||
-          parsedResponse.expectedResult ||
-          parsedResponse.expected_outcome ||
-          parsedResponse.expectedOutcome ||
-          null;
-        const responseAnalysisNotes =
-          parsedResponse.analysis_notes ||
-          parsedResponse.analysisNotes ||
-          parsedResponse.notes ||
-          null;
-
-        const aiLegs = Array.isArray(parsedResponse.legs)
-          ? parsedResponse.legs
-          : Array.isArray(parsedResponse.actions)
-            ? parsedResponse.actions
-            : [];
-
-        if (aiLegs.length > 0) {
-          const normalizedLegs = this.applyLegsToWorkflowState(aiLegs, workflowState, step.id || 'ai-prompt');
-          if (normalizedLegs.length > 0) {
-            parsedResponse.legs = normalizedLegs;
-            parsedResponse.actions = normalizedLegs;
-            workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
-            workflowState.aiAnalysisResult.legs = normalizedLegs;
-            workflowState.aiAnalysisResult.actions = normalizedLegs;
-            workflowState.aiAnalysisResult.source = step.id || 'ai-prompt';
-          }
-        }
-
-        if (step.id === 'generate_login_script') {
-          const iterationNumber = workflowState.currentIteration || (Array.isArray(workflowState.executionHistory) ? workflowState.executionHistory.length + 1 : 1);
-          const flowStage = parsedResponse.flow_stage || parsedResponse.stage || 'login_attempt';
-          const legId = parsedResponse.leg_id || `login_attempt_${iterationNumber}`;
-          const actionSummary =
-            parsedResponse.action_summary ||
-            parsedResponse.description ||
-            parsedResponse.summary ||
-            `Login attempt ${iterationNumber}`;
-
-          const loginLeg = {
-            leg_id: legId,
-            description: actionSummary,
-            type: 'login_attempt',
-            stage: flowStage,
-            iteration: iterationNumber,
-            metadata: parsedResponse
-          };
-
-          workflowState.currentLeg = loginLeg;
-          workflowState.currentLegOriginalId = legId;
-          workflowState.currentLegResolvedId = legId;
-
-          if (!Array.isArray(workflowState.loginAttempts)) {
-            workflowState.loginAttempts = [];
-          }
-          workflowState.loginAttempts.push({
-            leg_id: legId,
-            stage: flowStage,
-            summary: actionSummary,
-            iteration: iterationNumber,
-            timestamp: new Date().toISOString()
-          });
-
-          workflowState.context.current_login_stage = flowStage;
-          workflowState.context.current_leg = loginLeg;
-        }
-
-        if (step.id === 'generate_action_script') {
-          const currentLeg = workflowState.currentLeg || workflowState.context?.currentLeg || null;
-          const defaultLegDescription = currentLeg?.description || currentLeg?.title || currentLeg?.name || null;
-          const defaultExpected = currentLeg?.expected_outcome || currentLeg?.expectedOutcome || null;
-
-          const actionPlan = {
-            description: responseDescription || defaultLegDescription || null,
-            expected_result: responseExpectedResult || defaultExpected || null,
-            analysis_notes: responseAnalysisNotes || null,
-            page_summary: normalizedSummary || parsedResponse.page_summary || parsedResponse.pageDescription || null
-          };
-
-          workflowState.currentActionPlan = actionPlan;
-          workflowState.lastGeneratedActionPlan = actionPlan;
-          workflowState.lastExecutionSummary = actionPlan;
-          if (!workflowState.context) {
-            workflowState.context = {};
-          }
-          workflowState.context.currentActionPlan = actionPlan;
-
-          if (currentLeg && typeof currentLeg === 'object') {
-            currentLeg.generated_action_plan = actionPlan;
-            if (Array.isArray(workflowState.legs)) {
-              const legIndex = workflowState.legs.findIndex((leg) => {
-                if (!leg) return false;
-                const legIdentifier = leg.leg_id || leg.id || leg.original_leg_id || leg.source_leg_id;
-                const currentIdentifier =
-                  workflowState.currentLegResolvedId ||
-                  workflowState.currentLegOriginalId ||
-                  currentLeg.leg_id ||
-                  currentLeg.id ||
-                  currentLeg.original_leg_id ||
-                  null;
-                return legIdentifier && currentIdentifier && legIdentifier === currentIdentifier;
-              });
-              if (legIndex >= 0) {
-                workflowState.legs[legIndex] = {
-                  ...workflowState.legs[legIndex],
-                  generated_action_plan: actionPlan
-                };
-              }
-            }
-          }
-
-          const actionLogMessage = actionPlan.description
-            ? `🛠️ [ACTION] ${actionPlan.description}`
-            : '🛠️ [ACTION] Generated Playwright script';
-          await this.logStepOutcome(
-            step,
-            jobId,
-            actionLogMessage,
-            {
-              expected_result: actionPlan.expected_result,
-              leg_id: workflowState.currentLegResolvedId || workflowState.currentLegOriginalId || currentLeg?.leg_id || null,
-              script_length: typeof parsedResponse.playwright_script === 'string'
-                ? parsedResponse.playwright_script.length
-                : (workflowState.legScriptToExecute ? workflowState.legScriptToExecute.length : 0)
-            }
-          );
-        }
-
-          if (parsedResponse.playwright_script) {
+        if (parsedResponse.playwright_script) {
           console.log(`[WorkflowAnalyzer] ✅ playwright_script found: ${parsedResponse.playwright_script.length} chars`);
           // Log to job history
           if (jobId && this.backendLogger) {
@@ -2804,10 +2147,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
           const cleanedScript = this.cleanScript(parsedResponse.playwright_script);
           if (cleanedScript && cleanedScript.trim().length > 0) {
             workflowState.legScriptToExecute = cleanedScript;
+            if (!workflowState.context) {
+              workflowState.context = {};
+            }
             workflowState.context.legScriptToExecute = cleanedScript;
-            workflowState.loginScriptToExecute = cleanedScript;
-            workflowState.context.loginScriptToExecute = cleanedScript;
-            scriptProvided = true;
           }
         } else {
           console.log(`[WorkflowAnalyzer] ⚠️ playwright_script NOT found in response`);
@@ -2836,118 +2179,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
             const cleanedFallback = this.cleanScript(fallbackScript);
             if (cleanedFallback && cleanedFallback.trim().length > 0) {
               workflowState.legScriptToExecute = cleanedFallback;
+              if (!workflowState.context) {
+                workflowState.context = {};
+              }
               workflowState.context.legScriptToExecute = cleanedFallback;
-              workflowState.loginScriptToExecute = cleanedFallback;
-              workflowState.context.loginScriptToExecute = cleanedFallback;
-              scriptProvided = true;
             }
           }
+
         }
-
-      }
-
-      if (['generate_action_script', 'generate_login_script'].includes(step.id) && !scriptProvided) {
-        throw new Error('AI prompt did not return a playwright_script field');
-      }
-
-      if (step.id === 'determine_completion' && parsedResponse && typeof parsedResponse === 'object') {
-        const pageState = parsedResponse.page_state;
-        if (pageState && typeof pageState === 'object') {
-          workflowState.pageStateAfter = pageState;
-          workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
-          workflowState.aiAnalysisResult.page_state_after = pageState;
-
-          const metadata = {
-            source_step: step.id,
-            context: 'after_action',
-            short_description: pageState.short_description,
-            notable_changes_count: Array.isArray(pageState.notable_changes) ? pageState.notable_changes.length : 0
-          };
-
-          if (!workflowState.pageStateAfterLogged) {
-            await this.logPageDescription(
-              jobId,
-              workflowState.pageUrl,
-              workflowState.pageTitle,
-              {
-                short_description: pageState.short_description,
-                detailed_description: pageState.detailed_description,
-                primary_purpose: pageState.primary_purpose || null,
-                key_features: pageState.notable_changes || [],
-                user_actions: pageState.interactive_summary || []
-              },
-              metadata,
-              workflowState.htmlContent,
-              workflowState.screenshotBase64
-            );
-            workflowState.pageStateAfterLogged = true;
-          }
-        }
-
-        if (parsedResponse.status) {
-          workflowState.loginStatus = parsedResponse.status;
-          workflowState.context.login_status = parsedResponse.status;
-        }
-        if (parsedResponse.captcha_status) {
-          workflowState.lastCaptchaStatus = parsedResponse.captcha_status;
-          workflowState.context.captcha_status = parsedResponse.captcha_status;
-        }
-        if (Array.isArray(parsedResponse.cookies)) {
-          workflowState.latestCookies = parsedResponse.cookies;
-        }
-
-        const idsToPersist = new Set([step.id]);
-        if (step.id.includes('::')) {
-          idsToPersist.add(step.id.split('::').pop());
-        }
-        idsToPersist.add('determine_completion');
-        if (step.slug) {
-          idsToPersist.add(step.slug);
-        }
-
-        idsToPersist.forEach((storeId) => {
-          if (!storeId) {
-            return;
-          }
-
-          if (!workflowState.results) {
-            workflowState.results = {};
-          }
-          if (!workflowState.results[storeId]) {
-            workflowState.results[storeId] = {};
-          }
-          workflowState.results[storeId].result = parsedResponse;
-          if (parsedResponse.status !== undefined) {
-            workflowState.results[storeId].status = parsedResponse.status;
-          }
-          if (parsedResponse.is_complete !== undefined) {
-            workflowState.results[storeId].is_complete = parsedResponse.is_complete;
-          }
-
-          if (!workflowState[storeId]) {
-            workflowState[storeId] = {};
-          }
-          workflowState[storeId].result = parsedResponse;
-          if (parsedResponse.status !== undefined) {
-            workflowState[storeId].status = parsedResponse.status;
-          }
-          if (parsedResponse.is_complete !== undefined) {
-            workflowState[storeId].is_complete = parsedResponse.is_complete;
-          }
-        });
-
-        workflowState.determineCompletionStatus = parsedResponse.status ?? null;
-        workflowState.lastDetermineResult = parsedResponse;
-        workflowState.context.determine_completion = parsedResponse;
-        workflowState.context.determine_completion_status = parsedResponse.status ?? null;
       }
 
       // Store response in workflow state (legacy key and slug-based)
       workflowState[`${step.name}_response`] = parsedResponse;
       this.storeStepResult(step, parsedResponse, workflowState);
-      if (step.id === 'determine_completion') {
-        this.collectIterationDataFromState(workflowState);
-      }
       
       const logPreview = typeof aiResponse === 'string' ? aiResponse.substring(0, 100) : JSON.stringify(parsedResponse).substring(0, 100);
       console.log(`[WorkflowAnalyzer] ✅ AI prompt completed: ${logPreview}...`);
@@ -2996,7 +2240,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
       workflowState.aiAnalysisResult.page_description = workflowState.aiAnalysisResult.page_description || workflowState.pageDescription || null;
       workflowState.aiAnalysisResult.legs = workflowState.legs;
-      workflowState.aiAnalysisResult.actions = workflowState.legs;
       workflowState.aiAnalysisResult.source = workflowState.aiAnalysisResult.source || 'page-summary';
       this.storeStepResult(step, {
         legs: workflowState.legs,
@@ -3075,7 +2318,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
 
         workflowState.aiAnalysisResult.legs = normalizedLegs;
-        workflowState.aiAnalysisResult.actions = normalizedLegs;
         console.log(`[WorkflowAnalyzer] ✅ Workflow analysis completed: ${normalizedLegs.length} legs identified`);
         this.storeStepResult(step, {
           legs: normalizedLegs,
@@ -3107,48 +2349,24 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] 📝 Creating workflow document (${step.name})`);
     
     try {
-      const config = step.config || {};
-      const createActions = config.createActions !== false; // Default to true
-      
       const workflow = await this.createWorkflow(pageId, projectId, workflowState.pageUrl, workflowState.playwrightAnalysis);
       workflowState.workflowId = workflow._id;
       console.log(`[WorkflowAnalyzer] ✅ Created workflow: ${workflow._id}`);
 
-      // If legs are already discovered, create actions immediately
-      const hasLegs = Array.isArray(workflowState.legs) && workflowState.legs.length > 0;
-      if (hasLegs && createActions) {
-        console.log(`[WorkflowAnalyzer] 🚀 Creating actions immediately upon discovery (${workflowState.legs.length} legs)`);
-        try {
-          await this.updateWorkflowWithAnalysis(
-            workflow._id,
-            workflowState.aiAnalysisResult?.page_description || workflowState.pageDescription || '',
-            workflowState.legs,
-            true // Force createActions = true for immediate creation
-          );
-          console.log(`[WorkflowAnalyzer] ✅ Actions created immediately for ${workflowState.legs.length} legs`);
-        } catch (actionError) {
-          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to create actions immediately: ${actionError.message}`);
-          // Don't fail the step if action creation fails
-        }
-      }
-
       this.storeStepResult(step, {
         workflowId: workflow._id,
         pageId,
-        projectId,
-        actionsCreated: hasLegs && createActions
+        projectId
       }, workflowState);
 
       await this.logStepOutcome(
         step,
         jobId,
-        `📝 [CREATE-WORKFLOW] Created workflow ${workflow._id}${hasLegs && createActions ? ` (${workflowState.legs.length} actions created immediately)` : ''}`,
+        `📝 [CREATE-WORKFLOW] Created workflow ${workflow._id}`,
         {
           workflow_id: workflow._id,
           page_id: pageId,
-          project_id: projectId,
-          legs_count: workflowState.legs?.length || 0,
-          actions_created_immediately: hasLegs && createActions
+          project_id: projectId
         }
       );
     } catch (error) {
@@ -3168,7 +2386,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     try {
-      const createActions = step.config?.createActions !== false; // Default to true - actions must be populated immediately
+      const createActions = step.config?.createActions !== false;
 
       const hasExistingLegs = Array.isArray(workflowState.legs) && workflowState.legs.length > 0;
       const canGenerateFromAnalysis = !!workflowState.playwrightAnalysis;
@@ -3180,11 +2398,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         );
         workflowState.legs = derivedLegs;
         console.log(`[WorkflowAnalyzer] ✅ Derived ${derivedLegs.length} default legs from Playwright analysis`);
-        
-        // CRITICAL: Create actions immediately when legs are discovered
-        if (derivedLegs.length > 0 && createActions) {
-          console.log(`[WorkflowAnalyzer] 🚀 Creating actions immediately upon discovery (${derivedLegs.length} legs)`);
-        }
       } else if (!hasExistingLegs && !canGenerateFromAnalysis) {
         console.warn('[WorkflowAnalyzer] ⚠️ Missing Playwright analysis, unable to derive fallback legs');
         workflowState.legs = [];
@@ -3208,9 +2421,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         workflowState.workflowId,
         workflowState.aiAnalysisResult?.page_description || workflowState.pageDescription,
         workflowState.legs,
-        createActions // Actions are created IMMEDIATELY in the backend
+        createActions
       );
-      console.log(`[WorkflowAnalyzer] ✅ Workflow updated with analysis${createActions ? ` (${workflowState.legs?.length || 0} actions created immediately)` : ''}`);
+      console.log(`[WorkflowAnalyzer] ✅ Workflow updated with analysis${createActions ? ' (actions queued for creation)' : ''}`);
 
       if (updateResult?.legs && Array.isArray(updateResult.legs)) {
         workflowState.legs = updateResult.legs;
@@ -3243,404 +2456,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
       throw error;
     }
   }
+
   /**
    * Execute page discovery step
    */
-  /**
-   * Execute Sitemap Exploration Step
-   * Fetches and parses sitemap.xml to discover all pages
-   */
-  async executeSitemapExplorationStep(step, workflowState, jobId, pageId, projectId) {
-    console.log(`[WorkflowAnalyzer] 🗺️ Exploring sitemap.xml (${step.name})`);
-    
-    const config = step.config || {};
-    const sitemapUrl = config.sitemapUrl || null;
-    const baseUrl = workflowState.pageUrl || workflowState.baseUrl || null;
-    const projectIdValue = workflowState.projectId || projectId;
-    const normalizedProjectId = this.toStringIdentifier(projectIdValue);
-    const includeImages = config.includeImages === true;
-    
-    if (!baseUrl) {
-      const errorMsg = 'No base URL available for sitemap exploration';
-      console.error(`[WorkflowAnalyzer] ❌ ${errorMsg}`);
-      await this.sendLogToBackend(jobId, 'error', `❌ ${errorMsg}`, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: step.type
-      });
-      throw new Error(errorMsg);
-    }
-    
-    try {
-      // Determine sitemap URL
-      let sitemapUrlToFetch = sitemapUrl;
-      if (!sitemapUrlToFetch) {
-        // Try common sitemap locations
-        const urlObj = new URL(baseUrl);
-        const possibleSitemaps = [
-          `${urlObj.origin}/sitemap.xml`,
-          `${urlObj.origin}/sitemap_index.xml`,
-          `${urlObj.origin}/sitemaps.xml`
-        ];
-        
-        // Try each possible location
-        for (const possibleUrl of possibleSitemaps) {
-          try {
-            const testResponse = await axios.head(possibleUrl, { timeout: 5000 });
-            if (testResponse.status === 200) {
-              sitemapUrlToFetch = possibleUrl;
-              console.log(`[WorkflowAnalyzer] ✅ Found sitemap at: ${possibleUrl}`);
-              break;
-            }
-          } catch (e) {
-            // Continue to next possible location
-          }
-        }
-        
-        if (!sitemapUrlToFetch) {
-          throw new Error(`Could not find sitemap.xml at common locations: ${possibleSitemaps.join(', ')}`);
-        }
-      }
-      
-      await this.sendLogToBackend(jobId, 'info', `🗺️ Fetching sitemap from: ${sitemapUrlToFetch}`, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: step.type,
-        sitemap_url: sitemapUrlToFetch
-      });
-      
-      // Fetch sitemap
-      const sitemapResponse = await axios.get(sitemapUrlToFetch, {
-        timeout: 30000,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; AionQA/1.0)'
-        },
-        responseType: 'text',
-        transitional: {
-          silentJSONParsing: true
-        }
-      });
-      
-      const sitemapContent = typeof sitemapResponse.data === 'string'
-        ? sitemapResponse.data
-        : sitemapResponse.data?.toString?.() || '';
-      if (!sitemapContent) {
-        throw new Error('Sitemap response is empty');
-      }
-      
-      // Parse sitemap XML
-      const sitemapEntries = await this.parseSitemapXML(sitemapContent, sitemapUrlToFetch, { includeImages });
-      const pageEntries = Array.isArray(sitemapEntries)
-        ? sitemapEntries.filter(entry => entry.type === 'page')
-        : [];
-      const imageEntries = Array.isArray(sitemapEntries)
-        ? sitemapEntries.filter(entry => entry.type === 'image')
-        : [];
-      
-      if (!sitemapEntries || sitemapEntries.length === 0) {
-        throw new Error('No URLs found in sitemap');
-      }
-      
-      const summaryMsg = includeImages
-        ? `✅ Discovered ${pageEntries.length} pages and ${imageEntries.length} images from sitemap`
-        : `✅ Discovered ${pageEntries.length} URLs from sitemap`;
-      console.log(`[WorkflowAnalyzer] ${summaryMsg}`);
-      await this.sendLogToBackend(jobId, 'info', summaryMsg, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: step.type,
-        total_entries: sitemapEntries.length,
-        total_pages: pageEntries.length,
-        total_images: imageEntries.length,
-        include_images: includeImages
-      });
-      
-      // Store discovered URLs in workflowState
-      if (!workflowState.discoveredPages) {
-        workflowState.discoveredPages = [];
-      }
-      
-      // Create page records in backend for each discovered URL
-      const createdPages = [];
-      const maxPages = config.maxPages || 1000; // Limit to prevent overwhelming the system
-      const pagesToProcess = pageEntries.slice(0, maxPages);
-      const limitedImageEntries = includeImages ? imageEntries.slice(0, maxPages) : [];
-      
-      for (const entry of pagesToProcess) {
-        const url = entry.url;
-        try {
-          // Create page record in backend
-          const pageData = {
-            project_id: normalizedProjectId || projectIdValue,
-            job_id: jobId,
-            url: url,
-            title: null, // Will be updated when page is analyzed
-            analyzed: false,
-            discovered_from: 'sitemap',
-            sitemap_url: sitemapUrlToFetch
-          };
-          
-          const pageResponse = await axios.post(
-            `${this.backendUrl}/api/pages/discover`,
-            pageData,
-            {
-              timeout: 10000,
-              headers: this.getAuthHeaders()
-            }
-          );
-          
-          if (pageResponse.data && pageResponse.data._id) {
-            createdPages.push({
-              pageId: pageResponse.data._id,
-              url: url
-            });
-            workflowState.discoveredPages.push({
-              pageId: pageResponse.data._id,
-              url: url,
-              title: pageResponse.data.title || null,
-              type: entry.type || 'page',
-              source: sitemapUrlToFetch
-            });
-          }
-        } catch (pageError) {
-          // If page already exists, that's okay - continue
-          if (pageError.response?.status === 409 || pageError.response?.status === 400) {
-            console.log(`[WorkflowAnalyzer] ℹ️ Page already exists: ${url}`);
-          } else {
-            console.warn(`[WorkflowAnalyzer] ⚠️ Failed to create page for ${url}: ${pageError.message}`);
-          }
-        }
-      }
-      
-      if (includeImages && limitedImageEntries.length > 0) {
-        limitedImageEntries.forEach(entry => {
-          workflowState.discoveredPages.push({
-            pageId: null,
-            url: entry.url,
-            title: null,
-            type: 'image',
-            source: entry.parent || sitemapUrlToFetch,
-            metadata: { parent_page: entry.parent || null }
-          });
-        });
-      }
-      
-      if (Array.isArray(workflowState.discoveredPages) && workflowState.discoveredPages.length > 0) {
-        const seenDiscovered = new Set();
-        workflowState.discoveredPages = workflowState.discoveredPages.filter(item => {
-          const normalizedUrl = (item.url || '').trim();
-          const key = `${normalizedUrl}|${item.type || 'page'}`;
-          if (!normalizedUrl) {
-            return false;
-          }
-          if (seenDiscovered.has(key)) {
-            return false;
-          }
-          seenDiscovered.add(key);
-          return true;
-        });
-      }
-      
-      const slug = step.slug || this.generateSlug(step.name || step.type);
-      const stepId = step.id || slug;
-      
-      const snapshotEntriesPayload = pageEntries.map(entry => ({
-        url: entry.url,
-        lastmod: entry.lastmod || null,
-        changefreq: entry.changefreq || null,
-        priority: entry.priority || null
-      }));
-      
-      try {
-        await axios.post(
-          `${this.backendUrl}/sitemaps/snapshots`,
-          {
-            project_id: normalizedProjectId || projectIdValue,
-            job_id: jobId,
-            sitemap_url: sitemapUrlToFetch,
-            step: {
-              id: stepId,
-              name: step.name || step.type,
-              type: step.type
-            },
-            include_images: includeImages,
-            entry_count: pageEntries.length,
-            image_count: imageEntries.length,
-            entries: snapshotEntriesPayload,
-            raw_xml: sitemapContent
-          },
-          {
-            headers: this.getAuthHeaders(),
-            timeout: 15000,
-            maxContentLength: Infinity,
-            maxBodyLength: Infinity
-          }
-        );
-      } catch (snapshotError) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to persist sitemap snapshot: ${snapshotError.message}`);
-      }
-      
-      // Store result in workflowState
-      const result = {
-        sitemapUrl: sitemapUrlToFetch,
-        totalEntries: sitemapEntries.length,
-        totalPages: pageEntries.length,
-        totalImages: imageEntries.length,
-        processedUrls: pagesToProcess.length,
-        createdPages: createdPages.length,
-        pages: workflowState.discoveredPages,
-        includeImages
-      };
-      
-      this.storeStepResult(step, result, workflowState);
-      
-      const outcomeMsg = includeImages
-        ? `🗺️ [SITEMAP-EXPLORATION] ${pageEntries.length} pages + ${imageEntries.length} images discovered, ${createdPages.length} page records created`
-        : `🗺️ [SITEMAP-EXPLORATION] Discovered ${pageEntries.length} URLs, created ${createdPages.length} page records`;
-      await this.logStepOutcome(
-        step,
-        jobId,
-        outcomeMsg,
-        {
-          sitemap_url: sitemapUrlToFetch,
-          total_entries: sitemapEntries.length,
-          total_pages: pageEntries.length,
-          total_images: imageEntries.length,
-          processed_urls: pagesToProcess.length,
-          created_pages: createdPages.length,
-          include_images: includeImages
-        }
-      );
-      
-      console.log(`[WorkflowAnalyzer] ✅ Sitemap exploration completed: ${createdPages.length} pages created${includeImages ? `, ${imageEntries.length} images cataloged` : ''}`);
-      
-    } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Sitemap exploration failed: ${error.message}`);
-      await this.sendLogToBackend(jobId, 'error', `❌ Sitemap exploration failed: ${error.message}`, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: step.type,
-        error: error.message
-      });
-      throw error;
-    }
-  }
-  
-  /**
-   * Parse sitemap XML content and extract URLs
-   * Supports both regular sitemaps and sitemap index files
-   */
-  async parseSitemapXML(xmlContent, sitemapUrl, options = {}) {
-    const entries = [];
-    const includeImages = options.includeImages === true;
-    const seenPageUrls = new Set();
-    const xmlString = typeof xmlContent === 'string'
-      ? xmlContent
-      : xmlContent?.toString?.() || '';
-    
-    if (!xmlString) {
-      return entries;
-    }
-    
-    const looksLikeIndex = /<\s*sitemapindex/i.test(xmlString);
-    
-    try {
-      if (looksLikeIndex) {
-        const sitemapBlocks = xmlString.match(/<\s*sitemap\b[\s\S]*?<\/\s*sitemap>/gi) || [];
-        const childSitemapUrls = sitemapBlocks
-          .map(block => this.extractXmlTagValue(block, 'loc'))
-          .filter(Boolean);
-        
-        for (const childUrl of childSitemapUrls) {
-          try {
-            const subResponse = await axios.get(childUrl, {
-              timeout: 30000,
-              headers: {
-                'User-Agent': 'Mozilla/5.0 (compatible; AionQA/1.0)'
-              },
-              responseType: 'text'
-            });
-            const nestedEntries = await this.parseSitemapXML(subResponse.data, childUrl, options);
-            entries.push(...nestedEntries);
-          } catch (nestedError) {
-            console.warn(`[WorkflowAnalyzer] ⚠️ Failed to fetch sub-sitemap ${childUrl}: ${nestedError.message}`);
-          }
-        }
-        return entries;
-      }
-      
-      const urlBlocks = xmlString.match(/<\s*url\b[\s\S]*?<\/\s*url>/gi);
-      if (urlBlocks && urlBlocks.length) {
-        for (const block of urlBlocks) {
-          const pageUrl = this.extractXmlTagValue(block, 'loc');
-          if (pageUrl) {
-            const normalized = pageUrl.trim();
-            if (normalized && !seenPageUrls.has(normalized)) {
-              seenPageUrls.add(normalized);
-              entries.push({
-                url: normalized,
-                type: 'page',
-                lastmod: this.extractXmlTagValue(block, 'lastmod'),
-                changefreq: this.extractXmlTagValue(block, 'changefreq'),
-                priority: this.extractXmlTagValue(block, 'priority')
-              });
-            }
-          }
-          
-          if (includeImages) {
-            const imageBlocks = block.match(/<\s*image:image[\s\S]*?<\/\s*image:image>/gi) || [];
-            imageBlocks.forEach(imageBlock => {
-              const imageUrl = this.extractXmlTagValue(imageBlock, 'image:loc') || this.extractXmlTagValue(imageBlock, 'loc');
-              if (imageUrl) {
-                entries.push({
-                  url: imageUrl.trim(),
-                  type: 'image',
-                  parent: pageUrl || sitemapUrl,
-                  caption: this.extractXmlTagValue(imageBlock, 'image:caption') || this.extractXmlTagValue(imageBlock, 'caption'),
-                  title: this.extractXmlTagValue(imageBlock, 'image:title') || this.extractXmlTagValue(imageBlock, 'title')
-                });
-              }
-            });
-          }
-        }
-        return entries;
-      }
-      
-      // Fallback to simple <loc> matches
-      const urlMatches = xmlString.match(/<\s*loc>(.*?)<\/\s*loc>/gi);
-      if (urlMatches) {
-        urlMatches.forEach(match => {
-          const urlValue = match.replace(/<\/?loc>/gi, '').trim();
-          if (urlValue && !seenPageUrls.has(urlValue)) {
-            seenPageUrls.add(urlValue);
-            entries.push({
-              url: urlValue,
-              type: 'page'
-            });
-          }
-        });
-      }
-    } catch (parseError) {
-      console.error(`[WorkflowAnalyzer] ❌ Error parsing sitemap XML: ${parseError.message}`);
-      throw new Error(`Failed to parse sitemap XML: ${parseError.message}`);
-    }
-    
-    return entries;
-  }
-
-  extractXmlTagValue(content, tagName) {
-    if (!content || !tagName) {
-      return null;
-    }
-    const escapedTag = tagName.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
-    const regex = new RegExp(`<\\s*${escapedTag}[^>]*>([\\s\\S]*?)<\\s*/\\s*${escapedTag}>`, 'i');
-    const match = content.match(regex);
-    if (match && match[1]) {
-      return match[1].trim();
-    }
-    return null;
-  }
-
   async executePageDiscoveryStep(step, workflowState, jobId, pageId, projectId) {
     console.log(`[WorkflowAnalyzer] 📡 Updating page discovery (${step.name})`);
     
@@ -3658,33 +2477,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const includeActions = config.includeActions === true;
     const actionsScope = config.actionsScope || 'all';
     const saveLegsData = config.saveLegsData === true;
-    const includeDiscoveredPages = config.includeDiscoveredPages === true;
-    const includeActionsArray = config.includeActionsArray === true;
-    const maxDiscoveredPages = Number.isFinite(Number(config.maxDiscoveredPages))
-      ? Math.max(1, Number(config.maxDiscoveredPages))
-      : 100;
-    const maxActionItems = Number.isFinite(Number(config.maxActionItems))
-      ? Math.max(1, Number(config.maxActionItems))
-      : 100;
     
     const discoveryData = {
       title: workflowState.pageTitle,
       analyzed: markAsAnalyzed
     };
-
-    if (workflowState.shouldAutoCreateWorkflow && !workflowState.workflowId) {
-      const createdId = await this.ensureWorkflowInitialized(
-        workflowState,
-        jobId,
-        pageId,
-        projectId,
-        'before-page-discovery'
-      );
-      if (createdId) {
-        workflowState.autoCreatedWorkflow = true;
-        discoveryData.workflow_id = createdId;
-      }
-    }
     
     if (includeContent && workflowState.htmlContent) {
       discoveryData.content = workflowState.htmlContent;
@@ -3723,43 +2520,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
       };
       discoveryData.analyzed = true;
     }
-    
-    if (includeDiscoveredPages && Array.isArray(workflowState.discoveredPages) && workflowState.discoveredPages.length > 0) {
-      discoveryData.discovered_pages = workflowState.discoveredPages
-        .slice(0, maxDiscoveredPages)
-        .map(page => ({
-          page_id: page.pageId || page.page_id || null,
-          url: page.url,
-          title: page.title || null,
-          discovered_from: page.discovered_from || page.source || 'sitemap',
-          metadata: page.metadata || null
-        }));
-      discoveryData.discovered_pages_count = workflowState.discoveredPages.length;
-    }
-
-    if (includeActionsArray && Array.isArray(workflowState.legs) && workflowState.legs.length > 0) {
-      discoveryData.actions = workflowState.legs
-        .slice(0, maxActionItems)
-        .map(leg => ({
-          leg_id: leg.leg_id,
-          description: leg.description,
-          action_type: leg.action_type || leg.type || null,
-          status: leg.status || null,
-          priority: leg.priority || null,
-          confidence: leg.confidence || null,
-          metadata: leg.metadata || null
-        }));
-      discoveryData.actions_count = workflowState.legs.length;
-    }
 
     const stats = {
       forms: workflowState.playwrightAnalysis?.forms?.length || 0,
       links: workflowState.playwrightAnalysis?.links?.length || 0,
       interactive: workflowState.playwrightAnalysis?.interactive_elements?.length || 0,
       non_interactive: workflowState.playwrightAnalysis?.non_interactive_elements?.length || 0,
-      generated_at: new Date().toISOString(),
-      discovered_pages: workflowState.discoveredPages?.length || 0,
-      actions_listed: workflowState.legs?.length || 0
+      generated_at: new Date().toISOString()
     };
 
     let actionsSummary = workflowState.actionsSummary;
@@ -3912,19 +2679,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
   async executeSaveDataStep(page, step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 💾 Executing save-data step (${step.name})`);
     
-    if (!workflowState.workflowId && workflowState.shouldAutoCreateWorkflow) {
-      const createdId = await this.ensureWorkflowInitialized(
-        workflowState,
-        jobId,
-        workflowState.pageId,
-        workflowState.projectId,
-        'before-save-data'
-      );
-      if (createdId) {
-        workflowState.autoCreatedWorkflow = true;
-      }
-    }
-
     if (!workflowState.workflowId) {
       throw new Error('No workflow ID available for save-data step');
     }
@@ -4019,7 +2773,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
   /**
    * Store step result by slug
    */
-  storeStepResult(step, result, workflowState, options = {}) {
+  storeStepResult(step, result, workflowState) {
     const slug = step.slug || this.generateSlug(step.name || 'step');
     if (!workflowState[slug]) {
       workflowState[slug] = {};
@@ -4032,793 +2786,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     // Also store by step ID if it exists (for nested steps in for-each)
     if (step.id) {
-      const idsToIndex = [step.id];
-      if (step.id.includes('::')) {
-        const baseId = step.id.split('::').pop();
-        if (baseId && !idsToIndex.includes(baseId)) {
-          idsToIndex.push(baseId);
-        }
-      }
-
       if (!workflowState.results) {
         workflowState.results = {};
       }
-
-      idsToIndex.forEach((id) => {
-        if (!workflowState.results[id]) {
-          workflowState.results[id] = {};
-        }
-        workflowState.results[id].result = result;
-        workflowState.results[id].stepName = step.name;
-        workflowState.results[id].stepType = step.type;
-
-        workflowState[id] = {
-          result,
-          stepName: step.name,
-          stepType: step.type
-        };
-
-        if (result && typeof result === 'object' && !Array.isArray(result)) {
-          Object.entries(result).forEach(([key, value]) => {
-            const isPromotable =
-              value === null ||
-              typeof value === 'string' ||
-              typeof value === 'number' ||
-              typeof value === 'boolean';
-
-            if (isPromotable) {
-              workflowState.results[id][key] = value;
-              workflowState[id][key] = value;
-              if (workflowState[slug]) {
-                workflowState[slug][key] = value;
-              }
-            }
-          });
-        }
-      });
-    }
-
-    try {
-      this.updateVariablePool(step, result, workflowState, options);
-    } catch (error) {
-      console.warn(`[WorkflowAnalyzer] ⚠️ Failed to update variable pool for step ${step.name || step.type}: ${error.message}`);
-    }
-  }
-
-  initializeVariablePool(workflowState) {
-    if (!workflowState || typeof workflowState !== 'object') {
-      return;
-    }
-
-    const now = new Date().toISOString();
-    workflowState.variablePool = {
-      shared: {
-        meta: {
-          jobId: workflowState.jobId || null,
-          projectId: workflowState.projectId || null,
-          pageId: workflowState.pageId || null,
-          workflowType: workflowState.workflowType || null,
-          pageUrl: workflowState.pageUrl || null,
-          initializedAt: now,
-          lastUpdatedAt: now
-        },
-        context: this.cloneForVariablePool(workflowState.context || {}),
-        options: this.cloneForVariablePool(workflowState.options || {}),
-        byStep: {},
-        exports: {}
-      },
-      steps: {},
-      loopStack: [],
-      history: []
-    };
-  }
-
-  syncSharedContext(workflowState) {
-    if (!workflowState?.variablePool?.shared) {
-      return;
-    }
-
-    const shared = workflowState.variablePool.shared;
-    shared.context = this.cloneForVariablePool(workflowState.context || {});
-    shared.options = this.cloneForVariablePool(workflowState.options || {});
-    if (!shared.meta) {
-      shared.meta = {};
-    }
-    shared.meta.lastUpdatedAt = new Date().toISOString();
-  }
-
-  getActiveLoopScope(workflowState) {
-    if (!workflowState?.variablePool?.loopStack) {
-      return null;
-    }
-    const stack = workflowState.variablePool.loopStack;
-    return stack.length > 0 ? stack[stack.length - 1] : null;
-  }
-
-  isInsideLoop(workflowState) {
-    const scope = this.getActiveLoopScope(workflowState);
-    return !!scope;
-  }
-
-  enterLoopScope(workflowState, metadata = {}) {
-    if (!workflowState?.variablePool) {
-      return null;
-    }
-    if (!Array.isArray(workflowState.variablePool.loopStack)) {
-      workflowState.variablePool.loopStack = [];
-    }
-    const scope = {
-      metadata: {
-        ...metadata,
-        startedAt: new Date().toISOString()
-      },
-      variables: {}
-    };
-    workflowState.variablePool.loopStack.push(scope);
-    return scope;
-  }
-
-  exitLoopScope(workflowState, metadata = {}) {
-    if (!workflowState?.variablePool?.loopStack || workflowState.variablePool.loopStack.length === 0) {
-      return null;
-    }
-    const scope = workflowState.variablePool.loopStack.pop();
-    if (scope && scope.metadata) {
-      scope.metadata = {
-        ...scope.metadata,
-        ...metadata,
-        endedAt: new Date().toISOString()
+      if (!workflowState.results[step.id]) {
+        workflowState.results[step.id] = {};
+      }
+      workflowState.results[step.id].result = result;
+      workflowState.results[step.id].stepName = step.name;
+      workflowState.results[step.id].stepType = step.type;
+      
+      // Also store directly on workflowState for easier access
+      workflowState[step.id] = {
+        result,
+        stepName: step.name,
+        stepType: step.type
       };
     }
-    return scope;
-  }
-
-  cloneForVariablePool(value, options = {}, depth = 0, seen = new WeakSet()) {
-    const limits = {
-      maxDepth: options.maxDepth ?? this.variableSnapshotLimits.maxDepth,
-      maxArrayItems: options.maxArrayItems ?? this.variableSnapshotLimits.maxArrayItems,
-      maxStringLength: options.maxStringLength ?? this.variableSnapshotLimits.maxStringLength
-    };
-
-    if (Number.isFinite(limits.maxDepth) && depth >= limits.maxDepth) {
-      return {
-        __truncated__: true,
-        reason: `Max depth ${limits.maxDepth} reached`,
-        valueType: this.getValueTypeForSnapshot(value)
-      };
-    }
-
-    if (value === undefined) {
-      return '[Undefined]';
-    }
-    if (value === null) {
-      return null;
-    }
-    if (typeof value === 'string') {
-      if (value.length > limits.maxStringLength) {
-        const clipped = value.slice(0, limits.maxStringLength);
-        return `${clipped}… [${value.length - limits.maxStringLength} more chars]`;
-      }
-      return value;
-    }
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return value;
-    }
-    if (typeof value === 'bigint') {
-      return value.toString();
-    }
-    if (typeof value === 'function') {
-      return '[Function]';
-    }
-    if (value instanceof Date) {
-      return value.toISOString();
-    }
-    if (Buffer.isBuffer(value)) {
-      return `[Buffer length=${value.length}]`;
-    }
-
-    if (typeof value === 'object') {
-      if (seen.has(value)) {
-        return '[Circular]';
-      }
-      seen.add(value);
-
-      if (Array.isArray(value)) {
-        const limit = Number.isFinite(limits.maxArrayItems) ? limits.maxArrayItems : value.length;
-        const result = [];
-        const sliceLength = Math.max(0, Math.min(limit, value.length));
-        for (let i = 0; i < sliceLength; i++) {
-          result.push(this.cloneForVariablePool(value[i], options, depth + 1, seen));
-        }
-        if (sliceLength < value.length) {
-          result.push({
-            __truncated__: true,
-            reason: `Array truncated to ${sliceLength} items`,
-            remaining: value.length - sliceLength
-          });
-        }
-        seen.delete(value);
-        return result;
-      }
-
-      if (value instanceof Map) {
-        const obj = {};
-        for (const [key, mapValue] of value.entries()) {
-          obj[key] = this.cloneForVariablePool(mapValue, options, depth + 1, seen);
-        }
-        seen.delete(value);
-        return obj;
-      }
-
-      if (value instanceof Set) {
-        const arr = Array.from(value).map(item =>
-          this.cloneForVariablePool(item, options, depth + 1, seen)
-        );
-        seen.delete(value);
-        return arr;
-      }
-
-      const keys = Object.keys(value);
-      const resultObj = {};
-      for (let i = 0; i < keys.length; i++) {
-        const key = keys[i];
-        resultObj[key] = this.cloneForVariablePool(value[key], options, depth + 1, seen);
-      }
-      seen.delete(value);
-      return resultObj;
-    }
-
-    return String(value);
-  }
-
-  getValueTypeForSnapshot(value) {
-    if (value === null) return 'null';
-    if (Array.isArray(value)) return 'array';
-    if (value instanceof Date) return 'date';
-    if (value instanceof Map) return 'map';
-    if (value instanceof Set) return 'set';
-    if (Buffer.isBuffer(value)) return 'buffer';
-    if (value && typeof value === 'object' && value.constructor && value.constructor.name) {
-      return value.constructor.name;
-    }
-    return typeof value;
-  }
-
-  computeVarDumpStatistics(snapshotPayload) {
-    try {
-      const jsonString = JSON.stringify(snapshotPayload ?? {});
-      const byteSize = Buffer.byteLength(jsonString, 'utf8');
-      const metrics = this.countSnapshotStructure(snapshotPayload);
-      return {
-        byteSize,
-        totalKeys: metrics.totalKeys,
-        objectCount: metrics.objectCount,
-        arrayCount: metrics.arrayCount,
-        primitiveCount: metrics.primitiveCount
-      };
-    } catch (error) {
-      return {
-        byteSize: 0,
-        totalKeys: 0,
-        objectCount: 0,
-        arrayCount: 0,
-        primitiveCount: 0,
-        error: error?.message || String(error)
-      };
-    }
-  }
-
-  countSnapshotStructure(value, seen = new WeakSet()) {
-    const metrics = {
-      totalKeys: 0,
-      objectCount: 0,
-      arrayCount: 0,
-      primitiveCount: 0
-    };
-
-    const walk = (node) => {
-      if (node === null || node === undefined) {
-        metrics.primitiveCount += 1;
-        return;
-      }
-
-      if (typeof node !== 'object') {
-        metrics.primitiveCount += 1;
-        return;
-      }
-
-      if (seen.has(node)) {
-        return;
-      }
-      seen.add(node);
-
-      if (Array.isArray(node)) {
-        metrics.arrayCount += 1;
-        node.forEach(item => walk(item));
-        seen.delete(node);
-        return;
-      }
-
-      metrics.objectCount += 1;
-      const keys = Object.keys(node);
-      metrics.totalKeys += keys.length;
-      keys.forEach(key => walk(node[key]));
-      seen.delete(node);
-    };
-
-    walk(value);
-    return metrics;
-  }
-
-  computeVarDumpSequenceContext(workflowState) {
-    if (!workflowState) {
-      return {
-        type: 'root',
-        globalIndex: 1
-      };
-    }
-
-    if (!workflowState.__varDumpState) {
-      workflowState.__varDumpState = {
-        globalCount: 0,
-        loopCounters: {}
-      };
-    }
-
-    const state = workflowState.__varDumpState;
-    state.globalCount += 1;
-
-    const activeScope = this.getActiveLoopScope(workflowState);
-    const sequence = {
-      type: activeScope ? 'loop' : 'root',
-      globalIndex: state.globalCount
-    };
-
-    if (activeScope) {
-      const stepId = activeScope.metadata?.stepId || 'loop';
-      const iteration = activeScope.metadata?.iteration ?? null;
-      const loopKey = `${stepId}:${iteration ?? 'none'}`;
-      state.loopCounters[loopKey] = (state.loopCounters[loopKey] || 0) + 1;
-      sequence.loop = {
-        stepId,
-        stepName: activeScope.metadata?.stepName || null,
-        iteration,
-        indexWithinIteration: state.loopCounters[loopKey]
-      };
-    }
-
-    return sequence;
-  }
-
-  extractRequirementDetails(requirementText) {
-    if (!requirementText || typeof requirementText !== 'string') {
-      return {
-        lines: [],
-        keys: []
-      };
-    }
-
-    const lines = requirementText
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line && !line.startsWith('---') && !/^requirements enforced/i.test(line))
-      .map(line => (line.startsWith('-') ? line.substring(1).trim() : line))
-      .filter(Boolean);
-
-    const reservedWords = new Set([
-      'json', 'object', 'array', 'arrays', 'values', 'value', 'items', 'item',
-      'fields', 'field', 'should', 'must', 'return', 'include', 'includes',
-      'expected', 'previous', 'step', 'context', 'workflow', 'ai', 'analysis',
-      'data', 'structure', 'schema', 'list', 'string', 'number', 'boolean',
-      'true', 'false', 'null', 'arrayof', 'each', 'response', 'request'
-    ]);
-
-    const keys = new Set();
-    const addToken = (token) => {
-      if (!token) return;
-      const cleaned = token
-        .replace(/[`"'\\]/g, '')
-        .replace(/[()]/g, ' ')
-        .trim();
-      if (!cleaned) return;
-
-      const potentialTokens = cleaned.split(/[\s/]+/).filter(Boolean);
-      potentialTokens.forEach(entry => {
-        const normalized = entry.replace(/[^a-zA-Z0-9_.-]/g, '').trim();
-        if (!normalized) return;
-        const lowered = normalized.toLowerCase();
-        if (normalized.length < 2) return;
-        if (reservedWords.has(lowered)) return;
-        if (!/^[a-zA-Z0-9_.-]+$/.test(normalized)) return;
-        keys.add(normalized);
-      });
-    };
-
-    lines.forEach(line => {
-      let match;
-      const quoteRegex = /"([^"]+)"/g;
-      while ((match = quoteRegex.exec(line)) !== null) {
-        addToken(match[1]);
-      }
-
-      const backtickRegex = /`([^`]+)`/g;
-      while ((match = backtickRegex.exec(line)) !== null) {
-        addToken(match[1]);
-      }
-
-      const colonIndex = line.indexOf(':');
-      if (colonIndex !== -1) {
-        const tail = line.slice(colonIndex + 1);
-        tail.split(/[•,]/).forEach(fragment => {
-          fragment.split(/\band\b|\bor\b/gi).forEach(part => addToken(part));
-        });
-      }
-    });
-
-    return {
-      lines,
-      keys: Array.from(keys)
-    };
-  }
-  resolveRelevantSnapshotForNextStep(snapshotPayload, nextStep) {
-    if (!snapshotPayload || typeof snapshotPayload !== 'object') {
-      return {
-        data: snapshotPayload,
-        source: 'snapshot',
-        sourcePath: 'snapshot'
-      };
-    }
-
-    const shared = snapshotPayload.shared || {};
-    const byStep = shared.byStep || {};
-    const slug = nextStep
-      ? (nextStep.slug || this.generateSlug(nextStep.name || nextStep.type || 'next-step'))
-      : null;
-
-    const candidates = [];
-    if (slug) {
-      candidates.push({
-        data: byStep?.[slug]?.result,
-        source: 'shared.byStep.result',
-        sourcePath: `shared.byStep.${slug}.result`
-      });
-      candidates.push({
-        data: byStep?.[slug],
-        source: 'shared.byStep',
-        sourcePath: `shared.byStep.${slug}`
-      });
-      candidates.push({
-        data: shared?.[slug],
-        source: 'shared',
-        sourcePath: `shared.${slug}`
-      });
-      candidates.push({
-        data: snapshotPayload.currentLoop?.variables?.[slug],
-        source: 'currentLoop.variables',
-        sourcePath: `currentLoop.variables.${slug}`
-      });
-    }
-
-    candidates.push({
-      data: snapshotPayload.currentLoop?.variables,
-      source: 'currentLoop.variables',
-      sourcePath: 'currentLoop.variables'
-    });
-
-    candidates.push({
-      data: shared,
-      source: 'shared',
-      sourcePath: 'shared'
-    });
-
-    candidates.push({
-      data: snapshotPayload,
-      source: 'snapshot',
-      sourcePath: 'snapshot'
-    });
-
-    for (const candidate of candidates) {
-      if (!candidate.data) {
-        continue;
-      }
-      if (typeof candidate.data === 'object') {
-        if (Array.isArray(candidate.data)) {
-          if (candidate.data.length > 0) {
-            return candidate;
-          }
-        } else {
-          if (Object.keys(candidate.data).length > 0) {
-            return candidate;
-          }
-        }
-      }
-    }
-
-    return candidates[candidates.length - 1];
-  }
-
-  collectSnapshotKeyCoverage(data) {
-    if (!data || typeof data !== 'object') {
-      return {
-        keyPaths: {},
-        uniqueKeys: [],
-        topLevelKeys: []
-      };
-    }
-
-    const keyMap = new Map();
-    const topLevelKeys = new Set();
-    const seen = new WeakSet();
-
-    const recordPath = (key, path) => {
-      if (!keyMap.has(key)) {
-        keyMap.set(key, new Set());
-      }
-      const entries = keyMap.get(key);
-      if (entries.size < 8) {
-        entries.add(path);
-      }
-    };
-
-    const walk = (node, pathSegments = []) => {
-      if (node === null || node === undefined) {
-        return;
-      }
-
-      if (typeof node !== 'object') {
-        return;
-      }
-
-      if (seen.has(node)) {
-        return;
-      }
-      seen.add(node);
-
-      if (Array.isArray(node)) {
-        node.forEach((item, index) => {
-          walk(item, [...pathSegments, `[${index}]`]);
-        });
-        seen.delete(node);
-        return;
-      }
-
-      const keys = Object.keys(node);
-      keys.forEach(key => {
-        if (pathSegments.length === 0) {
-          topLevelKeys.add(key);
-        }
-        const newPath = [...pathSegments, key].join('.');
-        recordPath(key, newPath);
-        walk(node[key], [...pathSegments, key]);
-      });
-
-      seen.delete(node);
-    };
-
-    walk(data, []);
-
-    const keyPaths = {};
-    keyMap.forEach((paths, key) => {
-      keyPaths[key] = Array.from(paths);
-    });
-
-    return {
-      keyPaths,
-      uniqueKeys: Array.from(keyMap.keys()),
-      topLevelKeys: Array.from(topLevelKeys)
-    };
-  }
-
-  compareSnapshotToRequirements(snapshotPayload, nextStep, requirementDetails) {
-    const comparison = {
-      source: null,
-      sourcePath: null,
-      expectedKeys: requirementDetails?.keys || [],
-      missingKeys: [],
-      matchedKeys: [],
-      extraKeys: [],
-      availableKeys: [],
-      requirementLines: requirementDetails?.lines || []
-    };
-
-    const { data: relevantData, source, sourcePath } = this.resolveRelevantSnapshotForNextStep(snapshotPayload, nextStep);
-    comparison.source = source;
-    comparison.sourcePath = sourcePath;
-
-    const coverage = this.collectSnapshotKeyCoverage(relevantData);
-    comparison.availableKeys = coverage.uniqueKeys;
-
-    const expectedKeys = requirementDetails?.keys || [];
-    expectedKeys.forEach(key => {
-      const paths = coverage.keyPaths[key] || [];
-      if (paths.length > 0) {
-        comparison.matchedKeys.push({
-          key,
-          paths: paths.slice(0, 5),
-          hasMore: paths.length > 5
-        });
-      } else {
-        comparison.missingKeys.push(key);
-      }
-    });
-
-    comparison.extraKeys = coverage.topLevelKeys.filter(key => !expectedKeys.includes(key));
-
-    return comparison;
-  }
-
-  updateVariablePool(step, result, workflowState, options = {}) {
-    if (!workflowState?.variablePool) {
-      return;
-    }
-
-    this.syncSharedContext(workflowState);
-
-    const slug = step.slug || this.generateSlug(step.name || step.type || 'step');
-    const sanitizedResult = this.cloneForVariablePool(result);
-    const activeScope = this.getActiveLoopScope(workflowState);
-    const forceShared = options.forceShared === true;
-    const skipShared = options.skipShared === true;
-
-    const entry = {
-      stepId: step.id || slug,
-      slug,
-      stepName: step.name || step.type || slug,
-      stepType: step.type,
-      updatedAt: new Date().toISOString(),
-      scope: activeScope ? 'loop' : 'shared',
-      result: sanitizedResult
-    };
-
-    workflowState.variablePool.steps = workflowState.variablePool.steps || {};
-    workflowState.variablePool.steps[slug] = entry;
-
-    workflowState.variablePool.history = workflowState.variablePool.history || [];
-    workflowState.variablePool.history.push({
-      stepId: entry.stepId,
-      slug: entry.slug,
-      stepType: entry.stepType,
-      scope: entry.scope,
-      updatedAt: entry.updatedAt
-    });
-    if (workflowState.variablePool.history.length > this.variableSnapshotLimits.maxHistory) {
-      workflowState.variablePool.history.shift();
-    }
-
-    if (activeScope) {
-      activeScope.variables[slug] = entry.result;
-    }
-
-    if ((!activeScope || forceShared) && !skipShared) {
-      const shared = workflowState.variablePool.shared || (workflowState.variablePool.shared = {});
-      shared.byStep = shared.byStep || {};
-      shared.byStep[slug] = entry.result;
-
-      const reservedKeys = new Set(['meta', 'byStep', 'context', 'options', 'exports']);
-      if (!reservedKeys.has(slug)) {
-        shared[slug] = entry.result;
-      }
-      shared.meta = shared.meta || {};
-      shared.meta.lastUpdatedAt = entry.updatedAt;
-    }
-  }
-
-  resolveVariableSource(path, workflowState) {
-    if (!path || !workflowState) {
-      return undefined;
-    }
-
-    const trimmed = path.trim();
-    if (trimmed.length === 0) {
-      return undefined;
-    }
-
-    if (trimmed === 'shared') {
-      return workflowState.variablePool?.shared;
-    }
-    if (trimmed.startsWith('shared.')) {
-      const sharedPath = trimmed.substring('shared.'.length);
-      return this.getNestedValue(workflowState.variablePool?.shared, sharedPath);
-    }
-
-    if (trimmed === 'loop') {
-      return this.getActiveLoopScope(workflowState)?.variables;
-    }
-    if (trimmed.startsWith('loop.')) {
-      const loopPath = trimmed.substring('loop.'.length);
-      return this.getNestedValue(this.getActiveLoopScope(workflowState)?.variables || {}, loopPath);
-    }
-
-    if (trimmed.startsWith('step.')) {
-      const rest = trimmed.substring('step.'.length);
-      const [slug, ...segments] = rest.split('.').filter(Boolean);
-      if (!slug) {
-        return undefined;
-      }
-      const stepEntry = workflowState.variablePool?.steps?.[slug];
-      let base = stepEntry?.result;
-      if (!base && workflowState[slug]?.result) {
-        base = workflowState[slug].result;
-      }
-      if (!segments.length) {
-        return base;
-      }
-      return this.getNestedValue(base, segments.join('.'));
-    }
-
-    if (trimmed.startsWith('results.')) {
-      const resultsPath = trimmed.substring('results.'.length);
-      return this.resolvePathValue(workflowState, resultsPath, 'results');
-    }
-
-    if (trimmed.startsWith('state.')) {
-      const statePath = trimmed.substring('state.'.length);
-      return this.resolvePathValue(workflowState, statePath, 'context');
-    }
-
-    // Try direct context path first, then results
-    let resolved = this.resolvePathValue(workflowState, trimmed, 'context');
-    if (resolved === undefined) {
-      resolved = this.resolvePathValue(workflowState, trimmed, 'results');
-    }
-    return resolved;
-  }
-
-  applyExportToShared(targetPath, value, strategy, workflowState) {
-    if (!workflowState?.variablePool?.shared) {
-      return { success: false, reason: 'Shared pool not initialised' };
-    }
-
-    const sanitized = this.cloneForVariablePool(value);
-    const shared = workflowState.variablePool.shared;
-    const segments = (targetPath && typeof targetPath === 'string'
-      ? targetPath.split('.').map(segment => segment.trim()).filter(Boolean)
-      : []);
-
-    const reservedKeys = new Set(['meta', 'byStep', 'context', 'options']);
-    let effectiveSegments = segments.length > 0 ? [...segments] : [];
-    if (effectiveSegments.length === 0) {
-      effectiveSegments = ['exports', `export_${Date.now()}`];
-    } else if (reservedKeys.has(effectiveSegments[0]) && effectiveSegments.length === 1) {
-      effectiveSegments = ['exports', effectiveSegments[0]];
-    }
-
-    let container = shared;
-    for (let i = 0; i < effectiveSegments.length - 1; i++) {
-      const key = effectiveSegments[i];
-      if (!container[key] || typeof container[key] !== 'object') {
-        container[key] = {};
-      }
-      container = container[key];
-    }
-
-    const finalKey = effectiveSegments[effectiveSegments.length - 1];
-    const existing = container[finalKey];
-    const normalizedStrategy = (strategy || 'replace').toLowerCase();
-
-    switch (normalizedStrategy) {
-      case 'merge':
-        if (existing && typeof existing === 'object' && !Array.isArray(existing) && sanitized && typeof sanitized === 'object' && !Array.isArray(sanitized)) {
-          container[finalKey] = { ...existing, ...sanitized };
-        } else {
-          container[finalKey] = sanitized;
-        }
-        break;
-      case 'append':
-        if (Array.isArray(existing)) {
-          container[finalKey] = existing.concat([sanitized]);
-        } else if (existing === undefined) {
-          container[finalKey] = [sanitized];
-        } else {
-          container[finalKey] = [existing, sanitized];
-        }
-        break;
-      default:
-        container[finalKey] = sanitized;
-        break;
-    }
-
-    return { success: true, targetPath: effectiveSegments.join('.') };
   }
 
   /**
@@ -5026,6 +3010,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     return cleaned;
   }
+
   /**
    * Execute code step (static code)
    */
@@ -5380,10 +3365,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         if (resultObj.context && typeof resultObj.context === 'object') {
           workflowState.context = { ...workflowState.context, ...resultObj.context };
-          // If context has legsToExecute, ensure it's also on workflowState
-          if (resultObj.context.legsToExecute && Array.isArray(resultObj.context.legsToExecute)) {
-            workflowState.legsToExecute = resultObj.context.legsToExecute;
-          }
         }
         if (resultObj.legs && Array.isArray(resultObj.legs)) {
           workflowState.legs = resultObj.legs;
@@ -5392,21 +3373,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         console.log(`[WorkflowAnalyzer] ⚠️ Result is empty array - code may have failed or returned nothing`);
       }
       
-      // Store step result - this will also store the result in workflowState.results[step.id]
       this.storeStepResult(step, result, workflowState);
-      
-      // After storing, ensure legsToExecute is accessible from the step result as well
-      if (step.id === 'prepare_legs_for_execution' || step.id === 'prepare-legs-for-execution') {
-        const storedResult = workflowState.results?.[step.id]?.result || workflowState[step.id]?.result;
-        if (storedResult && typeof storedResult === 'object' && storedResult.legsToExecute && Array.isArray(storedResult.legsToExecute)) {
-          if (!workflowState.context) {
-            workflowState.context = {};
-          }
-          workflowState.context.legsToExecute = storedResult.legsToExecute;
-          workflowState.legsToExecute = storedResult.legsToExecute;
-          console.log(`[WorkflowAnalyzer] ✅ Ensured legsToExecute is accessible from prepare step result (${storedResult.legsToExecute.length} items)`);
-        }
-      }
       console.log(`[WorkflowAnalyzer] ✅ Code execution completed: ${JSON.stringify(result).substring(0, 100)}...`);
     } catch (error) {
       const executionTime = Date.now() - startTime;
@@ -5627,8 +3594,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       // After executing code, wait for page to stabilize (navigation, DOM updates, etc.)
       try {
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-        await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+          console.warn('[WorkflowAnalyzer] Page DOM not fully loaded after 30s, continuing anyway');
+        });
         await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (waitError) {
         console.log(`[WorkflowAnalyzer] ⚠️ Page wait warning: ${waitError.message}`);
@@ -5757,228 +3725,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   /**
-   * Fetch job details from backend with fallback between legacy and /api routes
-   */
-  async fetchJobDetails(jobId) {
-    if (!jobId) {
-      throw new Error('Job ID is required to fetch job details');
-    }
-
-    if (this.jobDetailsCache.has(jobId)) {
-      return this.jobDetailsCache.get(jobId);
-    }
-
-    const endpoints = [
-      `${this.backendUrl}/jobs/${jobId}`,
-      `${this.backendUrl}/api/jobs/${jobId}`
-    ];
-
-    let lastError = null;
-
-    for (const url of endpoints) {
-      try {
-        const response = await axios.get(url, {
-          headers: this.getAuthHeaders()
-        });
-        const data = response.data;
-        this.jobDetailsCache.set(jobId, data);
-        return data;
-      } catch (error) {
-        lastError = error;
-        if (error?.response?.status === 404) {
-          continue;
-        }
-        throw error;
-      }
-    }
-
-    const message = lastError?.response?.status === 404
-      ? `Job ${jobId} not found on backend`
-      : lastError?.message || `Failed to fetch job ${jobId}`;
-
-    throw new Error(message);
-  }
-  /**
    * Execute cookie add step
    */
-  async executeVarExportStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 📤 Executing var-export step (${step.name || step.slug || step.type})`);
-
-    if (!workflowState.variablePool) {
-      this.initializeVariablePool(workflowState);
-    }
-
-    const config = step.config || {};
-    const exportsConfig = Array.isArray(config.exports) ? config.exports : [];
-    const slug = step.slug || this.generateSlug(step.name || step.type || 'var-export');
-    const results = [];
-
-    for (let idx = 0; idx < exportsConfig.length; idx++) {
-      const mapping = exportsConfig[idx] || {};
-      const sourcePath = typeof mapping.source === 'string' ? mapping.source.trim() : '';
-      const rawTargetPath = typeof mapping.target === 'string' ? mapping.target.trim() : '';
-      const strategy = (mapping.strategy || 'replace').toLowerCase();
-      const targetPath = rawTargetPath.length > 0 ? rawTargetPath : `exports.${slug}.mapping_${idx + 1}`;
-
-      if (!sourcePath) {
-        results.push({
-          source: sourcePath,
-          target: targetPath,
-          strategy,
-          success: false,
-          reason: 'source_missing'
-        });
-        continue;
-      }
-
-      const resolvedValue = this.resolveVariableSource(sourcePath, workflowState);
-      if (resolvedValue === undefined) {
-        results.push({
-          source: sourcePath,
-          target: targetPath,
-          strategy,
-          success: false,
-          reason: 'source_not_found'
-        });
-        continue;
-      }
-
-      const applied = this.applyExportToShared(targetPath, resolvedValue, strategy, workflowState);
-      results.push({
-        source: sourcePath,
-        target: applied.targetPath || targetPath,
-        strategy,
-        success: applied.success !== false,
-        reason: applied.reason || null
-      });
-    }
-
-    const successCount = results.filter(entry => entry.success).length;
-    const message = exportsConfig.length === 0
-      ? '📤 Var export: no mappings configured'
-      : `📤 Var export: ${successCount}/${exportsConfig.length} mappings promoted`;
-    const level = exportsConfig.length === 0 || successCount === exportsConfig.length ? 'info' : 'warn';
-
-    const summary = {
-      exported: results,
-      total: exportsConfig.length,
-      success: successCount,
-      failed: exportsConfig.length - successCount
-    };
-
-    this.storeStepResult(step, summary, workflowState, { forceShared: true });
-
-    await this.logStepOutcome(step, jobId, message, {
-      exported: results,
-      success: successCount,
-      total: exportsConfig.length
-    }, level);
-
-    return summary;
-  }
-
-  async executeVarDumpStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 📝 Executing var-dump step (${step.name || step.slug || step.type})`);
-
-    if (!workflowState.variablePool) {
-      this.initializeVariablePool(workflowState);
-    }
-
-    const config = step.config || {};
-
-    const includeShared = config.includeShared !== false;
-    const includeCurrentLoop = config.includeCurrentLoop !== false;
-    const includeStepsSummary = config.includeStepsSummary === true;
-    const includeContext = config.includeContext === true;
-
-    const depthOverride = this.coerceToInteger(config.maxDepth);
-    const arrayOverride = this.coerceToInteger(config.maxArrayLength);
-    const stringOverride = this.coerceToInteger(config.maxStringLength);
-
-    const snapshotOptions = {
-      maxDepth: depthOverride !== null ? Math.max(1, depthOverride) : undefined,
-      maxArrayItems: arrayOverride !== null ? Math.max(1, arrayOverride) : undefined,
-      maxStringLength: stringOverride !== null ? Math.max(50, stringOverride) : undefined
-    };
-
-    const snapshotPayload = {};
-    const scopesIncluded = [];
-
-    if (includeShared && workflowState.variablePool?.shared) {
-      snapshotPayload.shared = this.cloneForVariablePool(workflowState.variablePool.shared, snapshotOptions);
-      scopesIncluded.push('shared');
-    }
-
-    if (includeCurrentLoop) {
-      const activeScope = this.getActiveLoopScope(workflowState);
-      if (activeScope) {
-        snapshotPayload.currentLoop = {
-          metadata: { ...(activeScope.metadata || {}) },
-          variables: this.cloneForVariablePool(activeScope.variables || {}, snapshotOptions)
-        };
-        scopesIncluded.push('currentLoop');
-      }
-    }
-
-    if (includeStepsSummary) {
-      const steps = Object.values(workflowState.variablePool?.steps || {}).map(entry => ({
-        slug: entry.slug,
-        stepName: entry.stepName,
-        stepType: entry.stepType,
-        scope: entry.scope,
-        updatedAt: entry.updatedAt
-      }));
-      snapshotPayload.steps = steps;
-      scopesIncluded.push('steps');
-    }
-
-    if (includeContext) {
-      snapshotPayload.context = this.cloneForVariablePool(workflowState.context || {}, snapshotOptions);
-      scopesIncluded.push('context');
-    }
-
-    const contextInfo = this.resolveStepContext(step, null, this.workflowTemplate?.steps);
-    const requirementDetails = this.extractRequirementDetails(contextInfo.requirementText);
-    const sequenceContext = this.computeVarDumpSequenceContext(workflowState);
-    const statistics = this.computeVarDumpStatistics(snapshotPayload);
-    const schemaComparison = this.compareSnapshotToRequirements(snapshotPayload, contextInfo.nextStep, requirementDetails);
-    const nextStepInfo = contextInfo.nextStep ? {
-      id: contextInfo.nextStep.id || null,
-      slug: contextInfo.nextStep.slug || null,
-      name: contextInfo.nextStep.name || null,
-      type: contextInfo.nextStep.type || null
-    } : null;
-
-    const generatedAt = new Date().toISOString();
-    const displayScopes = scopesIncluded.length > 0 ? scopesIncluded.join(', ') : 'none';
-
-    const result = {
-      scopes: scopesIncluded,
-      snapshot: snapshotPayload,
-      generatedAt,
-      statistics,
-      sequence: sequenceContext,
-      requirementSummary: requirementDetails.lines,
-      schemaComparison,
-      nextStep: nextStepInfo
-    };
-
-    this.storeStepResult(step, result, workflowState, { forceShared: true });
-
-    await this.logStepOutcome(step, jobId, `📝 Var dump captured (${displayScopes}) — view in Vars tab`, {
-      scopes: scopesIncluded,
-      snapshot: snapshotPayload,
-      generatedAt,
-      statistics,
-      sequence: sequenceContext,
-      requirementSummary: requirementDetails.lines,
-      schemaComparison,
-      nextStep: nextStepInfo
-    }, 'info');
-
-    return result;
-  }
-
   async executeCookieAddStep(step, workflowState, jobId) {
     console.log(`[WorkflowAnalyzer] 🍪 Adding cookie (${step.name})`);
     
@@ -5989,8 +3737,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     try {
       // Get project ID from job
-      const jobData = await this.fetchJobDetails(jobId);
-      const projectId = jobData?.project_id;
+      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+        headers: this.getAuthHeaders()
+      });
+      // Handle both ObjectId and string formats
+      let projectId = null;
+      const rawProjectId = jobResponse.data?.project_id;
+      if (rawProjectId) {
+        projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
+      }
+      
+      // Also try to get from context if API call didn't return it
+      if (!projectId && this.context?.project_id) {
+        const ctxProjectId = this.context.project_id;
+        projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
+        console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
+      }
       
       if (!projectId) {
         throw new Error(`Could not find project ID for job: ${jobId}`);
@@ -6046,8 +3808,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     try {
       // Get project ID from job
-      const jobData = await this.fetchJobDetails(jobId);
-      const projectId = jobData?.project_id;
+      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+        headers: this.getAuthHeaders()
+      });
+      // Handle both ObjectId and string formats
+      let projectId = null;
+      const rawProjectId = jobResponse.data?.project_id;
+      if (rawProjectId) {
+        projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
+      }
+      
+      // Also try to get from context if API call didn't return it
+      if (!projectId && this.context?.project_id) {
+        const ctxProjectId = this.context.project_id;
+        projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
+        console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
+      }
       
       if (!projectId) {
         throw new Error(`Could not find project ID for job: ${jobId}`);
@@ -6114,8 +3890,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     try {
       // Get project ID from job
-      const jobData = await this.fetchJobDetails(jobId);
-      const projectId = jobData?.project_id;
+      const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+        headers: this.getAuthHeaders()
+      });
+      // Handle both ObjectId and string formats
+      let projectId = null;
+      const rawProjectId = jobResponse.data?.project_id;
+      if (rawProjectId) {
+        projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
+      }
+      
+      // Also try to get from context if API call didn't return it
+      if (!projectId && this.context?.project_id) {
+        const ctxProjectId = this.context.project_id;
+        projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
+        console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
+      }
       
       if (!projectId) {
         throw new Error(`Could not find project ID for job: ${jobId}`);
@@ -6164,104 +3954,118 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] 🔍 Collecting cookies (${step.name})`);
     
     const config = step.config || {};
-    const source = config.source || 'browser';
-    const reloadFromProject = config.reloadFromProject !== false; // Default to true
+    const source = config.source || 'latest';
+    let collectedCookies = []; // Declare early so it's available in catch block
 
     try {
-      // Get project ID from job
-      const jobData = await this.fetchJobDetails(jobId);
-      const projectId = jobData?.project_id;
+      let projectId = null;
       
-      if (!projectId) {
-        throw new Error(`Could not find project ID for job: ${jobId}`);
-      }
-
-      // Step 1: Reload cookies from project into browser context (if enabled)
-      if (reloadFromProject && page) {
-        try {
-          const response = await axios.get(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
-            headers: this.getAuthHeaders()
-          });
-          
-          if (response.data && Array.isArray(response.data) && response.data.length > 0) {
-            const projectCookies = response.data;
-            // Get current cookies to compare
-            const currentCookies = await page.context().cookies();
-            const currentCookieMap = new Map(currentCookies.map(c => [`${c.name}:${c.domain}`, c]));
-            
-            // Add/update cookies from project
-            const cookiesToAdd = projectCookies.filter(cookie => {
-              const key = `${cookie.name}:${cookie.domain}`;
-              const existing = currentCookieMap.get(key);
-              // Add if new or if value/expires changed
-              return !existing || existing.value !== cookie.value || existing.expires !== cookie.expires;
-            });
-            
-            if (cookiesToAdd.length > 0) {
-              await page.context().addCookies(cookiesToAdd);
-              console.log(`[WorkflowAnalyzer] 🍪 Reloaded ${cookiesToAdd.length} cookies from project into browser context`);
-              await this.sendLogToBackend(jobId, 'info', `🍪 Reloaded ${cookiesToAdd.length} cookies from project`, 'WORKFLOW-ANALYZER', {
-                step_id: step.id,
-                cookies_reloaded: cookiesToAdd.length
-              });
-            }
-          }
-        } catch (reloadError) {
-          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to reload cookies from project: ${reloadError.message}`);
-        }
-      }
-
-      // Step 2: Collect cookies based on source
-      let collectedCookies = [];
-
+      // If source is 'browser', collect cookies FIRST (before trying to get project_id)
+      // This ensures we have cookies even if project_id fetch fails
       if (source === 'browser') {
         if (!page) {
           throw new Error('Browser source requested but Playwright page is not available');
         }
         const contextCookies = await page.context().cookies();
         collectedCookies = contextCookies;
-      } else if (source === 'latest') {
-        // Collect from project cookies (which includes latest from login)
-        const projectCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
-          headers: this.getAuthHeaders()
-        });
-        collectedCookies = projectCookiesResponse.data || [];
-      } else if (source === 'job') {
-        // Collect from specific job
-        if (!config.jobId) {
-          throw new Error(`Job ID is required when source is 'job'`);
-        }
-        const jobData = await this.fetchJobDetails(config.jobId);
-        if (jobData && jobData.result && jobData.result.cookies) {
-          collectedCookies = jobData.result.cookies;
-        }
-      } else if (source === 'workflowState') {
-        // Collect from workflow state
-        if (!config.sourceField) {
-          throw new Error(`sourceField is required when source is 'workflowState'`);
-        }
-        const cookiesData = this.resolvePath(config.sourceField, workflowState);
-        if (Array.isArray(cookiesData)) {
-          collectedCookies = cookiesData;
-        } else {
-          throw new Error(`Cookies at path "${config.sourceField}" is not an array`);
-        }
-      }
-
-      // Step 3: Enrich cookies with metadata if collecting from browser
-      if (source === 'browser' && page && collectedCookies.length > 0) {
-        const currentUrl = page.url();
-        const currentDomain = new URL(currentUrl).hostname;
-        collectedCookies = collectedCookies.map(cookie => ({
-          ...cookie,
-          _metadata: {
-            source: 'page-visit',
-            collectedAt: new Date().toISOString(),
-            targetDomain: currentDomain,
-            originalDomain: cookie.domain || 'unknown',
-            pageUrl: currentUrl
+        console.log(`[WorkflowAnalyzer] ✅ Collected ${collectedCookies.length} cookie(s) from browser`);
+        
+        // Now try to get project_id if we need to save to project
+        if (config.saveToProject !== false) {
+          try {
+            const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+              headers: this.getAuthHeaders()
+            });
+            // Handle both ObjectId and string formats
+            const rawProjectId = jobResponse.data?.project_id;
+            if (rawProjectId) {
+              projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
+            }
+            
+            // Also try to get from context if API call didn't return it
+            if (!projectId && this.context?.project_id) {
+              const ctxProjectId = this.context.project_id;
+              projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
+              console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
+            }
+          } catch (jobError) {
+            console.warn(`[WorkflowAnalyzer] ⚠️ Could not fetch job to get project_id: ${jobError.message}`);
+            
+            // Try to get from context as fallback
+            if (this.context?.project_id) {
+              const ctxProjectId = this.context.project_id;
+              projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
+              console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context as fallback: ${projectId}`);
+            }
+            // Don't throw - we already have cookies
           }
-        }));
+        }
+      } else {
+        // For non-browser sources, we need project_id first
+        try {
+          const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+            headers: this.getAuthHeaders()
+          });
+          // Handle both ObjectId and string formats
+          const rawProjectId = jobResponse.data?.project_id;
+          if (rawProjectId) {
+            // Convert ObjectId to string if needed
+            projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
+          }
+          
+          // Also try to get from context if API call didn't return it
+          if (!projectId && this.context?.project_id) {
+            const ctxProjectId = this.context.project_id;
+            projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
+            console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
+          }
+        } catch (jobError) {
+          console.warn(`[WorkflowAnalyzer] ⚠️ Could not fetch job to get project_id: ${jobError.message}`);
+          
+          // Try to get from context as fallback
+          if (this.context?.project_id) {
+            const ctxProjectId = this.context.project_id;
+            projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
+            console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context as fallback: ${projectId}`);
+          } else {
+            throw new Error(`Could not find project ID for job: ${jobId}`);
+          }
+        }
+        
+        if (!projectId) {
+          throw new Error(`Could not find project ID for job: ${jobId}`);
+        }
+        
+        if (source === 'latest') {
+          // Collect from latest login job
+          const latestCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/latest-cookies`, {
+            headers: this.getAuthHeaders()
+          });
+          collectedCookies = latestCookiesResponse.data || [];
+        } else if (source === 'job') {
+          // Collect from specific job
+          if (!config.jobId) {
+            throw new Error(`Job ID is required when source is 'job'`);
+          }
+          const jobDataResponse = await axios.get(`${this.backendUrl}/api/jobs/${config.jobId}`, {
+            headers: this.getAuthHeaders()
+          });
+          const jobData = jobDataResponse.data;
+          if (jobData && jobData.result && jobData.result.cookies) {
+            collectedCookies = jobData.result.cookies;
+          }
+        } else if (source === 'workflowState') {
+          // Collect from workflow state
+          if (!config.sourceField) {
+            throw new Error(`sourceField is required when source is 'workflowState'`);
+          }
+          const cookiesData = this.resolvePath(config.sourceField, workflowState);
+          if (Array.isArray(cookiesData)) {
+            collectedCookies = cookiesData;
+          } else {
+            throw new Error(`Cookies at path "${config.sourceField}" is not an array`);
+          }
+        }
       }
 
       // Store collected cookies in workflow state
@@ -6270,121 +4074,35 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       workflowState.collectedCookies = collectedCookies;
 
-      // Step 4: Save to project (if enabled)
-      if (config.saveToProject !== false && collectedCookies.length > 0) {
+      // Optionally save to project (only if projectId is available)
+      if (config.saveToProject !== false && projectId) {
         try {
-          const saveResponse = await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+          await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
             cookies: collectedCookies,
             source: 'workflow'
           }, {
             headers: this.getAuthHeaders()
           });
-          
-          if (saveResponse.data) {
-            const result = saveResponse.data;
-            console.log(`[WorkflowAnalyzer] 🍪 Updated project cookies: +${result.addedCount || 0} new, ~${result.updatedCount || 0} updated`);
-            await this.sendLogToBackend(jobId, 'info', `🍪 Updated project cookies: +${result.addedCount || 0} new, ~${result.updatedCount || 0} updated`, 'WORKFLOW-ANALYZER', {
-              step_id: step.id,
-              cookies_added: result.addedCount || 0,
-              cookies_updated: result.updatedCount || 0
-            });
-          }
+          console.log(`[WorkflowAnalyzer] ✅ Saved ${collectedCookies.length} cookie(s) to project`);
         } catch (saveError) {
           console.warn(`[WorkflowAnalyzer] ⚠️ Failed to save cookies to project: ${saveError.message}`);
+          // Don't throw - cookies are still collected
         }
       }
 
       this.storeStepResult(step, { cookies: collectedCookies, count: collectedCookies.length }, workflowState);
       console.log(`[WorkflowAnalyzer] ✅ Collected ${collectedCookies.length} cookie(s) successfully`);
     } catch (error) {
-      const status = error?.response?.status;
-      const requestUrl =
-        error?.response?.config?.url ||
-        error?.config?.url ||
-        null;
-      const requestMethod =
-        error?.response?.config?.method ||
-        error?.config?.method ||
-        null;
-      const extra = [];
-      if (status) {
-        extra.push(`status=${status}`);
+      // If we have cookies collected, don't fail the step
+      if (collectedCookies && collectedCookies.length > 0) {
+        console.warn(`[WorkflowAnalyzer] ⚠️ Cookie collect had errors but cookies were collected: ${error.message}`);
+        this.storeStepResult(step, { cookies: collectedCookies }, workflowState);
+        console.log(`[WorkflowAnalyzer] ✅ Cookie collection completed despite errors: ${collectedCookies.length} cookie(s)`);
+        return; // Success - cookies collected
       }
-      if (requestMethod) {
-        extra.push(`method=${requestMethod.toUpperCase()}`);
-      }
-      if (requestUrl) {
-        extra.push(`url=${requestUrl}`);
-      }
-      const extraInfo = extra.length ? ` (${extra.join(' ')})` : '';
-      console.error(`[WorkflowAnalyzer] ❌ Cookie collect failed${extraInfo}: ${error.message}`);
-      if (!extra.length || status >= 400) {
-        try {
-          const debugPayload = {
-            status,
-            method: requestMethod ? requestMethod.toUpperCase() : null,
-            url: requestUrl,
-            responseData: error?.response?.data ?? null,
-            code: error?.code ?? null
-          };
-          console.error('[WorkflowAnalyzer] ❌ Cookie collect debug payload:', JSON.stringify(debugPayload));
-        } catch (serializationError) {
-          console.error('[WorkflowAnalyzer] ❌ Cookie collect debug payload serialization failed:', serializationError.message);
-        }
-      }
+      console.error(`[WorkflowAnalyzer] ❌ Cookie collect failed: ${error.message}`);
       throw error;
     }
-  }
-
-  /**
-   * Execute validate-login step
-   */
-  async executeValidateLoginStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🔐 Validating login state (${step.name})`);
-    
-    const determineResult =
-      workflowState.lastDetermineResult ||
-      workflowState['determine_completion']?.result ||
-      workflowState.results?.['determine_completion']?.result ||
-      null;
-    
-    const loginStatus =
-      workflowState.loginStatus ||
-      workflowState.context?.login_status ||
-      determineResult?.status ||
-      'unknown';
-    
-    const validation = {
-      status: loginStatus,
-      is_complete: determineResult?.is_complete ?? (loginStatus === 'success'),
-      reason: determineResult?.reason || null,
-      what_happened: determineResult?.what_happened || null,
-      timestamp: new Date().toISOString()
-    };
-    
-    if (determineResult?.captcha_status !== undefined) {
-      validation.captcha_status = determineResult.captcha_status;
-    }
-    if (determineResult?.page_state) {
-      validation.page_state = determineResult.page_state;
-    }
-    
-    workflowState.loginStatus = loginStatus;
-    workflowState.lastValidationResult = validation;
-    this.storeStepResult(step, validation, workflowState, { forceShared: true });
-    
-    if (jobId) {
-      await this.sendLogToBackend(jobId, 'info', `🔐 Login validation result: ${loginStatus}`, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: step.type,
-        status: loginStatus,
-        is_complete: validation.is_complete,
-        reason: validation.reason
-      });
-    }
-    
-    return validation;
   }
 
   /**
@@ -6650,6 +4368,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       throw error;
     }
   }
+
   buildTemplateScope(step, workflowState, jobId) {
     const scope = {};
 
@@ -6712,16 +4431,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const expressionRegex = /\{\{\s*([^}]+?)\s*\}\}/g;
     return template.replace(expressionRegex, (_, expression) => {
       try {
-        const evaluationScope = { ...scope };
-        const fn = new Function('scope', `
-          if (!scope || typeof scope !== 'object') {
-            return undefined;
-          }
-          with (scope) {
-            return (${expression});
-          }
-        `);
-        const result = fn(evaluationScope);
+        const fn = new Function(...Object.keys(scope), `return (${expression});`);
+        const result = fn(...Object.values(scope));
         if (result === undefined || result === null) {
           return '';
         }
@@ -7094,41 +4805,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
         const possibleSlugs = ['prepare-legs-for-execution', 'prepare_legs_for_execution', 'prepare-legs-for-execution'];
         let found = false;
         for (const slug of possibleSlugs) {
-          // Try multiple locations for the step result
-          const prepareResult = workflowState[slug]?.result || 
-                                workflowState.results?.[slug]?.result ||
-                                workflowState.results?.[slug] ||
-                                workflowState[slug];
-          if (prepareResult && typeof prepareResult === 'object') {
-            if (prepareResult.legsToExecute && Array.isArray(prepareResult.legsToExecute)) {
-              items = prepareResult.legsToExecute;
-              found = true;
-              console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in prepare step result (${items.length} items)`);
-              break;
-            }
+          const prepareResult = workflowState[slug]?.result || workflowState.results?.[slug]?.result;
+          if (prepareResult && prepareResult.legsToExecute && Array.isArray(prepareResult.legsToExecute)) {
+            items = prepareResult.legsToExecute;
+            found = true;
+            break;
           }
         }
         
         // If still not found, search all workflowState keys for legsToExecute
         if (!found) {
           for (const key of Object.keys(workflowState)) {
-            if (workflowState[key] && typeof workflowState[key] === 'object') {
-              // Check direct property
-              if (workflowState[key].legsToExecute && Array.isArray(workflowState[key].legsToExecute)) {
-                items = workflowState[key].legsToExecute;
+            if (workflowState[key] && typeof workflowState[key] === 'object' && workflowState[key].result) {
+              const stepResult = workflowState[key].result;
+              if (stepResult && stepResult.legsToExecute && Array.isArray(stepResult.legsToExecute)) {
+                items = stepResult.legsToExecute;
                 found = true;
-                console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in workflowState.${key} (${items.length} items)`);
                 break;
-              }
-              // Check result property
-              if (workflowState[key].result) {
-                const stepResult = workflowState[key].result;
-                if (stepResult && typeof stepResult === 'object' && stepResult.legsToExecute && Array.isArray(stepResult.legsToExecute)) {
-                  items = stepResult.legsToExecute;
-                  found = true;
-                  console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in workflowState.${key}.result (${items.length} items)`);
-                  break;
-                }
               }
             }
           }
@@ -7141,7 +4834,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
             workflowState.context = {};
           }
           workflowState.context.legsToExecute = items;
-          console.log(`[WorkflowAnalyzer] ✅ Updated workflowState.legsToExecute and context.legsToExecute (${items.length} items)`);
         }
       }
     }
@@ -7166,28 +4858,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState.context.legsToExecute = items;
     }
 
-    const loopLimits = this.getLoopLimitConfig();
     const numericMaxItems = this.coerceToInteger(maxItems);
-    let resolvedMaxItems = numericMaxItems !== null ? Math.max(1, numericMaxItems) : loopLimits.forEachMaxItems;
-    if (resolvedMaxItems > loopLimits.forEachMaxItems) {
-      console.warn(`[WorkflowAnalyzer] ⚠️ for-each step ${step.id || step.name} requested ${resolvedMaxItems} items but template limit is ${loopLimits.forEachMaxItems}. Truncating.`);
-      resolvedMaxItems = loopLimits.forEachMaxItems;
-    }
-    if (!config.maxItems || this.coerceToInteger(config.maxItems) !== resolvedMaxItems) {
-      step.config = { ...(step.config || {}), maxItems: resolvedMaxItems };
-    }
-
-    const effectiveItems = items.slice(0, resolvedMaxItems);
-    if (items.length > effectiveItems.length) {
-      console.warn(`[WorkflowAnalyzer] ⚠️ for-each step ${step.id || step.name} limited to ${effectiveItems.length} of ${items.length} items`);
-      await this.sendLogToBackend(jobId, 'warn', `⚠️ for-each step limited to ${effectiveItems.length} of ${items.length} items`, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: 'for-each',
-        requested_items: items.length,
-        max_items: effectiveItems.length
-      });
-    }
+    const effectiveItems = numericMaxItems !== null ? items.slice(0, Math.max(numericMaxItems, 0)) : items;
     const resultKey = providedResultKey || `${step.id || 'for_each'}_results`;
 
     // Save previous values if they exist
@@ -7195,10 +4867,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const previousItemValue = workflowState[itemVariable];
     const hadIndexVariable = Object.prototype.hasOwnProperty.call(workflowState, indexVariable);
     const previousIndexValue = workflowState[indexVariable];
-    const hadCurrentLeg = Object.prototype.hasOwnProperty.call(workflowState, 'currentLeg');
-    const previousCurrentLeg = workflowState.currentLeg;
-    const hadContextCurrentLeg = Boolean(workflowState.context && Object.prototype.hasOwnProperty.call(workflowState.context, 'currentLeg'));
-    const previousContextCurrentLeg = hadContextCurrentLeg ? workflowState.context.currentLeg : undefined;
 
     const nestedStepsArray = Array.isArray(nestedStepsConfig) ? nestedStepsConfig : [];
     const iterationSummaries = [];
@@ -7209,85 +4877,52 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const item = effectiveItems[idx];
       workflowState[itemVariable] = item;
       workflowState[indexVariable] = idx;
-      if (!workflowState.context) {
-        workflowState.context = {};
-      }
-      workflowState.context[itemVariable] = item;
-      workflowState.context[indexVariable] = idx;
-      workflowState.currentLeg = item;
-      workflowState.context.currentLeg = item;
-
-      if (item && typeof item === 'object') {
-        const legId =
-          item.leg_id ||
-          item.original_leg_id ||
-          item.source_leg_id ||
-          item.id ||
-          null;
-        if (legId) {
-          workflowState.currentLegOriginalId = item.original_leg_id || legId;
-          workflowState.currentLegResolvedId = legId;
-          workflowState.context.currentLegOriginalId = workflowState.currentLegOriginalId;
-          workflowState.context.currentLegResolvedId = workflowState.currentLegResolvedId;
-        }
-      }
 
       console.log(`[WorkflowAnalyzer] 🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
       
-      const loopScopeMetadata = {
-        loopType: 'for-each',
-        stepId: step.id || 'for-each',
-        stepName: step.name || step.type || 'for-each',
-        iteration: idx,
-        itemSummary: this.summarizeItemForMetadata(item)
-      };
-
-      this.enterLoopScope(workflowState, loopScopeMetadata);
-      let stepResults = [];
-
-      try {
-        if (nestedStepsArray.length > 0) {
-          for (let nestedIdx = 0; nestedIdx < nestedStepsArray.length; nestedIdx++) {
-            const nestedStep = nestedStepsArray[nestedIdx];
-            
-            // Create unique step ID for nested step
-            const baseId = nestedStep.id || `nested-${nestedIdx}`;
-            const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
-            
-            const nestedStepWithId = {
-              ...nestedStep,
-              id: nestedStepId,
-              originalId: nestedStep.id || baseId
-            };
-            
-            console.log(`[WorkflowAnalyzer] 🔁 Executing nested step ${nestedIdx + 1}/${nestedStepsArray.length}: ${nestedStep.name || nestedStep.type} (iteration ${idx + 1})`);
-            
-            try {
-              await this.executeStepByType(page, nestedStepWithId, workflowState, jobId, {
-                stepIndex: nestedIdx,
-                siblings: nestedStepsArray
-              });
-            } catch (nestedError) {
-              console.error(`[WorkflowAnalyzer] ❌ Nested step failed in iteration ${idx + 1}: ${nestedError.message}`);
-              if (nestedStep.config?.critical) {
-                throw nestedError;
-              }
+      // Execute nested steps for this item
+      if (nestedStepsArray.length > 0) {
+        for (let nestedIdx = 0; nestedIdx < nestedStepsArray.length; nestedIdx++) {
+          const nestedStep = nestedStepsArray[nestedIdx];
+          
+          // Create unique step ID for nested step
+          const baseId = nestedStep.id || `nested-${nestedIdx}`;
+          const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
+          
+          const nestedStepWithId = {
+            ...nestedStep,
+            id: nestedStepId,
+            originalId: nestedStep.id || baseId
+          };
+          
+          console.log(`[WorkflowAnalyzer] 🔁 Executing nested step ${nestedIdx + 1}/${nestedStepsArray.length}: ${nestedStep.name || nestedStep.type} (iteration ${idx + 1})`);
+          
+          try {
+            // Execute nested step using the same switch logic
+            await this.executeStepByType(page, nestedStepWithId, workflowState, jobId, {
+              stepIndex: nestedIdx,
+              siblings: nestedStepsArray
+            });
+          } catch (nestedError) {
+            console.error(`[WorkflowAnalyzer] ❌ Nested step failed in iteration ${idx + 1}: ${nestedError.message}`);
+            // Continue with next step unless critical
+            if (nestedStep.config?.critical) {
+              throw nestedError;
             }
           }
         }
-
-        stepResults = nestedStepsArray.map((nestedStep, nestedIndex) => {
-          const baseId = nestedStep.id || `nested-${nestedIndex}`;
-          const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
-          return {
-            stepId: nestedStepId,
-            originalStepId: nestedStep.id || baseId,
-            result: workflowState[nestedStepId]
-          };
-        });
-      } finally {
-        this.exitLoopScope(workflowState, { iteration: idx, loopType: 'for-each' });
       }
+
+      // Collect step results for this iteration
+      const stepResults = nestedStepsArray.map((nestedStep, nestedIndex) => {
+        const baseId = nestedStep.id || `nested-${nestedIndex}`;
+        const nestedStepId = `${step.id || 'for-each'}::${idx}::${baseId}`;
+        return {
+          stepId: nestedStepId,
+          originalStepId: nestedStep.id || baseId,
+          result: workflowState[nestedStepId]
+        };
+      });
 
       iterationSummaries.push({
         index: idx,
@@ -7308,25 +4943,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     } else {
       delete workflowState[indexVariable];
     }
-    if (hadCurrentLeg) {
-      workflowState.currentLeg = previousCurrentLeg;
-    } else {
-      delete workflowState.currentLeg;
-    }
-    if (workflowState.context) {
-      if (hadContextCurrentLeg) {
-        workflowState.context.currentLeg = previousContextCurrentLeg;
-      } else {
-        delete workflowState.context.currentLeg;
-      }
-    }
-
-    if (workflowState.context) {
-      delete workflowState.context[itemVariable];
-      delete workflowState.context[indexVariable];
-      delete workflowState.context.currentLegOriginalId;
-      delete workflowState.context.currentLegResolvedId;
-    }
 
     // Store results
     workflowState[resultKey] = iterationSummaries;
@@ -7343,6 +4959,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     console.log(`[WorkflowAnalyzer] ✅ For-each step completed: ${iterationSummaries.length} iterations`);
   }
+
   /**
    * Execute while-loop step - loops while condition is true
    * General-purpose looping element that can loop based on conditions from code or AI
@@ -7351,27 +4968,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] 🔄 Executing while-loop (${step.name})`);
     
     const config = step.config || {};
-    const loopLimits = this.getLoopLimitConfig();
-    const configuredMax = this.coerceToInteger(config.maxIterations);
-    let maxIterations = configuredMax !== null ? Math.max(1, configuredMax) : loopLimits.whileMaxIterations;
-    if (maxIterations > loopLimits.whileMaxIterations) {
-      console.warn(`[WorkflowAnalyzer] ⚠️ while-loop ${step.id || step.name} requested ${maxIterations} iterations but template limit is ${loopLimits.whileMaxIterations}. Truncating.`);
-      await this.sendLogToBackend(jobId, 'warn', `⚠️ while-loop truncated to ${loopLimits.whileMaxIterations} iterations`, 'WORKFLOW-ANALYZER', {
-        step_id: step.id,
-        step_name: step.name || step.type,
-        step_type: 'while-loop',
-        requested_iterations: maxIterations,
-        limit: loopLimits.whileMaxIterations
-      });
-      maxIterations = loopLimits.whileMaxIterations;
-    }
-    config.maxIterations = maxIterations;
-    step.config = config;
-
-    const conditionPath = step.config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
-    const conditionType = step.config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
-    const invertCondition = step.config.invertCondition === true; // If true, loop while condition is false
-    const nestedSteps = step.config.steps || [];
+    const maxIterations = config.maxIterations || 10;
+    const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
+    const conditionType = config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
+    const invertCondition = config.invertCondition === true; // If true, loop while condition is false
+    const nestedSteps = config.steps || [];
     
     if (!nestedSteps.length) {
       console.log(`[WorkflowAnalyzer] ⚠️ While-loop has no nested steps`);
@@ -7381,8 +4982,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     let iteration = 0;
     let condition = true; // Start with true to enter loop
     let lastResult = null;
-    let lastConditionValue = null;
-    let expectedValue = step.config.conditionValue || 'continue';
     
     console.log(`[WorkflowAnalyzer] 🔄 Starting while-loop (max ${maxIterations} iterations)`);
     
@@ -7412,14 +5011,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Loop while condition is true (or false if inverted) and under max iterations
     while ((invertCondition ? !condition : condition) && iteration < maxIterations) {
       iteration++;
-      this.resetIterationScopedVariables(workflowState);
       loopState.currentIteration = iteration;
       // Also set workflowState.currentIteration for use by other steps
       workflowState.currentIteration = iteration;
-      if (!workflowState.context) {
-        workflowState.context = {};
-      }
-      workflowState.context.currentIteration = iteration;
       
       console.log(`[WorkflowAnalyzer] 🔄 While-loop iteration ${iteration}/${maxIterations}`);
       
@@ -7432,16 +5026,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         max_iterations: maxIterations
       });
       
-      const loopScopeMetadata = {
-        loopType: 'while-loop',
-        stepId: step.id || 'while-loop',
-        stepName: step.name || step.type || 'while-loop',
-        iteration,
-        expectedValue
-      };
-
-      this.enterLoopScope(workflowState, loopScopeMetadata);
-
       try {
         // Execute nested steps
         for (let nestedIdx = 0; nestedIdx < nestedSteps.length; nestedIdx++) {
@@ -7461,9 +5045,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         // Evaluate condition after nested steps
-        let autoContinueReason = null;
-        let originalConditionValue = null;
-
         if (conditionType === 'code' && config.conditionCode) {
           // Clean the code before execution
           let cleanedCode = this.cleanScript(config.conditionCode);
@@ -7479,14 +5060,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             { code: cleanedCode, workflowState }
           );
           condition = conditionResult === true || conditionResult === 'true' || conditionResult === 1;
-          originalConditionValue = conditionResult;
-          lastConditionValue = conditionResult;
           
         } else if (conditionType === 'ai-response' || conditionType === 'path') {
           // Get condition from workflowState path (check multiple locations)
           let conditionValue = this.resolvePathValue(workflowState, conditionPath || 'determine_completion.status', 'results');
-          lastConditionValue = conditionValue;
-          originalConditionValue = conditionValue;
           
           // If not found, try finding the determine_completion step result directly
           if (conditionValue === undefined || conditionValue === null) {
@@ -7512,28 +5089,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
               // Default: check status, fallback to is_complete
               conditionValue = determineStepResult.status || determineStepResult.is_complete;
             }
-            lastConditionValue = conditionValue;
           }
           
-          const normalizedExpectedValue = typeof expectedValue === 'string'
-            ? expectedValue.trim().toLowerCase()
-            : expectedValue;
-          let normalizedConditionValue = conditionValue;
-          if (typeof normalizedConditionValue === 'string') {
-            normalizedConditionValue = normalizedConditionValue.trim().toLowerCase();
-          }
-
-          if (normalizedConditionValue !== undefined && normalizedConditionValue !== null) {
-            if (typeof normalizedConditionValue === 'string' && typeof normalizedExpectedValue === 'string') {
-              condition = normalizedConditionValue === normalizedExpectedValue;
-              console.log(`[WorkflowAnalyzer] 🔍 Checking status: ${normalizedConditionValue} === ${normalizedExpectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
+          if (conditionValue !== undefined && conditionValue !== null) {
+            // Support both new status field (success/failure/continue/stuck) and legacy is_complete
+            if (typeof conditionValue === 'string') {
+              // New format: status field with 'success', 'failure', 'continue', 'stuck'
+              const expectedValue = config.conditionValue || 'continue';
+              condition = conditionValue === expectedValue;
+              console.log(`[WorkflowAnalyzer] 🔍 Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
             } else {
-              condition = normalizedConditionValue === normalizedExpectedValue;
+              // Legacy format: boolean is_complete
+              condition = conditionValue === true || conditionValue === 'true' || conditionValue === 1 || conditionValue === 'complete';
             }
           } else {
+            // If path not found and it's required, default to false (exit loop)
             if (conditionPath) {
               console.log(`[WorkflowAnalyzer] ⚠️ Condition path "${conditionPath}" not found, exiting loop`);
               
+              // Send log to backend
               await this.sendLogToBackend(jobId, 'warn', `⚠️ Condition path "${conditionPath}" not found, exiting loop`, 'WORKFLOW-ANALYZER', {
                 step_id: step.id,
                 step_name: step.name || step.type,
@@ -7544,62 +5118,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
               
               condition = invertCondition ? true : false;
             } else {
+              // No condition path specified, default to false (exit loop)
               condition = false;
             }
-          }
-
-          if (!condition) {
-            const determineResult =
-              workflowState.lastDetermineResult ||
-              workflowState['determine_completion']?.result ||
-              workflowState.results?.['determine_completion']?.result ||
-              workflowState.context?.determine_completion ||
-              null;
-
-            if (determineResult && typeof determineResult === 'object') {
-              const completionStatus = typeof determineResult.completion_status === 'string'
-                ? determineResult.completion_status.trim().toLowerCase()
-                : null;
-              const statusField = typeof determineResult.status === 'string'
-                ? determineResult.status.trim().toLowerCase()
-                : determineResult.status;
-              const needsMoreTesting = determineResult.needs_more_testing === true;
-              const explicitlyIncomplete = determineResult.is_complete === false;
-              const hasFollowUpScript = typeof determineResult.playwright_script === 'string' && determineResult.playwright_script.trim().length > 0;
-              const shouldAutoContinue =
-                needsMoreTesting ||
-                explicitlyIncomplete ||
-                completionStatus === 'needs_iteration' ||
-                completionStatus === 'in_progress' ||
-                statusField === 'retry' ||
-                statusField === 'pending' ||
-                hasFollowUpScript;
-
-              if (shouldAutoContinue) {
-                condition = true;
-                autoContinueReason =
-                  (needsMoreTesting && 'needs_more_testing') ||
-                  (explicitlyIncomplete && 'is_complete_false') ||
-                  (completionStatus === 'needs_iteration' && 'completion_status_needs_iteration') ||
-                  (completionStatus === 'in_progress' && 'completion_status_in_progress') ||
-                  (statusField === 'retry' && 'status_retry') ||
-                  (statusField === 'pending' && 'status_pending') ||
-                  (hasFollowUpScript && 'follow_up_script_provided') ||
-                  'derived_continue';
-
-                const derivedValue = statusField || completionStatus || 'auto-continue';
-                const derivedLabel = typeof derivedValue === 'string' ? derivedValue : 'auto-continue';
-                conditionValue = derivedLabel;
-                lastConditionValue = `${derivedLabel} (auto:${autoContinueReason})`;
-                console.log(`[WorkflowAnalyzer] 🔁 Auto-continuing loop because ${autoContinueReason} (status=${statusField}, completion_status=${completionStatus})`);
-              } else {
-                lastConditionValue = originalConditionValue;
-              }
-            } else {
-              lastConditionValue = originalConditionValue;
-            }
-          } else {
-            lastConditionValue = originalConditionValue;
           }
         }
         
@@ -7608,9 +5129,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           iteration,
           condition,
           timestamp: new Date().toISOString(),
-          lastResult: workflowState.lastExecutionResult,
-          autoContinueReason,
-          originalConditionValue
+          lastResult: workflowState.lastExecutionResult
         });
         
         console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: condition=${condition} (inverted=${invertCondition}, should continue=${invertCondition ? !condition : condition})`);
@@ -7623,11 +5142,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           iteration: iteration,
           condition: condition,
           inverted: invertCondition,
-          should_continue: invertCondition ? !condition : condition,
-          condition_value: lastConditionValue,
-          expected_value: expectedValue,
-          condition_original_value: originalConditionValue,
-          auto_continue_reason: autoContinueReason
+          should_continue: invertCondition ? !condition : condition
         });
         
         // Small delay between iterations
@@ -7659,8 +5174,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         await new Promise(resolve => setTimeout(resolve, 1000));
-      } finally {
-        this.exitLoopScope(workflowState, { iteration, loopType: 'while-loop' });
       }
     }
     
@@ -7699,13 +5212,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       } catch (error) {
         console.error(`[WorkflowAnalyzer] ⚠️ Failed to log while-loop completion: ${error.message}`);
       }
-    }
-
-    if (workflowState.context && Object.prototype.hasOwnProperty.call(workflowState.context, 'currentIteration')) {
-      delete workflowState.context.currentIteration;
-    }
-    if (Object.prototype.hasOwnProperty.call(workflowState, 'currentIteration')) {
-      delete workflowState.currentIteration;
     }
   }
 
@@ -8107,6 +5613,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     return finalResult;
   }
+
   /**
    * Execute step by type (used by for-each to execute nested steps)
    */
@@ -8136,17 +5643,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
       case 'page-discovery':
         await this.executePageDiscoveryStep(step, workflowState, jobId, workflowState.pageId, workflowState.projectId);
         break;
-      case 'sitemap-exploration':
-        await this.executeSitemapExplorationStep(step, workflowState, jobId, workflowState.pageId, workflowState.projectId);
-        break;
       case 'execute-code':
         await this.executeCodeStep(page, step, workflowState);
-        break;
-      case 'var-export':
-        await this.executeVarExportStep(step, workflowState, jobId);
-        break;
-      case 'var-dump':
-        await this.executeVarDumpStep(step, workflowState, jobId);
         break;
       case 'execute-code-from-variable':
         await this.executeCodeFromVariableStep(page, step, workflowState, jobId);
@@ -8156,18 +5654,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         break;
       case 'filter-response':
         await this.executeFilterResponseStep(step, workflowState);
-        break;
-      case 'cookie-add':
-        await this.executeCookieAddStep(step, workflowState, jobId);
-        break;
-      case 'cookie-update':
-        await this.executeCookieUpdateStep(step, workflowState, jobId);
-        break;
-      case 'cookie-remove':
-        await this.executeCookieRemoveStep(step, workflowState, jobId);
-        break;
-      case 'cookie-collect':
-        await this.executeCookieCollectStep(page, step, workflowState, jobId);
         break;
       case 'print':
         await this.executePrintStep(step, workflowState, jobId);
@@ -8187,9 +5673,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         break;
       case 'save-data':
         await this.executeSaveDataStep(page, step, workflowState, jobId);
-        break;
-      case 'validate-login':
-        await this.executeValidateLoginStep(step, workflowState, jobId);
         break;
       default:
         console.log(`[WorkflowAnalyzer] ⚠️ Unknown nested step type: ${step.type}`);
@@ -8243,25 +5726,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
           current = current.result[segment];
         } else if (current.metadata && typeof current.metadata === 'object' && Object.prototype.hasOwnProperty.call(current.metadata, segment)) {
           current = current.metadata[segment];
-        } else if (sourceType === 'results') {
-          const matchingKey = Object.keys(current).find((key) => {
-            if (typeof key !== 'string') {
-              return false;
-            }
-            if (key === segment) {
-              return true;
-            }
-            if (key.includes('::')) {
-              const suffix = key.split('::').pop();
-              return suffix === segment;
-            }
-            return false;
-          });
-          if (matchingKey && current[matchingKey]) {
-            current = current[matchingKey];
-          } else {
-            current = undefined;
-          }
         } else {
           current = undefined;
         }
@@ -8321,15 +5785,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       return result;
     }
     return data;
-  }
-
-  getLoopLimitConfig() {
-    const templateId = this.workflowTemplate?._id?.toString() || this.context?.workflow_template_id;
-    const overrides = templateId && this.templateLoopOverrides[templateId] ? this.templateLoopOverrides[templateId] : {};
-    return {
-      whileMaxIterations: overrides.whileMaxIterations ?? this.loopDefaults.whileMaxIterations,
-      forEachMaxItems: overrides.forEachMaxItems ?? this.loopDefaults.forEachMaxItems
-    };
   }
 
   /**
@@ -8647,3 +6102,4 @@ export default WorkflowAnalyzer;
 
 // Force rebuild Wed 15 Oct 2025 23:26:24 AEDT
 // Force rebuild Tue 28 Oct 2025 15:43:46 AEDT
+
