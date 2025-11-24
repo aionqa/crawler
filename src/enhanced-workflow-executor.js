@@ -243,15 +243,19 @@ class EnhancedWorkflowExecutor {
       }
       
       // Extract action details from leg
-      const kind = leg.type || 'click'; // Default to click if not specified
-      const text = leg.description || 'AI-generated action';
-      const selector = leg.element_info?.selector || null;
+      // Try multiple possible fields for action type/kind
+      const kind = leg.type || leg.kind || leg.action_type || leg.action || 'click'; // Default to click if not specified
+      const text = leg.description || leg.text || leg.name || 'AI-generated action';
+      const selector = leg.element_info?.selector || leg.selector || leg.element_selector || null;
+      
+      // Ensure kind is always a valid string (not undefined)
+      const finalKind = (typeof kind === 'string' && kind.trim()) ? kind.trim() : 'click';
       
       // Create action payload
       const actionPayload = {
         project_id: projectId,
         page_id: pageId,
-        kind: kind,
+        kind: finalKind,
         text: text,
         selector: selector,
         playwright_script: playwrightScript,
