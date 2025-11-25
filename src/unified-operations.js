@@ -1505,7 +1505,10 @@ const modeHandlers = {
     const maxPages = context.options?.max_pages || 10;
     const maxDepth = context.options?.max_depth || 2;
     
-    await sendLog(jobId, 'info', `🔄 WORKFLOW MODE: Multi-page crawl (max ${maxPages} pages, depth ${maxDepth})`);
+    // CRITICAL: For single-page scans (max_pages=1, max_depth=0), disable link discovery
+    const isSinglePageScan = maxPages === 1 && maxDepth === 0;
+    
+    await sendLog(jobId, 'info', `🔄 WORKFLOW MODE: ${isSinglePageScan ? 'Single-page' : 'Multi-page'} crawl (max ${maxPages} pages, depth ${maxDepth})`);
     
     // Initialize workflow analyzer and enhanced executor with context
     const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger, context);
@@ -1533,7 +1536,8 @@ const modeHandlers = {
     const workflowCapabilities = workflowAnalyzer.getCapabilities();
     context.workflow_capabilities = workflowCapabilities;
     const shouldRunPerformanceAnalysis = workflowCapabilities.usesPerformanceAudit === true;
-    const shouldDiscoverLinks = workflowCapabilities.usesLinkDiscovery === true;
+    // CRITICAL: Disable link discovery for single-page scans
+    const shouldDiscoverLinks = isSinglePageScan ? false : (workflowCapabilities.usesLinkDiscovery === true);
     const hasAdvancedAnalysis = (workflowCapabilities.usesPlaywrightAnalysis === true) || (workflowCapabilities.usesAIModel === true);
     
     const visitedUrls = new Set();
@@ -1743,8 +1747,70 @@ const modeHandlers = {
                   workflowTemplateLoaded = true;
                 }
 
-                await sendLog(jobId, 'info', `▶️ Executing workflow legs for ${analysisResult.workflow_id}...`);
-                const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
+                // CRITICAL: For single-page scans, filter out navigation legs to prevent multi-page crawling
+                let legsToExecute = analysisResult.legs || [];
+                if (isSinglePageScan && legsToExecute.length > 0) {
+                  const originalCount = legsToExecute.length;
+                  legsToExecute = legsToExecute.filter(leg => {
+                    const action = leg.action || leg.type || '';
+                    const description = leg.description || '';
+                    const isNavigation = action === 'navigate' || 
+                                        action === 'navigation' ||
+                                        description.toLowerCase().includes('follow link') ||
+                                        description.toLowerCase().includes('navigate to');
+                    return !isNavigation;
+                  });
+                  if (legsToExecute.length < originalCount) {
+                    await sendLog(jobId, 'info', `⏭️ Single-page scan: Filtered out ${originalCount - legsToExecute.length} navigation legs (keeping ${legsToExecute.length} non-navigation legs)`);
+                    // Update analysisResult with filtered legs
+                    analysisResult.legs = legsToExecute;
+                  }
+                }
+
+                await sendLog(jobId, 'info', `▶️ Executing ${legsToExecute.length} workflow legs for ${analysisResult.workflow_id}...`);
+                // For single-page scans, temporarily update workflow in database to filter navigation legs
+                if (isSinglePageScan && legsToExecute.length < (analysisResult.legs?.length || 0)) {
+                  const axios = (await import('axios')).default;
+                  const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+                  const workflowId = analysisResult.workflow_id;
+                  
+                  // Get original workflow
+                  const originalWorkflow = await workflowExecutor.getWorkflow(workflowId);
+                  const originalLegs = originalWorkflow?.legs || [];
+                  
+                  try {
+                    // Temporarily update workflow with filtered legs
+                    await axios.put(`${backendUrl}/api/workflows/${workflowId}`, {
+                      legs: legsToExecute
+                    }, {
+                      headers: workflowExecutor.getAuthHeaders ? workflowExecutor.getAuthHeaders() : {},
+                      timeout: 5000
+                    });
+                    
+                    const executionResult = await workflowExecutor.executeWorkflow(page, jobId, workflowId);
+                    await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
+                  } catch (updateError) {
+                    console.warn(`[WORKFLOW] Failed to filter legs for single-page scan: ${updateError.message}`);
+                    // Fall back to executing all legs
+                    const executionResult = await workflowExecutor.executeWorkflow(page, jobId, workflowId);
+                    await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
+                  } finally {
+                    // Restore original legs
+                    try {
+                      await axios.put(`${backendUrl}/api/workflows/${workflowId}`, {
+                        legs: originalLegs
+                      }, {
+                        headers: workflowExecutor.getAuthHeaders ? workflowExecutor.getAuthHeaders() : {},
+                        timeout: 5000
+                      });
+                    } catch (restoreError) {
+                      console.error(`[WORKFLOW] Failed to restore original legs: ${restoreError.message}`);
+                    }
+                  }
+                } else {
+                  const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
+                  await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
+                }
                 await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
               } catch (execError) {
                 await sendLog(jobId, 'warn', `⚠️ Workflow leg execution encountered issues: ${execError.message}`);
@@ -1764,13 +1830,19 @@ const modeHandlers = {
           const baseUrl = new URL(currentUrl).origin;
           const internalLinks = links.filter(link => link.startsWith(baseUrl));
           
-          for (const link of internalLinks.slice(0, 20)) {
-            if (!visitedUrls.has(link)) {
-              urlQueue.push({ url: link, depth: depth + 1 });
+          // CRITICAL: Only collect links if we haven't reached max_pages and depth limit
+          // For single-page scans (max_pages=1, max_depth=0), don't collect links at all
+          if (pagesAnalyzed < maxPages && depth < maxDepth) {
+            for (const link of internalLinks.slice(0, 20)) {
+              if (!visitedUrls.has(link)) {
+                urlQueue.push({ url: link, depth: depth + 1 });
+              }
             }
+            
+            await sendLog(jobId, 'info', `🔗 Found ${internalLinks.length} internal links, queued ${Math.min(20, internalLinks.length)} for crawling`);
+          } else {
+            await sendLog(jobId, 'info', `⏭️ Skipping link collection (max_pages: ${maxPages}, current: ${pagesAnalyzed}, max_depth: ${maxDepth}, current: ${depth})`);
           }
-          
-          await sendLog(jobId, 'info', `🔗 Found ${internalLinks.length} internal links, queued ${Math.min(20, internalLinks.length)} for crawling`);
         }
       }
       
@@ -3893,21 +3965,27 @@ async function executeLoginFromAnalysis(page, analysis, context) {
     // Find form elements based on analysis
     let usernameField, passwordField, submitButton;
     
-    if (analysis.field_mapping) {
-      // Use AI-provided field mapping
-      const usernameSelector = analysis.field_mapping.username || 'input[name="username"], input[name="user"], input[name="email"]';
-      const passwordSelector = analysis.field_mapping.password || 'input[name="password"], input[type="password"]';
-      const submitSelector = analysis.field_mapping.submit || 'button[type="submit"], input[type="submit"]';
-      
-      usernameField = await page.$(usernameSelector);
-      passwordField = await page.$(passwordSelector);
-      submitButton = await page.$(submitSelector);
-    } else {
-      // Fallback to common selectors
-      usernameField = await page.$('input[name="username"], input[name="user"], input[name="email"], input[type="email"]');
-      passwordField = await page.$('input[name="password"], input[type="password"]');
-      submitButton = await page.$('button[type="submit"], input[type="submit"]');
+    // CRITICAL: Use AI-provided field mapping only - no static fallbacks
+    if (!analysis.field_mapping || !analysis.field_mapping.username || !analysis.field_mapping.password || !analysis.field_mapping.submit) {
+      return {
+        success: false,
+        message: 'AI analysis must provide field_mapping with username, password, and submit selectors. Cannot use static fallbacks.',
+        details: { 
+          hasFieldMapping: !!analysis.field_mapping,
+          hasUsername: !!analysis.field_mapping?.username,
+          hasPassword: !!analysis.field_mapping?.password,
+          hasSubmit: !!analysis.field_mapping?.submit
+        }
+      };
     }
+    
+    const usernameSelector = analysis.field_mapping.username;
+    const passwordSelector = analysis.field_mapping.password;
+    const submitSelector = analysis.field_mapping.submit;
+    
+    usernameField = await page.$(usernameSelector);
+    passwordField = await page.$(passwordSelector);
+    submitButton = await page.$(submitSelector);
     
     if (!usernameField || !passwordField) {
       return {

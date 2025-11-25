@@ -144,7 +144,14 @@ class WorkflowAnalyzer {
    * @returns {Object} workflow object
    */
   async analyzePage(page, jobId, pageId, projectId) {
-    console.log(`[WorkflowAnalyzer] Analyzing page: ${page.url()}`);
+    // CRITICAL: job_id must always be available - use from context if not provided as parameter
+    // Backend always provides job_id in context, so this ensures workflows can link to the job
+    const effectiveJobId = jobId || this.context.job_id;
+    if (!effectiveJobId) {
+      console.warn(`[WorkflowAnalyzer] ⚠️ No job_id provided - workflows/actions/pages may not be linked to job`);
+    }
+    
+    console.log(`[WorkflowAnalyzer] Analyzing page: ${page.url()} (job_id: ${effectiveJobId || 'none'})`);
 
     // Load workflow template - MANDATORY
     await this.loadWorkflowTemplate();
@@ -159,7 +166,9 @@ class WorkflowAnalyzer {
 
     // Execute workflow template steps ONLY
     try {
-      const results = await this.executeWorkflowSteps(page, jobId, pageId, projectId);
+      // Use jobId from parameter or fallback to context (backend always provides job_id in context)
+      const effectiveJobId = jobId || this.context.job_id;
+      const results = await this.executeWorkflowSteps(page, effectiveJobId, pageId, projectId);
       console.log(`[WorkflowAnalyzer] ✅ Workflow template steps completed successfully`);
       
       return results;
@@ -954,14 +963,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
   /**
    * Create workflow document via backend API
    */
-  async createWorkflow(pageId, projectId, url, playwrightAnalysis) {
+  async createWorkflow(pageId, projectId, url, playwrightAnalysis, jobId = null) {
     try {
-      const response = await axios.post(`${this.backendUrl}/api/workflows`, {
+      const workflowData = {
         page_id: pageId,
         project_id: projectId,
         url: url,
         playwright_analysis: playwrightAnalysis
-      }, {
+      };
+      
+      // Include job_id if available (so workflows are linked to the job that created them)
+      if (jobId) {
+        workflowData.job_id = jobId;
+      }
+      
+      const response = await axios.post(`${this.backendUrl}/api/workflows`, workflowData, {
         headers: this.getAuthHeaders()
       });
 
@@ -976,7 +992,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Update workflow with AI analysis and legs
    * Also creates action documents for each leg
    */
-  async updateWorkflowWithAnalysis(workflowId, pageDescription, legs, createActions = true) {
+  async updateWorkflowWithAnalysis(workflowId, pageDescription, legs, createActions = true, jobId = null) {
     try {
       const response = await axios.put(
         `${this.backendUrl}/api/workflows/${workflowId}/analysis`,
@@ -986,7 +1002,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
             analyzed_at: new Date().toISOString()
           },
           legs: legs,
-          create_actions: createActions  // Signal backend to create action documents
+          create_actions: createActions,  // Signal backend to create action documents
+          job_id: jobId  // Pass job_id so actions can be linked to the job
         },
         {
           headers: this.getAuthHeaders()
@@ -1262,8 +1279,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * @returns {Object} workflow results
    */
   async executeWorkflowSteps(page, jobId, pageId, projectId) {
+    // CRITICAL: job_id must always be available - use from context if not provided as parameter
+    // Backend always provides job_id in context, so this ensures workflows can link to the job
+    const effectiveJobId = jobId || this.context.job_id;
+    if (!effectiveJobId) {
+      console.warn(`[WorkflowAnalyzer] ⚠️ No job_id available - workflows/actions/pages may not be linked to job`);
+    }
+    
     console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
-    console.log(`[WorkflowAnalyzer] 🔄 EXECUTING WORKFLOW TEMPLATE STEPS`);
+    console.log(`[WorkflowAnalyzer] 🔄 EXECUTING WORKFLOW TEMPLATE STEPS (job_id: ${effectiveJobId || 'none'})`);
     console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
     
     const resolvedOptions = {
@@ -1307,7 +1331,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     workflowState.pageId = pageId || null;
     workflowState.projectId = projectId || null;
-    workflowState.jobId = jobId;
+    workflowState.jobId = effectiveJobId; // Use effectiveJobId (from parameter or context)
     
     // Check if we should retry from a specific step (after self-adjustable workflow)
     let startStepIndex = 0;
@@ -1329,7 +1353,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
       
       // Send log to backend
-      await this.sendLogToBackend(jobId, 'info', `🔄 EXECUTING STEP ${i + 1}/${this.workflowTemplate.steps.length}: ${step.name} (${step.type})`, 'WORKFLOW-ANALYZER', {
+      await this.sendLogToBackend(effectiveJobId, 'info', `🔄 EXECUTING STEP ${i + 1}/${this.workflowTemplate.steps.length}: ${step.name} (${step.type})`, 'WORKFLOW-ANALYZER', {
         step_id: step.id,
         step_name: step.name || step.type,
         step_type: step.type,
@@ -1350,29 +1374,29 @@ IMPORTANT OUTPUT REQUIREMENTS:
           (async () => {
             switch (step.type) {
           case 'screenshot':
-            await this.executeScreenshotStep(page, step, workflowState, jobId, pageId);
+            await this.executeScreenshotStep(page, step, workflowState, effectiveJobId, pageId);
             break;
             
           case 'playwright-analysis':
-            await this.executePlaywrightAnalysisStep(page, step, workflowState, jobId);
+            await this.executePlaywrightAnalysisStep(page, step, workflowState, effectiveJobId);
             break;
             
           case 'page-description':
-            await this.executePageDescriptionStep(page, step, workflowState, jobId, {
+            await this.executePageDescriptionStep(page, step, workflowState, effectiveJobId, {
               stepIndex: i,
               siblings: this.workflowTemplate.steps
             });
             break;
             
           case 'ai-prompt':
-            await this.executeAIPromptStep(page, step, workflowState, jobId, {
+            await this.executeAIPromptStep(page, step, workflowState, effectiveJobId, {
               stepIndex: i,
               siblings: this.workflowTemplate.steps
             });
             break;
             
           case 'workflow-analysis':
-            await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId, {
+            await this.executeWorkflowAnalysisStep(page, step, workflowState, effectiveJobId, {
               stepIndex: i,
               siblings: this.workflowTemplate.steps
             });
@@ -1380,28 +1404,28 @@ IMPORTANT OUTPUT REQUIREMENTS:
           
           // Deterministic, hardcoded analysis for specific domains (e.g., Practical Test Automation)
           case 'hardcoded-workflow-analysis':
-            await this.executeHardcodedWorkflowAnalysisStep(page, step, workflowState, jobId);
+            await this.executeHardcodedWorkflowAnalysisStep(page, step, workflowState, effectiveJobId);
             break;
             
           case 'create-workflow':
-            await this.executeCreateWorkflowStep(step, workflowState, pageId, projectId, jobId);
+            await this.executeCreateWorkflowStep(step, workflowState, pageId, projectId, effectiveJobId);
             break;
             
           case 'update-workflow':
-            await this.executeUpdateWorkflowStep(step, workflowState, jobId);
+            await this.executeUpdateWorkflowStep(step, workflowState, effectiveJobId);
             break;
             
           case 'page-discovery':
-            await this.executePageDiscoveryStep(step, workflowState, jobId, pageId, projectId);
+            await this.executePageDiscoveryStep(step, workflowState, effectiveJobId, pageId, projectId);
             break;
             
           case 'save-data':
-            await this.executeSaveDataStep(page, step, workflowState, jobId);
+            await this.executeSaveDataStep(page, step, workflowState, effectiveJobId);
             break;
             
           case 'execute-code':
             const nextStepForCode = i + 1 < this.workflowTemplate.steps.length ? this.workflowTemplate.steps[i + 1] : null;
-            await this.executeCodeStep(page, step, workflowState, jobId, nextStepForCode);
+            await this.executeCodeStep(page, step, workflowState, effectiveJobId, nextStepForCode);
             break;
             
           case 'execute-code-from-variable':
@@ -1462,11 +1486,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
             break;
             
           case 'for-each':
-            await this.executeForEachStep(page, step, workflowState, jobId);
+            await this.executeForEachStep(page, step, workflowState, effectiveJobId);
             break;
             
           case 'while-loop':
-            await this.executeWhileLoopStep(page, step, workflowState, jobId);
+            await this.executeWhileLoopStep(page, step, workflowState, effectiveJobId);
             break;
             
           case 'if':
@@ -1494,7 +1518,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         console.error(`[WorkflowAnalyzer] ❌ Step ${i + 1} failed: ${stepError.message}`);
         
         // Send error log to backend
-        await this.sendLogToBackend(jobId, 'error', `❌ Step ${i + 1} failed: ${stepError.message}`, 'WORKFLOW-ANALYZER', {
+        await this.sendLogToBackend(effectiveJobId, 'error', `❌ Step ${i + 1} failed: ${stepError.message}`, 'WORKFLOW-ANALYZER', {
           step_id: step.id,
           step_name: step.name || step.type,
           step_type: step.type,
@@ -1547,13 +1571,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
     
     // Send log to backend
-    await this.sendLogToBackend(jobId, 'info', `✅ ALL WORKFLOW STEPS COMPLETED`, 'WORKFLOW-ANALYZER', {
+    await this.sendLogToBackend(effectiveJobId, 'info', `✅ ALL WORKFLOW STEPS COMPLETED`, 'WORKFLOW-ANALYZER', {
       total_steps: this.workflowTemplate.steps.length,
       workflow_id: workflowState.workflowId
     });
     
-    // Return workflow results including context and cookies for login workflows
-    return {
+    // CRITICAL: Include all step results in the return value
+    // Step results are stored by step.id, step.slug, and in workflowState.results
+    // This allows login-operations.js to extract determine_completion and other step results
+    
+    // Build result object with all step results accessible
+    const result = {
       workflow_id: workflowState.workflowId,
       legs_count: workflowState.legs.length,
       page_description: workflowState.pageDescription,
@@ -1563,8 +1591,39 @@ IMPORTANT OUTPUT REQUIREMENTS:
       collectedCookies: workflowState.collectedCookies || [],
       login_status: workflowState.context?.login_status || workflowState.loginStatus || null,
       screenshotUrl: workflowState.screenshotUrl || null,
-      screenshotFileId: workflowState.screenshotFileId || null
+      screenshotFileId: workflowState.screenshotFileId || null,
+      // Include all step results by ID (e.g., determine_completion, perform_login_attempts, etc.)
+      results: workflowState.results || {}
     };
+    
+    // Also include step results directly on the result object for backward compatibility
+    // This allows analysisResult.determine_completion to work
+    if (workflowState.results) {
+      for (const [stepId, stepResult] of Object.entries(workflowState.results)) {
+        if (stepResult && typeof stepResult === 'object') {
+          result[stepId] = stepResult;
+        }
+      }
+    }
+    
+    // Also include step results stored by slug or name (storeStepResult stores in multiple places)
+    // Check for common step IDs like determine_completion, perform_login_attempts, etc.
+    const importantStepIds = ['determine_completion', 'perform_login_attempts', 'collect_iteration_cookies', 'collect_final_cookies'];
+    for (const stepId of importantStepIds) {
+      if (workflowState[stepId] && !result[stepId]) {
+        result[stepId] = workflowState[stepId];
+      }
+      // Also check for slug-based storage
+      const stepSlug = workflowState[stepId]?.stepName ? 
+        workflowState[stepId].stepName.toLowerCase().replace(/\s+/g, '_') : null;
+      if (stepSlug && workflowState[stepSlug] && !result[stepSlug]) {
+        result[stepSlug] = workflowState[stepSlug];
+      }
+    }
+    
+    console.log(`[WorkflowAnalyzer] ✅ Returning workflow results with step results:`, Object.keys(result.results || {}));
+    
+    return result;
   }
 
   /**
@@ -2210,6 +2269,24 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState[`${step.name}_response`] = parsedResponse;
       this.storeStepResult(step, parsedResponse, workflowState);
       
+      // CRITICAL: For determine_completion step, also store directly by ID for easy access
+      if (step.id === 'determine_completion' || step.name?.includes('Determine Login Progress')) {
+        if (!workflowState.determine_completion) {
+          workflowState.determine_completion = {};
+        }
+        workflowState.determine_completion.result = parsedResponse;
+        
+        if (!workflowState.results) {
+          workflowState.results = {};
+        }
+        if (!workflowState.results.determine_completion) {
+          workflowState.results.determine_completion = {};
+        }
+        workflowState.results.determine_completion.result = parsedResponse;
+        
+        console.log(`[WorkflowAnalyzer] ✅ Stored determine_completion result: status=${parsedResponse?.status || parsedResponse?.completion_status || 'none'}`);
+      }
+      
       const logPreview = typeof aiResponse === 'string' ? aiResponse.substring(0, 100) : JSON.stringify(parsedResponse).substring(0, 100);
       console.log(`[WorkflowAnalyzer] ✅ AI prompt completed: ${logPreview}...`);
     } catch (aiError) {
@@ -2366,9 +2443,29 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`[WorkflowAnalyzer] 📝 Creating workflow document (${step.name})`);
     
     try {
-      const workflow = await this.createWorkflow(pageId, projectId, workflowState.pageUrl, workflowState.playwrightAnalysis);
+      const workflow = await this.createWorkflow(pageId, projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
       workflowState.workflowId = workflow._id;
-      console.log(`[WorkflowAnalyzer] ✅ Created workflow: ${workflow._id}`);
+      console.log(`[WorkflowAnalyzer] ✅ Created workflow: ${workflow._id}${jobId ? ` (linked to job ${jobId})` : ''}`);
+
+      // CRITICAL: Automatically discover page immediately when workflow is created
+      // This ensures pages appear in the UI as soon as they're analyzed
+      try {
+        await this.updatePageDiscovery(
+          jobId,
+          pageId,
+          projectId,
+          workflowState.pageUrl,
+          {
+            title: workflowState.pageTitle,
+            workflow_id: workflow._id,
+            analyzed: false // Will be marked as analyzed after AI analysis completes
+          }
+        );
+        console.log(`[WorkflowAnalyzer] ✅ Page discovered immediately after workflow creation`);
+      } catch (discoveryError) {
+        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to discover page immediately: ${discoveryError.message}`);
+        // Don't fail the workflow if page discovery fails
+      }
 
       this.storeStepResult(step, {
         workflowId: workflow._id,
@@ -2438,15 +2535,41 @@ IMPORTANT OUTPUT REQUIREMENTS:
         workflowState.workflowId,
         workflowState.aiAnalysisResult?.page_description || workflowState.pageDescription,
         workflowState.legs,
-        createActions
+        createActions,
+        jobId  // Pass jobId so actions are linked to the current job
       );
-      console.log(`[WorkflowAnalyzer] ✅ Workflow updated with analysis${createActions ? ' (actions queued for creation)' : ''}`);
+      console.log(`[WorkflowAnalyzer] ✅ Workflow updated with analysis${createActions ? ' (actions created immediately)' : ''}`);
 
       if (updateResult?.legs && Array.isArray(updateResult.legs)) {
         workflowState.legs = updateResult.legs;
       }
 
       workflowState.actionsSummary = this.buildActionsSummary(workflowState.legs);
+      
+      // CRITICAL: Update page discovery immediately after actions are created
+      // This ensures the page shows the latest analysis and action count
+      if (workflowState.pageId && workflowState.projectId) {
+        try {
+          await this.updatePageDiscovery(
+            jobId,
+            workflowState.pageId,
+            workflowState.projectId,
+            workflowState.pageUrl,
+            {
+              title: workflowState.pageTitle,
+              workflow_id: workflowState.workflowId,
+              page_description: workflowState.aiAnalysisResult?.page_description || workflowState.pageDescription,
+              analyzed: true,
+              ai_analysis: workflowState.aiAnalysisResult,
+              actions_summary: workflowState.actionsSummary
+            }
+          );
+          console.log(`[WorkflowAnalyzer] ✅ Page discovery updated with analysis and actions`);
+        } catch (discoveryError) {
+          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to update page discovery: ${discoveryError.message}`);
+          // Don't fail the workflow if page discovery update fails
+        }
+      }
 
       this.storeStepResult(step, {
         workflowId: workflowState.workflowId,
@@ -5195,13 +5318,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
         }
         
-        // Record iteration
-        loopState.iterations.push({
+        // Record iteration - include determine_completion from workflowState
+        const iterationState = {
           iteration,
           condition,
           timestamp: new Date().toISOString(),
-          lastResult: workflowState.lastExecutionResult
-        });
+          lastResult: workflowState.lastExecutionResult || {},
+          determine_completion: workflowState.determine_completion?.result || 
+                               workflowState.results?.determine_completion?.result ||
+                               workflowState.determine_completion ||
+                               null
+        };
+        loopState.iterations.push(iterationState);
+        
+        // Also store in lastExecutionResult for next iteration
+        if (!workflowState.lastExecutionResult) {
+          workflowState.lastExecutionResult = {};
+        }
+        workflowState.lastExecutionResult.determine_completion = iterationState.determine_completion || 
+                                                                workflowState.determine_completion;
         
         console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: condition=${condition} (inverted=${invertCondition}, should continue=${invertCondition ? !condition : condition})`);
         
@@ -5248,12 +5383,63 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
     
+    // Extract determine_completion result from last iteration and promote to top level
+    // CRITICAL: After loop completes, we need to make determine_completion accessible at top level
+    let lastDetermineCompletion = null;
+    
+    // Strategy 1: Check if already stored at top level from last iteration
+    lastDetermineCompletion = workflowState.determine_completion?.result || workflowState.determine_completion;
+    
+    // Strategy 2: Extract from loop iterations
+    if ((!lastDetermineCompletion || (!lastDetermineCompletion.status && !lastDetermineCompletion.completion_status)) 
+        && loopState.iterations && loopState.iterations.length > 0) {
+      const lastIteration = loopState.iterations[loopState.iterations.length - 1];
+      
+      // Check multiple possible locations in last iteration
+      lastDetermineCompletion = 
+        lastIteration?.determine_completion?.result ||
+        lastIteration?.determine_completion ||
+        lastIteration?.lastResult?.determine_completion?.result ||
+        lastIteration?.lastResult?.determine_completion ||
+        lastDetermineCompletion;
+    }
+    
+    // Strategy 3: Check workflowState.results (by step ID)
+    if ((!lastDetermineCompletion || (!lastDetermineCompletion.status && !lastDetermineCompletion.completion_status))
+        && workflowState.results?.determine_completion) {
+      lastDetermineCompletion = workflowState.results.determine_completion.result ||
+                                workflowState.results.determine_completion ||
+                                lastDetermineCompletion;
+    }
+    
+    // Promote to top level for easy access (even if empty, for debugging)
+    if (lastDetermineCompletion) {
+      if (!workflowState.determine_completion) {
+        workflowState.determine_completion = {};
+      }
+      workflowState.determine_completion.result = lastDetermineCompletion;
+      
+      if (!workflowState.results) {
+        workflowState.results = {};
+      }
+      if (!workflowState.results.determine_completion) {
+        workflowState.results.determine_completion = {};
+      }
+      workflowState.results.determine_completion.result = lastDetermineCompletion;
+      
+      const statusDisplay = lastDetermineCompletion.status || lastDetermineCompletion.completion_status || 'none';
+      console.log(`[WorkflowAnalyzer] ✅ Promoted determine_completion result: status=${statusDisplay}, is_complete=${lastDetermineCompletion.is_complete}`);
+    } else {
+      console.warn(`[WorkflowAnalyzer] ⚠️ No determine_completion result found after ${iteration} iterations`);
+    }
+    
     const finalResult = {
       iterations: iteration,
       maxIterations,
       exitedEarly: iteration < maxIterations && (invertCondition ? condition : !condition),
       finalCondition: condition,
-      loopHistory: loopState.iterations
+      loopHistory: loopState.iterations,
+      determine_completion: lastDetermineCompletion // Include in final result for extraction
     };
     
     this.storeStepResult(step, finalResult, workflowState);
