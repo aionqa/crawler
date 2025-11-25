@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy package files
-COPY unified-crawler/package*.json ./
+COPY package*.json ./
 
 # Install Node.js dependencies
 RUN npm install
@@ -24,10 +24,7 @@ RUN npm install
 RUN npx playwright install --with-deps chromium
 
 # Copy source code
-COPY unified-crawler/src/ ./src/
-
-# Copy shared utilities
-COPY shared/ ./shared/
+COPY src/ ./src/
 
 # Create directories for temporary files
 RUN mkdir -p /tmp/aionqa_videos /tmp/aionqa_screenshots
