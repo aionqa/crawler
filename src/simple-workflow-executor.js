@@ -511,10 +511,17 @@ Please analyze this login page and provide a detailed response in JSON format.`;
         return s;
       };
 
-      const emailSelector = sanitizeSelector(aiAnalysis.emailSelector) || '#email';
-      const passwordSelector = sanitizeSelector(aiAnalysis.passwordSelector) || 'input[type="password"]';
-      const submitSelector = sanitizeSelector(aiAnalysis.submitSelector) || '#next-button';
-      const isOAuth = aiAnalysis.isOAuth || page.url().includes('auth.') || page.url().includes('oauth');
+      // CRITICAL: No static fallbacks - AI must provide selectors
+      const emailSelector = sanitizeSelector(aiAnalysis.emailSelector);
+      const passwordSelector = sanitizeSelector(aiAnalysis.passwordSelector);
+      const submitSelector = sanitizeSelector(aiAnalysis.submitSelector);
+      
+      if (!emailSelector || !passwordSelector || !submitSelector) {
+        throw new Error('AI analysis must provide emailSelector, passwordSelector, and submitSelector. Cannot use static fallbacks.');
+      }
+      
+      // Determine OAuth from AI analysis or context, not URL patterns
+      const isOAuth = aiAnalysis.isOAuth || false;
       
       console.log(`[SimpleWorkflowExecutor] Generated selectors: email=${emailSelector}, password=${passwordSelector}, submit=${submitSelector}, isOAuth=${isOAuth}`);
       
@@ -548,17 +555,8 @@ Please analyze this login page and provide a detailed response in JSON format.`;
           }
           
           // Step 2: Click continue/submit button
-          // Guard against invalid selectors (fallback to common submit patterns)
-          let submitButton;
-          try {
-            submitButton = await page.$(submitSelector);
-          } catch (e) {
-            console.log('Invalid submit selector from AI, falling back. Error:', e.message);
-          }
-          if (!submitButton) {
-            submitButton = await page.$("button[type='submit'], input[type='submit'], button:has-text('Continue'), button:has-text('Next'), #submit, #login-button");
-            submitSelector = "button[type='submit'], input[type='submit'], button:has-text('Continue'), button:has-text('Next'), #submit, #login-button";
-          }
+          // Use AI-provided selector only - no static fallbacks
+          const submitButton = await page.$(submitSelector);
           if (submitButton) {
             await submitButton.click();
             console.log('✅ Clicked submit button');
@@ -575,8 +573,8 @@ Please analyze this login page and provide a detailed response in JSON format.`;
               console.log('Password field found, filling it');
               await passwordField.fill('testpassword');
               
-              // Look for final submit button
-              const finalSubmit = await page.$('button[type="submit"], #submit, #login-button, button:has-text("Sign in"), button:has-text("Login")');
+              // Use AI-provided submit selector - no static fallbacks
+              const finalSubmit = await page.$(submitSelector);
               if (finalSubmit) {
                 await finalSubmit.click();
                 console.log('✅ Clicked final submit button');
@@ -595,18 +593,10 @@ Please analyze this login page and provide a detailed response in JSON format.`;
           console.log('Handling regular form login');
           
           // Regular form login
+          // Use AI-provided selectors only - no static fallbacks
           const emailField = await page.$(emailSelector);
           const passwordField = await page.$(passwordSelector);
-                   let submitButton;
-                   try {
-                     submitButton = await page.$(submitSelector);
-                   } catch (e) {
-                     console.log('Invalid submit selector from AI, falling back. Error:', e.message);
-                   }
-                   if (!submitButton) {
-                     submitButton = await page.$("button[type='submit'], input[type='submit'], #submit, #login-button, button:has-text('Sign in'), button:has-text('Login')");
-                     submitSelector = "button[type='submit'], input[type='submit'], #submit, #login-button, button:has-text('Sign in'), button:has-text('Login')";
-                   }
+          const submitButton = await page.$(submitSelector);
           
           if (emailField) {
             await emailField.fill('test@example.com');

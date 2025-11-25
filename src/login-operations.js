@@ -848,12 +848,69 @@ export async function performLoginWithWorkflow(
     const workflowAnalyzer = new WorkflowAnalyzer(BACKEND_URL, conversationLogger, normalizedContext);
     const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, null, projectId);
 
-    const determineResult =
+    // Extract determine_completion result from multiple possible locations
+    // CRITICAL: The while-loop stores determine_completion in each iteration, need to get from last iteration
+    let determineResult = null;
+    
+    // Strategy 1: Check if it was promoted to top level after loop completion
+    determineResult = 
       analysisResult?.determine_completion?.result ||
       analysisResult?.results?.determine_completion?.result ||
       analysisResult?.context?.determine_completion?.result ||
       analysisResult?.context?.determine_completion ||
-      {};
+      null;
+    
+    // Strategy 2: Extract from while-loop's last iteration (most reliable)
+    if (!determineResult || (!determineResult.status && !determineResult.completion_status)) {
+      const performLoginAttempts = 
+        analysisResult?.perform_login_attempts ||
+        analysisResult?.results?.perform_login_attempts ||
+        analysisResult?.context?.perform_login_attempts ||
+        analysisResult?.perform_login_attempts?.result ||
+        analysisResult?.results?.perform_login_attempts?.result ||
+        {};
+      
+      // Check if determine_completion is in the loop result
+      if (performLoginAttempts.determine_completion) {
+        determineResult = performLoginAttempts.determine_completion.result ||
+                         performLoginAttempts.determine_completion ||
+                         determineResult;
+      }
+      
+      // Check loop history (last iteration)
+      if ((!determineResult || (!determineResult.status && !determineResult.completion_status)) && 
+          performLoginAttempts.loopHistory && Array.isArray(performLoginAttempts.loopHistory)) {
+        const lastIteration = performLoginAttempts.loopHistory[performLoginAttempts.loopHistory.length - 1];
+        
+        // Check multiple paths in last iteration
+        determineResult = 
+          lastIteration?.lastResult?.determine_completion?.result ||
+          lastIteration?.lastResult?.determine_completion ||
+          lastIteration?.determine_completion?.result ||
+          lastIteration?.determine_completion ||
+          determineResult;
+      }
+      
+      // Check context for determine_completion from last execution
+      if (!determineResult || (!determineResult.status && !determineResult.completion_status)) {
+        determineResult =
+          analysisResult?.context?.lastExecutionResult?.determine_completion?.result ||
+          analysisResult?.lastExecutionResult?.determine_completion?.result ||
+          analysisResult?.lastExecutionResult?.determine_completion ||
+          determineResult;
+      }
+    }
+    
+    // Fallback to empty object if nothing found
+    if (!determineResult) {
+      determineResult = {};
+    }
+    
+    console.log(`[LOGIN-WORKFLOW] 🔍 Extracted determineResult:`, JSON.stringify({
+      status: determineResult.status,
+      completion_status: determineResult.completion_status,
+      is_complete: determineResult.is_complete
+    }));
 
     // Extract cookies from multiple possible locations FIRST
     const iterationCookies =
@@ -887,29 +944,42 @@ export async function performLoginWithWorkflow(
 
     const finalUrl = page.url();
     
-    // Infer login success from final URL if status not explicitly set
-    const isDashboardOrAuthenticatedPage = 
-      finalUrl.includes('/dashboard') ||
-      finalUrl.includes('/home') ||
-      finalUrl.includes('/profile') ||
-      finalUrl.includes('/account') ||
-      finalUrl.includes('/settings') ||
-      (!finalUrl.includes('/login') && !finalUrl.includes('/signin') && finalUrl !== url);
+    // CRITICAL: Rely ONLY on AI response from determine_completion step in workflow
+    // Do NOT use static URL patterns - workflows must work on different websites
+    // The AI in determine_completion step analyzes the page state and determines success
     
-    console.log(`[LOGIN-WORKFLOW] 🔍 Login inference: URL=${finalUrl}, isDashboard=${isDashboardOrAuthenticatedPage}, cookies=${finalCookies.length}`);
+    console.log(`[LOGIN-WORKFLOW] 🔍 Checking AI-determined login status from determine_completion step`);
+    console.log(`[LOGIN-WORKFLOW] determineResult:`, JSON.stringify({
+      status: determineResult?.status,
+      completion_status: determineResult?.completion_status,
+      is_complete: determineResult?.is_complete,
+      reason: determineResult?.reason?.substring(0, 100)
+    }));
+    console.log(`[LOGIN-WORKFLOW] Full determineResult keys:`, determineResult ? Object.keys(determineResult) : 'null');
+    console.log(`[LOGIN-WORKFLOW] analysisResult keys:`, analysisResult ? Object.keys(analysisResult) : 'null');
+    if (analysisResult?.perform_login_attempts) {
+      console.log(`[LOGIN-WORKFLOW] perform_login_attempts keys:`, Object.keys(analysisResult.perform_login_attempts));
+    }
     
+    // Extract login status from AI response (determine_completion step result)
+    // The AI analyzes the page and determines if login was successful
     const loginStatus =
-      analysisResult?.login_status ||
+      determineResult.status ||  // Primary: status from AI (success/failure/continue/stuck)
+      determineResult.completion_status ||  // Alternative: completion_status (complete/in_progress/failed/needs_iteration/stuck)
+      analysisResult?.login_status ||  // Fallback: explicit login_status if set elsewhere
       analysisResult?.context?.login_status ||
       analysisResult?.loginStatus ||
-      determineResult.status ||
-      determineResult.completion_status ||
-      (isDashboardOrAuthenticatedPage && finalCookies.length > 0 ? 'success' : null);
+      null;
 
+    // Determine success based ONLY on AI response
+    // AI sets status='success' when it determines authentication is successful
     const loginSuccess =
-      loginStatus === 'success' ||
-      (determineResult.is_complete === true && loginStatus !== 'failure') ||
-      (isDashboardOrAuthenticatedPage && finalCookies.length > 0);
+      loginStatus === 'success' ||  // AI determined success
+      (determineResult.status === 'success') ||  // Explicit success status
+      (determineResult.completion_status === 'complete' && loginStatus !== 'failure') ||  // Completion with no failure
+      (determineResult.is_complete === true && determineResult.status !== 'failure');  // Complete without failure
+    
+    console.log(`[LOGIN-WORKFLOW] 🔍 Final login status: ${loginStatus}, success: ${loginSuccess}`);
     
     console.log(`[LOGIN-WORKFLOW] 🔍 Final inference: loginStatus=${loginStatus}, loginSuccess=${loginSuccess}`);
 
