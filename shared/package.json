@@ -1,0 +1,11 @@
+{
+  "name": "aionqa-shared",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Shared utilities for AionQA agents",
+  "main": "index.js",
+  "exports": {
+    "./structured-ai-response.js": "./structured-ai-response.js",
+    "./ai-conversation-logger.js": "./ai-conversation-logger.js"
+  }
+}
