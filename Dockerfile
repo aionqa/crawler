@@ -26,6 +26,9 @@ RUN npx playwright install --with-deps chromium
 # Copy source code
 COPY src/ ./src/
 
+# Copy shared utilities used by crawler/login operations
+COPY shared/ ./shared/
+
 # Create directories for temporary files
 RUN mkdir -p /tmp/aionqa_videos /tmp/aionqa_screenshots
 
