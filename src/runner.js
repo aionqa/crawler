@@ -9,9 +9,10 @@ import { performLogin } from './login-operations.js';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
+import express from 'express';
 import VideoStreamManager from './video-stream-manager.js';
 import VideoRecorder from './video-recorder.js';
-// HTTP server removed - runners only poll backend, never expose HTTP endpoints (rule 51-runner-architecture.mdc)
+// Minimal HTTP server for ECS health checks only (not for workflow endpoints - rule 51-runner-architecture.mdc)
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
@@ -59,9 +60,21 @@ export const runnerContext = {
   }
 };
 
-// HTTP server removed - runners only poll backend, never expose HTTP endpoints (rule 51-runner-architecture.mdc)
-// Workflow execution happens internally within the runner - no HTTP endpoints needed
-console.log(`✅ [UNIFIED-RUNNER] Runner uses polling pattern only - no HTTP server exposed`);
+// Minimal HTTP server for ECS health checks only (not for workflow endpoints - rule 51-runner-architecture.mdc)
+const HEALTH_CHECK_PORT = process.env.HEALTH_CHECK_PORT || 8080;
+const healthApp = express();
+healthApp.get('/health', (_req, res) => {
+  res.status(200).json({ 
+    status: 'ok', 
+    runner_id: RUNNER_ID,
+    timestamp: new Date().toISOString() 
+  });
+});
+
+const healthServer = healthApp.listen(HEALTH_CHECK_PORT, () => {
+  console.log(`❤️  [UNIFIED-RUNNER] Health check server listening on port ${HEALTH_CHECK_PORT}`);
+});
+console.log(`✅ [UNIFIED-RUNNER] Health check endpoint available at http://localhost:${HEALTH_CHECK_PORT}/health`);
 
 /**
  * Get axios headers with authentication
@@ -921,21 +934,19 @@ function sleep(ms) {
 /**
  * Graceful shutdown
  */
-process.on('SIGINT', () => {
-  console.log(`\n⏹️  [UNIFIED-RUNNER] Received SIGINT, shutting down gracefully...`);
+function shutdown() {
+  console.log(`\n⏹️  [UNIFIED-RUNNER] Shutting down gracefully...`);
   if (currentJobId) {
     console.log(`⚠️  [UNIFIED-RUNNER] Job ${currentJobId} still running, waiting for completion...`);
   }
-  process.exit(0);
-});
+  healthServer.close(() => {
+    console.log(`✅ [UNIFIED-RUNNER] Health check server closed`);
+    process.exit(0);
+  });
+}
 
-process.on('SIGTERM', () => {
-  console.log(`\n⏹️  [UNIFIED-RUNNER] Received SIGTERM, shutting down gracefully...`);
-  if (currentJobId) {
-    console.log(`⚠️  [UNIFIED-RUNNER] Job ${currentJobId} still running, waiting for completion...`);
-  }
-  process.exit(0);
-});
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
 // Start the runner
 runLoop().catch(error => {
