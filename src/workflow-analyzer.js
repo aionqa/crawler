@@ -1476,6 +1476,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
           case 'print':
             await this.executePrintStep(step, workflowState, jobId);
             break;
+
+          case 'var-dump':
+            await this.executeVarDumpStep(step, workflowState, jobId);
+            break;
             
           case 'sleep':
             await this.executeSleepStep(step, workflowState);
@@ -4432,6 +4436,70 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   /**
+   * Execute var-dump step - capture workflow state snapshot
+   */
+  async executeVarDumpStep(step, workflowState, jobId) {
+    console.log(`[WorkflowAnalyzer] 🧾 Executing var-dump step (${step.name})`);
+
+    const config = step.config || {};
+    const options = {
+      maxDepth: Math.max(1, this.coerceToInteger(config.maxDepth) ?? 4),
+      maxArrayLength: Math.max(1, this.coerceToInteger(config.maxArrayLength) ?? 20),
+      maxStringLength: Math.max(50, this.coerceToInteger(config.maxStringLength) ?? 1200)
+    };
+
+    const { snapshot, scopes, statistics } = this.buildVarDumpSnapshot(step, workflowState, options, config);
+
+    if (!snapshot || Object.keys(snapshot).length === 0) {
+      await this.sendLogToBackend(jobId, 'info', '🧾 Var dump skipped (no data)', 'WORKFLOW-VAR-DUMP', {
+        step_type: 'var-dump',
+        step_name: step.name,
+        step_slug: step.slug || null
+      });
+      return;
+    }
+
+    const metadata = {
+      step_type: 'var-dump',
+      step_name: step.name,
+      step_slug: step.slug || null,
+      scopes,
+      snapshot,
+      statistics,
+      includeShared: config.includeShared !== false,
+      includeCurrentLoop: config.includeCurrentLoop === true,
+      includeStepsSummary: config.includeStepsSummary === true,
+      includeContext: config.includeContext === true,
+      maxDepth: options.maxDepth,
+      maxArrayLength: options.maxArrayLength,
+      maxStringLength: options.maxStringLength
+    };
+
+    try {
+      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+        jobId,
+        level: 'info',
+        message: `🧾 [VAR-DUMP] ${step.name || 'Workflow variables'}`,
+        component: 'WORKFLOW-VAR-DUMP',
+        metadata
+      }, {
+        headers: this.getAuthHeaders()
+      });
+
+      this.storeStepResult(step, {
+        dumped_scopes: scopes,
+        statistics,
+        preview: this.createVarDumpPreview(snapshot)
+      }, workflowState);
+
+      console.log(`[WorkflowAnalyzer] ✅ Var dump captured (${scopes.join(', ')})`);
+    } catch (error) {
+      console.error(`[WorkflowAnalyzer] ❌ Var dump step failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
    * Execute print step - logs a message to job history
    */
   async executePrintStep(step, workflowState, jobId) {
@@ -5915,6 +5983,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       case 'print':
         await this.executePrintStep(step, workflowState, jobId);
         break;
+      case 'var-dump':
+        await this.executeVarDumpStep(step, workflowState, jobId);
+        break;
       case 'sleep':
         await this.executeSleepStep(step, workflowState);
         break;
@@ -6022,6 +6093,172 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
 
     return null;
+  }
+
+  buildVarDumpSnapshot(step, workflowState, options, config) {
+    const snapshot = {};
+    const scopes = [];
+    const statistics = {
+      legs: Array.isArray(workflowState.legs) ? workflowState.legs.length : 0,
+      completedLegs: Array.isArray(workflowState.legResults)
+        ? workflowState.legResults.filter(Boolean).length
+        : 0,
+      loopIterations: workflowState.currentIteration || 0
+    };
+
+    if (config.includeShared !== false) {
+      const sharedScope = {
+        job: {
+          id: workflowState.jobId,
+          workflowId: workflowState.workflowId,
+          pageUrl: workflowState.pageUrl,
+          pageTitle: workflowState.pageTitle
+        },
+        runtimeOptions: workflowState.runtimeOptions,
+        aiAnalysisResult: workflowState.aiAnalysisResult,
+        lastExecutionResult: workflowState.lastExecutionResult,
+        lastScriptFailure: workflowState.lastScriptFailure,
+        results: workflowState.results,
+        determine_completion: workflowState['determine_completion'],
+        conversationHistory: Array.isArray(workflowState.conversationHistory)
+          ? workflowState.conversationHistory.slice(-5)
+          : [],
+        collectedCookies: Array.isArray(workflowState.collectedCookies)
+          ? workflowState.collectedCookies.slice(-5)
+          : [],
+        screenshot: workflowState.screenshotUrl ? {
+          url: workflowState.screenshotUrl,
+          fileId: workflowState.screenshotFileId
+        } : null
+      };
+      snapshot.shared = this.truncateForVarDump(sharedScope, options);
+      scopes.push('shared');
+    }
+
+    if (config.includeCurrentLoop) {
+      const loopScope = {
+        currentIteration: workflowState.currentIteration || null,
+        loopState: workflowState.loopState || null,
+        loopStack: workflowState.loopStack || null
+      };
+      snapshot.currentLoop = this.truncateForVarDump(loopScope, options);
+      scopes.push('currentLoop');
+    }
+
+    if (config.includeStepsSummary) {
+      const legsSummary = Array.isArray(workflowState.legs)
+        ? workflowState.legs.map(leg => ({
+            leg_id: leg.leg_id,
+            title: leg.title || leg.description,
+            type: leg.type,
+            final_result: leg.final_result || leg.result || null,
+            iterations: Array.isArray(leg.iterations) ? leg.iterations.length : 0
+          }))
+        : [];
+      const summaryScope = {
+        legs: legsSummary,
+        legResults: workflowState.legResults || [],
+        actionsSummary: workflowState.actionsSummary || null
+      };
+      snapshot.steps = this.truncateForVarDump(summaryScope, options);
+      scopes.push('stepsSummary');
+    }
+
+    if (config.includeContext) {
+      snapshot.context = this.truncateForVarDump(workflowState.context || {}, options);
+      scopes.push('context');
+    }
+
+    if (scopes.length === 0) {
+      snapshot.shared = this.truncateForVarDump(workflowState, options);
+      scopes.push('workflowState');
+    }
+
+    snapshot.metadata = {
+      jobId: workflowState.jobId,
+      pageUrl: workflowState.pageUrl,
+      pageTitle: workflowState.pageTitle,
+      workflowId: workflowState.workflowId,
+      timestamp: new Date().toISOString()
+    };
+
+    return { snapshot, scopes, statistics };
+  }
+
+  truncateForVarDump(value, options, depth = 0, seen = new WeakSet()) {
+    if (value === null || value === undefined) {
+      return value;
+    }
+
+    if (typeof value === 'string') {
+      const limit = options.maxStringLength ?? 1000;
+      return value.length > limit ? `${value.slice(0, limit)}…` : value;
+    }
+
+    if (typeof value !== 'object') {
+      return value;
+    }
+
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+
+    if (seen.has(value)) {
+      return '[Circular]';
+    }
+    seen.add(value);
+
+    const maxDepth = options.maxDepth ?? 4;
+    if (depth >= maxDepth) {
+      if (Array.isArray(value)) {
+        return `[Array(${value.length})]`;
+      }
+      return `[Object keys=${Object.keys(value).length}]`;
+    }
+
+    if (Array.isArray(value)) {
+      const maxItems = options.maxArrayLength ?? 20;
+      const sliced = value.slice(0, maxItems).map(item =>
+        this.truncateForVarDump(item, options, depth + 1, seen)
+      );
+      if (value.length > maxItems) {
+        sliced.push(`… +${value.length - maxItems} more`);
+      }
+      return sliced;
+    }
+
+    const result = {};
+    for (const [key, val] of Object.entries(value)) {
+      result[key] = this.truncateForVarDump(val, options, depth + 1, seen);
+    }
+    return result;
+  }
+
+  createVarDumpPreview(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') {
+      return [];
+    }
+
+    return Object.entries(snapshot)
+      .filter(([scope]) => scope !== 'metadata')
+      .map(([scope, value]) => {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          return {
+            scope,
+            keys: Object.keys(value).slice(0, 10)
+          };
+        }
+        if (Array.isArray(value)) {
+          return {
+            scope,
+            keys: [`Array(${value.length})`]
+          };
+        }
+        return {
+          scope,
+          keys: [typeof value]
+        };
+      });
   }
 
   /**
