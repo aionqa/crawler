@@ -17,6 +17,9 @@ import VideoRecorder from './video-recorder.js';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
 const RUNNER_TOKEN = process.env.RUNNER_TOKEN; // GitHub Actions-style runner token
+const TASK_MODE = process.env.TASK_MODE || 'polling'; // 'single-job' or 'polling'
+const JOB_ID = process.env.JOB_ID; // Job ID when in single-job mode
+const JOB_DATA = process.env.JOB_DATA; // Job data JSON when in single-job mode
 const MAX_SITEMAP_SCAN_DEPTH = 5;
 const MAX_SITEMAP_SCAN_CHILD_SITEMAPS = 25;
 const MAX_SITEMAP_SCAN_ENTRIES = 5000;
@@ -948,9 +951,55 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
+/**
+ * Execute a single job and exit (for ECS task-per-job mode)
+ */
+async function executeSingleJob() {
+  console.log(`🎯 [UNIFIED-RUNNER] Running in single-job mode`);
+  
+  if (!JOB_ID || !JOB_DATA) {
+    console.error(`❌ [UNIFIED-RUNNER] JOB_ID and JOB_DATA are required in single-job mode`);
+    process.exit(1);
+  }
+  
+  try {
+    const jobData = JSON.parse(JOB_DATA);
+    const job = {
+      id: JOB_ID,
+      ...jobData,
+      jobType: jobData.type === 'login' ? 'login' : 'crawl'
+    };
+    
+    console.log(`📥 [UNIFIED-RUNNER] Executing job ${JOB_ID} (type: ${job.jobType})`);
+    
+    // Execute the job
+    const success = await executeJob(job);
+    
+    if (success) {
+      console.log(`✅ [UNIFIED-RUNNER] Job ${JOB_ID} completed successfully`);
+      process.exit(0);
+    } else {
+      console.error(`❌ [UNIFIED-RUNNER] Job ${JOB_ID} failed`);
+      process.exit(1);
+    }
+  } catch (error) {
+    console.error(`❌ [UNIFIED-RUNNER] Fatal error executing job:`, error);
+    process.exit(1);
+  }
+}
+
 // Start the runner
-runLoop().catch(error => {
-  console.error(`❌ [UNIFIED-RUNNER] Fatal error:`, error);
-  process.exit(1);
-});
+if (TASK_MODE === 'single-job') {
+  console.log(`🚀 [UNIFIED-RUNNER] Starting in single-job mode`);
+  executeSingleJob().catch(error => {
+    console.error(`❌ [UNIFIED-RUNNER] Fatal error:`, error);
+    process.exit(1);
+  });
+} else {
+  console.log(`🚀 [UNIFIED-RUNNER] Starting in polling mode`);
+  runLoop().catch(error => {
+    console.error(`❌ [UNIFIED-RUNNER] Fatal error:`, error);
+    process.exit(1);
+  });
+}
 
