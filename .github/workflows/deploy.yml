@@ -59,18 +59,17 @@ jobs:
           container-name: crawler
           image: ${{ steps.build-image.outputs.image }}
 
-      - name: Deploy Amazon ECS task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
-        with:
-          task-definition: ${{ steps.task-def.outputs.task-definition }}
-          service: ${{ env.ECS_SERVICE }}
-          cluster: ${{ env.ECS_CLUSTER }}
-          wait-for-service-stability: true
-
-      - name: Verify crawler service
+      - name: Register Amazon ECS task definition
         run: |
-          echo "✅ Crawler service deployed successfully"
-          echo "Note: Crawler service does not expose HTTP endpoints, it runs in runner mode"
+          aws ecs register-task-definition \
+            --cli-input-json file://${{ steps.task-def.outputs.task-definition }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Verify task definition
+        run: |
+          echo "✅ Crawler task definition registered successfully"
+          echo "Note: Crawler now uses task-per-job model - tasks are deployed by backend when jobs start"
+          echo "No service deployment needed - tasks run once per job and exit when complete"
 
 
 
