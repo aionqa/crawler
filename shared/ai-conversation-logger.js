@@ -513,7 +513,7 @@ export class AIConversationLogger {
   }
 
   /**
-   * Make AI call using prompt from database with retry logic (max 2 attempts)
+   * Make AI call using prompt from database (single attempt, no retries)
    * @param {string} promptSlug - Prompt slug to use
    * @param {Object} payload - Data to fill into prompt template
    * @param {string} jobId - Job ID for logging
@@ -521,8 +521,8 @@ export class AIConversationLogger {
    * @param {string} pageUrl - Page URL for logging
    * @param {string} screenshotId - Optional screenshot ID
    * @param {Object} sourcePayload - Optional source payload for logging
-   * @param {number} attemptNumber - Current attempt number (1 or 2)
-   * @param {string} previousError - Error from previous attempt (for retry context)
+   * @param {number} attemptNumber - Deprecated: kept for backward compatibility (not used)
+   * @param {string} previousError - Deprecated: kept for backward compatibility (not used)
    * @param {string} modelOverride - Optional model override
    * @param {boolean} reasoningEnabled - Enable reasoning mode (if supported by model)
    * @param {boolean} websearchEnabled - Enable web search (if supported by model)
@@ -1083,7 +1083,6 @@ export class AIConversationLogger {
             error: error.message,
             success: false,
             prompt_slug: promptSlug,
-            attempt_number: attemptNumber
           },
           screenshotId,
           pageUrl,
