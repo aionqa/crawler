@@ -628,11 +628,20 @@ export class AIConversationLogger {
               }).catch(() => null);
               if (jobResponse && jobResponse.data) {
                 const rawProjectId = jobResponse.data.project_id;
+                console.log(`[AI-CALL] 🔍 Job response data:`, JSON.stringify({
+                  hasProjectId: !!rawProjectId,
+                  projectIdType: typeof rawProjectId,
+                  projectIdValue: rawProjectId?.toString ? rawProjectId.toString() : rawProjectId
+                }));
                 if (rawProjectId) {
                   // Convert ObjectId to string if needed
                   projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
                   console.log(`[AI-CALL] ℹ️ Retrieved project_id from job: ${projectId}`);
+                } else {
+                  console.warn(`[AI-CALL] ⚠️ Job ${jobId} does not have project_id field`);
                 }
+              } else {
+                console.warn(`[AI-CALL] ⚠️ No job data returned for jobId: ${jobId}`);
               }
             } catch (jobError) {
               console.warn(`[AI-CALL] ⚠️ Could not fetch job to get project_id: ${jobError.message}`);
