@@ -149,26 +149,31 @@ export async function injectStealthScripts(page) {
   });
 
   // Add realistic mouse and keyboard behavior
-  await page.evaluateOnNewDocument(() => {
-    // Add realistic mouse movement
+  // Use addInitScript instead of evaluateOnNewDocument (more compatible)
+  await page.addInitScript(() => {
+    // Add realistic mouse movement tracking
     let lastMouseMove = Date.now();
-    document.addEventListener('mousemove', () => {
-      lastMouseMove = Date.now();
-    });
+    if (typeof document !== 'undefined') {
+      document.addEventListener('mousemove', () => {
+        lastMouseMove = Date.now();
+      });
+    }
 
     // Override requestAnimationFrame to add slight delays
-    const originalRAF = window.requestAnimationFrame;
-    let rafCallCount = 0;
-    window.requestAnimationFrame = function(callback) {
-      rafCallCount++;
-      // Add occasional slight delays to mimic human behavior
-      if (rafCallCount % 100 === 0) {
-        return originalRAF.call(window, () => {
-          setTimeout(callback, Math.random() * 5);
-        });
-      }
-      return originalRAF.call(window, callback);
-    };
+    if (typeof window !== 'undefined' && window.requestAnimationFrame) {
+      const originalRAF = window.requestAnimationFrame;
+      let rafCallCount = 0;
+      window.requestAnimationFrame = function(callback) {
+        rafCallCount++;
+        // Add occasional slight delays to mimic human behavior
+        if (rafCallCount % 100 === 0) {
+          return originalRAF.call(window, () => {
+            setTimeout(callback, Math.random() * 5);
+          });
+        }
+        return originalRAF.call(window, callback);
+      };
+    }
   });
 }
 
