@@ -233,36 +233,70 @@ export async function executePlaywrightAnalysis(page, jobId, stepId, parameters,
 
     if (parameters.collectInteractiveElements !== false) {
       const onlyVisibleInteractiveElements = parameters.onlyVisibleInteractiveElements === true;
+      const skipHiddenElements = parameters.skipHiddenElements === true;
+      
       analysis.interactiveElements = await page.$$eval(
         'button, input, select, textarea, [onclick], [role="button"]',
-        (elements, onlyVisible) => elements
-          .map(el => {
-            const style = window.getComputedStyle(el);
-            const rect = el.getBoundingClientRect();
-            const isVisible = !!style &&
-              style.visibility !== 'hidden' &&
-              style.display !== 'none' &&
-              style.opacity !== '0' &&
-              rect.width > 0 &&
-              rect.height > 0;
-            
-            if (onlyVisible && !isVisible) {
-              return null;
+        (elements, onlyVisible, skipHidden) => {
+          // Helper to check if element or any parent is hidden
+          const isElementOrParentHidden = (el) => {
+            let current = el;
+            while (current && current !== document.body) {
+              const style = window.getComputedStyle(current);
+              const rect = current.getBoundingClientRect();
+              
+              // Check if element itself is hidden
+              if (style.visibility === 'hidden' ||
+                  style.display === 'none' ||
+                  parseFloat(style.opacity) === 0 ||
+                  rect.width === 0 ||
+                  rect.height === 0 ||
+                  current.hasAttribute('hidden') ||
+                  current.getAttribute('aria-hidden') === 'true') {
+                return true;
+              }
+              
+              current = current.parentElement;
             }
-            
-            return {
-              tagName: el.tagName,
-              type: el.type,
-              text: el.textContent?.trim(),
-              placeholder: el.placeholder,
-              id: el.id,
-              className: el.className,
-              onclick: el.onclick?.toString(),
-              visible: isVisible
-            };
-          })
-          .filter(Boolean),
-        onlyVisibleInteractiveElements
+            return false;
+          };
+          
+          return elements
+            .map(el => {
+              const style = window.getComputedStyle(el);
+              const rect = el.getBoundingClientRect();
+              const isVisible = !!style &&
+                style.visibility !== 'hidden' &&
+                style.display !== 'none' &&
+                parseFloat(style.opacity) > 0 &&
+                rect.width > 0 &&
+                rect.height > 0 &&
+                !el.hasAttribute('hidden') &&
+                el.getAttribute('aria-hidden') !== 'true';
+              
+              // Enhanced hidden check - also check parent containers
+              const isParentHidden = skipHidden && isElementOrParentHidden(el);
+              
+              if (onlyVisible && (!isVisible || isParentHidden)) {
+                return null;
+              }
+              
+              return {
+                tagName: el.tagName,
+                type: el.type,
+                text: el.textContent?.trim(),
+                placeholder: el.placeholder,
+                id: el.id,
+                className: el.className,
+                onclick: el.onclick?.toString(),
+                visible: isVisible,
+                isHidden: isParentHidden
+              };
+            })
+            .filter(Boolean);
+        },
+        onlyVisibleInteractiveElements,
+        skipHiddenElements || false
       );
     }
 
