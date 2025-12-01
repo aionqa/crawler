@@ -54,10 +54,16 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
       }
     }
     
-    // Get model from step config or use project default
+    // Get model and options from step config or use project default
     const stepModel = parameters.model || null;
     const stepReasoningEnabled = parameters.reasoning_enabled || false;
     const stepWebsearchEnabled = parameters.websearch_enabled || false;
+    
+    // GPT-5 specific options
+    const stepTextFormat = parameters.text_format || null;
+    const stepReasoningEffort = parameters.reasoning_effort || null;
+    const stepVerbosity = parameters.verbosity || null;
+    const stepStoreLogs = parameters.store_logs || false;
     
     // Make AI call with retry logic
     let lastError = null;
@@ -72,7 +78,12 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
             jobId: context.jobId,
             model: stepModel, // Pass model to payload
             reasoning_enabled: stepReasoningEnabled,
-            websearch_enabled: stepWebsearchEnabled
+            websearch_enabled: stepWebsearchEnabled,
+            // GPT-5 specific options
+            text_format: stepTextFormat,
+            reasoning_effort: stepReasoningEffort,
+            verbosity: stepVerbosity,
+            store_logs: stepStoreLogs
           },
           jobId,
           'workflow-ai-request',
