@@ -615,7 +615,28 @@ export class AIConversationLogger {
       if (jobId && this.backendUrl) {
         try {
           // Extract project_id from payload or job context
-          const projectId = payload?.project_id || payload?.projectId || null;
+          let projectId = payload?.project_id || payload?.projectId || null;
+          
+          // If project_id not in payload, try to get it from job
+          if (!projectId && jobId) {
+            try {
+              const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+                headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {},
+                timeout: 3000
+              }).catch(() => null);
+              if (jobResponse && jobResponse.data) {
+                const rawProjectId = jobResponse.data.project_id;
+                if (rawProjectId) {
+                  // Convert ObjectId to string if needed
+                  projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
+                  console.log(`[AI-CALL] ℹ️ Retrieved project_id from job: ${projectId}`);
+                }
+              }
+            } catch (jobError) {
+              console.warn(`[AI-CALL] ⚠️ Could not fetch job to get project_id: ${jobError.message}`);
+            }
+          }
+          
           if (projectId) {
             const configResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/llm-config`, {
               headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {},
@@ -624,7 +645,12 @@ export class AIConversationLogger {
             if (configResponse && configResponse.data) {
               projectModel = configResponse.data.model;
               projectOptions = configResponse.data.options || {};
+              console.log(`[AI-CALL] ✅ Using project LLM config: model=${projectModel}, options=${JSON.stringify(projectOptions)}`);
+            } else {
+              console.warn(`[AI-CALL] ⚠️ No LLM config found for project ${projectId}`);
             }
+          } else {
+            console.warn(`[AI-CALL] ⚠️ No project_id available, using default model`);
           }
         } catch (error) {
           console.warn(`[AI-CALL] ⚠️ Failed to fetch project LLM config: ${error.message}`);
