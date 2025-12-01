@@ -54,6 +54,11 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
       }
     }
     
+    // Get model from step config or use project default
+    const stepModel = parameters.model || null;
+    const stepReasoningEnabled = parameters.reasoning_enabled || false;
+    const stepWebsearchEnabled = parameters.websearch_enabled || false;
+    
     // Make AI call with retry logic
     let lastError = null;
     for (let attempt = 1; attempt <= (parameters.maxRetries || 3); attempt++) {
@@ -64,14 +69,20 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
             ...attachments,
             ...contextualPayload,
             pageUrl: context.pageUrl,
-            jobId: context.jobId
+            jobId: context.jobId,
+            model: stepModel, // Pass model to payload
+            reasoning_enabled: stepReasoningEnabled,
+            websearch_enabled: stepWebsearchEnabled
           },
           jobId,
           'workflow-ai-request',
           context.pageUrl,
           null,
           attachments,
-          promptTemplate
+          promptTemplate,
+          1, // attemptNumber
+          null, // previousError
+          stepModel // modelOverride
         );
 
         // Validate response schema if provided

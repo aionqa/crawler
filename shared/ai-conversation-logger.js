@@ -525,7 +525,7 @@ export class AIConversationLogger {
    * @param {string} previousError - Error from previous attempt (for retry context)
    * @returns {Promise<Object>} AI response (parsed JSON)
    */
-  async makeAICallWithPrompt(promptSlug, payload, jobId, agentName, pageUrl = null, screenshotId = null, sourcePayload = null, customTemplate = null, attemptNumber = 1, previousError = null) {
+  async makeAICallWithPrompt(promptSlug, payload, jobId, agentName, pageUrl = null, screenshotId = null, sourcePayload = null, customTemplate = null, attemptNumber = 1, previousError = null, modelOverride = null) {
     // Track pending conversation ID for error handling
     let pendingConversationId = null;
     let pendingChatContextId = null;
@@ -612,9 +612,10 @@ export class AIConversationLogger {
       // 4. Construct Responses API input (supports text + optional screenshot)
       const responseInput = this.buildResponseInput(enhancedSystemMessage, userMessageText, payload);
       
-      // 5. Construct OpenAI request (always gpt-5-mini, enforce JSON output)
+      // 5. Construct OpenAI request (use modelOverride if provided, otherwise default to gpt-5-mini)
+      const model = modelOverride || payload?.model || "gpt-5-mini";
       const openaiRequest = {
-        model: "gpt-5-mini",
+        model: model,
         input: responseInput,
         text: {
           format: { type: "json_object" }
