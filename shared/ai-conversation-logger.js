@@ -622,7 +622,7 @@ export class AIConversationLogger {
           // If project_id not in payload, try to get it from job
           if (!projectId && jobId) {
             try {
-              const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+              const jobResponse = await axios.get(`${this.backendUrl}/jobs/${jobId}`, {
                 headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {},
                 timeout: 3000
               }).catch(() => null);
