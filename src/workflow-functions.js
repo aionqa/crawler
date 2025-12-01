@@ -55,15 +55,16 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
     }
     
     // Get model and options from step config or use project default
-    const stepModel = parameters.model || null;
-    const stepReasoningEnabled = parameters.reasoning_enabled || false;
-    const stepWebsearchEnabled = parameters.websearch_enabled || false;
+    // Use undefined (not null) for optional values so project defaults can be used
+    const stepModel = parameters.model || undefined;
+    const stepReasoningEnabled = parameters.reasoning_enabled !== undefined ? parameters.reasoning_enabled : undefined;
+    const stepWebsearchEnabled = parameters.websearch_enabled !== undefined ? parameters.websearch_enabled : undefined;
     
-    // GPT-5 specific options
-    const stepTextFormat = parameters.text_format || null;
-    const stepReasoningEffort = parameters.reasoning_effort || null;
-    const stepVerbosity = parameters.verbosity || null;
-    const stepStoreLogs = parameters.store_logs || false;
+    // GPT-5 specific options - only include in payload if explicitly set
+    const stepTextFormat = parameters.text_format || undefined;
+    const stepReasoningEffort = parameters.reasoning_effort !== undefined ? parameters.reasoning_effort : undefined;
+    const stepVerbosity = parameters.verbosity !== undefined ? parameters.verbosity : undefined;
+    const stepStoreLogs = parameters.store_logs !== undefined ? parameters.store_logs : undefined;
     
     // Make AI call - makeAICallWithPrompt has built-in retry logic (2 attempts)
     // Don't add outer retry loop to avoid duplicate calls
@@ -77,14 +78,14 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
           jobId: context.jobId,
           project_id: context.project_id || context.projectId || null, // Pass project_id for LLM config lookup
           projectId: context.project_id || context.projectId || null, // Also pass as projectId for compatibility
-          model: stepModel, // Pass model to payload
-          reasoning_enabled: stepReasoningEnabled,
-          websearch_enabled: stepWebsearchEnabled,
-          // GPT-5 specific options
-          text_format: stepTextFormat,
-          reasoning_effort: stepReasoningEffort,
-          verbosity: stepVerbosity,
-          store_logs: stepStoreLogs
+          // Only include these in payload if explicitly set (undefined values will be omitted)
+          ...(stepModel !== undefined && { model: stepModel }),
+          ...(stepReasoningEnabled !== undefined && { reasoning_enabled: stepReasoningEnabled }),
+          ...(stepWebsearchEnabled !== undefined && { websearch_enabled: stepWebsearchEnabled }),
+          ...(stepTextFormat !== undefined && { text_format: stepTextFormat }),
+          ...(stepReasoningEffort !== undefined && { reasoning_effort: stepReasoningEffort }),
+          ...(stepVerbosity !== undefined && { verbosity: stepVerbosity }),
+          ...(stepStoreLogs !== undefined && { store_logs: stepStoreLogs })
         },
         jobId,
         'workflow-ai-request',

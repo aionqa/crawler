@@ -665,9 +665,10 @@ export class AIConversationLogger {
       const useWebsearch = websearchEnabled || payload?.websearch_enabled || projectOptions.websearch_enabled || false;
       
       // GPT-5 specific options (from payload, then project options, then defaults)
-      const textFormat = payload?.text_format || projectOptions.text_format || 'json_object';
-      const reasoningEffort = payload?.reasoning_effort || projectOptions.reasoning_effort || null;
-      const verbosity = payload?.verbosity || projectOptions.verbosity || null;
+      // Use !== undefined check to properly handle null values (null means explicitly disabled)
+      const textFormat = payload?.text_format !== undefined ? payload.text_format : (projectOptions.text_format || 'json_object');
+      const reasoningEffort = payload?.reasoning_effort !== undefined ? payload.reasoning_effort : (projectOptions.reasoning_effort || null);
+      const verbosity = payload?.verbosity !== undefined ? payload.verbosity : (projectOptions.verbosity || null);
       const storeLogs = payload?.store_logs !== undefined ? payload.store_logs : (projectOptions.store_logs !== undefined ? projectOptions.store_logs : true);
       
       const openaiRequest = {
