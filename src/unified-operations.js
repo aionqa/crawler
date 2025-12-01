@@ -1308,37 +1308,38 @@ async function validateLoginSuccessWithAI(page, context, openaiClient, approach)
 async function withBrowser(action, options = {}) {
   await sendLog(options.jobId || 'debug', 'info', `🌐 Launching embedded Chromium browser (runner mode)`);
   
+  // Import stealth configuration
+  const { 
+    getStealthLaunchArgs, 
+    getStealthContextOptions, 
+    injectStealthScripts 
+  } = await import('./stealth-config.js');
+  
   let browser;
   
   try {
-    // Launch local embedded browser (no remote browser needed)
+    // Launch local embedded browser with stealth configuration
     browser = await chromium.launch({
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-dev-shm-usage',
-        '--window-size=1920,1080',
-        '--force-device-scale-factor=1'
-      ]
+      args: getStealthLaunchArgs()
     });
     
-    await sendLog(options.jobId || 'server', 'info', `✅ Embedded browser launched successfully`);
+    await sendLog(options.jobId || 'server', 'info', `✅ Embedded browser launched successfully with stealth configuration`);
   } catch (error) {
     await sendLog(options.jobId || 'server', 'error', `Failed to launch embedded browser: ${error.message}`);
     throw new Error(`Embedded browser launch failed: ${error.message}`);
   }
   
-  // Configure browser context with video recording support
+  // Configure browser context with stealth options and video recording support
   const enableRecording = options.enable_video_recording !== false;
-  const contextOptions = {
-    userAgent: options.userAgent,
-    ignoreHTTPSErrors: true,
-    viewport: null, // Disable Playwright's default 800x600 viewport - use Chrome's window size instead
+  const contextOptions = getStealthContextOptions({
+    viewport: { width: 1920, height: 1080 },
+    userAgent: options.userAgent, // Allow override if provided
     recordVideo: enableRecording ? {
       dir: '/tmp/aionqa_videos',
       size: { width: 1920, height: 1080 }
     } : undefined
-  };
+  });
   
   if (enableRecording) {
     await sendLog(options.jobId || 'server', 'info', `🎥 Video recording enabled for session`);
@@ -1346,6 +1347,9 @@ async function withBrowser(action, options = {}) {
   
   const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
+  
+  // Inject stealth scripts to hide automation
+  await injectStealthScripts(page);
   
   // Set viewport to match window size (1920x1080 from launch args)
   await page.setViewportSize({ width: 1920, height: 1080 });
