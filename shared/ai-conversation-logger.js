@@ -640,15 +640,15 @@ export class AIConversationLogger {
       
       // 6. Construct OpenAI request (use modelOverride if provided, then payload model, then project model, then default)
       const model = modelOverride || payload?.model || projectModel || "gpt-5-mini";
-      // Get reasoning/websearch from parameters or payload
-      const useReasoning = reasoningEnabled || payload?.reasoning_enabled || false;
-      const useWebsearch = websearchEnabled || payload?.websearch_enabled || false;
+      // Get reasoning/websearch from parameters, payload, or project options (in that order)
+      const useReasoning = reasoningEnabled || payload?.reasoning_enabled || projectOptions.reasoning_enabled || false;
+      const useWebsearch = websearchEnabled || payload?.websearch_enabled || projectOptions.websearch_enabled || false;
       
-      // GPT-5 specific options
-      const textFormat = payload?.text_format || 'text';
-      const reasoningEffort = payload?.reasoning_effort || null;
-      const verbosity = payload?.verbosity || null;
-      const storeLogs = payload?.store_logs || false;
+      // GPT-5 specific options (from payload, then project options, then defaults)
+      const textFormat = payload?.text_format || projectOptions.text_format || 'json_object';
+      const reasoningEffort = payload?.reasoning_effort || projectOptions.reasoning_effort || null;
+      const verbosity = payload?.verbosity || projectOptions.verbosity || null;
+      const storeLogs = payload?.store_logs !== undefined ? payload.store_logs : (projectOptions.store_logs !== undefined ? projectOptions.store_logs : true);
       
       const openaiRequest = {
         model: model,
