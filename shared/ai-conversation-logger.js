@@ -704,15 +704,18 @@ export class AIConversationLogger {
       // Add reasoning if enabled and supported
       if (useReasoning) {
         openaiRequest.reasoning = true;
-        // Add reasoning effort for GPT-5 models (must be set even if null/empty to use API default)
+        // Add reasoning effort for GPT-5 models
+        // Use project setting unless workflow explicitly overrides it
         if (model.startsWith('gpt-5')) {
-          // If reasoning_effort is explicitly set (including empty string), use it
-          // Otherwise, don't set it and let OpenAI use its default
+          // reasoningEffort comes from: workflow payload > project options > null
+          // If it's set (from either source), pass it to OpenAI
+          // If null/undefined, don't set it and let OpenAI use its default
           if (reasoningEffort !== null && reasoningEffort !== undefined && reasoningEffort !== '') {
             openaiRequest.reasoning_effort = reasoningEffort;
+            console.log(`[AI-CALL] ✅ Setting reasoning_effort to: ${reasoningEffort} (from ${payload?.reasoning_effort !== undefined ? 'workflow' : 'project settings'})`);
+          } else {
+            console.log(`[AI-CALL] ⚠️ No reasoning_effort specified - OpenAI will use default (medium)`);
           }
-          // If reasoning is enabled but no effort specified, OpenAI will use default (medium)
-          // We don't need to set it explicitly in that case
         }
       }
       
@@ -826,9 +829,12 @@ export class AIConversationLogger {
           
           const paramsList = [];
           if (useReasoning) {
-            // Show actual reasoning_effort value, or 'medium' if not set (OpenAI default)
-            const effortDisplay = reasoningEffort || 'medium';
-            paramsList.push(`Reasoning: ${effortDisplay}`);
+            // Show actual reasoning_effort value being used (or indicate OpenAI default)
+            if (reasoningEffort) {
+              paramsList.push(`Reasoning: ${reasoningEffort}`);
+            } else {
+              paramsList.push(`Reasoning (default: medium)`);
+            }
           }
           if (useWebsearch) paramsList.push('Web Search');
           if (textFormat === 'json_object') paramsList.push('JSON Format');
