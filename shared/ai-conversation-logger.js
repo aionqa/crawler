@@ -523,9 +523,12 @@ export class AIConversationLogger {
    * @param {Object} sourcePayload - Optional source payload for logging
    * @param {number} attemptNumber - Current attempt number (1 or 2)
    * @param {string} previousError - Error from previous attempt (for retry context)
+   * @param {string} modelOverride - Optional model override
+   * @param {boolean} reasoningEnabled - Enable reasoning mode (if supported by model)
+   * @param {boolean} websearchEnabled - Enable web search (if supported by model)
    * @returns {Promise<Object>} AI response (parsed JSON)
    */
-  async makeAICallWithPrompt(promptSlug, payload, jobId, agentName, pageUrl = null, screenshotId = null, sourcePayload = null, customTemplate = null, attemptNumber = 1, previousError = null, modelOverride = null) {
+  async makeAICallWithPrompt(promptSlug, payload, jobId, agentName, pageUrl = null, screenshotId = null, sourcePayload = null, customTemplate = null, attemptNumber = 1, previousError = null, modelOverride = null, reasoningEnabled = false, websearchEnabled = false) {
     // Track pending conversation ID for error handling
     let pendingConversationId = null;
     let pendingChatContextId = null;
@@ -614,6 +617,10 @@ export class AIConversationLogger {
       
       // 5. Construct OpenAI request (use modelOverride if provided, otherwise default to gpt-5-mini)
       const model = modelOverride || payload?.model || "gpt-5-mini";
+      // Get reasoning/websearch from parameters or payload
+      const useReasoning = reasoningEnabled || payload?.reasoning_enabled || false;
+      const useWebsearch = websearchEnabled || payload?.websearch_enabled || false;
+      
       const openaiRequest = {
         model: model,
         input: responseInput,
@@ -621,6 +628,16 @@ export class AIConversationLogger {
           format: { type: "json_object" }
         }
       };
+      
+      // Add reasoning if enabled and supported
+      if (useReasoning) {
+        openaiRequest.reasoning = true;
+      }
+      
+      // Add web search if enabled and supported
+      if (useWebsearch) {
+        openaiRequest.web_search = true;
+      }
 
     if (conversationKey) {
       openaiRequest.conversation = {
