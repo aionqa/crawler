@@ -621,22 +621,42 @@ export class AIConversationLogger {
       const useReasoning = reasoningEnabled || payload?.reasoning_enabled || false;
       const useWebsearch = websearchEnabled || payload?.websearch_enabled || false;
       
+      // GPT-5 specific options
+      const textFormat = payload?.text_format || 'text';
+      const reasoningEffort = payload?.reasoning_effort || null;
+      const verbosity = payload?.verbosity || null;
+      const storeLogs = payload?.store_logs || false;
+      
       const openaiRequest = {
         model: model,
         input: responseInput,
         text: {
-          format: { type: "json_object" }
+          format: { type: textFormat === 'json_object' ? "json_object" : "text" }
         }
       };
       
       // Add reasoning if enabled and supported
       if (useReasoning) {
         openaiRequest.reasoning = true;
+        // Add reasoning effort for GPT-5 models
+        if (model.startsWith('gpt-5') && reasoningEffort) {
+          openaiRequest.reasoning_effort = reasoningEffort;
+        }
       }
       
       // Add web search if enabled and supported
       if (useWebsearch) {
         openaiRequest.web_search = true;
+      }
+      
+      // Add verbosity for GPT-5 models
+      if (model.startsWith('gpt-5') && verbosity) {
+        openaiRequest.verbosity = verbosity;
+      }
+      
+      // Add store_logs for GPT-5 models
+      if (model.startsWith('gpt-5') && storeLogs) {
+        openaiRequest.store_logs = storeLogs;
       }
 
     if (conversationKey) {
