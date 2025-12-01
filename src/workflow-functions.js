@@ -82,7 +82,9 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
           promptTemplate,
           1, // attemptNumber
           null, // previousError
-          stepModel // modelOverride
+          stepModel, // modelOverride
+          stepReasoningEnabled, // reasoningEnabled
+          stepWebsearchEnabled // websearchEnabled
         );
 
         // Validate response schema if provided
