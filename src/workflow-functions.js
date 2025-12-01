@@ -75,6 +75,8 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
           ...contextualPayload,
           pageUrl: context.pageUrl,
           jobId: context.jobId,
+          project_id: context.project_id || context.projectId || null, // Pass project_id for LLM config lookup
+          projectId: context.project_id || context.projectId || null, // Also pass as projectId for compatibility
           model: stepModel, // Pass model to payload
           reasoning_enabled: stepReasoningEnabled,
           websearch_enabled: stepWebsearchEnabled,
