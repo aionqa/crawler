@@ -709,9 +709,9 @@ export class AIConversationLogger {
         openaiRequest.web_search = true;
       }
       
-      // Add verbosity for GPT-5 models
+      // Add verbosity for GPT-5 models (must be in text.verbosity, not top level)
       if (model.startsWith('gpt-5') && verbosity) {
-        openaiRequest.verbosity = verbosity;
+        openaiRequest.text.verbosity = verbosity;
       }
       
       // Note: store_logs is not a valid OpenAI API parameter, it's just tracked in metadata
