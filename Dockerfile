@@ -16,11 +16,8 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install Node.js dependencies with retry logic
-RUN npm config set fetch-retries 5 && \
-    npm config set fetch-retry-mintimeout 20000 && \
-    npm config set fetch-retry-maxtimeout 120000 && \
-    npm install || (sleep 5 && npm install) || (sleep 10 && npm install)
+# Install Node.js dependencies
+RUN npm install
 
 # Install Playwright browsers and system dependencies (including ffmpeg for video recording)
 # This is required for video recording even when using remote browsers
