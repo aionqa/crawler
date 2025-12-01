@@ -580,10 +580,7 @@ export class AIConversationLogger {
         userMessageText += `\n\n=== PROJECT-SPECIFIC CONTEXT ===\n${payload.additional_prompt_text.trim()}\n`;
       }
       
-      // 2b. Add previous error context if this is a retry (attempt 2)
-      if (attemptNumber === 2 && previousError) {
-        userMessageText += `\n\n=== PREVIOUS ATTEMPT FAILED ===\nThe previous attempt failed with this error:\n${previousError}\n\nPlease adjust your response to avoid this error. Learn from the failure and provide a corrected response.\n`;
-      }
+      // No retry logic - removed
       
       // 3. Add explicit output schema instruction to ensure AI knows the expected format
       if (prompt.response_schema_description) {
@@ -596,10 +593,7 @@ export class AIConversationLogger {
         userMessageText += `\n\nIMPORTANT: Respond with VALID JSON ONLY. No markdown, no code blocks, just pure JSON.`;
       }
       
-      // Log attempt number
-      if (attemptNumber > 1) {
-        console.log(`[AI-CALL] 🔄 Retry attempt ${attemptNumber}/2 with previous error context`);
-      }
+      // No retry logic - removed
       
       const enhancedSystemMessage = prompt.system_message || 'You are an automation assistant.';
 
@@ -1044,7 +1038,7 @@ export class AIConversationLogger {
       return aiResponse;
       
     } catch (error) {
-      console.error(`[AI-CALL] ❌ AI call failed for prompt "${promptSlug}" (attempt ${attemptNumber}/2):`, error.message);
+      console.error(`[AI-CALL] ❌ AI call failed for prompt "${promptSlug}":`, error.message);
       
       // Update pending conversation to failed status if it exists
       if (pendingConversationId && jobId && this.backendUrl) {
@@ -1064,7 +1058,6 @@ export class AIConversationLogger {
             timestamp: new Date(),
             status: 'failed', // Update from pending to failed
             error: error.message,
-            attempt_number: attemptNumber,
             conversation_id: pendingConversationId
           };
           
@@ -1126,29 +1119,8 @@ export class AIConversationLogger {
         }
       }
       
-      // Retry logic: if this is the first attempt and it failed, try once more with error context
-      if (attemptNumber === 1) {
-        console.log(`[AI-CALL] 🔄 Retrying AI call with error context (attempt 2/2)...`);
-        try {
-          return await this.makeAICallWithPrompt(
-            promptSlug,
-            payload,
-            jobId,
-            agentName,
-            pageUrl,
-            screenshotId,
-            sourcePayload,
-            customTemplate, // Pass custom template to retry as well
-            2, // Second attempt
-            error.message // Pass error message as context
-          );
-        } catch (retryError) {
-          console.error(`[AI-CALL] ❌ Retry also failed. Giving up after 2 attempts.`);
-          throw retryError; // Throw the retry error
-        }
-      }
-      
-      throw error; // If this was already attempt 2, throw the error
+      // No retries - throw error immediately
+      throw error;
     }
   }
 
