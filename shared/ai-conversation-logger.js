@@ -615,8 +615,31 @@ export class AIConversationLogger {
       // 4. Construct Responses API input (supports text + optional screenshot)
       const responseInput = this.buildResponseInput(enhancedSystemMessage, userMessageText, payload);
       
-      // 5. Construct OpenAI request (use modelOverride if provided, otherwise default to gpt-5-mini)
-      const model = modelOverride || payload?.model || "gpt-5-mini";
+      // 5. Get project LLM config to use project's default model if not overridden
+      let projectModel = null;
+      let projectOptions = {};
+      if (jobId && this.backendUrl) {
+        try {
+          // Extract project_id from payload or job context
+          const projectId = payload?.project_id || payload?.projectId || null;
+          if (projectId) {
+            const configResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/llm-config`, {
+              headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {},
+              timeout: 5000
+            }).catch(() => null);
+            if (configResponse && configResponse.data) {
+              projectModel = configResponse.data.model;
+              projectOptions = configResponse.data.options || {};
+            }
+          }
+        } catch (error) {
+          console.warn(`[AI-CALL] ⚠️ Failed to fetch project LLM config: ${error.message}`);
+          // Continue with defaults
+        }
+      }
+      
+      // 6. Construct OpenAI request (use modelOverride if provided, then payload model, then project model, then default)
+      const model = modelOverride || payload?.model || projectModel || "gpt-5-mini";
       // Get reasoning/websearch from parameters or payload
       const useReasoning = reasoningEnabled || payload?.reasoning_enabled || false;
       const useWebsearch = websearchEnabled || payload?.websearch_enabled || false;
