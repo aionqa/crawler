@@ -820,7 +820,11 @@ export class AIConversationLogger {
           };
           
           const paramsList = [];
-          if (useReasoning) paramsList.push(`Reasoning: ${reasoningEffort || 'medium'}`);
+          if (useReasoning) {
+            // Show actual reasoning_effort value, or 'medium' if not set (OpenAI default)
+            const effortDisplay = reasoningEffort || 'medium';
+            paramsList.push(`Reasoning: ${effortDisplay}`);
+          }
           if (useWebsearch) paramsList.push('Web Search');
           if (textFormat === 'json_object') paramsList.push('JSON Format');
           if (verbosity) paramsList.push(`Verbosity: ${verbosity}`);
