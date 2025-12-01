@@ -787,10 +787,31 @@ export class AIConversationLogger {
         }
       }
       
-      // 6.5. Log AI call start with model and params to job logs (only on first attempt, not retries)
+      // 6.5. Log AI conversation immediately to job logs with step name, page, and request JSON
       const aiCallStartTime = Date.now();
       if (jobId && this.backendUrl && attemptNumber === 1) {
         try {
+          // Extract step information from sourcePayload
+          const stepName = sourcePayload?.step_name || sourcePayload?.stepId || 'AI Request';
+          const stepId = sourcePayload?.step_id || sourcePayload?.stepId || null;
+          
+          // Build request JSON tree for display
+          const requestTree = {
+            model: model,
+            prompt: promptSlug,
+            page: pageUrl || 'Unknown',
+            step: stepName,
+            parameters: {
+              reasoning_enabled: useReasoning,
+              websearch_enabled: useWebsearch,
+              text_format: textFormat,
+              reasoning_effort: reasoningEffort,
+              verbosity: verbosity,
+              store_logs: storeLogs
+            },
+            request: openaiRequest
+          };
+          
           const paramsList = [];
           if (useReasoning) paramsList.push(`Reasoning: ${reasoningEffort || 'medium'}`);
           if (useWebsearch) paramsList.push('Web Search');
@@ -799,14 +820,19 @@ export class AIConversationLogger {
           if (storeLogs) paramsList.push('Store Logs');
           
           const paramsText = paramsList.length > 0 ? ` (${paramsList.join(', ')})` : '';
+          const stepInfo = stepName !== 'AI Request' ? ` - Step: ${stepName}` : '';
+          const pageInfo = pageUrl ? ` - Page: ${new URL(pageUrl).pathname}` : '';
           
           await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
             jobId,
             level: 'info',
-            message: `🤖 Starting AI call: Model ${model}${paramsText}`,
+            message: `🤖 AI Request: ${stepName}${pageInfo} - Model: ${model}${paramsText}`,
             component: 'AI-CALL',
             metadata: {
               prompt_slug: promptSlug,
+              step_name: stepName,
+              step_id: stepId,
+              page_url: pageUrl,
               model: model,
               model_params: {
                 reasoning_enabled: useReasoning,
@@ -816,7 +842,9 @@ export class AIConversationLogger {
                 verbosity: verbosity,
                 store_logs: storeLogs
               },
-              status: 'starting',
+              full_request: JSON.stringify(requestTree, null, 2), // Request as JSON tree
+              status: 'pending',
+              aiConversationId: pendingConversationId, // Link to conversation
               attempt_number: attemptNumber
             }
           }, {
@@ -934,6 +962,9 @@ export class AIConversationLogger {
             component: 'AI-CALL',
             metadata: {
               prompt_slug: promptSlug,
+              step_name: sourcePayload?.step_name || sourcePayload?.stepId || null,
+              step_id: sourcePayload?.step_id || sourcePayload?.stepId || null,
+              page_url: pageUrl,
               model: response.model,
               duration_ms: aiCallDuration,
               duration_seconds: parseFloat(durationSeconds),
@@ -944,7 +975,14 @@ export class AIConversationLogger {
               },
               cost: costDetails,
               status: 'completed',
-              finish_reason: finishReason
+              finish_reason: finishReason,
+              full_response: JSON.stringify({
+                model: response.model,
+                response: aiResponse,
+                usage: response.usage,
+                finish_reason: finishReason
+              }, null, 2), // Response as JSON tree
+              aiConversationId: pendingConversationId // Link to conversation
             }
           }, {
             headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}

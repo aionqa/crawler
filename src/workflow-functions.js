@@ -69,6 +69,9 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
     // Make AI call - makeAICallWithPrompt has built-in retry logic (2 attempts)
     // Don't add outer retry loop to avoid duplicate calls
     try {
+      // Get step name from context or parameters
+      const stepName = context?.stepName || parameters?.name || stepId || 'AI Request';
+      
       const result = await aiLogger.makeAICallWithPrompt(
         parameters.prompt,
         {
@@ -91,7 +94,12 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
         'workflow-ai-request',
         context.pageUrl,
         null,
-        attachments,
+        {
+          ...attachments,
+          step_id: stepId,
+          step_name: stepName,
+          workflow_step: true
+        },
         promptTemplate,
         1, // attemptNumber (makeAICallWithPrompt will retry internally if needed)
         null, // previousError
