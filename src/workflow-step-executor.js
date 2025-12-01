@@ -122,9 +122,12 @@ export class WorkflowStepExecutor {
    */
   async getBrowserForJob(jobId) {
     if (!this.activeBrowsers.has(jobId)) {
+      // Import stealth configuration
+      const { getStealthLaunchArgs } = await import('./stealth-config.js');
+      
       const browser = await chromium.launch({
         headless: true,
-        args: ['--no-sandbox', '--disable-dev-shm-usage']
+        args: getStealthLaunchArgs()
       });
       this.activeBrowsers.set(jobId, browser);
     }
@@ -137,6 +140,10 @@ export class WorkflowStepExecutor {
   async getPageForJob(jobId, context) {
     const browser = await this.getBrowserForJob(jobId);
     const page = await browser.newPage();
+    
+    // Inject stealth scripts to hide automation
+    const { injectStealthScripts } = await import('./stealth-config.js');
+    await injectStealthScripts(page);
     
     // Navigate to URL if provided
     if (context.pageUrl) {

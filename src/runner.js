@@ -328,23 +328,35 @@ async function executeLoginJob(job, streamInterval) {
   };
 
   // Launch local browser (embedded) - SAME as crawl jobs
-  console.log(`🌐 [UNIFIED-RUNNER] Launching local Chromium browser for login`);
+  console.log(`🌐 [UNIFIED-RUNNER] Launching local Chromium browser for login with stealth configuration`);
   const { chromium } = await import('playwright');
+  
+  // Import stealth configuration
+  const { 
+    getStealthLaunchArgs, 
+    getStealthContextOptions, 
+    injectStealthScripts 
+  } = await import('./stealth-config.js');
+  
   const browser = await chromium.launch({ 
     headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage']
+    args: getStealthLaunchArgs()
   });
 
-  const context = await browser.newContext({
-    viewport: { width: 1920, height: 1080 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    recordVideo: {
-      dir: '/tmp/aionqa_videos',
-      size: { width: 1920, height: 1080 }
-    }
-  });
+  const context = await browser.newContext(
+    getStealthContextOptions({
+      viewport: { width: 1920, height: 1080 },
+      recordVideo: {
+        dir: '/tmp/aionqa_videos',
+        size: { width: 1920, height: 1080 }
+      }
+    })
+  );
 
   const page = await context.newPage();
+  
+  // Inject stealth scripts to hide automation
+  await injectStealthScripts(page);
 
   // Start video recording (full video for playback)
   videoRecorder.startRecording(job.id, context, page);
