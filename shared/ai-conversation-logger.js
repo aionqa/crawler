@@ -675,8 +675,8 @@ export class AIConversationLogger {
       // Debug logging to understand model selection
       if (attemptNumber === 1) {
         console.log(`[AI-CALL] 🔍 Model selection: modelOverride=${modelOverride}, payload.model=${payload?.model}, projectModel=${projectModel}, final=${model}`);
-        console.log(`[AI-CALL] 🔍 Reasoning: enabled=${useReasoning}, effort=${reasoningEffort}, from payload=${payload?.reasoning_effort}, from project=${projectOptions.reasoning_effort}`);
       }
+      
       // Get reasoning/websearch from parameters, payload, or project options (in that order)
       const useReasoning = reasoningEnabled || payload?.reasoning_enabled || projectOptions.reasoning_enabled || false;
       const useWebsearch = websearchEnabled || payload?.websearch_enabled || projectOptions.websearch_enabled || false;
@@ -687,6 +687,11 @@ export class AIConversationLogger {
       const reasoningEffort = payload?.reasoning_effort !== undefined ? payload.reasoning_effort : (projectOptions.reasoning_effort || null);
       const verbosity = payload?.verbosity !== undefined ? payload.verbosity : (projectOptions.verbosity || null);
       const storeLogs = payload?.store_logs !== undefined ? payload.store_logs : (projectOptions.store_logs !== undefined ? projectOptions.store_logs : true);
+      
+      // Debug logging for reasoning after variables are defined
+      if (attemptNumber === 1) {
+        console.log(`[AI-CALL] 🔍 Reasoning: enabled=${useReasoning}, effort=${reasoningEffort}, from payload=${payload?.reasoning_effort}, from project=${projectOptions.reasoning_effort}`);
+      }
       
       const openaiRequest = {
         model: model,
