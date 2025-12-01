@@ -617,6 +617,8 @@ export class AIConversationLogger {
           // Extract project_id from payload or job context
           let projectId = payload?.project_id || payload?.projectId || null;
           
+          console.log(`[AI-CALL] 🔍 Looking for project_id: payload.project_id=${payload?.project_id}, payload.projectId=${payload?.projectId}, jobId=${jobId}`);
+          
           // If project_id not in payload, try to get it from job
           if (!projectId && jobId) {
             try {
@@ -660,6 +662,11 @@ export class AIConversationLogger {
       
       // 6. Construct OpenAI request (use modelOverride if provided, then payload model, then project model, then default)
       const model = modelOverride || payload?.model || projectModel || "gpt-5-mini";
+      
+      // Debug logging to understand model selection
+      if (attemptNumber === 1) {
+        console.log(`[AI-CALL] 🔍 Model selection: modelOverride=${modelOverride}, payload.model=${payload?.model}, projectModel=${projectModel}, final=${model}`);
+      }
       // Get reasoning/websearch from parameters, payload, or project options (in that order)
       const useReasoning = reasoningEnabled || payload?.reasoning_enabled || projectOptions.reasoning_enabled || false;
       const useWebsearch = websearchEnabled || payload?.websearch_enabled || projectOptions.websearch_enabled || false;
