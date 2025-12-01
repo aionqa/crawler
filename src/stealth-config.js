@@ -176,33 +176,106 @@ export async function injectStealthScripts(page) {
  * Add human-like delays and behaviors
  */
 export async function addHumanBehavior(page) {
-  // Random mouse movements
-  const moveMouse = async () => {
+  // Random mouse movements with realistic patterns
+  const moveMouse = async (targetX = null, targetY = null) => {
     const viewport = page.viewportSize();
     if (viewport) {
-      const x = Math.random() * viewport.width;
-      const y = Math.random() * viewport.height;
-      await page.mouse.move(x, y, { steps: Math.floor(Math.random() * 10) + 5 });
+      const x = targetX !== null ? targetX : Math.random() * viewport.width;
+      const y = targetY !== null ? targetY : Math.random() * viewport.height;
+      // Use curved movement with multiple steps for realism
+      const steps = Math.floor(Math.random() * 15) + 10;
+      await page.mouse.move(x, y, { steps });
+      // Small random pause after movement
+      await humanDelay(50, 200);
     }
   };
 
-  // Random scrolls
-  const randomScroll = async () => {
+  // Random scrolls with human-like patterns
+  const randomScroll = async (direction = 'down', amount = null) => {
     const viewport = page.viewportSize();
     if (viewport) {
-      const scrollY = Math.random() * viewport.height * 0.5;
-      await page.mouse.wheel(0, scrollY);
+      const scrollY = amount !== null ? amount : (Math.random() * viewport.height * 0.3) + 100;
+      const finalY = direction === 'down' ? scrollY : -scrollY;
+      // Scroll in small increments like humans do
+      const increments = Math.floor(Math.random() * 3) + 2;
+      for (let i = 0; i < increments; i++) {
+        await page.mouse.wheel(0, finalY / increments);
+        await humanDelay(100, 300);
+      }
     }
   };
 
-  return { moveMouse, randomScroll };
+  // Human-like click with mouse movement first
+  const humanClick = async (selector, options = {}) => {
+    const element = await page.locator(selector).first();
+    const box = await element.boundingBox();
+    
+    if (box) {
+      // Move mouse to element with slight offset (humans rarely click dead center)
+      const offsetX = (Math.random() - 0.5) * 10;
+      const offsetY = (Math.random() - 0.5) * 10;
+      await page.mouse.move(box.x + box.width / 2 + offsetX, box.y + box.height / 2 + offsetY, {
+        steps: Math.floor(Math.random() * 10) + 5
+      });
+      await humanDelay(100, 300); // Pause before clicking
+      await element.click(options);
+      await humanDelay(50, 150); // Pause after clicking
+    } else {
+      await element.click(options);
+    }
+  };
+
+  // Human-like hover
+  const humanHover = async (selector) => {
+    const element = await page.locator(selector).first();
+    const box = await element.boundingBox();
+    
+    if (box) {
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, {
+        steps: Math.floor(Math.random() * 8) + 5
+      });
+      await humanDelay(200, 500); // Humans hover for a moment
+    } else {
+      await element.hover();
+    }
+  };
+
+  return { moveMouse, randomScroll, humanClick, humanHover };
 }
 
 /**
- * Wait with human-like random delay
+ * Wait with human-like random delay (uses realistic timing patterns)
  */
 export async function humanDelay(min = 100, max = 500) {
-  const delay = Math.floor(Math.random() * (max - min + 1)) + min;
-  await new Promise(resolve => setTimeout(resolve, delay));
+  // Use exponential distribution for more realistic delays
+  const lambda = 1 / ((min + max) / 2);
+  const delay = Math.min(max, Math.max(min, -Math.log(Math.random()) / lambda));
+  await new Promise(resolve => setTimeout(resolve, Math.floor(delay)));
+}
+
+/**
+ * Human-like typing delay between characters
+ */
+export function getTypingDelay() {
+  // Humans type at variable speeds, faster for common patterns
+  const baseDelay = 50 + Math.random() * 150;
+  // Occasionally pause longer (thinking, reading)
+  if (Math.random() < 0.1) {
+    return baseDelay + Math.random() * 500;
+  }
+  return baseDelay;
+}
+
+/**
+ * Simulate human reading time (for pages, forms, etc.)
+ */
+export async function humanReadingTime(textLength = 0) {
+  // Average reading speed: 200-300 words per minute
+  // Assume average word length: 5 characters
+  const words = textLength / 5;
+  const readingTimeMs = (words / 250) * 60 * 1000; // Convert to milliseconds
+  // Add randomness: humans read at variable speeds
+  const delay = readingTimeMs * (0.5 + Math.random() * 1.0);
+  await humanDelay(Math.min(500, delay), Math.min(3000, delay + 1000));
 }
 
