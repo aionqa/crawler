@@ -1261,6 +1261,28 @@ class EnhancedWorkflowExecutor {
         );
       }
       
+      // Add human-like pre-execution behaviors
+      try {
+        const { addHumanBehavior, humanDelay } = await import('./stealth-config.js');
+        const { moveMouse, randomScroll } = await addHumanBehavior(page);
+        
+        // Random mouse movement (humans move mouse even when not clicking)
+        if (Math.random() < 0.3) {
+          await moveMouse();
+        }
+        
+        // Small random scroll (humans scroll to read)
+        if (Math.random() < 0.4) {
+          await randomScroll('down', 50 + Math.random() * 150);
+        }
+        
+        // Brief pause before starting actions
+        await humanDelay(200, 500);
+      } catch (error) {
+        // Don't fail if human behavior injection fails
+        console.warn(`[ENHANCED-WORKFLOW-EXECUTOR] Human behavior injection warning: ${error.message}`);
+      }
+      
       // Playwright scripts must execute in Node.js context, not browser context
       // The 'page' object is available in Node.js, not in browser
       // Create an async function that has access to the page object

@@ -696,6 +696,28 @@ class WorkflowExecutor {
 
         console.log(`[WorkflowExecutor] Executing script for leg ${leg.leg_id}`);
 
+        // Step 4: Add human-like pre-execution behaviors
+        try {
+          const { addHumanBehavior, humanDelay } = await import('./stealth-config.js');
+          const { moveMouse, randomScroll } = await addHumanBehavior(page);
+          
+          // Random mouse movement (humans move mouse even when not clicking)
+          if (Math.random() < 0.3) {
+            await moveMouse();
+          }
+          
+          // Small random scroll (humans scroll to read)
+          if (Math.random() < 0.4) {
+            await randomScroll('down', 50 + Math.random() * 150);
+          }
+          
+          // Brief pause before starting actions
+          await humanDelay(200, 500);
+        } catch (error) {
+          // Don't fail if human behavior injection fails
+          console.warn(`[WorkflowExecutor] Human behavior injection warning: ${error.message}`);
+        }
+        
         // Step 4: Execute Playwright script
         const executionResult = await this.executeScript(page, playwrightScript, jobId);
         
