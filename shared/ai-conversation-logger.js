@@ -750,9 +750,9 @@ export class AIConversationLogger {
         }
       }
       
-      // 6.5. Log AI call start with model and params to job logs
+      // 6.5. Log AI call start with model and params to job logs (only on first attempt, not retries)
       const aiCallStartTime = Date.now();
-      if (jobId && this.backendUrl) {
+      if (jobId && this.backendUrl && attemptNumber === 1) {
         try {
           const paramsList = [];
           if (useReasoning) paramsList.push(`Reasoning: ${reasoningEffort || 'medium'}`);
@@ -779,7 +779,8 @@ export class AIConversationLogger {
                 verbosity: verbosity,
                 store_logs: storeLogs
               },
-              status: 'starting'
+              status: 'starting',
+              attempt_number: attemptNumber
             }
           }, {
             headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}

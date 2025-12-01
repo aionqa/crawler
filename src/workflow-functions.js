@@ -65,79 +65,65 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
     const stepVerbosity = parameters.verbosity || null;
     const stepStoreLogs = parameters.store_logs || false;
     
-    // Make AI call with retry logic
-    let lastError = null;
-    for (let attempt = 1; attempt <= (parameters.maxRetries || 3); attempt++) {
-      try {
-        const result = await aiLogger.makeAICallWithPrompt(
-          parameters.prompt,
-          {
-            ...attachments,
-            ...contextualPayload,
-            pageUrl: context.pageUrl,
-            jobId: context.jobId,
-            model: stepModel, // Pass model to payload
-            reasoning_enabled: stepReasoningEnabled,
-            websearch_enabled: stepWebsearchEnabled,
-            // GPT-5 specific options
-            text_format: stepTextFormat,
-            reasoning_effort: stepReasoningEffort,
-            verbosity: stepVerbosity,
-            store_logs: stepStoreLogs
-          },
-          jobId,
-          'workflow-ai-request',
-          context.pageUrl,
-          null,
-          attachments,
-          promptTemplate,
-          1, // attemptNumber
-          null, // previousError
-          stepModel, // modelOverride
-          stepReasoningEnabled, // reasoningEnabled
-          stepWebsearchEnabled // websearchEnabled
-        );
+    // Make AI call - makeAICallWithPrompt has built-in retry logic (2 attempts)
+    // Don't add outer retry loop to avoid duplicate calls
+    try {
+      const result = await aiLogger.makeAICallWithPrompt(
+        parameters.prompt,
+        {
+          ...attachments,
+          ...contextualPayload,
+          pageUrl: context.pageUrl,
+          jobId: context.jobId,
+          model: stepModel, // Pass model to payload
+          reasoning_enabled: stepReasoningEnabled,
+          websearch_enabled: stepWebsearchEnabled,
+          // GPT-5 specific options
+          text_format: stepTextFormat,
+          reasoning_effort: stepReasoningEffort,
+          verbosity: stepVerbosity,
+          store_logs: stepStoreLogs
+        },
+        jobId,
+        'workflow-ai-request',
+        context.pageUrl,
+        null,
+        attachments,
+        promptTemplate,
+        1, // attemptNumber (makeAICallWithPrompt will retry internally if needed)
+        null, // previousError
+        stepModel, // modelOverride
+        stepReasoningEnabled, // reasoningEnabled
+        stepWebsearchEnabled // websearchEnabled
+      );
 
-        // Validate response schema if provided
-        if (parameters.outputSchema) {
-          const schema = typeof parameters.outputSchema === 'string' 
-            ? JSON.parse(parameters.outputSchema) 
-            : parameters.outputSchema;
-          
-          if (!validateSchema(result, schema)) {
-            throw new Error('AI response does not match required schema');
-          }
-        }
-
-        const responsePayload = {
-          success: true,
-          result: result,
-          attempt: attempt,
-          prompt: parameters.prompt,
-          lastAIResponse: result
-        };
-
-        if (parameters.storeResultAs) {
-          responsePayload[parameters.storeResultAs] = result;
-        }
-
-        if (parameters.mergeResultIntoContext && typeof result === 'object' && result !== null) {
-          Object.assign(responsePayload, result);
-        }
-
-        return responsePayload;
-
-      } catch (error) {
-        lastError = error;
-        console.log(`[WORKFLOW-FUNCTIONS] AI Request attempt ${attempt} failed:`, error.message);
+      // Validate response schema if provided
+      if (parameters.outputSchema) {
+        const schema = typeof parameters.outputSchema === 'string' 
+          ? JSON.parse(parameters.outputSchema) 
+          : parameters.outputSchema;
         
-        if (attempt < (parameters.maxRetries || 3)) {
-          await sleep(2000 * attempt); // Exponential backoff
+        if (!validateSchema(result, schema)) {
+          throw new Error('AI response does not match required schema');
         }
       }
-    }
 
-    throw lastError || new Error('AI Request failed after all retries');
+      const responsePayload = {
+        success: true,
+        result: result,
+        prompt: parameters.prompt,
+        lastAIResponse: result
+      };
+
+      if (parameters.storeResultAs) {
+        responsePayload[parameters.storeResultAs] = result;
+      }
+
+      if (parameters.mergeResultIntoContext && typeof result === 'object' && result !== null) {
+        Object.assign(responsePayload, result);
+      }
+
+      return responsePayload;
 
   } catch (error) {
     console.error(`[WORKFLOW-FUNCTIONS] AI Request failed:`, error);
