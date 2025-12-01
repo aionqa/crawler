@@ -695,7 +695,17 @@ export class AIConversationLogger {
             metadata: {
               prompt_slug: promptSlug,
               pending: true,
-              request_sent_at: new Date().toISOString()
+              request_sent_at: new Date().toISOString(),
+              // Add model and params information
+              model: model,
+              model_params: {
+                reasoning_enabled: useReasoning,
+                websearch_enabled: useWebsearch,
+                text_format: textFormat,
+                reasoning_effort: reasoningEffort,
+                verbosity: verbosity,
+                store_logs: storeLogs
+              }
             },
             conversation_id: pendingConversationIdValue
           };
@@ -717,6 +727,45 @@ export class AIConversationLogger {
         } catch (pendingLogError) {
           console.warn(`[AI-CALL] ⚠️ Error logging pending request: ${pendingLogError.message}`);
           // Continue with API call even if pending log fails
+        }
+      }
+      
+      // 6.5. Log AI call start with model and params to job logs
+      const aiCallStartTime = Date.now();
+      if (jobId && this.backendUrl) {
+        try {
+          const paramsList = [];
+          if (useReasoning) paramsList.push(`Reasoning: ${reasoningEffort || 'medium'}`);
+          if (useWebsearch) paramsList.push('Web Search');
+          if (textFormat === 'json_object') paramsList.push('JSON Format');
+          if (verbosity) paramsList.push(`Verbosity: ${verbosity}`);
+          if (storeLogs) paramsList.push('Store Logs');
+          
+          const paramsText = paramsList.length > 0 ? ` (${paramsList.join(', ')})` : '';
+          
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId,
+            level: 'info',
+            message: `🤖 Starting AI call: Model ${model}${paramsText}`,
+            component: 'AI-CALL',
+            metadata: {
+              prompt_slug: promptSlug,
+              model: model,
+              model_params: {
+                reasoning_enabled: useReasoning,
+                websearch_enabled: useWebsearch,
+                text_format: textFormat,
+                reasoning_effort: reasoningEffort,
+                verbosity: verbosity,
+                store_logs: storeLogs
+              },
+              status: 'starting'
+            }
+          }, {
+            headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}
+          }).catch(() => {}); // Silent fail - don't block execution
+        } catch (e) {
+          // Silent fail - don't block execution
         }
       }
       
@@ -806,6 +855,47 @@ export class AIConversationLogger {
         }
       }
       
+      // 9. Log AI call completion with duration, tokens, and cost to job logs
+      const aiCallDuration = Date.now() - aiCallStartTime;
+      if (jobId && this.backendUrl && response.usage) {
+        try {
+          const costDetails = this.calculateCost(response.usage, response.model);
+          const inputTokens = response.usage.prompt_tokens ?? response.usage.input_tokens ?? 0;
+          const outputTokens = response.usage.completion_tokens ?? response.usage.output_tokens ?? 0;
+          const totalTokens = response.usage.total_tokens ?? (inputTokens + outputTokens);
+          
+          const durationSeconds = (aiCallDuration / 1000).toFixed(2);
+          const costText = costDetails.totalCost > 0 
+            ? `Cost: $${costDetails.totalCost.toFixed(6)} USD`
+            : 'Cost: $0.000000 USD';
+          
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId,
+            level: 'info',
+            message: `✅ AI call completed in ${durationSeconds}s - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, ${costText}`,
+            component: 'AI-CALL',
+            metadata: {
+              prompt_slug: promptSlug,
+              model: response.model,
+              duration_ms: aiCallDuration,
+              duration_seconds: parseFloat(durationSeconds),
+              usage: {
+                input_tokens: inputTokens,
+                output_tokens: outputTokens,
+                total_tokens: totalTokens
+              },
+              cost: costDetails,
+              status: 'completed',
+              finish_reason: finishReason
+            }
+          }, {
+            headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}
+          }).catch(() => {}); // Silent fail - don't block execution
+        } catch (e) {
+          // Silent fail - don't block execution
+        }
+      }
+      
       // 10. Log conversation to job logs with FULL payload as attachments
       const conversationRecord = await this.logAIRequestResponse(
         jobId,
@@ -836,6 +926,20 @@ export class AIConversationLogger {
       
       if (conversationRecord) {
         // Update the pending conversation with the actual response
+        // Add model and params to metadata
+        const enhancedMetadata = {
+          ...conversationRecord.metadata,
+          model: model,
+          model_params: {
+            reasoning_enabled: useReasoning,
+            websearch_enabled: useWebsearch,
+            text_format: textFormat,
+            reasoning_effort: reasoningEffort,
+            verbosity: verbosity,
+            store_logs: storeLogs
+          }
+        };
+        
         await this.sendAIConversation(
           jobId,
           agentName,
@@ -849,7 +953,7 @@ export class AIConversationLogger {
             human_request: conversationRecord.humanRequest,
             human_response: conversationRecord.humanResponse,
             attachments: conversationRecord.attachments,
-            metadata: conversationRecord.metadata,
+            metadata: enhancedMetadata,
             cost: conversationRecord.cost,
             usage: conversationRecord.usage,
             status: 'success', // Update status from pending to success
@@ -875,7 +979,18 @@ export class AIConversationLogger {
             status: 'success', // Update from pending to success
             usage: response.usage,
             cost: this.calculateCost(response.usage, response.model),
-            conversation_id: pendingConversationId
+            conversation_id: pendingConversationId,
+            metadata: {
+              model: model,
+              model_params: {
+                reasoning_enabled: useReasoning,
+                websearch_enabled: useWebsearch,
+                text_format: textFormat,
+                reasoning_effort: reasoningEffort,
+                verbosity: verbosity,
+                store_logs: storeLogs
+              }
+            }
           };
           
           await fetch(`${this.backendUrl}/ai-conversations`, {
@@ -1169,6 +1284,24 @@ export class AIConversationLogger {
 
       const timestamp = new Date();
 
+      // Extract model and params from sourcePayload or options
+      const modelInfo = sourcePayload?.model || options?.model || additionalMetadata?.model || null;
+      const modelParams = {
+        reasoning_enabled: sourcePayload?.reasoning_enabled || options?.reasoning_enabled || additionalMetadata?.model_params?.reasoning_enabled || false,
+        websearch_enabled: sourcePayload?.websearch_enabled || options?.websearch_enabled || additionalMetadata?.model_params?.websearch_enabled || false,
+        text_format: sourcePayload?.text_format || options?.text_format || additionalMetadata?.model_params?.text_format || 'json_object',
+        reasoning_effort: sourcePayload?.reasoning_effort || options?.reasoning_effort || additionalMetadata?.model_params?.reasoning_effort || null,
+        verbosity: sourcePayload?.verbosity || options?.verbosity || additionalMetadata?.model_params?.verbosity || null,
+        store_logs: sourcePayload?.store_logs !== undefined ? sourcePayload.store_logs : (options?.store_logs !== undefined ? options.store_logs : true)
+      };
+      
+      // Merge model info into metadata
+      const enhancedMetadata = {
+        ...additionalMetadata,
+        model: modelInfo,
+        model_params: modelParams
+      };
+      
       const conversationData = {
         job_id: jobId,
         agent_name: approachAgentName, // Use approach-specific agent name
@@ -1192,7 +1325,7 @@ export class AIConversationLogger {
         cost: costDetails,
         usage: usageDetails,
         attachments,
-        metadata: additionalMetadata,
+        metadata: enhancedMetadata,
         conversation_id: explicitConversationId,
         // Enhanced payload structure
         enhanced_payload: options.enhanced_payload || false,
