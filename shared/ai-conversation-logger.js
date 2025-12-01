@@ -565,7 +565,12 @@ export class AIConversationLogger {
       prompt.response_schema = prompt.response_schema || null;
       
       // 2. Replace placeholders in user message template
-      let userMessageText = this.replacePlaceholders(prompt.user_message_template, payload);
+      // CRITICAL: Remove URLs from payload to prevent OpenAI from making direct calls to websites
+      const safePayload = { ...payload };
+      delete safePayload.page_url;
+      delete safePayload.pageUrl;
+      delete safePayload.url;
+      let userMessageText = this.replacePlaceholders(prompt.user_message_template, safePayload);
       
       // 2a. Add project-specific additional prompt text if available
       if (payload.additional_prompt_text && payload.additional_prompt_text.trim()) {
