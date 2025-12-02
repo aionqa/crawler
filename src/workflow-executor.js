@@ -1333,19 +1333,58 @@ class WorkflowExecutor {
             // Enhanced click with visibility and stability checks
             const element = pageObj.locator(selector).first();
             
-            // Wait for element to be visible
-            await element.waitFor({ state: 'visible', timeout: options.timeout || 30000 });
+            // Increased timeout for slow-loading elements (60 seconds)
+            const visibilityTimeout = options.timeout || 60000;
+            
+            // Wait for element to be visible with longer timeout
+            await element.waitFor({ state: 'visible', timeout: visibilityTimeout });
+            
+            // Check if element is actually visible (not just in DOM but hidden by CSS)
+            const isActuallyVisible = await element.evaluate((el) => {
+              const style = window.getComputedStyle(el);
+              return style.display !== 'none' && 
+                     style.visibility !== 'hidden' && 
+                     style.opacity !== '0' &&
+                     el.offsetWidth > 0 && 
+                     el.offsetHeight > 0;
+            }).catch(() => false);
+            
+            if (!isActuallyVisible) {
+              // Try to make element visible by removing hidden styles
+              await element.evaluate((el) => {
+                el.style.display = '';
+                el.style.visibility = '';
+                el.style.opacity = '';
+              }).catch(() => {});
+              
+              // Wait a bit for styles to apply
+              await pageObj.waitForTimeout(500);
+              
+              // Re-check visibility
+              const isNowVisible = await element.evaluate((el) => {
+                const style = window.getComputedStyle(el);
+                return style.display !== 'none' && 
+                       style.visibility !== 'hidden' && 
+                       style.opacity !== '0' &&
+                       el.offsetWidth > 0 && 
+                       el.offsetHeight > 0;
+              }).catch(() => false);
+              
+              if (!isNowVisible) {
+                throw new Error(`Element ${selector} is not visible (hidden by CSS)`);
+              }
+            }
             
             // Scroll element into view if needed
-            await element.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {
+            await element.scrollIntoViewIfNeeded({ timeout: 10000 }).catch(() => {
               // Ignore scroll errors, continue with click
             });
             
-            // Wait a bit for any animations to settle
-            await pageObj.waitForTimeout(100);
+            // Wait a bit for any animations to settle (increased delay)
+            await pageObj.waitForTimeout(300);
             
             // Check if element is enabled
-            const isEnabled = await element.isEnabled({ timeout: 1000 }).catch(() => true);
+            const isEnabled = await element.isEnabled({ timeout: 2000 }).catch(() => true);
             if (!isEnabled) {
               throw new Error(`Element ${selector} is not enabled`);
             }
@@ -1366,10 +1405,11 @@ class WorkflowExecutor {
             }
             
             // Perform click with force option if element might be covered
+            // Increased timeout to 60 seconds
             return await element.click({ 
               ...options,
               force: options.force || false,
-              timeout: options.timeout || 30000
+              timeout: options.timeout || 60000
             });
           } catch (markerError) {
             // Don't fail script execution if marker sending fails
