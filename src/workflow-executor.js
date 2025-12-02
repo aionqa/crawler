@@ -722,12 +722,57 @@ class WorkflowExecutor {
         const executionResult = await this.executeScript(page, playwrightScript, jobId);
         
         // Step 5: Take screenshot after action (always, even if script failed)
-        const screenshotAfter = await page.screenshot({ fullPage: true, type: 'png' });
-        const screenshotAfterKey = await this.uploadScreenshot(jobId, screenshotAfter, 'after');
-        const screenshotAfterBase64 = screenshotAfter.toString('base64');
-
-        // Step 6: Get HTML after action (FULL - no trimming)
-        const htmlAfter = await page.content();
+        // CRITICAL: Wrap in try-catch to handle browser crashes gracefully
+        let screenshotAfter = null;
+        let screenshotAfterKey = null;
+        let screenshotAfterBase64 = null;
+        let htmlAfter = null;
+        
+        try {
+          // Check if page is still valid before attempting screenshot
+          if (page && !page.isClosed()) {
+            try {
+              // Quick validity check
+              await page.url();
+              
+              screenshotAfter = await page.screenshot({ 
+                fullPage: true, 
+                type: 'png',
+                timeout: 10000 // Shorter timeout to fail faster if browser is unstable
+              });
+              screenshotAfterKey = await this.uploadScreenshot(jobId, screenshotAfter, 'after');
+              screenshotAfterBase64 = screenshotAfter.toString('base64');
+              
+              // Get HTML after action
+              htmlAfter = await page.content();
+            } catch (screenshotError) {
+              // Browser crashed or page became invalid
+              console.warn(`[WorkflowExecutor] Screenshot after action failed (browser may have crashed): ${screenshotError.message}`);
+              await this.backendLogger.appendJobLog(jobId, 'warn', 
+                `⚠️ Could not capture screenshot after action: ${screenshotError.message}`,
+                'WORKFLOW-EXECUTOR',
+                { leg_id: leg.leg_id, error: screenshotError.message }
+              );
+              // Continue without screenshot - we can still verify with execution result
+              htmlAfter = null;
+            }
+          } else {
+            console.warn(`[WorkflowExecutor] Page is closed or invalid, skipping screenshot`);
+            await this.backendLogger.appendJobLog(jobId, 'warn',
+              `⚠️ Page is closed/invalid after script execution, skipping screenshot`,
+              'WORKFLOW-EXECUTOR',
+              { leg_id: leg.leg_id }
+            );
+          }
+        } catch (error) {
+          // Last resort catch - log and continue
+          console.error(`[WorkflowExecutor] Error during screenshot/HTML capture: ${error.message}`);
+          await this.backendLogger.appendJobLog(jobId, 'error',
+            `❌ Screenshot/HTML capture error: ${error.message}`,
+            'WORKFLOW-EXECUTOR',
+            { leg_id: leg.leg_id, error: error.message }
+          );
+        }
 
         // Step 7: Always call determine completion to get clear reasoning (even if script failed)
         // This provides clear failure/success reasons for all outcomes
@@ -1370,7 +1415,21 @@ class WorkflowExecutor {
         return await fn(wrappedPage);
       };
       
-      // DO NOT validate or check for incomplete strings - execute script as-is from OpenAI
+      // Validate script syntax before execution to catch errors early
+      if (this.checkIncompleteString && this.checkIncompleteString(cleanedScript)) {
+        const errorMsg = 'Script contains incomplete string literals or template literals';
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'error',
+            `❌ ${errorMsg}`,
+            'WORKFLOW-EXECUTOR',
+            {
+              script_preview: cleanedScript.substring(0, 500),
+              script_length: cleanedScript.length
+            }
+          );
+        }
+        throw new Error(errorMsg);
+      }
       
       // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
       const result = await Promise.race([
