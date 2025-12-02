@@ -721,11 +721,18 @@ class WorkflowExecutor {
             const codeBlockMatches = [...playwrightScript.matchAll(codeBlockRegex)];
             if (codeBlockMatches.length > 0) {
               // Extract code from first code block
-              playwrightScript = codeBlockMatches[0][1].trim();
+              // CRITICAL: Only trim leading/trailing whitespace, preserve all content including quotes
+              // Use trimStart/trimEnd to preserve closing quotes that might be on new lines
+              let extracted = codeBlockMatches[0][1];
+              // Only remove leading/trailing whitespace, not quotes
+              extracted = extracted.replace(/^\s+/, '').replace(/\s+$/, '');
+              playwrightScript = extracted;
             }
           }
           
-          if (!playwrightScript || playwrightScript.trim().length === 0) {
+          // Only check if script is empty after minimal trimming (preserve all content)
+          const trimmedCheck = playwrightScript.replace(/^\s+/, '').replace(/\s+$/, '');
+          if (!trimmedCheck || trimmedCheck.length === 0) {
             throw new Error(`Script is empty`);
           }
           
