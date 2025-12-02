@@ -902,20 +902,93 @@ async function detectCaptcha(page, jobId) {
   }
 }
 
-// Attempt to handle captcha
+// Attempt to handle captcha with human-like behavior
 async function handleCaptcha(page, jobId, captchaInfo) {
   try {
-    await sendLog(jobId, 'info', `🔐 Attempting to handle ${captchaInfo.type}...`, {
+    await sendLog(jobId, 'info', `🔐 Attempting to handle ${captchaInfo.type} with human-like behavior...`, {
       captcha_type: captchaInfo.type,
       action: 'captcha_handling'
     });
     
-    // Wait for potential manual intervention or automatic solving
-    // In a real scenario, this would integrate with a captcha solving service
-    await page.waitForTimeout(5000);
+    // Add human-like behavior: random mouse movements and scrolling
+    try {
+      // Random scroll (humans scroll to see the page)
+      const scrollAmount = 100 + Math.random() * 200;
+      await page.evaluate((amount) => {
+        window.scrollBy(0, amount);
+      }, scrollAmount);
+      await page.waitForTimeout(500 + Math.random() * 1000);
+      
+      // Random mouse movement (humans move mouse even when not clicking)
+      await page.mouse.move(100 + Math.random() * 500, 100 + Math.random() * 500);
+      await page.waitForTimeout(200 + Math.random() * 500);
+    } catch (behaviorError) {
+      // Ignore behavior errors, continue with captcha handling
+      console.warn(`[CAPTCHA] Human behavior injection warning: ${behaviorError.message}`);
+    }
+    
+    // Try to interact with CAPTCHA if it's clickable
+    try {
+      // For reCAPTCHA, try clicking the checkbox
+      if (captchaInfo.type.includes('reCAPTCHA') || captchaInfo.selector.includes('recaptcha')) {
+        const recaptchaCheckbox = await page.$('iframe[src*="recaptcha"]').catch(() => null);
+        if (recaptchaCheckbox) {
+          await sendLog(jobId, 'info', `🖱️ Attempting to interact with reCAPTCHA checkbox...`, {
+            action: 'captcha_interaction'
+          });
+          
+          // Click the iframe (this might trigger the challenge)
+          const box = await recaptchaCheckbox.boundingBox();
+          if (box) {
+            // Move mouse to checkbox with human-like delay
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
+            await page.waitForTimeout(300 + Math.random() * 500);
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            await page.waitForTimeout(2000 + Math.random() * 3000); // Wait for challenge to appear/solve
+          }
+        }
+      }
+      
+      // For hCaptcha, try clicking the checkbox
+      if (captchaInfo.type.includes('hCaptcha') || captchaInfo.selector.includes('hcaptcha')) {
+        const hcaptchaCheckbox = await page.$('iframe[src*="hcaptcha"]').catch(() => null);
+        if (hcaptchaCheckbox) {
+          await sendLog(jobId, 'info', `🖱️ Attempting to interact with hCaptcha checkbox...`, {
+            action: 'captcha_interaction'
+          });
+          
+          const box = await hcaptchaCheckbox.boundingBox();
+          if (box) {
+            await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
+            await page.waitForTimeout(300 + Math.random() * 500);
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            await page.waitForTimeout(2000 + Math.random() * 3000);
+          }
+        }
+      }
+      
+      // For Cloudflare Turnstile, try clicking
+      if (captchaInfo.type.includes('Turnstile') || captchaInfo.selector.includes('turnstile')) {
+        const turnstileElement = await page.$(captchaInfo.selector).catch(() => null);
+        if (turnstileElement) {
+          await sendLog(jobId, 'info', `🖱️ Attempting to interact with Turnstile...`, {
+            action: 'captcha_interaction'
+          });
+          
+          await turnstileElement.click({ timeout: 10000 }).catch(() => {});
+          await page.waitForTimeout(2000 + Math.random() * 3000);
+        }
+      }
+    } catch (interactionError) {
+      console.warn(`[CAPTCHA] Interaction attempt warning: ${interactionError.message}`);
+    }
+    
+    // Wait longer for potential automatic solving or manual intervention
+    // Increased wait time to give more chance for CAPTCHA to be solved
+    await page.waitForTimeout(8000 + Math.random() * 4000);
     
     // Check if captcha is still present
-    const stillPresent = await page.$(captchaInfo.selector);
+    const stillPresent = await page.$(captchaInfo.selector).catch(() => null);
     
     if (!stillPresent) {
       await sendLog(jobId, 'info', `✅ CAPTCHA PASSED: ${captchaInfo.type} was resolved`, {
@@ -925,6 +998,26 @@ async function handleCaptcha(page, jobId, captchaInfo) {
       });
       return { passed: true };
     } else {
+      // Check if CAPTCHA challenge appeared (iframe might have loaded)
+      const challengeIframe = await page.$('iframe[src*="recaptcha"][src*="bframe"], iframe[src*="hcaptcha"][src*="challenges"]').catch(() => null);
+      if (challengeIframe) {
+        await sendLog(jobId, 'info', `⏳ CAPTCHA challenge appeared, waiting for resolution...`, {
+          action: 'captcha_challenge_waiting'
+        });
+        // Wait longer for challenge to be solved
+        await page.waitForTimeout(15000 + Math.random() * 10000);
+      }
+      
+      const stillPresentAfterWait = await page.$(captchaInfo.selector).catch(() => null);
+      if (!stillPresentAfterWait) {
+        await sendLog(jobId, 'info', `✅ CAPTCHA PASSED after challenge: ${captchaInfo.type} was resolved`, {
+          captcha_type: captchaInfo.type,
+          action: 'captcha_passed',
+          page_url: page.url()
+        });
+        return { passed: true };
+      }
+      
       await sendLog(jobId, 'warn', `⚠️ CAPTCHA STILL PRESENT: ${captchaInfo.type} requires manual intervention`, {
         captcha_type: captchaInfo.type,
         action: 'captcha_failed',
