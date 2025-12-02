@@ -1224,6 +1224,82 @@ class WorkflowExecutor {
   }
 
   /**
+   * Fix incomplete string literals by closing them
+   * This handles cases where OpenAI generates scripts with unclosed quotes
+   */
+  fixIncompleteStrings(script) {
+    if (!script || typeof script !== 'string') {
+      return script;
+    }
+    
+    let fixed = script;
+    let inSingleQuote = false;
+    let inDoubleQuote = false;
+    let inTemplateLiteral = false;
+    let escapeNext = false;
+    let lastQuoteIndex = -1;
+    let lastQuoteType = null;
+    
+    // First pass: detect incomplete strings
+    for (let i = 0; i < fixed.length; i++) {
+      const char = fixed[i];
+      
+      if (escapeNext) {
+        escapeNext = false;
+        continue;
+      }
+      
+      if (char === '\\') {
+        escapeNext = true;
+        continue;
+      }
+      
+      if (char === '`' && !inSingleQuote && !inDoubleQuote) {
+        inTemplateLiteral = !inTemplateLiteral;
+        if (inTemplateLiteral) {
+          lastQuoteIndex = i;
+          lastQuoteType = '`';
+        }
+        continue;
+      }
+      
+      if (!inTemplateLiteral) {
+        if (char === "'" && !inDoubleQuote) {
+          inSingleQuote = !inSingleQuote;
+          if (inSingleQuote) {
+            lastQuoteIndex = i;
+            lastQuoteType = "'";
+          }
+        } else if (char === '"' && !inSingleQuote) {
+          inDoubleQuote = !inDoubleQuote;
+          if (inDoubleQuote) {
+            lastQuoteIndex = i;
+            lastQuoteType = '"';
+          }
+        }
+      }
+    }
+    
+    // If we're still inside a string at the end, close it
+    if (inSingleQuote || inDoubleQuote || inTemplateLiteral) {
+      // Find the last incomplete string and close it
+      // Look for common patterns like 'xpath= or "selector= or `url=
+      const incompletePattern = new RegExp(`(['"\`])\\s*(xpath|selector|url|text|value|id|name|class|href|src)\\s*=\\s*$`, 'i');
+      const match = fixed.substring(lastQuoteIndex).match(incompletePattern);
+      
+      if (match) {
+        // Remove the incomplete string part
+        fixed = fixed.substring(0, lastQuoteIndex) + fixed.substring(lastQuoteIndex).replace(incompletePattern, '');
+      } else {
+        // Just close the quote at the end
+        fixed += lastQuoteType || '"';
+      }
+    }
+    
+    return fixed;
+  }
+
+  /**
    * Clean script to remove function declarations, require statements, etc.
    * Extract only executable code
    */
@@ -1582,11 +1658,27 @@ class WorkflowExecutor {
         return await fn(wrappedPage);
       };
       
-      // Validate script syntax before execution to catch errors early
-      if (this.checkIncompleteString) {
-        const hasIncompleteString = this.checkIncompleteString(cleanedScript);
-        if (hasIncompleteString) {
-          const errorMsg = 'Script contains incomplete string literals or template literals';
+      // Fix incomplete string literals automatically instead of failing
+      if (this.checkIncompleteString && this.checkIncompleteString(cleanedScript)) {
+        console.log(`[WorkflowExecutor] ⚠️ Detected incomplete string literals, attempting to fix...`);
+        const originalScript = cleanedScript;
+        cleanedScript = this.fixIncompleteStrings(cleanedScript);
+        
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'warn',
+            `⚠️ Fixed incomplete string literals in script`,
+            'WORKFLOW-EXECUTOR',
+            {
+              original_length: originalScript.length,
+              fixed_length: cleanedScript.length,
+              script_preview: cleanedScript.substring(0, 500)
+            }
+          );
+        }
+        
+        // Verify the fix worked
+        if (this.checkIncompleteString(cleanedScript)) {
+          const errorMsg = 'Script contains incomplete string literals that could not be fixed';
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'error',
               `❌ ${errorMsg}`,
