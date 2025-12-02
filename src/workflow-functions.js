@@ -207,18 +207,53 @@ export async function executePlaywrightAnalysis(page, jobId, stepId, parameters,
     const analysis = {};
 
     if (parameters.collectForms !== false) {
-      analysis.forms = await page.$$eval('form', forms => 
-        forms.map(form => ({
-          action: form.action,
-          method: form.method,
-          fields: Array.from(form.elements).map(el => ({
-            name: el.name,
-            type: el.type,
-            required: el.required,
-            placeholder: el.placeholder
-          }))
-        }))
-      );
+      const skipCaptchaForms = parameters.skipCaptchaForms === true;
+      const skipMailpoetForms = parameters.skipMailpoetForms === true;
+      
+      analysis.forms = await page.$$eval('form', (forms, skipCaptcha, skipMailpoet) => {
+        return forms
+          .filter(form => {
+            // Skip captcha forms if requested
+            if (skipCaptcha || skipMailpoet) {
+              const formId = form.id || '';
+              const formClass = form.className || '';
+              const formName = form.name || '';
+              
+              // Skip mailpoet captcha forms
+              if (skipMailpoet && (
+                formId.includes('mailpoet') && formId.includes('captcha') ||
+                formId === 'mailpoet_captcha_form' ||
+                formClass.includes('mailpoet') && formClass.includes('captcha')
+              )) {
+                return false;
+              }
+              
+              // Skip generic captcha forms
+              if (skipCaptcha && (
+                formId.toLowerCase().includes('captcha') ||
+                formClass.toLowerCase().includes('captcha') ||
+                formName.toLowerCase().includes('captcha')
+              )) {
+                return false;
+              }
+            }
+            return true;
+          })
+          .map(form => ({
+            id: form.id || '',
+            action: form.action,
+            method: form.method || 'GET',
+            fields: Array.from(form.elements)
+              .filter(el => el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT')
+              .map(el => ({
+                name: el.name || '',
+                type: el.type || 'text',
+                required: el.required || false,
+                placeholder: el.placeholder || '',
+                id: el.id || ''
+              }))
+          }));
+      }, skipCaptchaForms, skipMailpoetForms);
     }
 
     if (parameters.collectLinks !== false) {

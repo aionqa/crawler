@@ -847,6 +847,12 @@ async function detectCaptcha(page, jobId) {
   try {
     // Common captcha selectors and indicators
     const captchaIndicators = [
+      // Mailpoet Captcha (specific detection)
+      'form#mailpoet_captcha_form',
+      'form[id*="mailpoet"]',
+      'form[class*="mailpoet"]',
+      'form[id*="captcha"][class*="mailpoet"]',
+      'div[id*="mailpoet"][id*="captcha"]',
       // reCAPTCHA
       'iframe[src*="recaptcha"]',
       'div.g-recaptcha',
@@ -868,7 +874,8 @@ async function detectCaptcha(page, jobId) {
     for (const selector of captchaIndicators) {
       const element = await page.$(selector);
       if (element) {
-        const captchaType = selector.includes('recaptcha') ? 'reCAPTCHA' :
+        const captchaType = selector.includes('mailpoet') ? 'Mailpoet Captcha' :
+                           selector.includes('recaptcha') ? 'reCAPTCHA' :
                            selector.includes('hcaptcha') ? 'hCaptcha' :
                            selector.includes('turnstile') ? 'Cloudflare Turnstile' :
                            'Generic Captcha';
