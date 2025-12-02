@@ -634,6 +634,47 @@ class WorkflowExecutor {
               if (fromResponse) return fromResponse;
             }
             
+            // Check for script in actions array (if response has actions)
+            if (response.actions && Array.isArray(response.actions) && response.actions.length > 0) {
+              for (const action of response.actions) {
+                if (action.playwright_script && typeof action.playwright_script === 'string') {
+                  return action.playwright_script;
+                }
+                if (action.script && typeof action.script === 'string') {
+                  return action.script;
+                }
+                if (action.code && typeof action.code === 'string') {
+                  return action.code;
+                }
+              }
+            }
+            
+            // Check for script in legs array (if response has legs)
+            if (response.legs && Array.isArray(response.legs) && response.legs.length > 0) {
+              for (const leg of response.legs) {
+                if (leg.playwright_script && typeof leg.playwright_script === 'string') {
+                  return leg.playwright_script;
+                }
+                if (leg.script && typeof leg.script === 'string') {
+                  return leg.script;
+                }
+                if (leg.code && typeof leg.code === 'string') {
+                  return leg.code;
+                }
+                // Check nested actions in legs
+                if (leg.actions && Array.isArray(leg.actions)) {
+                  for (const action of leg.actions) {
+                    if (action.playwright_script && typeof action.playwright_script === 'string') {
+                      return action.playwright_script;
+                    }
+                    if (action.script && typeof action.script === 'string') {
+                      return action.script;
+                    }
+                  }
+                }
+              }
+            }
+            
             // Check all possible field names (case-insensitive check for common variations)
             const possibleFields = [
               'script',
