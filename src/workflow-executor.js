@@ -349,6 +349,9 @@ class WorkflowExecutor {
     let screenshotBeforeKey = null; // Initialize to avoid undefined errors
     let htmlContent = null; // Initialize to avoid undefined errors
 
+    // CRITICAL: Wrap entire leg execution in 1-minute timeout to prevent hangs
+    const legTimeout = 60000; // 1 minute max per leg
+    const legExecutionPromise = (async () => {
     try {
       console.log(`[WorkflowExecutor] Leg ${leg.leg_id} - Single execution (AI requests: ${aiRequestCount}/${this.maxAiRequestsPerLeg})`);
 
