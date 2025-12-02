@@ -86,8 +86,8 @@ class WorkflowAnalyzer {
       'playwright-analysis': 120000, // 2 minutes - Playwright analysis
       'execute-code': 120000,        // 2 minutes - Code execution
       'execute-code-from-variable': 120000, // 2 minutes
-      'while-loop': 300000,          // 5 minutes - Loops can take longer
-      'for-each': 300000,            // 5 minutes - Iterations
+      'while-loop': 60000,           // 1 minute - Loops timeout quickly
+      'for-each': 60000,             // 1 minute - Iterations timeout quickly
       'self-adjustable-ai-workflow': 240000, // 4 minutes - Complex workflow
       'screenshot': 60000,           // 1 minute - Quick operation
       'cookie-collect': 60000,       // 1 minute - Quick operation
