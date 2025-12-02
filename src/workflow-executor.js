@@ -1053,6 +1053,46 @@ class WorkflowExecutor {
     }
 
     return outcome;
+    })();
+
+    // Execute with timeout wrapper
+    try {
+      outcome = await Promise.race([
+        legExecutionPromise,
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error(`Leg execution timed out after ${legTimeout/1000}s`)), legTimeout)
+        )
+      ]);
+    } catch (timeoutError) {
+      console.error(`[WorkflowExecutor] Leg ${leg.leg_id} timed out after ${legTimeout/1000}s: ${timeoutError.message}`);
+      finalResult = 'failure';
+      lastError = timeoutError.message;
+      
+      // Mark leg as failed due to timeout
+      try {
+        await this.completeLeg(workflowId, leg.leg_id, 'failure', lastError, jobId);
+      } catch (e) {
+        console.error(`[WorkflowExecutor] Error completing timed-out leg: ${e.message}`);
+      }
+      
+      // Mark associated action as failed if it exists
+      if (leg.action_id) {
+        try {
+          await this.markActionCompleted(leg.action_id, false, lastError);
+        } catch (e) {
+          console.error(`[WorkflowExecutor] Error marking timed-out action: ${e.message}`);
+        }
+      }
+      
+      outcome = {
+        leg_id: leg.leg_id,
+        result: 'failure',
+        iterations: 1,
+        error: lastError
+      };
+    }
+
+    return outcome;
   }
 
   /**
