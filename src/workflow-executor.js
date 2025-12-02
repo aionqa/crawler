@@ -1406,11 +1406,26 @@ class WorkflowExecutor {
             
             // Perform click with force option if element might be covered
             // Increased timeout to 60 seconds
-            return await element.click({ 
-              ...options,
-              force: options.force || false,
-              timeout: options.timeout || 60000
-            });
+            // Handle locator ambiguity by using .first() if multiple elements match
+            try {
+              return await element.click({ 
+                ...options,
+                force: options.force || false,
+                timeout: options.timeout || 60000
+              });
+            } catch (clickError) {
+              // If error is about strict mode violation (multiple elements), use first()
+              if (clickError.message && clickError.message.includes('strict mode') && clickError.message.includes('matches')) {
+                console.warn(`[WorkflowExecutor] Locator ambiguity detected for ${selector}, using first() element`);
+                const firstElement = pageObj.locator(selector).first();
+                return await firstElement.click({ 
+                  ...options,
+                  force: options.force || false,
+                  timeout: options.timeout || 60000
+                });
+              }
+              throw clickError;
+            }
           } catch (markerError) {
             // Don't fail script execution if marker sending fails
             console.warn(`[WorkflowExecutor] Failed to send click marker: ${markerError.message}`);
