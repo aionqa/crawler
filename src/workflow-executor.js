@@ -1578,10 +1578,50 @@ class WorkflowExecutor {
       }
       
       // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
+      // Check for CAPTCHA before executing script
+      try {
+        // Import CAPTCHA detection functions dynamically
+        const unifiedOps = await import('./unified-operations.js');
+        // These functions are not exported, so we'll detect CAPTCHA inline
+        const captchaSelectors = [
+          'iframe[src*="recaptcha"]',
+          'div.g-recaptcha',
+          'iframe[src*="hcaptcha"]',
+          'div.h-captcha',
+          'iframe[src*="turnstile"]',
+          'div[class*="turnstile"]'
+        ];
+        
+        let captchaDetected = false;
+        for (const selector of captchaSelectors) {
+          const element = await page.$(selector).catch(() => null);
+          if (element) {
+            captchaDetected = true;
+            console.log(`[WorkflowExecutor] CAPTCHA detected before script execution: ${selector}`);
+            // Try to interact with CAPTCHA
+            try {
+              const box = await element.boundingBox();
+              if (box) {
+                await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
+                await page.waitForTimeout(300 + Math.random() * 500);
+                await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+                await page.waitForTimeout(3000 + Math.random() * 2000);
+              }
+            } catch (interactError) {
+              console.warn(`[WorkflowExecutor] CAPTCHA interaction failed: ${interactError.message}`);
+            }
+            break;
+          }
+        }
+      } catch (captchaError) {
+        console.warn(`[WorkflowExecutor] CAPTCHA check failed, continuing: ${captchaError.message}`);
+      }
+      
+      // Increased timeout to 90 seconds for complex interactions and CAPTCHA handling
       const result = await Promise.race([
         executeInNodeContext(page, cleanedScript, jobId),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Script execution timeout after 45 seconds')), 45000)
+          setTimeout(() => reject(new Error('Script execution timeout after 90 seconds')), 90000)
         )
       ]);
       
