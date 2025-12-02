@@ -722,12 +722,21 @@ class WorkflowExecutor {
             if (codeBlockMatches.length > 0) {
               // Extract code from first code block
               // CRITICAL: Only trim leading/trailing whitespace, preserve all content including quotes
-              // Use trimStart/trimEnd to preserve closing quotes that might be on new lines
+              // Do NOT use .trim() as it can remove closing quotes on new lines
               let extracted = codeBlockMatches[0][1];
-              // Only remove leading/trailing whitespace, not quotes
-              extracted = extracted.replace(/^\s+/, '').replace(/\s+$/, '');
+              // Only remove leading/trailing whitespace (newlines, spaces, tabs), preserve quotes
+              extracted = extracted.replace(/^[\s\n\r]+/, '').replace(/[\s\n\r]+$/, '');
               playwrightScript = extracted;
+              
+              console.log(`[WorkflowExecutor] Extracted from code block: ${playwrightScript.length} chars (preserved all content)`);
             }
+          }
+          
+          // Check if script has incomplete strings BEFORE storing/executing
+          if (this.checkIncompleteString && this.checkIncompleteString(playwrightScript)) {
+            console.log(`[WorkflowExecutor] ⚠️ Detected incomplete string literals in extracted script, attempting to fix...`);
+            playwrightScript = this.fixIncompleteStrings(playwrightScript);
+            console.log(`[WorkflowExecutor] Fixed script length: ${playwrightScript.length} chars`);
           }
           
           // Only check if script is empty after minimal trimming (preserve all content)
