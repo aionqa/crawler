@@ -1312,14 +1312,14 @@ class WorkflowExecutor {
       const createPageWrapper = (pageObj, jobId, backendLogger) => {
         const wrapper = Object.create(pageObj);
         
-        // Wrap click method to send timeline marker
+        // Wrap click method with enhanced reliability checks
         const originalClick = pageObj.click.bind(pageObj);
-        wrapper.click = async function(selector, options) {
+        wrapper.click = async function(selector, options = {}) {
           try {
             // Get element text for marker label
             let label = 'Click';
             try {
-              const element = await pageObj.locator(selector).first();
+              const element = pageObj.locator(selector).first();
               const text = await element.textContent({ timeout: 1000 }).catch(() => null);
               if (text && text.trim()) {
                 label = `Click: ${text.trim().substring(0, 30)}`;
@@ -1328,6 +1328,26 @@ class WorkflowExecutor {
               }
             } catch (e) {
               label = `Click: ${selector.substring(0, 30)}`;
+            }
+            
+            // Enhanced click with visibility and stability checks
+            const element = pageObj.locator(selector).first();
+            
+            // Wait for element to be visible
+            await element.waitFor({ state: 'visible', timeout: options.timeout || 30000 });
+            
+            // Scroll element into view if needed
+            await element.scrollIntoViewIfNeeded({ timeout: 5000 }).catch(() => {
+              // Ignore scroll errors, continue with click
+            });
+            
+            // Wait a bit for any animations to settle
+            await pageObj.waitForTimeout(100);
+            
+            // Check if element is enabled
+            const isEnabled = await element.isEnabled({ timeout: 1000 }).catch(() => true);
+            if (!isEnabled) {
+              throw new Error(`Element ${selector} is not enabled`);
             }
             
             // Send timeline marker
@@ -1344,12 +1364,20 @@ class WorkflowExecutor {
                 }
               );
             }
+            
+            // Perform click with force option if element might be covered
+            return await element.click({ 
+              ...options,
+              force: options.force || false,
+              timeout: options.timeout || 30000
+            });
           } catch (markerError) {
             // Don't fail script execution if marker sending fails
             console.warn(`[WorkflowExecutor] Failed to send click marker: ${markerError.message}`);
+            // Still try to click even if marker failed
+            const element = pageObj.locator(selector).first();
+            return await element.click(options);
           }
-          
-          return await originalClick(selector, options);
         };
         
         // Wrap fill method to send timeline marker
@@ -1416,15 +1444,37 @@ class WorkflowExecutor {
       };
       
       // Validate script syntax before execution to catch errors early
-      if (this.checkIncompleteString && this.checkIncompleteString(cleanedScript)) {
-        const errorMsg = 'Script contains incomplete string literals or template literals';
+      if (this.checkIncompleteString) {
+        const hasIncompleteString = this.checkIncompleteString(cleanedScript);
+        if (hasIncompleteString) {
+          const errorMsg = 'Script contains incomplete string literals or template literals';
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error',
+              `❌ ${errorMsg}`,
+              'WORKFLOW-EXECUTOR',
+              {
+                script_preview: cleanedScript.substring(0, 500),
+                script_length: cleanedScript.length
+              }
+            );
+          }
+          throw new Error(errorMsg);
+        }
+      }
+      
+      // Validate script syntax using JavaScript parser
+      try {
+        new Function(cleanedScript);
+      } catch (syntaxError) {
+        const errorMsg = `Script syntax error: ${syntaxError.message}`;
         if (jobId && this.backendLogger) {
           await this.backendLogger.appendJobLog(jobId, 'error',
             `❌ ${errorMsg}`,
             'WORKFLOW-EXECUTOR',
             {
               script_preview: cleanedScript.substring(0, 500),
-              script_length: cleanedScript.length
+              script_length: cleanedScript.length,
+              syntax_error: syntaxError.message
             }
           );
         }
