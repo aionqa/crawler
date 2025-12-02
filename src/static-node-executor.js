@@ -229,7 +229,7 @@ export class StaticNodeExecutor {
         throw new Error('Failed to get presigned URL for screenshot');
       }
 
-      const { key, uploadUrl } = prepareResult;
+      const { key, uploadUrl, publicUrl } = prepareResult;
 
       // Upload screenshot to MinIO
       const uploadSuccess = await backendLogger.uploadScreenshotToPresignedUrl(uploadUrl, screenshotBuffer);
@@ -238,12 +238,18 @@ export class StaticNodeExecutor {
         throw new Error('Failed to upload screenshot to MinIO');
       }
 
+      // Use backend-provided public URL (from S3 configuration from Terraform)
+      if (!publicUrl) {
+        console.warn(`[StaticNodeExecutor] ⚠️ Backend did not return publicUrl, using key as fallback: ${key}`);
+      }
+      const screenshotUrl = publicUrl || key; // Use publicUrl from backend (S3 URL from Terraform config)
+
       // Track the screenshot
       await backendLogger.trackMediaUpload(this.jobId, 'screenshot', {
         screenshotId: key,
         screenshotKey: key,
         objectName: key,
-        url: `http://localhost:9000/crawldata/screenshots/${this.jobId}/${key}`,
+        url: screenshotUrl,
         size: screenshotBuffer.length,
         action: node.label || 'workflow_screenshot',
         workflow_step: node.id,
