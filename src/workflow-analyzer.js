@@ -4095,57 +4095,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute cookie collect step
    */
   async executeCookieCollectStep(page, step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🔍 Collecting cookies (${step.name})`);
+    console.log(`[WorkflowAnalyzer] 🔍 Collecting cookies from browser (${step.name})`);
     
     const config = step.config || {};
-    const source = config.source || 'latest';
     let collectedCookies = []; // Declare early so it's available in catch block
 
     try {
-      let projectId = null;
+      // Always collect from browser - this is self-explanatory
+      if (!page) {
+        throw new Error('Playwright page is not available - cannot collect cookies from browser');
+      }
       
-      // If source is 'browser', collect cookies FIRST (before trying to get project_id)
-      // This ensures we have cookies even if project_id fetch fails
-      if (source === 'browser') {
-        if (!page) {
-          throw new Error('Browser source requested but Playwright page is not available');
-        }
-        const contextCookies = await page.context().cookies();
-        collectedCookies = contextCookies;
-        console.log(`[WorkflowAnalyzer] ✅ Collected ${collectedCookies.length} cookie(s) from browser`);
-        
-        // Now try to get project_id if we need to save to project
-        if (config.saveToProject !== false) {
-          try {
-            const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
-              headers: this.getAuthHeaders()
-            });
-            // Handle both ObjectId and string formats
-            const rawProjectId = jobResponse.data?.project_id;
-            if (rawProjectId) {
-              projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
-            }
-            
-            // Also try to get from context if API call didn't return it
-            if (!projectId && this.context?.project_id) {
-              const ctxProjectId = this.context.project_id;
-              projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
-              console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
-            }
-          } catch (jobError) {
-            console.warn(`[WorkflowAnalyzer] ⚠️ Could not fetch job to get project_id: ${jobError.message}`);
-            
-            // Try to get from context as fallback
-            if (this.context?.project_id) {
-              const ctxProjectId = this.context.project_id;
-              projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
-              console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context as fallback: ${projectId}`);
-            }
-            // Don't throw - we already have cookies
-          }
-        }
-      } else {
-        // For non-browser sources, we need project_id first
+      // Collect all cookies from the browser context
+      const contextCookies = await page.context().cookies();
+      collectedCookies = contextCookies;
+      console.log(`[WorkflowAnalyzer] ✅ Collected ${collectedCookies.length} cookie(s) from browser`);
+      
+      // Try to get project_id to save cookies to project (optional)
+      let projectId = null;
+      if (config.saveToProject !== false) {
         try {
           const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
             headers: this.getAuthHeaders()
@@ -4153,7 +4121,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
           // Handle both ObjectId and string formats
           const rawProjectId = jobResponse.data?.project_id;
           if (rawProjectId) {
-            // Convert ObjectId to string if needed
             projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
           }
           
@@ -4171,44 +4138,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
             const ctxProjectId = this.context.project_id;
             projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
             console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context as fallback: ${projectId}`);
-          } else {
-            throw new Error(`Could not find project ID for job: ${jobId}`);
           }
-        }
-        
-        if (!projectId) {
-          throw new Error(`Could not find project ID for job: ${jobId}`);
-        }
-        
-        if (source === 'latest') {
-          // Collect from latest login job
-          const latestCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/latest-cookies`, {
-            headers: this.getAuthHeaders()
-          });
-          collectedCookies = latestCookiesResponse.data || [];
-        } else if (source === 'job') {
-          // Collect from specific job
-          if (!config.jobId) {
-            throw new Error(`Job ID is required when source is 'job'`);
-          }
-          const jobDataResponse = await axios.get(`${this.backendUrl}/api/jobs/${config.jobId}`, {
-            headers: this.getAuthHeaders()
-          });
-          const jobData = jobDataResponse.data;
-          if (jobData && jobData.result && jobData.result.cookies) {
-            collectedCookies = jobData.result.cookies;
-          }
-        } else if (source === 'workflowState') {
-          // Collect from workflow state
-          if (!config.sourceField) {
-            throw new Error(`sourceField is required when source is 'workflowState'`);
-          }
-          const cookiesData = this.resolvePath(config.sourceField, workflowState);
-          if (Array.isArray(cookiesData)) {
-            collectedCookies = cookiesData;
-          } else {
-            throw new Error(`Cookies at path "${config.sourceField}" is not an array`);
-          }
+          // Don't throw - we already have cookies
         }
       }
 
