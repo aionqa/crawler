@@ -14,7 +14,8 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 # Copy package files
-COPY unified-crawler/package*.json ./
+# Works when build context is the unified-crawler/ directory (AWS) or project root (docker-compose)
+COPY package*.json ./
 
 # Install Node.js dependencies
 RUN npm install
@@ -24,10 +25,12 @@ RUN npm install
 RUN npx playwright install --with-deps chromium
 
 # Copy source code
-COPY unified-crawler/src/ ./src/
+# Works when build context is the unified-crawler/ directory (AWS) or project root (docker-compose)
+COPY src/ ./src/
 
 # Copy shared utilities used by crawler/login operations
-COPY unified-crawler/shared/ ./shared/
+# Works when build context is the unified-crawler/ directory (AWS) or project root (docker-compose)
+COPY shared/ ./shared/
 
 # Create directories for temporary files
 RUN mkdir -p /tmp/aionqa_videos /tmp/aionqa_screenshots
