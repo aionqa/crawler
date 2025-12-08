@@ -189,8 +189,22 @@ function getNextSequence(jobId) {
 
 // Helper function to remove ASCII graphics from log messages (but preserve emojis)
 function cleanLogMessage(message) {
-  if (!message || typeof message !== 'string') {
-    return message || '';
+  if (!message) {
+    return '';
+  }
+  // Convert non-string values to string (handles objects, arrays, etc.)
+  if (typeof message !== 'string') {
+    try {
+      // For objects/arrays, use JSON.stringify with formatting
+      if (typeof message === 'object') {
+        message = JSON.stringify(message, null, 2);
+      } else {
+        message = String(message);
+      }
+    } catch (error) {
+      // Fallback if stringification fails
+      message = String(message);
+    }
   }
   // Remove box drawing characters (but preserve emojis)
   message = message.replace(/[╔╗╚╝═║│┌┐└┘─├┤┬┴┼━┃┏┓┗┛┣┫┳┻╋]/g, '');
@@ -1108,16 +1122,20 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
     const screenshotPath = publicUrl || key; // Fallback to key if publicUrl not provided
     
     // Step 4: Log the screenshot with backend-generated key
+    // Include screenshot URL in metadata so UI can display it as thumbnail
     await sendLog(jobId, 'info', `📸 Screenshot captured: ${action}`, { 
       page_url: pageUrl, // Add page_url to route to logs_pages
       screenshotKey: key,
       screenshotId: key, // Use backend-generated key as screenshotId
+      screenshot_file_id: key, // Alternative field name for UI detection
+      screenshot_url: screenshotPath, // Direct URL to screenshot (preferred)
+      screenshotPath: screenshotPath, // Also include as screenshotPath for compatibility
       action: 'screenshot',
       url: pageUrl,
       title: await page.title(),
-      screenshotPath,
       resolution: 'full_hd',
       timestamp: new Date().toISOString(),
+      isScreenshot: true, // Flag to indicate this is a screenshot log
       ...context
     });
 
@@ -1513,9 +1531,14 @@ async function withBrowser(action, options = {}) {
           
           if (uploadSuccess) {
             screenshotFileId = key;
+            // Get public URL for screenshot
+            const publicUrl = prepareResult.publicUrl || `${process.env.BACKEND_URL || 'http://back:4000'}/files/${key}`;
             await sendLog(options.job_id || 'unknown', 'info', `📸 Screenshot captured successfully: ${key}`, {
               screenshotKey: key,
               screenshotId: key,
+              screenshot_file_id: key,
+              screenshot_url: publicUrl,
+              screenshotPath: publicUrl,
               action: 'screenshot',
               isScreenshot: true
             });
@@ -1832,18 +1855,102 @@ const modeHandlers = {
 
           const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, createdPageId, projectId);
 
-          if (typeof analysisResult?.legs_count === 'number' && analysisResult.legs_count > 0) {
-            await sendLog(jobId, 'info', `✅ Workflow executed with ${analysisResult.legs_count} testable legs`);
+          // Log workflow analysis results
+          const legsCount = typeof analysisResult?.legs_count === 'number' ? analysisResult.legs_count : null;
+          const legsArray = analysisResult?.legs || [];
+          const actualLegsCount = legsArray.length;
+          
+          if (legsCount !== null && legsCount > 0) {
+            await sendLog(jobId, 'info', `✅ Workflow executed with ${legsCount} testable legs`);
+          } else if (legsCount === 0) {
+            await sendLog(jobId, 'info', `ℹ️ Workflow analysis completed with 0 legs (no testable actions found)`);
           }
+          
+          // Check for discrepancy between reported legs_count and actual legs array
+          if (legsCount !== null && legsCount !== actualLegsCount) {
+            await sendLog(jobId, 'warn', `⚠️ Discrepancy: legs_count=${legsCount} but legs array has ${actualLegsCount} items`);
+          }
+          
           if (analysisResult?.page_description) {
-            await sendLog(jobId, 'info', `📝 ${analysisResult.page_description}`);
+            // Ensure page_description is converted to string (handles objects)
+            const pageDesc = typeof analysisResult.page_description === 'string' 
+              ? analysisResult.page_description 
+              : JSON.stringify(analysisResult.page_description, null, 2);
+            await sendLog(jobId, 'info', `📝 ${pageDesc}`);
           }
 
           allWorkflows.push(analysisResult);
 
           if (shouldExecuteWorkflowLegs) {
-            if (!analysisResult?.workflow_id) {
-              await sendLog(jobId, 'warn', '⚠️ Skipping workflow leg execution (workflow_id missing from analysis result)');
+            const legsToExecute = analysisResult.legs || [];
+            
+            if (legsToExecute.length === 0) {
+              // Provide detailed diagnostic information
+              const workflowId = analysisResult?.workflow_id || null;
+              const reportedLegsCount = analysisResult?.legs_count || 0;
+              const hasPageDescription = !!analysisResult?.page_description;
+              
+              let diagnosticMessage = '⏭️ No legs to execute';
+              const diagnosticDetails = [];
+              
+              if (workflowId) {
+                diagnosticDetails.push(`workflow_id: ${workflowId}`);
+              } else {
+                diagnosticDetails.push('no workflow_id');
+              }
+              
+              if (typeof reportedLegsCount === 'number') {
+                diagnosticDetails.push(`legs_count: ${reportedLegsCount}`);
+              }
+              
+              if (hasPageDescription) {
+                diagnosticDetails.push('page_description: present');
+              }
+              
+              if (diagnosticDetails.length > 0) {
+                diagnosticMessage += ` (${diagnosticDetails.join(', ')})`;
+              }
+              
+              // Check if this might be due to filtering
+              if (isSinglePageScan) {
+                diagnosticMessage += ' [Note: Single-page scan may have filtered navigation legs]';
+              }
+              
+              await sendLog(jobId, 'info', diagnosticMessage);
+            } else if (!analysisResult?.workflow_id) {
+              // Execute legs directly without workflow_id (no database updates)
+              await sendLog(jobId, 'warn', `⚠️ Executing ${legsToExecute.length} legs without workflow_id (no database status updates will be made)`);
+              try {
+                if (!workflowTemplateLoaded) {
+                  await workflowExecutor.loadWorkflowTemplate();
+                  workflowTemplateLoaded = true;
+                }
+                
+                // Filter navigation legs for single-page scans
+                let filteredLegs = legsToExecute;
+                if (isSinglePageScan && filteredLegs.length > 0) {
+                  const originalCount = filteredLegs.length;
+                  filteredLegs = filteredLegs.filter(leg => {
+                    const action = leg.action || leg.type || '';
+                    const description = leg.description || '';
+                    const isNavigation = action === 'navigate' || 
+                                        action === 'navigation' ||
+                                        description.toLowerCase().includes('follow link') ||
+                                        description.toLowerCase().includes('navigate to');
+                    return !isNavigation;
+                  });
+                  if (filteredLegs.length < originalCount) {
+                    await sendLog(jobId, 'info', `⏭️ Single-page scan: Filtered out ${originalCount - filteredLegs.length} navigation legs`);
+                  }
+                }
+                
+                // Execute legs directly (workflow_id optional - only needed for DB updates)
+                const executionResult = await workflowExecutor.executeLegsDirectly(page, jobId, filteredLegs, null);
+                await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed, no workflow_id - execution only)`);
+              } catch (execError) {
+                console.error(`[WORKFLOW] Leg execution failed:`, execError);
+                await sendLog(jobId, 'error', `❌ Failed to execute workflow legs: ${execError.message}`);
+              }
             } else {
               try {
                 if (!workflowTemplateLoaded) {
@@ -1915,7 +2022,6 @@ const modeHandlers = {
                   const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
                   await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
                 }
-                await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
               } catch (execError) {
                 await sendLog(jobId, 'warn', `⚠️ Workflow leg execution encountered issues: ${execError.message}`);
               }
@@ -1928,18 +2034,38 @@ const modeHandlers = {
           const links = await page.$$eval('a[href]', anchors => 
             anchors
               .map(a => a.href)
-              .filter(href => href && !href.startsWith('javascript:') && !href.startsWith('#') && !href.startsWith('mailto:'))
+              .filter(href => {
+                const isPureAnchor = href.startsWith('#') && !href.startsWith('http');
+                return href && 
+                       !href.startsWith('javascript:') && 
+                       !isPureAnchor && 
+                       !href.startsWith('mailto:');
+              })
           );
           
           const baseUrl = new URL(currentUrl).origin;
+          const currentBaseUrl = currentUrl.split('#')[0];
           const internalLinks = links.filter(link => link.startsWith(baseUrl));
           
           // CRITICAL: Only collect links if we haven't reached max_pages and depth limit
           // For single-page scans (max_pages=1, max_depth=0), don't collect links at all
           if (pagesAnalyzed < maxPages && depth < maxDepth) {
             for (const link of internalLinks.slice(0, 20)) {
-              if (!visitedUrls.has(link)) {
-                urlQueue.push({ url: link, depth: depth + 1 });
+              // Check if link has hash fragment (modal/popup on same page)
+              const hasHashFragment = link.includes('#') && link.split('#').length > 1;
+              const linkBaseUrl = hasHashFragment ? link.split('#')[0] : link;
+              const isHashBasedAction = hasHashFragment && linkBaseUrl === currentBaseUrl;
+              
+              if (isHashBasedAction) {
+                // Hash-based links are modal/popup actions - don't crawl as separate pages
+                // They will be converted to legs/actions by workflow analyzer
+                continue;
+              }
+              
+              // Regular link - use base URL (without hash) for deduplication
+              const urlToCheck = link.split('#')[0];
+              if (!visitedUrls.has(urlToCheck)) {
+                urlQueue.push({ url: urlToCheck, depth: depth + 1 });
               }
             }
             
@@ -2878,16 +3004,18 @@ async function extractAllLinks(page, jobId, baseUrl) {
           }
         }
         
-        // Remove hash fragments for deduplication
+        // Preserve all hash fragments - always use full URL for deduplication
         const urlWithoutHash = fullUrl.split('#')[0];
+        const hashFragment = fullUrl.includes('#') ? fullUrl.split('#')[1] : null;
         
-        // Deduplicate URLs
-        if (!linkSet.has(urlWithoutHash)) {
-          linkSet.add(urlWithoutHash);
+        // Deduplicate URLs using full URL (preserving hash fragments)
+        if (!linkSet.has(fullUrl)) {
+          linkSet.add(fullUrl);
           links.push({
             text: text.substring(0, 200), // Limit text length
             href: fullUrl,
             urlWithoutHash: urlWithoutHash,
+            hashFragment: hashFragment,
             title: el.title || '',
             isInternal: isInternal,
             target: el.target || '',
@@ -3392,10 +3520,11 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
   while (urlQueue.length > 0 && analyzedPages.length < maxPages) {
     const { url: currentUrl, depth } = urlQueue.shift();
     
-    // Normalize URL by removing hash fragment for deduplication
+    // Normalize URL by removing hash fragments for deduplication
+    // Hash fragments represent modal/popup actions on the same page, not separate pages
     const normalizedUrl = currentUrl.split('#')[0];
     
-    // Skip if already visited
+    // Skip if already visited (by base URL, without hash)
     if (visitedUrls.has(normalizedUrl)) {
       await sendLog(jobId, 'info', `⏭️  Skipping (already visited): ${normalizedUrl}`, { page_url: currentUrl, mode: approach });
       continue;
@@ -3580,8 +3709,21 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         await sendLog(jobId, 'info', `🔍 Checking ${pageAnalysis.internal_links.length} internal links for crawling...`);
         
         for (const link of pageAnalysis.internal_links) {
-          // Use urlWithoutHash for deduplication to avoid processing same page multiple times with different hash fragments
-          const urlToCheck = link.urlWithoutHash || link.href;
+          // Check if link has hash fragment - these are modal/popup actions, not separate pages
+          const hasHashFragment = link.href.includes('#') && link.href.split('#').length > 1;
+          const baseUrlFromLink = hasHashFragment ? link.href.split('#')[0] : link.href;
+          const baseUrlFromCurrent = currentUrl.includes('#') ? currentUrl.split('#')[0] : currentUrl;
+          const isHashBasedAction = hasHashFragment && baseUrlFromLink === baseUrlFromCurrent;
+          
+          if (isHashBasedAction) {
+            // Hash-based links are modal/popup actions on same page - don't crawl as separate pages
+            // They should be converted to legs/actions instead (handled by workflow analyzer)
+            await sendLog(jobId, 'info', `  🔘 Hash-based link (modal/popup action, not crawling): ${link.href}`);
+            continue;
+          }
+          
+          // Regular link - use urlWithoutHash to avoid processing same page with different hashes
+          const urlToCheck = link.urlWithoutHash || link.href.split('#')[0];
           
           if (!visitedUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
             urlQueue.push({ url: urlToCheck, depth: depth + 1 });
