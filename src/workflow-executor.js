@@ -328,8 +328,10 @@ class WorkflowExecutor {
       };
     }
 
-    // Mark leg as in progress
-    await this.updateLegStatus(workflowId, leg.leg_id, 'in_progress', jobId);
+    // Mark leg as in progress (only if workflowId is provided)
+    if (workflowId) {
+      await this.updateLegStatus(workflowId, leg.leg_id, 'in_progress', jobId);
+    }
 
     // Mark associated action as started if it exists
     if (leg.action_id) {
@@ -1047,7 +1049,9 @@ class WorkflowExecutor {
       }
 
       // Mark leg as completed
-      await this.completeLeg(workflowId, leg.leg_id, finalResult, lastError, jobId);
+      if (workflowId) {
+        await this.completeLeg(workflowId, leg.leg_id, finalResult, lastError, jobId);
+      }
 
       // Mark associated action as completed if it exists
       if (leg.action_id) {
@@ -1086,7 +1090,9 @@ class WorkflowExecutor {
       
       // Mark leg as failed due to timeout
       try {
-        await this.completeLeg(workflowId, leg.leg_id, 'failure', lastError, jobId);
+        if (workflowId) {
+          await this.completeLeg(workflowId, leg.leg_id, 'failure', lastError, jobId);
+        }
       } catch (e) {
         console.error(`[WorkflowExecutor] Error completing timed-out leg: ${e.message}`);
       }
@@ -1169,6 +1175,73 @@ class WorkflowExecutor {
       } else {
         console.log(`[WorkflowExecutor] Skipping leg ${leg.leg_id} - status: ${leg.status}`);
       }
+    }
+
+    return {
+      workflow_id: workflowId,
+      legs_executed: results.length,
+      results: results
+    };
+  }
+
+  /**
+   * Execute legs directly without requiring workflow_id (for execution-only, no DB updates)
+   * @param {Page} page - Playwright page object
+   * @param {string} jobId - Job ID for logging
+   * @param {Array} legs - Array of leg objects to execute
+   * @param {string|null} workflowId - Optional workflow ID for database updates
+   * @returns {Object} execution result
+   */
+  async executeLegsDirectly(page, jobId, legs, workflowId = null) {
+    console.log(`[WorkflowExecutor] Executing ${legs.length} legs directly${workflowId ? ` (workflow: ${workflowId})` : ' (no workflow_id - execution only)'}`);
+    
+    if (!Array.isArray(legs) || legs.length === 0) {
+      return {
+        workflow_id: workflowId,
+        legs_executed: 0,
+        results: []
+      };
+    }
+
+    const results = [];
+    const effectiveJobId = jobId || this.context?.job_id || null;
+    const singleActionOnly =
+      this.context?.single_action_only === true ||
+      this.context?.options?.single_action_only === true;
+
+    if (singleActionOnly) {
+      console.log(`[WorkflowExecutor] 🎯 Single-action mode enabled`);
+      if (effectiveJobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(effectiveJobId, 'info', '🎯 Single-action mode: will execute only the first leg', 'WORKFLOW-EXECUTOR', {
+          workflow_id: workflowId,
+          single_action_only: true
+        });
+      }
+    }
+
+    let executedCount = 0;
+
+    // Execute each leg sequentially
+    for (const leg of legs) {
+      if (singleActionOnly && executedCount >= 1) {
+        console.log(`[WorkflowExecutor] ⏭️ Skipping leg ${leg.leg_id} due to single-action mode`);
+        if (workflowId) {
+          await this.completeLeg(workflowId, leg.leg_id, 'skipped', null, effectiveJobId);
+        }
+        if (effectiveJobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(effectiveJobId, 'info', `⏭️ Skipped leg ${leg.leg_id} (single-action mode)`, 'WORKFLOW-EXECUTOR', {
+            workflow_id: workflowId,
+            leg_id: leg.leg_id,
+            reason: 'single_action_only'
+          });
+        }
+        continue;
+      }
+
+      // Execute leg (workflowId is optional - only used for DB updates)
+      const result = await this.executeLeg(page, effectiveJobId, workflowId, leg);
+      results.push(result);
+      executedCount += 1;
     }
 
     return {
@@ -1484,11 +1557,16 @@ class WorkflowExecutor {
       
       // Playwright scripts must execute in Node.js context, not browser context
       // The 'page' object is available in Node.js, not in browser
+      // Import human behavior functions
+      const { humanClick } = await import('./human-behavior-wrapper.js');
+      const { humanType } = await import('./human-typing.js');
+      const { humanDelay } = await import('./stealth-config.js');
+      
       // Create a wrapper page object that intercepts clicks and fills to send timeline markers
       const createPageWrapper = (pageObj, jobId, backendLogger) => {
         const wrapper = Object.create(pageObj);
         
-        // Wrap click method with enhanced reliability checks
+        // Wrap click method with human-like behavior
         const originalClick = pageObj.click.bind(pageObj);
         wrapper.click = async function(selector, options = {}) {
           try {
@@ -1556,7 +1634,7 @@ class WorkflowExecutor {
               // Ignore scroll errors, continue with click
             });
             
-            // Wait a bit for any animations to settle (increased delay)
+            // Wait a bit for any animations to settle
             await pageObj.waitForTimeout(300);
             
             // Check if element is enabled
@@ -1565,7 +1643,7 @@ class WorkflowExecutor {
               throw new Error(`Element ${selector} is not enabled`);
             }
             
-            // Send timeline marker
+            // Send timeline marker BEFORE human-like click (so it appears early in video)
             if (jobId && backendLogger) {
               await backendLogger.appendJobLog(jobId, 'info',
                 `🖱️ ${label}`,
@@ -1580,25 +1658,74 @@ class WorkflowExecutor {
               );
             }
             
-            // Perform click with force option if element might be covered
-            // Increased timeout to 60 seconds
-            // Handle locator ambiguity by using .first() if multiple elements match
+            // Use human-like click with mouse movements and delays
             try {
-              return await element.click({ 
-                ...options,
-                force: options.force || false,
-                timeout: options.timeout || 60000
-              });
+              // Get element bounding box for mouse movement
+              const box = await element.boundingBox();
+              
+              if (box) {
+                // Move mouse to element with curved path (humans don't move in straight lines)
+                const offsetX = (Math.random() - 0.5) * 15; // Slightly larger offset
+                const offsetY = (Math.random() - 0.5) * 15;
+                const targetX = box.x + box.width / 2 + offsetX;
+                const targetY = box.y + box.height / 2 + offsetY;
+                
+                // Move mouse with more steps for smoother, more visible movement
+                const steps = Math.floor(Math.random() * 15) + 20; // 20-35 steps
+                await pageObj.mouse.move(targetX, targetY, { steps });
+                
+                // Hover before clicking (humans hover to see hover effects)
+                await humanDelay(400, 800); // Longer hover to see menus open
+                
+                // Perform click
+                await element.click({ 
+                  ...options,
+                  force: options.force || false,
+                  timeout: options.timeout || 60000
+                });
+                
+                // Wait after clicking to see menu opens, dropdowns, etc. (humans wait to see result)
+                // Longer delay for interactive elements that trigger menus
+                if (Math.random() < 0.5) {
+                  await humanDelay(600, 1200); // 50% chance: 600-1200ms (for menus)
+                } else {
+                  await humanDelay(200, 500);  // 50% chance: 200-500ms (quick clicks)
+                }
+              } else {
+                // Fallback to regular click if bounding box unavailable
+                await element.click({ 
+                  ...options,
+                  force: options.force || false,
+                  timeout: options.timeout || 60000
+                });
+                await humanDelay(300, 700);
+              }
+              
+              return;
             } catch (clickError) {
               // If error is about strict mode violation (multiple elements), use first()
               if (clickError.message && clickError.message.includes('strict mode') && clickError.message.includes('matches')) {
                 console.warn(`[WorkflowExecutor] Locator ambiguity detected for ${selector}, using first() element`);
                 const firstElement = pageObj.locator(selector).first();
-                return await firstElement.click({ 
+                const box = await firstElement.boundingBox();
+                
+                if (box) {
+                  const offsetX = (Math.random() - 0.5) * 15;
+                  const offsetY = (Math.random() - 0.5) * 15;
+                  const targetX = box.x + box.width / 2 + offsetX;
+                  const targetY = box.y + box.height / 2 + offsetY;
+                  const steps = Math.floor(Math.random() * 15) + 20;
+                  await pageObj.mouse.move(targetX, targetY, { steps });
+                  await humanDelay(400, 800);
+                }
+                
+                await firstElement.click({ 
                   ...options,
                   force: options.force || false,
                   timeout: options.timeout || 60000
                 });
+                await humanDelay(600, 1200);
+                return;
               }
               throw clickError;
             }
@@ -1611,7 +1738,7 @@ class WorkflowExecutor {
           }
         };
         
-        // Wrap fill method to send timeline marker
+        // Wrap fill method with human-like typing (mistakes, corrections, delays)
         const originalFill = pageObj.fill.bind(pageObj);
         wrapper.fill = async function(selector, value, options) {
           try {
@@ -1632,7 +1759,7 @@ class WorkflowExecutor {
               label = `Input: ${selector.substring(0, 30)}`;
             }
             
-            // Send timeline marker
+            // Send timeline marker BEFORE typing (so it appears early in video)
             if (jobId && backendLogger) {
               await backendLogger.appendJobLog(jobId, 'info',
                 `⌨️ ${label}`,
@@ -1647,12 +1774,27 @@ class WorkflowExecutor {
                 }
               );
             }
-          } catch (markerError) {
-            // Don't fail script execution if marker sending fails
-            console.warn(`[WorkflowExecutor] Failed to send input marker: ${markerError.message}`);
+            
+            // Use human-like typing with mistakes and corrections
+            // Increase typo chance to 15% and add more pauses for better video visibility
+            await humanType(pageObj, selector, String(value), {
+              minDelay: 100,        // Slower typing (100-300ms between keystrokes)
+              maxDelay: 300,
+              typoChance: 0.15,     // 15% chance of making a typo
+              pauseChance: 0.20,    // 20% chance of pausing mid-typing
+              pauseDuration: [600, 1500], // Longer pauses (600-1500ms)
+              moveMouseFirst: true   // Move mouse to field first
+            });
+            
+            // Additional pause after completing field (humans verify what they typed)
+            await humanDelay(500, 1000);
+            
+            return;
+          } catch (typingError) {
+            // If human typing fails, fall back to regular fill
+            console.warn(`[WorkflowExecutor] Human typing failed, falling back to regular fill: ${typingError.message}`);
+            return await originalFill(selector, value, options);
           }
-          
-          return await originalFill(selector, value, options);
         };
         
         // Copy all other methods and properties
