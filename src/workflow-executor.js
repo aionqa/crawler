@@ -16,6 +16,185 @@ class WorkflowExecutor {
     // CRITICAL: 1 job = 1 attempt per leg (strictly enforced - no retries)
     this.maxIterations = 1;
     this.maxAiRequestsPerLeg = 2; // Maximum AI requests per leg (1 iteration × 2 requests: script generation + verification)
+
+    // Track executed legs per job to prevent running the same action multiple times in a single job
+    this.executedLegsPerJob = new Map();
+  }
+
+  /**
+   * Append a human-readable captcha log to job timeline
+   */
+  async logCaptcha(jobId, level, message, metadata = {}) {
+    if (!jobId || !this.backendLogger) {
+      return;
+    }
+    const pageUrl = await (async () => {
+      try {
+        return metadata.page_url || (await metadata.page?.url?.());
+      } catch {
+        return undefined;
+      }
+    })();
+
+    await this.backendLogger.appendJobLog(
+      jobId,
+      level,
+      message,
+      'WORKFLOW-EXECUTOR',
+      {
+        ...metadata,
+        page_url: pageUrl || undefined
+      }
+    );
+  }
+
+  /**
+   * Detect captcha element on the current page
+   */
+  async detectCaptchaOnPage(page) {
+    const captchaSelectors = [
+      // reCAPTCHA
+      'iframe[src*="recaptcha"]',
+      'div.g-recaptcha',
+      'div[class*="recaptcha"]',
+      // hCaptcha
+      'iframe[src*="hcaptcha"]',
+      'div.h-captcha',
+      'div[class*="hcaptcha"]',
+      // Cloudflare Turnstile
+      'iframe[src*="turnstile"]',
+      'div[class*="turnstile"]',
+      // Generic indicators
+      'div[id*="captcha"]',
+      'div[class*="captcha"]',
+      'img[src*="captcha"]',
+      'input[name*="captcha"]'
+    ];
+
+    for (const selector of captchaSelectors) {
+      const element = await page.$(selector).catch(() => null);
+      if (element) {
+        const type = selector.includes('recaptcha')
+          ? 'reCAPTCHA'
+          : selector.includes('hcaptcha')
+            ? 'hCaptcha'
+            : selector.includes('turnstile')
+              ? 'Cloudflare Turnstile'
+              : 'Generic Captcha';
+        return { selector, type };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Attempt to solve a captcha once with human-like behavior
+   */
+  async attemptCaptchaSolve(page, jobId, captchaInfo, attempt, maxAttempts) {
+    await this.logCaptcha(
+      jobId,
+      'warn',
+      `⚠️ CAPTCHA detected (${captchaInfo.type}) attempt ${attempt}/${maxAttempts}`,
+      {
+        captcha_type: captchaInfo.type,
+        captcha_selector: captchaInfo.selector,
+        attempt,
+        max_attempts: maxAttempts
+      }
+    );
+
+    // Add small human-like movements to avoid bot detection
+    try {
+      const scrollAmount = 80 + Math.random() * 120;
+      await page.evaluate(amount => window.scrollBy(0, amount), scrollAmount);
+      await page.waitForTimeout(300 + Math.random() * 700);
+      await page.mouse.move(
+        100 + Math.random() * 400,
+        100 + Math.random() * 400,
+        { steps: 8 }
+      );
+      await page.waitForTimeout(200 + Math.random() * 400);
+    } catch {
+      // Non-blocking
+    }
+
+    // Try to click the captcha container or frame
+    try {
+      const element = await page.$(captchaInfo.selector).catch(() => null);
+      if (element) {
+        const box = await element.boundingBox();
+        if (box) {
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
+          await page.waitForTimeout(300 + Math.random() * 500);
+          await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+          await page.waitForTimeout(1500 + Math.random() * 1500);
+        }
+      }
+    } catch (interactionError) {
+      await this.logCaptcha(
+        jobId,
+        'warn',
+        `⚠️ CAPTCHA interaction warning: ${interactionError.message}`,
+        {
+          captcha_type: captchaInfo.type,
+          captcha_selector: captchaInfo.selector,
+          attempt,
+          max_attempts: maxAttempts
+        }
+      );
+    }
+  }
+
+  /**
+   * Resolve captcha with up to 10 attempts during a leg execution
+   */
+  async resolveCaptchaWithRetries(page, jobId, maxAttempts = 10, phase = 'pre-leg') {
+    let detectedAtLeastOnce = false;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const captchaInfo = await this.detectCaptchaOnPage(page);
+      if (!captchaInfo) {
+        if (detectedAtLeastOnce) {
+          await this.logCaptcha(
+            jobId,
+            'info',
+            `✅ CAPTCHA cleared during ${phase}`,
+            { phase, attempts_used: attempt - 1 }
+          );
+        }
+        return { detected: detectedAtLeastOnce, resolved: true, attempts: attempt - 1 };
+      }
+
+      detectedAtLeastOnce = true;
+      await this.attemptCaptchaSolve(page, jobId, captchaInfo, attempt, maxAttempts);
+
+      const stillPresent = await page.$(captchaInfo.selector).catch(() => null);
+      if (!stillPresent) {
+        await this.logCaptcha(
+          jobId,
+          'info',
+          `✅ CAPTCHA resolved during ${phase} after attempt ${attempt}`,
+          {
+            captcha_type: captchaInfo.type,
+            attempt,
+            max_attempts: maxAttempts,
+            phase
+          }
+        );
+        return { detected: true, resolved: true, attempts: attempt };
+      }
+
+      await page.waitForTimeout(800 + Math.random() * 800);
+    }
+
+    await this.logCaptcha(
+      jobId,
+      'warn',
+      `❌ CAPTCHA still present after ${maxAttempts} attempts during ${phase}`,
+      { phase, max_attempts: maxAttempts }
+    );
+
+    return { detected: true, resolved: false, attempts: maxAttempts };
   }
 
   /**
@@ -328,6 +507,60 @@ class WorkflowExecutor {
       };
     }
 
+    // CRITICAL: Check database for already-executed actions with same leg_id + page_id in this job
+    // This ensures actions are analyzed once per job per page
+    // Get page_id from context or workflow state
+    const pageId = this.context.page_id || leg.page_id || null;
+    
+    try {
+      const existingActionResponse = await axios.get(`${this.backendUrl}/api/actions`, {
+        params: {
+          job_id: jobId,
+          leg_id: leg.leg_id,
+          ...(pageId ? { page_id: pageId } : {})
+        },
+        timeout: 5000
+      });
+      
+      if (existingActionResponse.data && Array.isArray(existingActionResponse.data) && existingActionResponse.data.length > 0) {
+        const existingActions = existingActionResponse.data;
+        // Check if any action with this leg_id (and page_id if available) has been executed (not pending)
+        const executedAction = existingActions.find(a => {
+          const legMatch = a.leg_id === leg.leg_id;
+          const pageMatch = !pageId || !a.page_id || a.page_id.toString() === pageId.toString();
+          const isExecuted = a.status !== 'pending' && a.status !== undefined;
+          return legMatch && pageMatch && isExecuted;
+        });
+        
+        if (executedAction) {
+          console.log(`[WorkflowExecutor] ⏭️ Skipping duplicate leg ${leg.leg_id} for job ${jobId}${pageId ? ` and page ${pageId}` : ''} - already executed (status: ${executedAction.status})`);
+          return {
+            leg_id: leg.leg_id,
+            result: 'skipped',
+            iterations: 0,
+            error: `duplicate_leg_in_job_per_page - action already executed with status: ${executedAction.status}`
+          };
+        }
+      }
+    } catch (checkError) {
+      // If check fails, log warning but continue (don't block execution)
+      console.warn(`[WorkflowExecutor] Could not check for duplicate actions: ${checkError.message}`);
+    }
+    
+    // Also track in memory for fast lookup within this executor instance
+    const executed = this.executedLegsPerJob.get(jobId) || new Set();
+    if (executed.has(leg.leg_id)) {
+      console.log(`[WorkflowExecutor] Skipping duplicate leg ${leg.leg_id} for job ${jobId} (in-memory check)`);
+      return {
+        leg_id: leg.leg_id,
+        result: 'skipped',
+        iterations: 0,
+        error: 'duplicate_leg_in_job'
+      };
+    }
+    executed.add(leg.leg_id);
+    this.executedLegsPerJob.set(jobId, executed);
+
     // Mark leg as in progress (only if workflowId is provided)
     if (workflowId) {
       await this.updateLegStatus(workflowId, leg.leg_id, 'in_progress', jobId);
@@ -369,6 +602,17 @@ class WorkflowExecutor {
         // Step 1: Capture page URL before action (for execution state)
         const pageUrlBefore = page.url();
         
+        // Step 1a: Detect and resolve captcha (up to 10 attempts) before collecting artifacts
+        const captchaResult = await this.resolveCaptchaWithRetries(page, jobId, 10, 'pre-leg');
+        if (captchaResult.detected && !captchaResult.resolved) {
+          await this.logCaptcha(
+            jobId,
+            'warn',
+            `⚠️ CAPTCHA unresolved after ${captchaResult.attempts} attempts (continuing leg)`,
+            { phase: 'pre-leg' }
+          );
+        }
+
         // Step 2: Take screenshot before action
         const screenshotBefore = await page.screenshot({ fullPage: true, type: 'png' });
         screenshotBeforeKey = await this.uploadScreenshot(jobId, screenshotBefore, 'before');
@@ -967,8 +1211,14 @@ class WorkflowExecutor {
           openai_response: determineCompletionResponse,
           result: determineCompletionResponse.status === 'success' ? 'success' : 
                   (determineCompletionResponse.status === 'failure' ? 'failure' : 'incomplete'),
+          status: determineCompletionResponse.status || null, // Status from determine_completion (success/failure/continue/stuck)
+          completion_status: determineCompletionResponse.completion_status || null, // Alternative status field
           error: executionResult?.error || null, // Keep script error for technical details
-          failure_reason: completionReason, // Clear reasoning from determine completion
+          reason: completionReason, // CRITICAL: Reasoning from determine_completion for execution history
+          failure_reason: completionReason, // Keep for backward compatibility
+          what_happened: determineCompletionResponse.what_happened || null, // What happened description
+          page_url_before: pageUrlBefore, // URL before script execution
+          page_url_after: pageUrlAfter, // URL after script execution
           execution_state: executionState, // Save state for redo capability
           job_id: jobId,
           video_segment_id: segmentToken || null
@@ -1028,6 +1278,17 @@ class WorkflowExecutor {
           }
 
           // Record failed attempt (single attempt only)
+          let pageUrlBefore = null;
+          let pageUrlAfter = null;
+          try {
+            if (page && !page.isClosed()) {
+              pageUrlBefore = page.url();
+              pageUrlAfter = page.url();
+            }
+          } catch (urlError) {
+            // Ignore URL errors
+          }
+
           await this.addIteration(workflowId, leg.leg_id, {
             screenshot_before: screenshotBeforeKey || null,
             screenshot_after: null,
@@ -1036,7 +1297,11 @@ class WorkflowExecutor {
             openai_request: null,
             openai_response: null,
             result: 'failure',
+            status: 'failure',
             error: error.message,
+            reason: error.message, // Use error message as reason for execution history
+            page_url_before: pageUrlBefore,
+            page_url_after: pageUrlAfter,
             execution_state: executionState, // Save state even on error if available
             job_id: jobId,
             video_segment_id: segmentToken || null
@@ -1149,8 +1414,46 @@ class WorkflowExecutor {
 
     let executedCount = 0;
 
+    // CRITICAL: Pre-check database for already-executed actions to avoid re-execution
+    // This prevents executing legs that have already been analyzed/tested in this job
+    const executedLegIds = new Set();
+    if (effectiveJobId) {
+      try {
+        const executedActionsResponse = await axios.get(`${this.backendUrl}/api/actions`, {
+          params: {
+            job_id: effectiveJobId
+          },
+          timeout: 5000
+        });
+        
+        if (executedActionsResponse.data && Array.isArray(executedActionsResponse.data)) {
+          executedActionsResponse.data.forEach(action => {
+            if (action.leg_id && action.status && action.status !== 'pending') {
+              executedLegIds.add(action.leg_id);
+              console.log(`[WorkflowExecutor] Found already-executed leg ${action.leg_id} (status: ${action.status})`);
+            }
+          });
+        }
+      } catch (checkError) {
+        console.warn(`[WorkflowExecutor] Could not pre-check executed actions: ${checkError.message}`);
+      }
+    }
+
     // Execute each leg sequentially
     for (const leg of workflow.legs) {
+      // Skip if already executed in this job (checked from database)
+      if (leg.leg_id && executedLegIds.has(leg.leg_id)) {
+        console.log(`[WorkflowExecutor] ⏭️ Skipping leg ${leg.leg_id} - already executed in this job`);
+        if (effectiveJobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(effectiveJobId, 'info', `⏭️ Skipped leg ${leg.leg_id} (already executed)`, 'WORKFLOW-EXECUTOR', {
+            workflow_id: workflowId,
+            leg_id: leg.leg_id,
+            reason: 'already_executed'
+          });
+        }
+        continue;
+      }
+      
       if (singleActionOnly && executedCount >= 1) {
         if (leg.status === 'pending') {
           console.log(`[WorkflowExecutor] ⏭️ Skipping leg ${leg.leg_id} due to single-action mode`);
@@ -1168,12 +1471,20 @@ class WorkflowExecutor {
         continue;
       }
 
-      if (leg.status === 'pending') {
-        const result = await this.executeLeg(page, effectiveJobId, workflowId, leg);
-        results.push(result);
-        executedCount += 1;
-      } else {
+      // Skip legs that are not pending (already completed/failed/skipped)
+      if (leg.status && leg.status !== 'pending') {
         console.log(`[WorkflowExecutor] Skipping leg ${leg.leg_id} - status: ${leg.status}`);
+        continue;
+      }
+
+      // Execute the leg
+      const result = await this.executeLeg(page, effectiveJobId, workflowId, leg);
+      results.push(result);
+      executedCount += 1;
+      
+      // Track executed leg in memory (executeLeg already does this, but ensure it's tracked)
+      if (leg.leg_id) {
+        executedLegIds.add(leg.leg_id);
       }
     }
 
@@ -1504,11 +1815,122 @@ class WorkflowExecutor {
     return cleaned;
   }
 
+  /**
+   * Parse script to extract meaningful action lines for logging
+   */
+  parseScriptActions(script) {
+    if (!script || typeof script !== 'string') return [];
+    
+    const actions = [];
+    const lines = script.split('\n');
+    
+    // Common Playwright action patterns - more comprehensive
+    const actionPatterns = [
+      /await\s+page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur)/i,
+      /await\s+page\.locator\([^)]+\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur|waitFor)/i,
+      /await\s+page\.mouse\.(move|click|down|up|wheel)/i,
+      /await\s+page\.keyboard\.(press|type|down|up)/i,
+      /await\s+element\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur)/i,
+      /page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur)/i,
+      /page\.locator\([^)]+\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur)/i,
+      /page\.mouse\.(move|click|down|up|wheel)/i,
+      /page\.keyboard\.(press|type|down|up)/i,
+    ];
+    
+    // Track if we're inside the IIFE body (skip the wrapper lines)
+    let insideIIFE = false;
+    let braceDepth = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+      
+      // Skip empty lines and comments
+      if (!line || line.startsWith('//') || line.startsWith('/*') || line.startsWith('*')) {
+        continue;
+      }
+      
+      // Detect start of async IIFE: "return await (async () => {" or "async () => {"
+      if (line.match(/^(return\s+await\s*\(async|async\s*\(\)\s*=>\s*\{)/)) {
+        insideIIFE = true;
+        // Count opening braces
+        braceDepth = (line.match(/\{/g) || []).length;
+        continue;
+      }
+      
+      // Count braces to detect when we exit the IIFE
+      if (insideIIFE) {
+        const openBraces = (line.match(/\{/g) || []).length;
+        const closeBraces = (line.match(/\}/g) || []).length;
+        braceDepth += openBraces - closeBraces;
+        
+        // If we hit the closing of the IIFE, skip it
+        if (braceDepth <= 0 && (line.includes('})();') || line.includes('})()'))) {
+          insideIIFE = false;
+          continue;
+        }
+        
+        // Skip closing braces that are just structure
+        if (line === '}' || line === '});' || line === '})();') {
+          continue;
+        }
+      }
+      
+      // Skip standalone return statements that are just control flow (but allow return { success: ... })
+      if (line.match(/^return\s*;$/)) {
+        continue;
+      }
+      
+      // Skip try/catch/if/else/for/while declarations on their own line (but keep their content)
+      if (line.match(/^(try|catch|if|else|for|while)\s*[\{\(]$/)) {
+        continue;
+      }
+      
+      // Skip variable declarations (but allow if they contain actions)
+      if (line.match(/^(const|let|var)\s+\w+\s*=\s*[^a-zA-Z]/) && !line.match(/page\.|element\./)) {
+        continue;
+      }
+      
+      // Check if line contains a Playwright action
+      for (const pattern of actionPatterns) {
+        if (pattern.test(line)) {
+          // Clean up the action line for display
+          let displayLine = line;
+          
+          // Remove leading/trailing semicolons and whitespace
+          displayLine = displayLine.replace(/^[;\s]+|[;\s]+$/g, '');
+          
+          // Truncate very long lines but preserve the action
+          if (displayLine.length > 150) {
+            const match = displayLine.match(/(await\s+)?(page|element|page\.mouse|page\.keyboard|page\.locator)\.([a-zA-Z]+)/);
+            if (match) {
+              const awaitPart = match[1] || '';
+              const objPart = match[2];
+              const methodPart = match[3];
+              displayLine = `${awaitPart}${objPart}.${methodPart}(...)`;
+            } else {
+              // Fallback: just truncate
+              displayLine = displayLine.substring(0, 147) + '...';
+            }
+          }
+          
+          actions.push(displayLine);
+          break;
+        }
+      }
+    }
+    
+    return actions;
+  }
+
   async executeScript(page, script, jobId = null) {
     const startTime = Date.now();
     const originalScriptLength = script?.length || 0;
     
     try {
+      // Parse script to extract action lines BEFORE cleaning
+      const actionLines = this.parseScriptActions(script);
+      console.log(`[WorkflowExecutor] 📋 Parsed ${actionLines.length} action lines from script (length: ${script?.length || 0})`);
+      
       // Log script execution start if jobId available
       if (jobId && this.backendLogger) {
         await this.backendLogger.appendJobLog(jobId, 'debug',
@@ -1517,9 +1939,33 @@ class WorkflowExecutor {
           {
             original_script_length: originalScriptLength,
             script_preview: script?.substring(0, 300) || 'N/A',
-            page_url: page.url()
+            page_url: page.url(),
+            action_lines_count: actionLines.length
           }
         );
+        
+        // Log each action line with [executing] prefix
+        console.log(`[WorkflowExecutor] 📋 Logging ${actionLines.length} action lines`);
+        if (actionLines.length > 0) {
+          for (const actionLine of actionLines) {
+            console.log(`[WorkflowExecutor] 📝 Logging action: [executing] ${actionLine.substring(0, 100)}`);
+            try {
+              await this.backendLogger.appendJobLog(jobId, 'info',
+                `[executing] ${actionLine}`,
+                'WORKFLOW-EXECUTOR',
+                {
+                  action_type: 'script_action',
+                  action_line: actionLine
+                }
+              );
+            } catch (logError) {
+              console.error(`[WorkflowExecutor] ❌ Failed to log action line: ${logError.message}`);
+            }
+          }
+          console.log(`[WorkflowExecutor] ✅ Successfully logged ${actionLines.length} action lines`);
+        } else {
+          console.warn(`[WorkflowExecutor] ⚠️ No action lines found in script`);
+        }
       }
       
       // DO NOT clean or sanitize the script - use it exactly as provided
@@ -1562,14 +2008,198 @@ class WorkflowExecutor {
       const { humanType } = await import('./human-typing.js');
       const { humanDelay } = await import('./stealth-config.js');
       
-      // Create a wrapper page object that intercepts clicks and fills to send timeline markers
+      // Create a wrapper page object that intercepts ALL Playwright methods to log execution
       const createPageWrapper = (pageObj, jobId, backendLogger) => {
-        const wrapper = Object.create(pageObj);
+        console.log(`[WorkflowExecutor] 🔧 Creating page wrapper for jobId: ${jobId}`);
+        const self = this; // Capture 'this' from WorkflowExecutor
+        const backendUrl = this.backendUrl;
+        const getAuthHeaders = this.getAuthHeaders.bind(this);
         
-        // Wrap click method with human-like behavior
+        // Helper function to log action execution with better formatting
+        const logAction = async (methodName, args = []) => {
+          if (!jobId || !backendLogger) {
+            console.log(`[WorkflowExecutor] ⚠️ logAction called but no jobId or backendLogger: ${methodName}`);
+            return;
+          }
+          
+          try {
+            // Format action message similar to playwright-action-logger
+            const message = formatActionMessage(methodName, args);
+            
+            console.log(`[WorkflowExecutor] 📝 Logging action: ${message}`);
+            
+            // Extract details for metadata
+            const details = extractActionDetails(methodName, args);
+            
+            await backendLogger.appendJobLog(jobId, 'info',
+              message,
+              'PLAYWRIGHT-ACTION',
+              {
+                action_type: methodName,
+                ...details,
+                timestamp: new Date().toISOString()
+              }
+            );
+            
+            console.log(`[WorkflowExecutor] ✅ Successfully logged action: ${methodName}`);
+          } catch (logError) {
+            // Don't fail execution if logging fails
+            console.error(`[WorkflowExecutor] ❌ Failed to log action: ${logError.message}`, logError);
+          }
+        };
+        
+        // Format action message for display (similar to playwright-action-logger)
+        const formatActionMessage = (actionType, args) => {
+          const actionEmojis = {
+            fill: '✍️',
+            click: '🖱️',
+            type: '⌨️',
+            press: '⌨️',
+            selectOption: '📋',
+            check: '☑️',
+            uncheck: '☐',
+            goto: '🌐',
+            waitForSelector: '⏳',
+            waitForTimeout: '⏸️',
+            evaluate: '🔍',
+            screenshot: '📸',
+            hover: '👆',
+            focus: '🎯',
+            blur: '👋',
+            setInputFiles: '📁',
+            waitForNavigation: '⏳',
+            reload: '🔄',
+            goBack: '⬅️',
+            goForward: '➡️'
+          };
+          
+          const emoji = actionEmojis[actionType] || '⚙️';
+          const selector = args[0] || 'page';
+          
+          switch (actionType) {
+            case 'fill':
+              const value = args[1] || '';
+              return `${emoji} Filling field "${selector}" with ${value?.length || 0} characters`;
+            
+            case 'click':
+              return `${emoji} Clicking "${selector}"`;
+            
+            case 'type':
+              const text = args[1] || '';
+              return `${emoji} Typing ${text?.length || 0} characters into "${selector}"`;
+            
+            case 'press':
+              const key = args[1] || args[0];
+              return `${emoji} Pressing key "${key}"${selector !== 'page' ? ` on "${selector}"` : ''}`;
+            
+            case 'selectOption':
+              const values = args[1] || args[0];
+              const valuesCount = Array.isArray(values) ? values.length : 1;
+              return `${emoji} Selecting option(s) in "${selector}" (${valuesCount} value(s))`;
+            
+            case 'check':
+              return `${emoji} Checking checkbox "${selector}"`;
+            
+            case 'uncheck':
+              return `${emoji} Unchecking checkbox "${selector}"`;
+            
+            case 'goto':
+              return `${emoji} Navigating to "${selector}"`;
+            
+            case 'waitForSelector':
+              return `${emoji} Waiting for selector "${selector}"`;
+            
+            case 'waitForTimeout':
+              return `${emoji} Waiting ${selector}ms`;
+            
+            case 'evaluate':
+              return `${emoji} Evaluating JavaScript on page`;
+            
+            case 'screenshot':
+              return `${emoji} Taking screenshot`;
+            
+            case 'hover':
+              return `${emoji} Hovering over "${selector}"`;
+            
+            case 'focus':
+              return `${emoji} Focusing on "${selector}"`;
+            
+            case 'blur':
+              return `${emoji} Blurring "${selector}"`;
+            
+            case 'setInputFiles':
+              return `${emoji} Uploading file(s) to "${selector}"`;
+            
+            case 'waitForNavigation':
+              return `${emoji} Waiting for navigation`;
+            
+            case 'reload':
+              return `${emoji} Reloading page`;
+            
+            case 'goBack':
+              return `${emoji} Going back in history`;
+            
+            case 'goForward':
+              return `${emoji} Going forward in history`;
+            
+            default:
+              return `${emoji} ${actionType} on "${selector}"`;
+          }
+        };
+        
+        // Extract action details for metadata
+        const extractActionDetails = (methodName, args) => {
+          const details = {};
+          
+          if (args.length > 0) {
+            details.selector = args[0];
+          }
+          
+          switch (methodName) {
+            case 'fill':
+            case 'type':
+              if (args.length > 1) {
+                details.value = maskSensitiveValue(args[1]);
+                details.value_length = args[1]?.length || 0;
+              }
+              break;
+            case 'press':
+              details.key = args[1] || args[0];
+              break;
+            case 'selectOption':
+              const values = args[1] || args[0];
+              details.values = Array.isArray(values) ? values : [values];
+              details.values_count = Array.isArray(values) ? values.length : 1;
+              break;
+            case 'waitForTimeout':
+              details.timeout_ms = args[0];
+              break;
+          }
+          
+          return details;
+        };
+        
+        // Mask sensitive values (passwords, etc.)
+        const maskSensitiveValue = (value) => {
+          if (!value || typeof value !== 'string') {
+            return value;
+          }
+          
+          // Mask if value is longer than 8 chars (likely password)
+          if (value.length > 8) {
+            return '***' + value.substring(value.length - 2);
+          }
+          
+          return value;
+        };
+        
+        // Wrap click method with human-like behavior AND logging
         const originalClick = pageObj.click.bind(pageObj);
         wrapper.click = async function(selector, options = {}) {
           try {
+            // Log the action execution
+            await logAction('click', [selector]);
+            
             // Get element text for marker label
             let label = 'Click';
             try {
@@ -1738,10 +2368,13 @@ class WorkflowExecutor {
           }
         };
         
-        // Wrap fill method with human-like typing (mistakes, corrections, delays)
+        // Wrap fill method with human-like typing (mistakes, corrections, delays) AND logging
         const originalFill = pageObj.fill.bind(pageObj);
         wrapper.fill = async function(selector, value, options) {
           try {
+            // Log the action execution
+            await logAction('fill', [selector, value]);
+            
             // Get element label for marker
             let label = 'Input';
             try {
@@ -1797,15 +2430,190 @@ class WorkflowExecutor {
           }
         };
         
-        // Copy all other methods and properties
-        Object.setPrototypeOf(wrapper, pageObj);
-        return wrapper;
+        // Wrap other common Playwright methods to log execution
+        const wrapMethod = (methodName, originalMethod) => {
+          return async function(...args) {
+            console.log(`[WorkflowExecutor] 🔍 Wrapper called for method: ${methodName}`);
+            await logAction(methodName, args);
+            return await originalMethod.apply(pageObj, args);
+          };
+        };
+        
+        // Wrap common page methods
+        wrapper.type = wrapMethod('type', pageObj.type.bind(pageObj));
+        wrapper.press = wrapMethod('press', pageObj.press.bind(pageObj));
+        wrapper.goto = wrapMethod('goto', pageObj.goto.bind(pageObj));
+        wrapper.waitForTimeout = wrapMethod('waitForTimeout', pageObj.waitForTimeout.bind(pageObj));
+        wrapper.waitFor = wrapMethod('waitFor', pageObj.waitFor.bind(pageObj));
+        wrapper.waitForLoadState = wrapMethod('waitForLoadState', pageObj.waitForLoadState.bind(pageObj));
+        wrapper.waitForSelector = wrapMethod('waitForSelector', pageObj.waitForSelector.bind(pageObj));
+        wrapper.selectOption = wrapMethod('selectOption', pageObj.selectOption.bind(pageObj));
+        wrapper.check = wrapMethod('check', pageObj.check.bind(pageObj));
+        wrapper.uncheck = wrapMethod('uncheck', pageObj.uncheck.bind(pageObj));
+        wrapper.hover = wrapMethod('hover', pageObj.hover.bind(pageObj));
+        wrapper.focus = wrapMethod('focus', pageObj.focus.bind(pageObj));
+        wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
+        
+        // Wrap locator method to also intercept methods on locators
+        const originalLocator = pageObj.locator.bind(pageObj);
+        wrapper.locator = function(selector, options) {
+          const locator = originalLocator(selector, options);
+          
+          // Wrap locator methods
+          const wrapLocatorMethod = (methodName, originalLocatorMethod) => {
+            return async function(...args) {
+              await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).${methodName}`, args);
+              return await originalLocatorMethod.apply(locator, args);
+            };
+          };
+          
+          // Wrap common locator methods
+          if (locator.click) {
+            const originalLocatorClick = locator.click.bind(locator);
+            locator.click = wrapLocatorMethod('click', originalLocatorClick);
+          }
+          if (locator.fill) {
+            const originalLocatorFill = locator.fill.bind(locator);
+            locator.fill = wrapLocatorMethod('fill', originalLocatorFill);
+          }
+          if (locator.type) {
+            const originalLocatorType = locator.type.bind(locator);
+            locator.type = wrapLocatorMethod('type', originalLocatorType);
+          }
+          if (locator.press) {
+            const originalLocatorPress = locator.press.bind(locator);
+            locator.press = wrapLocatorMethod('press', originalLocatorPress);
+          }
+          if (locator.selectOption) {
+            const originalLocatorSelectOption = locator.selectOption.bind(locator);
+            locator.selectOption = wrapLocatorMethod('selectOption', originalLocatorSelectOption);
+          }
+          if (locator.check) {
+            const originalLocatorCheck = locator.check.bind(locator);
+            locator.check = wrapLocatorMethod('check', originalLocatorCheck);
+          }
+          if (locator.uncheck) {
+            const originalLocatorUncheck = locator.uncheck.bind(locator);
+            locator.uncheck = wrapLocatorMethod('uncheck', originalLocatorUncheck);
+          }
+          if (locator.hover) {
+            const originalLocatorHover = locator.hover.bind(locator);
+            locator.hover = wrapLocatorMethod('hover', originalLocatorHover);
+          }
+          if (locator.screenshot) {
+            const originalLocatorScreenshot = locator.screenshot.bind(locator);
+            locator.screenshot = wrapLocatorMethod('screenshot', originalLocatorScreenshot);
+          }
+          
+          return locator;
+        };
+        
+        // Wrap screenshot method to capture and log screenshots during script execution
+        const originalScreenshot = pageObj.screenshot.bind(pageObj);
+        wrapper.screenshot = async function(options = {}) {
+          try {
+            // Log the action execution
+            await logAction('screenshot', [options]);
+            
+            // Take the screenshot
+            const screenshotBuffer = await originalScreenshot(options);
+            
+            // Log and upload screenshot if jobId and backendLogger are available
+            if (jobId && backendLogger && backendUrl) {
+              try {
+                const axios = await import('axios');
+                const authHeaders = getAuthHeaders();
+                
+                const presignedResponse = await axios.default.post(`${backendUrl}/api/upload/presigned-url`, {
+                  type: 'screenshot',
+                  jobId: jobId,
+                  contentType: 'image/png'
+                }, {
+                  headers: authHeaders
+                });
+                
+                if (presignedResponse.data.key && presignedResponse.data.url) {
+                  // Upload screenshot
+                  await axios.default.put(presignedResponse.data.url, screenshotBuffer, {
+                    headers: { 'Content-Type': 'image/png' },
+                    maxBodyLength: Infinity,
+                    maxContentLength: Infinity
+                  });
+                  
+                  const screenshotKey = presignedResponse.data.key;
+                  
+                  // Log screenshot with screenshot_type metadata (like screenshot-type elements)
+                  await backendLogger.appendJobLog(jobId, 'info',
+                    `📸 Screenshot captured`,
+                    'WORKFLOW-EXECUTOR',
+                    {
+                      screenshot_type: 'script_execution',
+                      screenshot_key: screenshotKey,
+                      screenshot_file_id: screenshotKey,
+                      is_screenshot: true,
+                      action_type: 'screenshot',
+                      screenshot_options: options
+                    }
+                  );
+                }
+              } catch (screenshotLogError) {
+                // Don't fail script execution if screenshot logging fails
+                console.warn(`[WorkflowExecutor] Failed to log screenshot: ${screenshotLogError.message}`);
+              }
+            }
+            
+            return screenshotBuffer;
+          } catch (screenshotError) {
+            // Re-throw screenshot errors
+            throw screenshotError;
+          }
+        };
+        
+        // Track which methods we've explicitly wrapped so Proxy can use them
+        const wrappedMethods = new Set(Object.keys(wrapper).filter(key => typeof wrapper[key] === 'function'));
+        
+        // Use Proxy to intercept ALL method calls - always wrap, never return direct references
+        const proxy = new Proxy(pageObj, {
+          get(target, prop, receiver) {
+            const originalValue = target[prop];
+            
+            // If we've explicitly wrapped this method in our wrapper object, use that
+            if (wrappedMethods.has(prop)) {
+              return wrapper[prop];
+            }
+            
+            // For all functions, wrap them to log execution
+            if (typeof originalValue === 'function') {
+              // Bind the function to maintain 'this' context
+              const boundFn = originalValue.bind(target);
+              return async function(...args) {
+                console.log(`[WorkflowExecutor] 🔍 Proxy intercepted method: ${String(prop)}`);
+                await logAction(String(prop), args);
+                return await boundFn(...args);
+              };
+            }
+            
+            // For non-functions (properties), return as-is
+            return originalValue;
+          },
+          // Also proxy property setting to maintain page object behavior
+          set(target, prop, value) {
+            target[prop] = value;
+            return true;
+          }
+        });
+        
+        return proxy;
       };
       
       // Create an async function that has access to the wrapped page object
       const executeInNodeContext = async (pageObj, scriptCode, jobId) => {
         // Create wrapped page with action interception
         const wrappedPage = createPageWrapper(pageObj, jobId, this.backendLogger);
+        
+        // Verify wrapper is working - test that wrappedPage.click exists and is our wrapper
+        console.log(`[WorkflowExecutor] 🔍 Testing wrapper: wrappedPage.click is function? ${typeof wrappedPage.click === 'function'}`);
+        console.log(`[WorkflowExecutor] 🔍 Testing wrapper: wrappedPage.locator is function? ${typeof wrappedPage.locator === 'function'}`);
         
         // Use string concatenation (not template literals) to avoid escaping issues
         // This allows the script code to contain backticks, ${}, etc. without problems
@@ -1871,44 +2679,8 @@ class WorkflowExecutor {
       }
       
       // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
-      // Check for CAPTCHA before executing script
-      try {
-        // Import CAPTCHA detection functions dynamically
-        const unifiedOps = await import('./unified-operations.js');
-        // These functions are not exported, so we'll detect CAPTCHA inline
-        const captchaSelectors = [
-          'iframe[src*="recaptcha"]',
-          'div.g-recaptcha',
-          'iframe[src*="hcaptcha"]',
-          'div.h-captcha',
-          'iframe[src*="turnstile"]',
-          'div[class*="turnstile"]'
-        ];
-        
-        let captchaDetected = false;
-        for (const selector of captchaSelectors) {
-          const element = await page.$(selector).catch(() => null);
-          if (element) {
-            captchaDetected = true;
-            console.log(`[WorkflowExecutor] CAPTCHA detected before script execution: ${selector}`);
-            // Try to interact with CAPTCHA
-            try {
-              const box = await element.boundingBox();
-              if (box) {
-                await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
-                await page.waitForTimeout(300 + Math.random() * 500);
-                await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-                await page.waitForTimeout(3000 + Math.random() * 2000);
-              }
-            } catch (interactError) {
-              console.warn(`[WorkflowExecutor] CAPTCHA interaction failed: ${interactError.message}`);
-            }
-            break;
-          }
-        }
-      } catch (captchaError) {
-        console.warn(`[WorkflowExecutor] CAPTCHA check failed, continuing: ${captchaError.message}`);
-      }
+      // Re-check for CAPTCHA right before executing the script with up to 10 attempts
+      await this.resolveCaptchaWithRetries(page, jobId, 10, 'pre-script');
       
       // Increased timeout to 90 seconds for complex interactions and CAPTCHA handling
       const result = await Promise.race([

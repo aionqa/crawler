@@ -777,9 +777,15 @@ export async function performLoginWithWorkflow(
       delete process.env.LOGIN_PASSWORD;
     }
 
-    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
-    console.log(`[LOGIN-WORKFLOW] 🔐 Starting workflow-based login for ${pageUrl}`);
-    console.log(`[LOGIN-WORKFLOW] ═══════════════════════════════════════════════════════`);
+    console.log(`═══════════════════════════════════════════════════════`);
+    console.log(`🔐 Starting workflow-based login for ${pageUrl}`);
+    console.log(`═══════════════════════════════════════════════════════`);
+    console.log(`📄 VAR_DUMP: performLoginWithWorkflow called`);
+    console.log(`📄 VAR_DUMP: pageUrl=${pageUrl}`);
+    console.log(`📄 VAR_DUMP: jobId=${jobId}`);
+    console.log(`📄 VAR_DUMP: username=${username || 'MISSING'}`);
+    console.log(`📄 VAR_DUMP: password=${password ? '***' : 'MISSING'}`);
+    console.log(`📄 VAR_DUMP: current page.url()=${page.url()}`);
 
     let context = {};
     if (workflowContext && typeof workflowContext === 'object' && !Array.isArray(workflowContext)) {
@@ -800,6 +806,23 @@ export async function performLoginWithWorkflow(
 
     const projectId = context.project_id || context.projectId || null;
 
+    console.log(`📄 VAR_DUMP: workflowTemplateId=${workflowTemplateId}`);
+    console.log(`📄 VAR_DUMP: projectId=${projectId}`);
+    console.log(`📄 VAR_DUMP: context.credentials=${context.credentials ? JSON.stringify({username: context.credentials.username || 'MISSING', password: context.credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
+
+    // CRITICAL: Strict validation - credentials MUST be in context.credentials, no fallbacks
+    if (!context.credentials || !context.credentials.username || !context.credentials.password ||
+        context.credentials.username === 'MISSING' || context.credentials.username === 'missing' ||
+        context.credentials.password === 'MISSING' || context.credentials.password === 'missing') {
+      console.error(`❌ CREDENTIALS MISSING or INVALID in context.credentials!`);
+      console.error(`context.credentials:`, context.credentials);
+      throw new Error('Credentials are required in context.credentials and must not contain placeholder values');
+    }
+    
+    const finalCredentials = context.credentials;
+    
+    console.log(`✅ Final credentials: username=${finalCredentials.username}, password=${finalCredentials.password ? '***' : 'MISSING'}`);
+    
     const normalizedContext = {
       ...context,
       workflow_template_id: workflowTemplateId,
@@ -807,15 +830,24 @@ export async function performLoginWithWorkflow(
       projectId,
       job_id: jobId,
       jobId,
-      page_url: pageUrl,
-      username,
-      password,
-      credentials: context.credentials || { username, password },
+      page_url: pageUrl, // CRITICAL: Preserve original login URL
+      username: finalCredentials.username, // Use from credentials
+      password: finalCredentials.password, // Use from credentials
+      credentials: finalCredentials, // CRITICAL: Always use finalCredentials
       runner_token: context.runner_token, // Preserve runner token for API authentication
+      // CRITICAL: Set jobType to 'login' to prevent crawling after successful login
+      jobType: 'login',
+      job_type: 'login',
+      isLoginJob: true,
+      preventCrawling: true,
+      preventLinkDiscovery: true,
       options: {
         ...(context.options || {})
       }
     };
+    
+    console.log(`📄 VAR_DUMP: normalizedContext.page_url=${normalizedContext.page_url}`);
+    console.log(`📄 VAR_DUMP: normalizedContext.credentials=${normalizedContext.credentials ? JSON.stringify({username: normalizedContext.credentials.username || 'MISSING', password: normalizedContext.credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
 
     if (openaiApiKey) {
       normalizedContext.openai_api_key = openaiApiKey;
@@ -829,8 +861,16 @@ export async function performLoginWithWorkflow(
     let conversationLogger = aiLogger;
     if (!conversationLogger) {
       const { AIConversationLogger } = await import('/app/shared/ai-conversation-logger.js');
-      conversationLogger = new AIConversationLogger(BACKEND_URL);
+      conversationLogger = new AIConversationLogger(BACKEND_URL, normalizedContext.runner_token);
+      console.log(`📄 VAR_DUMP: Created new AIConversationLogger with runner_token=${normalizedContext.runner_token ? 'EXISTS' : 'MISSING'}`);
+    } else {
+      console.log(`📄 VAR_DUMP: Using existing aiLogger`);
     }
+    
+    console.log(`📄 VAR_DUMP: conversationLogger=${conversationLogger ? 'EXISTS' : 'NULL'}`);
+    console.log(`📄 VAR_DUMP: BACKEND_URL=${BACKEND_URL}`);
+    console.log(`📄 VAR_DUMP: jobId=${jobId} (for AI conversation logging)`);
+    console.log(`📄 VAR_DUMP: pageUrl=${pageUrl} (for AI conversation logging)`);
 
     await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
       jobId,
@@ -846,22 +886,34 @@ export async function performLoginWithWorkflow(
     }).catch(() => {});
 
     const workflowAnalyzer = new WorkflowAnalyzer(BACKEND_URL, conversationLogger, normalizedContext);
+    console.log(`📄 VAR_DUMP: Created WorkflowAnalyzer, calling analyzePage`);
+    console.log(`📄 VAR_DUMP: analyzePage params: jobId=${jobId}, pageId=null, projectId=${projectId}`);
     const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, null, projectId);
+    console.log(`📄 VAR_DUMP: analyzePage completed, analysisResult keys: ${Object.keys(analysisResult || {}).join(', ')}`);
 
     // Extract determine_completion result from multiple possible locations
     // CRITICAL: The while-loop stores determine_completion in each iteration, need to get from last iteration
+    // NO FALLBACKS: Use ONLY determine_completion from while-loop, ignore validate_login_success
     let determineResult = null;
     
-    // Strategy 1: Check if it was promoted to top level after loop completion
+    console.log(`📄 VAR_DUMP: Extracting determineResult from analysisResult`);
+    console.log(`📄 VAR_DUMP: analysisResult keys: ${Object.keys(analysisResult || {}).join(', ')}`);
+    
+    // Strategy 1: Check if it was promoted to top level after loop completion (from while-loop)
+    // This is the PRIMARY location - workflow-analyzer promotes it here
     determineResult = 
       analysisResult?.determine_completion?.result ||
+      analysisResult?.determine_completion ||
       analysisResult?.results?.determine_completion?.result ||
+      analysisResult?.results?.determine_completion ||
       analysisResult?.context?.determine_completion?.result ||
       analysisResult?.context?.determine_completion ||
       null;
     
+    console.log(`📄 VAR_DUMP: Strategy 1 result: ${determineResult ? `found (status=${determineResult.status || determineResult.completion_status || 'none'})` : 'not found'}`);
+    
     // Strategy 2: Extract from while-loop's last iteration (most reliable)
-    if (!determineResult || (!determineResult.status && !determineResult.completion_status)) {
+    if (!determineResult || (!determineResult.status && !determineResult.completion_status && !determineResult.is_complete)) {
       const performLoginAttempts = 
         analysisResult?.perform_login_attempts ||
         analysisResult?.results?.perform_login_attempts ||
@@ -870,17 +922,21 @@ export async function performLoginWithWorkflow(
         analysisResult?.results?.perform_login_attempts?.result ||
         {};
       
+      console.log(`📄 VAR_DUMP: perform_login_attempts keys: ${Object.keys(performLoginAttempts).join(', ')}`);
+      
       // Check if determine_completion is in the loop result
       if (performLoginAttempts.determine_completion) {
         determineResult = performLoginAttempts.determine_completion.result ||
                          performLoginAttempts.determine_completion ||
                          determineResult;
+        console.log(`📄 VAR_DUMP: Found in perform_login_attempts.determine_completion`);
       }
       
-      // Check loop history (last iteration)
-      if ((!determineResult || (!determineResult.status && !determineResult.completion_status)) && 
+      // Check loop history (last iteration) - this is where it's stored during execution
+      if ((!determineResult || (!determineResult.status && !determineResult.completion_status && !determineResult.is_complete)) && 
           performLoginAttempts.loopHistory && Array.isArray(performLoginAttempts.loopHistory)) {
         const lastIteration = performLoginAttempts.loopHistory[performLoginAttempts.loopHistory.length - 1];
+        console.log(`📄 VAR_DUMP: Checking last iteration (${performLoginAttempts.loopHistory.length} total), keys: ${lastIteration ? Object.keys(lastIteration).join(', ') : 'null'}`);
         
         // Check multiple paths in last iteration
         determineResult = 
@@ -889,27 +945,51 @@ export async function performLoginWithWorkflow(
           lastIteration?.determine_completion?.result ||
           lastIteration?.determine_completion ||
           determineResult;
+        
+        if (determineResult && (determineResult.status || determineResult.completion_status || determineResult.is_complete)) {
+          console.log(`📄 VAR_DUMP: Found in last iteration`);
+        }
+      }
+      
+      // Check iterations array (alternative structure)
+      if ((!determineResult || (!determineResult.status && !determineResult.completion_status && !determineResult.is_complete)) &&
+          performLoginAttempts.iterations && Array.isArray(performLoginAttempts.iterations)) {
+        const lastIter = performLoginAttempts.iterations[performLoginAttempts.iterations.length - 1];
+        determineResult = 
+          lastIter?.determine_completion?.result ||
+          lastIter?.determine_completion ||
+          lastIter?.lastResult?.determine_completion?.result ||
+          lastIter?.lastResult?.determine_completion ||
+          determineResult;
+        if (determineResult && (determineResult.status || determineResult.completion_status || determineResult.is_complete)) {
+          console.log(`📄 VAR_DUMP: Found in iterations array`);
+        }
       }
       
       // Check context for determine_completion from last execution
-      if (!determineResult || (!determineResult.status && !determineResult.completion_status)) {
+      if (!determineResult || (!determineResult.status && !determineResult.completion_status && !determineResult.is_complete)) {
         determineResult =
           analysisResult?.context?.lastExecutionResult?.determine_completion?.result ||
           analysisResult?.lastExecutionResult?.determine_completion?.result ||
           analysisResult?.lastExecutionResult?.determine_completion ||
           determineResult;
+        if (determineResult && (determineResult.status || determineResult.completion_status || determineResult.is_complete)) {
+          console.log(`📄 VAR_DUMP: Found in lastExecutionResult`);
+        }
       }
     }
     
     // Fallback to empty object if nothing found
     if (!determineResult) {
       determineResult = {};
+      console.warn(`⚠️ WARNING: No determineResult found anywhere!`);
     }
     
-    console.log(`[LOGIN-WORKFLOW] 🔍 Extracted determineResult:`, JSON.stringify({
+    console.log(`🔍 Extracted determineResult:`, JSON.stringify({
       status: determineResult.status,
       completion_status: determineResult.completion_status,
-      is_complete: determineResult.is_complete
+      is_complete: determineResult.is_complete,
+      reason: determineResult.reason ? determineResult.reason.substring(0, 200) : null
     }));
 
     // Extract cookies from multiple possible locations FIRST
@@ -934,11 +1014,11 @@ export async function performLoginWithWorkflow(
       try {
         const browserCookies = await page.context().cookies();
         if (browserCookies && browserCookies.length > 0) {
-          console.log(`[LOGIN-WORKFLOW] 🔍 No cookies in workflow result, collecting from browser: ${browserCookies.length} cookies`);
+          console.log(`🔍 No cookies in workflow result, collecting from browser: ${browserCookies.length} cookies`);
           finalCookies = browserCookies;
         }
       } catch (cookieError) {
-        console.warn(`[LOGIN-WORKFLOW] ⚠️ Failed to collect cookies from browser: ${cookieError.message}`);
+        console.warn(`⚠️ Failed to collect cookies from browser: ${cookieError.message}`);
       }
     }
 
@@ -948,17 +1028,17 @@ export async function performLoginWithWorkflow(
     // Do NOT use static URL patterns - workflows must work on different websites
     // The AI in determine_completion step analyzes the page state and determines success
     
-    console.log(`[LOGIN-WORKFLOW] 🔍 Checking AI-determined login status from determine_completion step`);
-    console.log(`[LOGIN-WORKFLOW] determineResult:`, JSON.stringify({
+    console.log(`🔍 Checking AI-determined login status from determine_completion step`);
+    console.log(`determineResult:`, JSON.stringify({
       status: determineResult?.status,
       completion_status: determineResult?.completion_status,
       is_complete: determineResult?.is_complete,
       reason: determineResult?.reason?.substring(0, 100)
     }));
-    console.log(`[LOGIN-WORKFLOW] Full determineResult keys:`, determineResult ? Object.keys(determineResult) : 'null');
-    console.log(`[LOGIN-WORKFLOW] analysisResult keys:`, analysisResult ? Object.keys(analysisResult) : 'null');
+    console.log(`Full determineResult keys:`, determineResult ? Object.keys(determineResult) : 'null');
+    console.log(`analysisResult keys:`, analysisResult ? Object.keys(analysisResult) : 'null');
     if (analysisResult?.perform_login_attempts) {
-      console.log(`[LOGIN-WORKFLOW] perform_login_attempts keys:`, Object.keys(analysisResult.perform_login_attempts));
+      console.log(`perform_login_attempts keys:`, Object.keys(analysisResult.perform_login_attempts));
     }
     
     // Extract login status from AI response (determine_completion step result)
@@ -971,31 +1051,40 @@ export async function performLoginWithWorkflow(
       analysisResult?.loginStatus ||
       null;
 
-    // Determine success based ONLY on AI response
-    // AI sets status='success' when it determines authentication is successful
+    // CRITICAL: Rely on AI analysis for success determination - no hardcoded patterns
+    // The AI analyzes page content, URL changes, and authenticated indicators to determine success
+    const noExplicitFailure = loginStatus !== 'failure' && 
+                               determineResult.status !== 'failure' && 
+                               determineResult.completion_status !== 'failed';
+    
     const loginSuccess =
-      loginStatus === 'success' ||  // AI determined success
-      (determineResult.status === 'success') ||  // Explicit success status
-      (determineResult.completion_status === 'complete' && loginStatus !== 'failure') ||  // Completion with no failure
-      (determineResult.is_complete === true && determineResult.status !== 'failure');  // Complete without failure
+      loginStatus === 'success' ||  // AI determined success (primary indicator)
+      (determineResult.status === 'success') ||  // Explicit success status from AI
+      (determineResult.completion_status === 'complete' && noExplicitFailure) ||  // Completion with no failure
+      (determineResult.is_complete === true && noExplicitFailure);  // Complete without failure
     
-    console.log(`[LOGIN-WORKFLOW] 🔍 Final login status: ${loginStatus}, success: ${loginSuccess}`);
-    
-    console.log(`[LOGIN-WORKFLOW] 🔍 Final inference: loginStatus=${loginStatus}, loginSuccess=${loginSuccess}`);
+    console.log(`📄 VAR_DUMP: Success detection details`);
+    console.log(`📄 VAR_DUMP: loginStatus=${loginStatus}`);
+    console.log(`📄 VAR_DUMP: determineResult.status=${determineResult.status}`);
+    console.log(`📄 VAR_DUMP: determineResult.completion_status=${determineResult.completion_status}`);
+    console.log(`📄 VAR_DUMP: determineResult.is_complete=${determineResult.is_complete}`);
+    console.log(`📄 VAR_DUMP: initialUrl=${pageUrl}`);
+    console.log(`📄 VAR_DUMP: finalUrl=${finalUrl}`);
+    console.log(`🔍 Final login status: ${loginStatus}, success: ${loginSuccess}`);
 
 
     let finalTitle = 'Unknown';
     try {
       finalTitle = await page.title();
     } catch (titleError) {
-      console.warn(`[LOGIN-WORKFLOW] ⚠️ Unable to read page title: ${titleError.message}`);
+      console.warn(`⚠️ Unable to read page title: ${titleError.message}`);
     }
 
     await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
       jobId,
       level: loginSuccess ? 'info' : 'warn',
       message: loginSuccess
-        ? `✅ LOGIN WORKFLOW: Completed successfully`
+        ? `✅ LOGIN WORKFLOW: Completed successfully - Job will stop now`
         : `❌ LOGIN WORKFLOW: Login not confirmed`,
       component: 'LOGIN-WORKFLOW',
       metadata: {
@@ -1003,11 +1092,12 @@ export async function performLoginWithWorkflow(
         cookies_collected: finalCookies.length,
         final_url: finalUrl,
         final_title: finalTitle,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        stopped: loginSuccess // Indicate that job should stop
       }
     }).catch(() => {});
 
-    return {
+    const result = {
       success: loginSuccess,
       loginStatus: loginStatus || 'unknown',
       finalUrl,
@@ -1017,8 +1107,17 @@ export async function performLoginWithWorkflow(
       workflow_template_id: workflowTemplateId,
       workflowResult: analysisResult
     };
+    
+    // CRITICAL: If login was successful, mark that job should stop
+    if (loginSuccess) {
+      result.stopped = true;
+      result.reason = 'Login successful - job completed (login-only mode)';
+      console.log(`✅ Login successful - job will stop immediately`);
+    }
+    
+    return result;
   } catch (error) {
-    console.error(`[LOGIN-WORKFLOW] Login workflow failed: ${error.message}`);
+    console.error(`Login workflow failed: ${error.message}`);
     let finalTitle = 'Unknown';
     try {
       finalTitle = await page.title();

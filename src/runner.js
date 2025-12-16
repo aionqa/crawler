@@ -17,6 +17,7 @@ import VideoRecorder from './video-recorder.js';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
 const RUNNER_TOKEN = process.env.RUNNER_TOKEN; // GitHub Actions-style runner token
+const RUNNER_TYPE = process.env.RUNNER_TYPE || 'user-managed'; // 'service-managed' or 'user-managed'
 const TASK_MODE = process.env.TASK_MODE || 'polling'; // 'single-job' or 'polling'
 const JOB_ID = process.env.JOB_ID; // Job ID when in single-job mode
 const JOB_DATA = process.env.JOB_DATA; // Job data JSON when in single-job mode
@@ -25,18 +26,22 @@ const MAX_SITEMAP_SCAN_CHILD_SITEMAPS = 25;
 const MAX_SITEMAP_SCAN_ENTRIES = 5000;
 const DEFAULT_AVAILABILITY_TIMEOUT_MS = 10000;
 // Generate unique runner ID if not provided (includes hostname and UUID for uniqueness)
-const RUNNER_ID = process.env.RUNNER_ID || `unified-runner-${hostname()}-${randomUUID().substring(0, 8)}`;
+// For service-managed runners, include type in ID
+const RUNNER_ID = process.env.RUNNER_ID || (RUNNER_TYPE === 'service-managed' 
+  ? `service-runner-${hostname()}-${randomUUID().substring(0, 8)}`
+  : `unified-runner-${hostname()}-${randomUUID().substring(0, 8)}`);
 const STREAM_INTERVAL = 2000; // Stream browser frame every 2 seconds
 // WORKFLOW_API_PORT removed - runners do not expose HTTP endpoints (rule 51-runner-architecture.mdc)
 
 // Validate runner token is configured
 if (!RUNNER_TOKEN) {
-  console.error('❌ [UNIFIED-RUNNER] RUNNER_TOKEN environment variable is required');
+  console.error('❌ RUNNER_TOKEN environment variable is required');
   console.error('    Generate a token in the UI: Settings > Runners > Generate Token');
   process.exit(1);
 }
 
-console.log(`🤖 [UNIFIED-RUNNER] Runner ID: ${RUNNER_ID}`);
+console.log(`🤖 Runner ID: ${RUNNER_ID}`);
+console.log(`🤖 Runner Type: ${RUNNER_TYPE} (${RUNNER_TYPE === 'service-managed' ? 'spawned by backend service' : 'user-managed'})`);
 
 // Initialize video stream manager for real-time streaming
 const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID);
@@ -44,10 +49,10 @@ const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID);
 // Initialize video recorder for full recording
 const videoRecorder = new VideoRecorder(BACKEND_URL, RUNNER_ID);
 
-console.log(`🚀 [UNIFIED-RUNNER] Starting runner ${RUNNER_ID}`);
-console.log(`🔗 [UNIFIED-RUNNER] Backend URL: ${BACKEND_URL}`);
-console.log(`⏱️  [UNIFIED-RUNNER] Poll interval: ${POLL_INTERVAL}ms`);
-console.log(`📹 [UNIFIED-RUNNER] Stream interval: ${STREAM_INTERVAL}ms`);
+console.log(`🚀 Starting runner ${RUNNER_ID}`);
+console.log(`🔗 Backend URL: ${BACKEND_URL}`);
+console.log(`⏱️  Poll interval: ${POLL_INTERVAL}ms`);
+console.log(`📹 Stream interval: ${STREAM_INTERVAL}ms`);
 
 let isProcessing = false;
 let currentJobId = null;
@@ -75,9 +80,9 @@ healthApp.get('/health', (_req, res) => {
 });
 
 const healthServer = healthApp.listen(HEALTH_CHECK_PORT, () => {
-  console.log(`❤️  [UNIFIED-RUNNER] Health check server listening on port ${HEALTH_CHECK_PORT}`);
+  console.log(`❤️  Health check server listening on port ${HEALTH_CHECK_PORT}`);
 });
-console.log(`✅ [UNIFIED-RUNNER] Health check endpoint available at http://localhost:${HEALTH_CHECK_PORT}/health`);
+console.log(`✅ Health check endpoint available at http://localhost:${HEALTH_CHECK_PORT}/health`);
 
 /**
  * Get axios headers with authentication
@@ -100,7 +105,7 @@ async function appendJobLog(jobId, level, message, metadata = {}) {
       timeout: 10000
     });
   } catch (error) {
-    console.error(`[UNIFIED-RUNNER] Failed to append log for job ${jobId}:`, error.message);
+    console.error(`Failed to append log for job ${jobId}:`, error.message);
   }
 }
 
@@ -124,14 +129,14 @@ async function pollForJob() {
     if (error.response?.status === 404) {
       // Normal - no jobs available
     } else if (error.response?.status === 401) {
-      console.error(`❌ [UNIFIED-RUNNER] Authentication failed when polling for crawl jobs!`);
+      console.error(`❌ Authentication failed when polling for crawl jobs!`);
       console.error(`   Status: 401 Unauthorized`);
       console.error(`   Error: ${error.response?.data?.error || error.message}`);
       console.error(`   Runner ID: ${RUNNER_ID}`);
       console.error(`   Token configured: ${RUNNER_TOKEN ? 'Yes (length: ' + RUNNER_TOKEN.length + ')' : 'NO - THIS IS THE PROBLEM!'}`);
       console.error(`   Fix: Set RUNNER_TOKEN environment variable to a valid token from Settings > Runners`);
     } else {
-      console.error(`❌ [UNIFIED-RUNNER] Error polling for crawl jobs:`, error.message);
+      console.error(`❌ Error polling for crawl jobs:`, error.message);
       if (error.response) {
         console.error(`   Status: ${error.response.status}`);
         console.error(`   Response:`, error.response.data);
@@ -155,14 +160,14 @@ async function pollForJob() {
     if (error.response?.status === 404) {
       // Normal - no jobs available
     } else if (error.response?.status === 401) {
-      console.error(`❌ [UNIFIED-RUNNER] Authentication failed when polling for login jobs!`);
+      console.error(`❌ Authentication failed when polling for login jobs!`);
       console.error(`   Status: 401 Unauthorized`);
       console.error(`   Error: ${error.response?.data?.error || error.message}`);
       console.error(`   Runner ID: ${RUNNER_ID}`);
       console.error(`   Token configured: ${RUNNER_TOKEN ? 'Yes (length: ' + RUNNER_TOKEN.length + ')' : 'NO - THIS IS THE PROBLEM!'}`);
       console.error(`   Fix: Set RUNNER_TOKEN environment variable to a valid token from Settings > Runners`);
     } else {
-      console.error(`❌ [UNIFIED-RUNNER] Error polling for login jobs:`, error.message);
+      console.error(`❌ Error polling for login jobs:`, error.message);
       if (error.response) {
         console.error(`   Status: ${error.response.status}`);
         console.error(`   Response:`, error.response.data);
@@ -178,7 +183,7 @@ async function pollForJob() {
  * Uses VideoStreamManager for continuous streaming with buffer
  */
 function startVideoStream(page, jobId) {
-  console.log(`📹 [UNIFIED-RUNNER] Starting real-time video stream for job ${jobId}`);
+  console.log(`📹 Starting real-time video stream for job ${jobId}`);
   videoStreamManager.startStream(jobId, page, {
     interval: 200 // 5 FPS for smooth streaming
   });
@@ -188,7 +193,7 @@ function startVideoStream(page, jobId) {
  * Stop video streaming for a job
  */
 function stopVideoStream(jobId) {
-  console.log(`⏹️  [UNIFIED-RUNNER] Stopping video stream for job ${jobId}`);
+  console.log(`⏹️  Stopping video stream for job ${jobId}`);
   videoStreamManager.stopStream(jobId);
 }
 
@@ -202,7 +207,7 @@ async function checkJobStatus(jobId) {
     });
     return response.data?.status || 'unknown';
   } catch (error) {
-    console.error(`❌ [UNIFIED-RUNNER] Error checking job status:`, error.message);
+    console.error(`❌ Error checking job status:`, error.message);
     return 'unknown';
   }
 }
@@ -214,14 +219,14 @@ async function executeJob(job) {
   currentJobId = job.id;
   let streamInterval = null;
   
-  console.log(`\n🎯 [UNIFIED-RUNNER] Executing ${job.jobType} job ${job.id}`);
-  console.log(`📍 [UNIFIED-RUNNER] URL: ${job.url}`);
+  console.log(`\n🎯 Executing ${job.jobType} job ${job.id}`);
+  console.log(`📍 URL: ${job.url}`);
   console.log(`[DEBUG] Job object at start:`, JSON.stringify(job, null, 2));
 
   // Check job status before starting - accept both 'pending' and 'running'
   const initialStatus = await checkJobStatus(job.id);
   if (initialStatus !== 'running' && initialStatus !== 'pending') {
-    console.log(`⚠️  [UNIFIED-RUNNER] Job ${job.id} status is ${initialStatus}, skipping execution`);
+    console.log(`⚠️  Job ${job.id} status is ${initialStatus}, skipping execution`);
     // Report to backend to release the assignment
     try {
       await axios.post(`${BACKEND_URL}/api/runner/jobs/${job.id}/skip`, {
@@ -230,9 +235,9 @@ async function executeJob(job) {
       }, {
         headers: getAuthHeaders()
       });
-      console.log(`✅ [UNIFIED-RUNNER] Reported skipped job ${job.id} to backend`);
+      console.log(`✅ Reported skipped job ${job.id} to backend`);
     } catch (error) {
-      console.error(`❌ [UNIFIED-RUNNER] Error reporting skipped job:`, error.message);
+      console.error(`❌ Error reporting skipped job:`, error.message);
     }
     return false;
   }
@@ -245,9 +250,9 @@ async function executeJob(job) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'running' })
       });
-      console.log(`🔄 [UNIFIED-RUNNER] Updated job ${job.id} status to 'running'`);
+      console.log(`🔄 Updated job ${job.id} status to 'running'`);
     } catch (statusError) {
-      console.warn(`⚠️  [UNIFIED-RUNNER] Failed to update job status: ${statusError.message}`);
+      console.warn(`⚠️  Failed to update job status: ${statusError.message}`);
     }
 
     if (job.jobType === 'login') {
@@ -256,18 +261,18 @@ async function executeJob(job) {
       console.log(`[DEBUG] job.url=${job.url}, job.username=${job.username}, job.login_data=`, job.login_data);
       const result = await executeLoginJob(job, streamInterval);
       await reportJobComplete(job.id, result);
-      console.log(`✅ [UNIFIED-RUNNER] Login job ${job.id} completed successfully`);
+      console.log(`✅ Login job ${job.id} completed successfully`);
       return true;
     } else {
       // Execute crawl job
       const result = await executeCrawlJob(job, streamInterval);
       await reportJobComplete(job.id, result);
-      console.log(`✅ [UNIFIED-RUNNER] Crawl job ${job.id} completed successfully`);
+      console.log(`✅ Crawl job ${job.id} completed successfully`);
       return true;
     }
 
   } catch (error) {
-    console.error(`❌ [UNIFIED-RUNNER] Job ${job.id} failed:`, error.message);
+    console.error(`❌ Job ${job.id} failed:`, error.message);
     
     // Report failure to backend
     await reportJobFailed(job.id, error.message, error.stack);
@@ -288,6 +293,10 @@ async function executeJob(job) {
 async function executeLoginJob(job, streamInterval) {
   // Debug: Log the job object to see what we're receiving
   console.log(`[DEBUG] Received job object:`, JSON.stringify(job, null, 2));
+  console.log(`[DEBUG] job.context:`, job.context);
+  console.log(`[DEBUG] job.context.credentials:`, job.context?.credentials);
+  console.log(`[DEBUG] job.options:`, job.options);
+  console.log(`[DEBUG] job.options.credentials:`, job.options?.credentials);
   
   // Extract login credentials from job.login_data or fallback to top-level fields
   const loginData = job.login_data || {};
@@ -301,6 +310,11 @@ async function executeLoginJob(job, streamInterval) {
       workflow_template_id: job.context?.workflow_template_id || job.workflow_template_id || job.options?.workflow_template_id
     }
   };
+  
+  console.log(`[DEBUG] Extracted jobContext:`, jobContext);
+  console.log(`[DEBUG] jobContext.credentials:`, jobContext.credentials);
+  console.log(`[DEBUG] Top-level username:`, job.username);
+  console.log(`[DEBUG] Top-level password:`, job.password ? '***' : 'MISSING');
 
   console.log(`[DEBUG] Extracted credentials: url=${url}, username=${username}, password=${password ? '***' : 'undefined'}`);
 
@@ -313,12 +327,71 @@ async function executeLoginJob(job, streamInterval) {
     throw new Error('OpenAI API key not provided');
   }
 
+  // CRITICAL: ALWAYS extract credentials from available sources, regardless of what's in jobContext
+  // This ensures we get valid credentials even if jobContext has "MISSING" values
+  console.log(`[DEBUG] 🔍 Extracting credentials from all available sources...`);
+  
+  // Try to get credentials from multiple sources (in priority order)
+  const credsFromContext = jobContext?.credentials && 
+    jobContext.credentials.username !== 'MISSING' && jobContext.credentials.username !== 'missing' &&
+    jobContext.credentials.password !== 'MISSING' && jobContext.credentials.password !== 'missing' ?
+    jobContext.credentials : null;
+  const credsFromOptions = job.options?.credentials && 
+    job.options.credentials.username !== 'MISSING' && job.options.credentials.username !== 'missing' &&
+    job.options.credentials.password !== 'MISSING' && job.options.credentials.password !== 'missing' ?
+    job.options.credentials : null;
+  const credsFromTopLevel = job.username && job.password && 
+    job.username !== 'MISSING' && job.username !== 'missing' &&
+    job.password !== 'MISSING' && job.password !== 'missing' ?
+    { username: job.username, password: job.password } : null;
+  const credsFromLoginData = loginData.username && loginData.password && 
+    loginData.username !== 'MISSING' && loginData.username !== 'missing' &&
+    loginData.password !== 'MISSING' && loginData.password !== 'missing' ?
+    { username: loginData.username, password: loginData.password } : null;
+  
+  // Use extracted credentials (priority: context > options > top-level > login_data > function params)
+  const extractedCreds = credsFromContext || credsFromOptions || credsFromTopLevel || credsFromLoginData || 
+    (username && password && username !== 'MISSING' && password !== 'MISSING' ? { username, password } : null);
+  
+  console.log(`[DEBUG] Credential sources:`, {
+    fromContext: !!credsFromContext,
+    fromOptions: !!credsFromOptions,
+    fromTopLevel: !!credsFromTopLevel,
+    fromLoginData: !!credsFromLoginData,
+    fromParams: !!(username && password),
+    finalExtracted: !!extractedCreds
+  });
+  
+  if (!extractedCreds || !extractedCreds.username || !extractedCreds.password ||
+      extractedCreds.username === 'MISSING' || extractedCreds.username === 'missing' ||
+      extractedCreds.password === 'MISSING' || extractedCreds.password === 'missing') {
+    console.error(`[DEBUG] ❌ CREDENTIALS MISSING or INVALID from all sources!`);
+    console.error(`[DEBUG] jobContext.credentials:`, jobContext?.credentials);
+    console.error(`[DEBUG] job.options.credentials:`, job.options?.credentials);
+    console.error(`[DEBUG] job.username/password:`, { username: job.username, password: job.password ? '***' : 'MISSING' });
+    console.error(`[DEBUG] loginData:`, loginData);
+    throw new Error('Credentials are required and must not contain placeholder values');
+  }
+  
+  // ALWAYS set credentials in jobContext, overriding any existing (possibly "MISSING") values
+  jobContext.credentials = {
+    username: extractedCreds.username,
+    password: extractedCreds.password
+  };
+  console.log(`[DEBUG] ✅ Credentials extracted and set in jobContext: username=${extractedCreds.username}, password=***`);
+  
+  const finalCredentials = jobContext.credentials;
+  
+  console.log(`[DEBUG] ✅ Credentials found: username=${finalCredentials.username}, password=${finalCredentials.password ? '***' : 'MISSING'}`);
+  
   const workflowExecutionContext = {
     ...jobContext,
     workflow_template_id: jobContext.workflow_template_id,
     project_id: job.project_id || jobContext.project_id || job.projectId || null,
     projectId: job.project_id || jobContext.projectId || null,
-    credentials: jobContext.credentials || { username, password },
+    credentials: finalCredentials, // Use extracted credentials
+    username: finalCredentials.username, // Also set top-level for fallback
+    password: finalCredentials.password, // Also set top-level for fallback
     options: {
       ...(jobContext.options || {}),
       openai_api_key: openaiApiKey
@@ -326,9 +399,14 @@ async function executeLoginJob(job, streamInterval) {
     openai_api_key: openaiApiKey,
     runner_token: RUNNER_TOKEN // Add runner token for API authentication
   };
+  
+  console.log(`[DEBUG] ✅ workflowExecutionContext.credentials:`, { 
+    username: workflowExecutionContext.credentials.username, 
+    password: workflowExecutionContext.credentials.password ? '***' : 'MISSING' 
+  });
 
   // Launch local browser (embedded) - SAME as crawl jobs
-  console.log(`🌐 [UNIFIED-RUNNER] Launching local Chromium browser for login with stealth configuration`);
+  console.log(`🌐 Launching local Chromium browser for login with stealth configuration`);
   const { chromium } = await import('playwright');
   
   // Import stealth configuration
@@ -368,7 +446,7 @@ async function executeLoginJob(job, streamInterval) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     // Check if DOM is ready after 30s, continue anyway if not
     await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
-      console.warn(`[UNIFIED-RUNNER] Page DOM not fully loaded after 30s, continuing anyway`);
+      console.warn(`Page DOM not fully loaded after 30s, continuing anyway`);
     });
     await page.waitForTimeout(1000);
     console.log(`[DEBUG] Navigated to login URL: ${page.url()}`);
@@ -399,7 +477,7 @@ async function executeLoginJob(job, streamInterval) {
         cookies = result.iterationCookies;
       }
       if (!cookies || cookies.length === 0) {
-        console.log(`[LOGIN-WORKFLOW] No cookies returned from workflow result, collecting from current page context`);
+        console.log(`No cookies returned from workflow result, collecting from current page context`);
         cookies = await context.cookies();
       }
 
@@ -413,7 +491,7 @@ async function executeLoginJob(job, streamInterval) {
         finalUrl: page.url()
       };
     } else {
-      console.log(`[LOGIN-WORKFLOW] Workflow execution failed: ${result.error || 'Unknown error'}`);
+      console.log(`Workflow execution failed: ${result.error || 'Unknown error'}`);
     }
 
     return result;
@@ -422,10 +500,10 @@ async function executeLoginJob(job, streamInterval) {
     stopVideoStream(job.id);
     
     // Stop video recording and upload
-    console.log(`[UNIFIED-RUNNER] Finalizing video recording for job ${job.id}...`);
+    console.log(`Finalizing video recording for job ${job.id}...`);
     const videoInfo = await videoRecorder.stopRecording(job.id);
     if (videoInfo) {
-      console.log(`✅ [UNIFIED-RUNNER] Video uploaded: ${videoInfo.videoKey} (${videoInfo.sizeMB} MB, ${videoInfo.duration}s)`);
+      console.log(`✅ Video uploaded: ${videoInfo.videoKey} (${videoInfo.sizeMB} MB, ${videoInfo.duration}s)`);
     }
     
     // Clean up
@@ -449,9 +527,43 @@ async function executeCrawlJob(job, streamInterval) {
   // Extract job parameters
   // CRITICAL: URL can be at job.url or job.start_url (from runner_jobs structure)
   const url = job.url || job.start_url || null;
-  const cookies = job.cookies || [];
   const rawContext = job.context || {};
   const jobOptions = job.options || {};
+  
+  // CRITICAL: Get cookies from context first (from credentials/login_job), then fall back to job.cookies
+  const cookies = rawContext?.cookies || job.cookies || [];
+  
+  // CRITICAL: Get login redirection handling config
+  const handleLoginRedirect = rawContext?.handle_login_redirect || jobOptions?.handle_login_redirect || 'auto_retry';
+  const credentialsId = rawContext?.credentials_id || null;
+  const loginJobId = rawContext?.login_job_id || null;
+  
+  // CRITICAL: Always extract credentials from top-level fields and override any "MISSING" values
+  const credsFromOptions = jobOptions?.credentials;
+  const credsFromTopLevel = job.username && job.password && 
+    job.username !== 'MISSING' && job.password !== 'MISSING' ? 
+    { username: job.username, password: job.password } : null;
+  const credsFromLoginData = job.login_data?.username && job.login_data?.password && 
+    job.login_data.username !== 'MISSING' && job.login_data.password !== 'MISSING' ? 
+    { username: job.login_data.username, password: job.login_data.password } : null;
+  
+  const extractedCreds = credsFromOptions || credsFromTopLevel || credsFromLoginData;
+  
+  // CRITICAL: Always set credentials in context, overriding any "MISSING" values
+  if (extractedCreds && extractedCreds.username && extractedCreds.password &&
+      extractedCreds.username !== 'MISSING' && extractedCreds.password !== 'MISSING') {
+    rawContext.credentials = {
+      username: extractedCreds.username,
+      password: extractedCreds.password
+    };
+    console.log(`[DEBUG] ✅ Credentials extracted for crawl job from top-level: username=${extractedCreds.username}, password=***`);
+  } else if (!rawContext.credentials || 
+      rawContext.credentials.username === 'MISSING' || rawContext.credentials.password === 'MISSING') {
+    console.warn(`[DEBUG] ⚠️ No valid credentials found in job for crawl job ${job.id}`);
+    console.warn(`[DEBUG] job.username:`, job.username);
+    console.warn(`[DEBUG] job.password:`, job.password ? '***' : 'MISSING');
+    console.warn(`[DEBUG] job.options.credentials:`, credsFromOptions);
+  }
   
   if (!url) {
     throw new Error(`Missing URL in job object. Available keys: ${Object.keys(job).join(', ')}`);
@@ -477,16 +589,50 @@ async function executeCrawlJob(job, streamInterval) {
     ...(rawContext?.options || {})
   };
 
+  // CRITICAL: Ensure credentials are in rawContext before building normalizedContext
+  if (extractedCreds && extractedCreds.username && extractedCreds.password &&
+      extractedCreds.username !== 'MISSING' && extractedCreds.password !== 'MISSING') {
+    rawContext.credentials = {
+      username: extractedCreds.username,
+      password: extractedCreds.password
+    };
+    console.log(`[DEBUG] ✅ Credentials set in rawContext: username=${extractedCreds.username}, password=***`);
+  }
+  
   const normalizedContext = {
     ...rawContext,
     execute_workflow: executeWorkflowFlag,
     single_action_only: Boolean(singleActionOnlyValue),
+    // CRITICAL: Ensure credentials are explicitly set in normalizedContext
+    credentials: rawContext.credentials || (extractedCreds && extractedCreds.username !== 'MISSING' ? extractedCreds : undefined),
+    // CRITICAL: For login jobs, ensure jobType is set in context so login redirect handler can skip them
+    // Check top-level job.jobType and set it in context if it's a login job
+    jobType: rawContext.jobType || (job.jobType === 'login' ? 'login' : undefined),
+    job_type: rawContext.job_type || (job.jobType === 'login' ? 'login' : undefined),
+    isLoginJob: rawContext.isLoginJob || (job.jobType === 'login' ? true : undefined),
+    preventCrawling: rawContext.preventCrawling || (job.jobType === 'login' ? true : undefined),
     options: {
       ...mergedOptions,
       execute_workflow: executeWorkflowFlag,
       single_action_only: Boolean(singleActionOnlyValue)
     }
   };
+  
+  // CRITICAL: Final check - ensure credentials are in normalizedContext
+  if (normalizedContext.credentials && 
+      (normalizedContext.credentials.username === 'MISSING' || normalizedContext.credentials.password === 'MISSING')) {
+    if (extractedCreds && extractedCreds.username !== 'MISSING' && extractedCreds.password !== 'MISSING') {
+      normalizedContext.credentials = {
+        username: extractedCreds.username,
+        password: extractedCreds.password
+      };
+      console.log(`[DEBUG] ✅ Credentials overridden in normalizedContext: username=${extractedCreds.username}, password=***`);
+    }
+  }
+  
+  console.log(`[DEBUG] normalizedContext.credentials:`, normalizedContext.credentials ? 
+    { username: normalizedContext.credentials.username, password: normalizedContext.credentials.password ? '***' : 'MISSING' } : 
+    'MISSING');
 
   const openaiApiKey = normalizedContext.openai_api_key || process.env.OPENAI_API_KEY;
 
@@ -526,13 +672,13 @@ async function executeCrawlJob(job, streamInterval) {
     onContextReady: (context, page) => {
       // Start video recording when context is ready
       videoRecorder.startRecording(job.id, context, page);
-      console.log(`[UNIFIED-RUNNER] Video recording and streaming started for crawl job ${job.id}`);
+      console.log(`Video recording and streaming started for crawl job ${job.id}`);
     },
     beforeBrowserClose: async () => {
       try {
         recordedVideoInfo = recordedVideoInfo || await videoRecorder.stopRecording(job.id);
       } catch (error) {
-        console.error(`[UNIFIED-RUNNER] Failed to finalize video before browser close for job ${job.id}:`, error.message);
+        console.error(`Failed to finalize video before browser close for job ${job.id}:`, error.message);
       }
     }
   };
@@ -548,16 +694,16 @@ async function executeCrawlJob(job, streamInterval) {
     // Stop video recording and upload
     try {
       if (!recordedVideoInfo) {
-        console.log(`[UNIFIED-RUNNER] Finalizing video recording for crawl job ${job.id}...`);
+        console.log(`Finalizing video recording for crawl job ${job.id}...`);
         recordedVideoInfo = await videoRecorder.stopRecording(job.id);
       }
       if (recordedVideoInfo) {
-        console.log(`✅ [UNIFIED-RUNNER] Video uploaded: ${recordedVideoInfo.videoKey} (${recordedVideoInfo.sizeMB} MB, ${recordedVideoInfo.duration}s)`);
+        console.log(`✅ Video uploaded: ${recordedVideoInfo.videoKey} (${recordedVideoInfo.sizeMB} MB, ${recordedVideoInfo.duration}s)`);
       } else {
-        console.warn(`[UNIFIED-RUNNER] No video recorded for crawl job ${job.id}`);
+        console.warn(`No video recorded for crawl job ${job.id}`);
       }
     } catch (videoError) {
-      console.error(`[UNIFIED-RUNNER] Error finalizing video recording for crawl job ${job.id}:`, videoError.message);
+      console.error(`Error finalizing video recording for crawl job ${job.id}:`, videoError.message);
     }
   }
 }
@@ -880,7 +1026,7 @@ async function reportJobComplete(jobId, result) {
       headers: getAuthHeaders()
     });
   } catch (error) {
-    console.error(`❌ [UNIFIED-RUNNER] Error reporting job completion:`, error.message);
+    console.error(`❌ Error reporting job completion:`, error.message);
   }
 }
 
@@ -898,7 +1044,7 @@ async function reportJobFailed(jobId, errorMessage, errorStack) {
       headers: getAuthHeaders()
     });
   } catch (error) {
-    console.error(`❌ [UNIFIED-RUNNER] Error reporting job failure:`, error.message);
+    console.error(`❌ Error reporting job failure:`, error.message);
   }
 }
 
@@ -906,7 +1052,7 @@ async function reportJobFailed(jobId, errorMessage, errorStack) {
  * Main polling loop
  */
 async function runLoop() {
-  console.log(`🔄 [UNIFIED-RUNNER] Starting polling loop...`);
+  console.log(`🔄 Starting polling loop...`);
 
   while (true) {
     try {
@@ -920,7 +1066,7 @@ async function runLoop() {
       const job = await pollForJob();
 
       if (job) {
-        console.log(`📥 [UNIFIED-RUNNER] Received ${job.jobType} job ${job.id}`);
+        console.log(`📥 Received ${job.jobType} job ${job.id}`);
         isProcessing = true;
         
         // Execute job (don't await - let it run async)
@@ -933,7 +1079,7 @@ async function runLoop() {
       }
 
     } catch (error) {
-      console.error(`❌ [UNIFIED-RUNNER] Error in main loop:`, error.message);
+      console.error(`❌ Error in main loop:`, error.message);
       await sleep(POLL_INTERVAL);
     }
   }
@@ -950,12 +1096,12 @@ function sleep(ms) {
  * Graceful shutdown
  */
 function shutdown() {
-  console.log(`\n⏹️  [UNIFIED-RUNNER] Shutting down gracefully...`);
+  console.log(`\n⏹️  Shutting down gracefully...`);
   if (currentJobId) {
-    console.log(`⚠️  [UNIFIED-RUNNER] Job ${currentJobId} still running, waiting for completion...`);
+    console.log(`⚠️  Job ${currentJobId} still running, waiting for completion...`);
   }
   healthServer.close(() => {
-    console.log(`✅ [UNIFIED-RUNNER] Health check server closed`);
+    console.log(`✅ Health check server closed`);
     process.exit(0);
   });
 }
@@ -967,50 +1113,66 @@ process.on('SIGTERM', shutdown);
  * Execute a single job and exit (for ECS task-per-job mode)
  */
 async function executeSingleJob() {
-  console.log(`🎯 [UNIFIED-RUNNER] Running in single-job mode`);
+  console.log(`🎯 Running in single-job mode`);
   
   if (!JOB_ID || !JOB_DATA) {
-    console.error(`❌ [UNIFIED-RUNNER] JOB_ID and JOB_DATA are required in single-job mode`);
+    console.error(`❌ JOB_ID and JOB_DATA are required in single-job mode`);
     process.exit(1);
   }
   
   try {
     const jobData = JSON.parse(JOB_DATA);
+    
+    // CRITICAL: Get job type from database if available (passed via environment)
+    const dbJobType = process.env.JOB_TYPE || null;
+    
     const job = {
       id: JOB_ID,
       ...jobData,
-      jobType: jobData.type === 'login' ? 'login' : 'crawl'
+      // CRITICAL: Check jobType, type, database type, and environment variable
+      jobType: jobData.jobType || dbJobType || (jobData.type === 'login' ? 'login' : 'crawl') || 'crawl'
     };
     
-    console.log(`📥 [UNIFIED-RUNNER] Executing job ${JOB_ID} (type: ${job.jobType})`);
+    console.log(`[DEBUG] Parsed job from JOB_DATA:`, {
+      id: job.id,
+      jobType: job.jobType,
+      jobDataJobType: jobData.jobType,
+      dbJobType: dbJobType,
+      hasUsername: !!job.username,
+      hasPassword: !!job.password,
+      hasContextCredentials: !!job.context?.credentials,
+      contextCredentialsUsername: job.context?.credentials?.username
+    });
+    
+    console.log(`📥 Executing job ${JOB_ID} (type: ${job.jobType})`);
     
     // Execute the job
     const success = await executeJob(job);
     
     if (success) {
-      console.log(`✅ [UNIFIED-RUNNER] Job ${JOB_ID} completed successfully`);
+      console.log(`✅ Job ${JOB_ID} completed successfully`);
       process.exit(0);
     } else {
-      console.error(`❌ [UNIFIED-RUNNER] Job ${JOB_ID} failed`);
+      console.error(`❌ Job ${JOB_ID} failed`);
       process.exit(1);
     }
   } catch (error) {
-    console.error(`❌ [UNIFIED-RUNNER] Fatal error executing job:`, error);
+    console.error(`❌ Fatal error executing job:`, error);
     process.exit(1);
   }
 }
 
 // Start the runner
 if (TASK_MODE === 'single-job') {
-  console.log(`🚀 [UNIFIED-RUNNER] Starting in single-job mode`);
+  console.log(`🚀 Starting in single-job mode`);
   executeSingleJob().catch(error => {
-    console.error(`❌ [UNIFIED-RUNNER] Fatal error:`, error);
+    console.error(`❌ Fatal error:`, error);
     process.exit(1);
   });
 } else {
-  console.log(`🚀 [UNIFIED-RUNNER] Starting in polling mode`);
+  console.log(`🚀 Starting in polling mode`);
   runLoop().catch(error => {
-    console.error(`❌ [UNIFIED-RUNNER] Fatal error:`, error);
+    console.error(`❌ Fatal error:`, error);
     process.exit(1);
   });
 }

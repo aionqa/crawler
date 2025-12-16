@@ -20,10 +20,10 @@ class WorkflowAnalyzer {
    * Load workflow template from backend
    */
   async loadWorkflowTemplate() {
-    console.log(`[WorkflowAnalyzer] 🔍 Context received:`, JSON.stringify(this.context, null, 2));
+    console.log(`🔍 Context received:`, JSON.stringify(this.context, null, 2));
     if (!this.context.workflow_template_id) {
-      console.error(`[WorkflowAnalyzer] ❌ No workflow template ID provided - workflows are mandatory!`);
-      console.error(`[WorkflowAnalyzer] ❌ Context keys:`, Object.keys(this.context));
+      console.error(`❌ No workflow template ID provided - workflows are mandatory!`);
+      console.error(`❌ Context keys:`, Object.keys(this.context));
       throw new Error('workflow_template_id is required - all jobs must use workflows stored in MongoDB');
     }
 
@@ -36,14 +36,14 @@ class WorkflowAnalyzer {
         headers: this.getAuthHeaders()
       });
       this.workflowTemplate = response.data;
-      console.log(`[WorkflowAnalyzer] ✅ Loaded workflow: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`);
-      console.log(`[WorkflowAnalyzer] 📄 Workflow contains ${this.workflowTemplate.prompts?.length || 0} prompts`);
+      console.log(`✅ Loaded workflow: "${this.workflowTemplate.name}" (ID: ${this.context.workflow_template_id})`);
+      console.log(`📄 Workflow contains ${this.workflowTemplate.prompts?.length || 0} prompts`);
       
       // Log workflow usage
       if (this.workflowTemplate.prompts && this.workflowTemplate.prompts.length > 0) {
-        console.log(`[WorkflowAnalyzer] 📝 Custom prompts in template:`);
+        console.log(`📝 Custom prompts in template:`);
         this.workflowTemplate.prompts.forEach(p => {
-          console.log(`[WorkflowAnalyzer]    - ${p.name}: ${p.template?.substring(0, 80)}...`);
+          console.log(`   - ${p.name}: ${p.template?.substring(0, 80)}...`);
         });
       }
       
@@ -53,11 +53,11 @@ class WorkflowAnalyzer {
       );
 
       this.workflowCapabilities = this.detectCapabilities(this.workflowTemplate.steps || []);
-      console.log(`[WorkflowAnalyzer] ⚙️ Workflow capabilities:`, JSON.stringify(this.workflowCapabilities));
+      console.log(`⚙️ Workflow capabilities:`, JSON.stringify(this.workflowCapabilities));
       
       return this.workflowTemplate;
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Failed to load workflow template: ${error.message}`);
+      console.error(`❌ Failed to load workflow template: ${error.message}`);
       throw new Error(`Failed to load workflow template ${this.context.workflow_template_id}: ${error.message}`);
     }
   }
@@ -88,11 +88,9 @@ class WorkflowAnalyzer {
       'execute-code-from-variable': 120000, // 2 minutes
       'while-loop': 60000,           // 1 minute - Loops timeout quickly
       'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
-      'self-adjustable-ai-workflow': 240000, // 4 minutes - Complex workflow
       'screenshot': 60000,           // 1 minute - Quick operation
       'cookie-collect': 60000,       // 1 minute - Quick operation
-      'validate-login': 60000,      // 1 minute - Quick validation
-      'var-export': 60000,           // 1 minute - Quick operation
+      'content-change': 60000,       // 1 minute - Variable operations
       'var-dump': 60000,            // 1 minute - Quick operation
       'print': 30000,               // 30 seconds - Very quick
       'sleep': 60000,               // 1 minute - Sleep operations
@@ -148,10 +146,18 @@ class WorkflowAnalyzer {
     // Backend always provides job_id in context, so this ensures workflows can link to the job
     const effectiveJobId = jobId || this.context.job_id;
     if (!effectiveJobId) {
-      console.warn(`[WorkflowAnalyzer] ⚠️ No job_id provided - workflows/actions/pages may not be linked to job`);
+      console.warn(`⚠️ No job_id provided - workflows/actions/pages may not be linked to job`);
     }
     
-    console.log(`[WorkflowAnalyzer] Analyzing page: ${page.url()} (job_id: ${effectiveJobId || 'none'})`);
+    const initialUrl = page.url();
+    console.log(`═══════════════════════════════════════════════════════`);
+    console.log(`📄 VAR_DUMP: analyzePage called`);
+    console.log(`📄 VAR_DUMP: initialUrl=${initialUrl}`);
+    console.log(`📄 VAR_DUMP: jobId=${jobId}, effectiveJobId=${effectiveJobId}`);
+    console.log(`📄 VAR_DUMP: pageId=${pageId}, projectId=${projectId}`);
+    console.log(`📄 VAR_DUMP: context.page_url=${this.context?.page_url}`);
+    console.log(`📄 VAR_DUMP: context.credentials=${JSON.stringify({username: this.context?.credentials?.username || this.context?.username || 'MISSING', password: this.context?.credentials?.password || this.context?.password ? '***' : 'MISSING'})}`);
+    console.log(`Analyzing page: ${initialUrl} (job_id: ${effectiveJobId || 'none'})`);
 
     // Load workflow template - MANDATORY
     await this.loadWorkflowTemplate();
@@ -161,19 +167,24 @@ class WorkflowAnalyzer {
       throw new Error(`Workflow template "${this.context.workflow_template_id}" has no steps defined. All analysis must be defined in workflow template steps.`);
     }
 
-    console.log(`[WorkflowAnalyzer] 🎯 Executing workflow template: "${this.workflowTemplate.name}"`);
-    console.log(`[WorkflowAnalyzer] 📋 Workflow template has ${this.workflowTemplate.steps.length} steps to execute`);
+    // DEFAULT: All jobs are "crawl" jobs by default (test everything, discover pages, queue links)
+    // The configuration step can change this to "login" (authenticate only, no crawling)
+    // We don't check here - configuration step will set jobType if needed
+    // Default behavior is crawl, so we don't need to set anything here
+    
+    console.log(`🎯 Executing workflow template: "${this.workflowTemplate.name}"`);
+    console.log(`📋 Workflow template has ${this.workflowTemplate.steps.length} steps to execute`);
 
     // Execute workflow template steps ONLY
     try {
       // Use jobId from parameter or fallback to context (backend always provides job_id in context)
       const effectiveJobId = jobId || this.context.job_id;
       const results = await this.executeWorkflowSteps(page, effectiveJobId, pageId, projectId);
-      console.log(`[WorkflowAnalyzer] ✅ Workflow template steps completed successfully`);
+      console.log(`✅ Workflow template steps completed successfully`);
       
       return results;
     } catch (stepError) {
-      console.error(`[WorkflowAnalyzer] ❌ Workflow template execution failed:`, stepError);
+      console.error(`❌ Workflow template execution failed:`, stepError);
       throw new Error(`Workflow execution failed: ${stepError.message}`);
     }
   }
@@ -370,7 +381,7 @@ class WorkflowAnalyzer {
           if (!form) {
             // Skip if we still can't find it, but log for debugging
             if (formInfo.is_form_like) {
-              console.log(`[WorkflowAnalyzer] ⚠️ Could not locate form-like structure: ${formInfo.selector}, but will include basic info`);
+              console.log(`⚠️ Could not locate form-like structure: ${formInfo.selector}, but will include basic info`);
               // Still add the form with basic info from evaluate
               analysis.forms.push({
                 selector: formInfo.selector,
@@ -431,7 +442,7 @@ class WorkflowAnalyzer {
           analysis.forms.push(formData);
         } catch (error) {
           // If we can't process the form, still add basic info
-          console.warn(`[WorkflowAnalyzer] Could not fully process form ${formInfo.selector}: ${error.message}`);
+          console.warn(`Could not fully process form ${formInfo.selector}: ${error.message}`);
           analysis.forms.push({
             selector: formInfo.selector,
             action: formInfo.action,
@@ -513,13 +524,13 @@ class WorkflowAnalyzer {
       analysis.non_interactive_elements = nonInteractiveElements;
 
     } catch (error) {
-      console.error('[WorkflowAnalyzer] Error during Playwright analysis:', error);
+      console.error('Error during Playwright analysis:', error);
     }
 
     return analysis;
   }
 
-  generateLegsFromPlaywrightAnalysis(playwrightAnalysis = {}, pageUrl = '') {
+  async generateLegsFromPlaywrightAnalysis(playwrightAnalysis = {}, pageUrl = '', workflowState = {}) {
     const legs = [];
     const forms = Array.isArray(playwrightAnalysis.forms) ? playwrightAnalysis.forms.slice(0, 20) : [];
     const interactiveElements = Array.isArray(playwrightAnalysis.interactive_elements)
@@ -527,7 +538,7 @@ class WorkflowAnalyzer {
       : [];
     const links = Array.isArray(playwrightAnalysis.links) ? playwrightAnalysis.links.slice(0, 30) : [];
     
-    console.log(`[WorkflowAnalyzer] 🔍 generateLegsFromPlaywrightAnalysis: ${forms.length} forms, ${interactiveElements.length} interactive elements, ${links.length} links`);
+    console.log(`🔍 generateLegsFromPlaywrightAnalysis: ${forms.length} forms, ${interactiveElements.length} interactive elements, ${links.length} links`);
     
     // Ensure we generate at least one leg if we have any detectable elements
     const hasAnyElements = forms.length > 0 || interactiveElements.length > 0 || links.length > 0;
@@ -671,7 +682,7 @@ class WorkflowAnalyzer {
       });
     }
     
-    console.log(`[WorkflowAnalyzer] ✅ Generated ${legs.length} leg(s) from Playwright analysis`);
+    console.log(`✅ Generated ${legs.length} leg(s) from Playwright analysis`);
     return legs;
   }
 
@@ -765,7 +776,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
 - Do NOT include duplicate actions or simple navigation links unless the navigation triggers a meaningful state change or workflow step.`;
   }
 
-  applyLegsToWorkflowState(rawLegs, workflowState, source = 'page-summary') {
+  async applyLegsToWorkflowState(rawLegs, workflowState, source = 'page-summary') {
     if (!Array.isArray(rawLegs) || rawLegs.length === 0 || !workflowState) {
       return [];
     }
@@ -858,7 +869,35 @@ IMPORTANT OUTPUT REQUIREMENTS:
       return null;
     };
 
-    const seenIds = new Set();
+    // CRITICAL: Track existing leg IDs from workflowState to prevent duplicates across multiple calls
+    const existingLegIds = new Set();
+    const existingLegsByDescription = new Map();
+    const existingLegsBySelector = new Map();
+    
+    // Build maps of existing legs for deduplication
+    if (Array.isArray(workflowState.legs) && workflowState.legs.length > 0) {
+      for (const existingLeg of workflowState.legs) {
+        if (existingLeg.leg_id) {
+          existingLegIds.add(existingLeg.leg_id);
+        }
+        // Index by description for fuzzy matching
+        if (existingLeg.description) {
+          const descKey = existingLeg.description.trim().toLowerCase().substring(0, 100);
+          if (!existingLegsByDescription.has(descKey)) {
+            existingLegsByDescription.set(descKey, existingLeg);
+          }
+        }
+        // Index by selector for exact matching
+        if (existingLeg.selector) {
+          const selKey = existingLeg.selector.trim();
+          if (!existingLegsBySelector.has(selKey)) {
+            existingLegsBySelector.set(selKey, existingLeg);
+          }
+        }
+      }
+    }
+    
+    const seenIds = new Set(existingLegIds); // Initialize with existing IDs
     const generateLegId = (leg, index) => {
       const candidates = [
         leg.leg_id,
@@ -908,15 +947,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
     };
 
     const normalizedLegs = [];
-    rawLegs.forEach((rawLeg, index) => {
+    for (let index = 0; index < rawLegs.length; index++) {
+      const rawLeg = rawLegs[index];
       if (!rawLeg || typeof rawLeg !== 'object') {
-        return;
+        continue;
       }
 
       const type = normalizeType(rawLeg.type || rawLeg.action || rawLeg.action_type || rawLeg.kind);
       if (type === 'navigation') {
-        console.log('[WorkflowAnalyzer] ⚠️ Skipping navigation leg emitted by page summary');
-        return;
+        console.log('⚠️ Skipping navigation leg emitted by page summary');
+        continue;
       }
 
       const selector = pickSelector(rawLeg);
@@ -947,7 +987,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
               finalSelector = matchingForm.selector || 
                              (matchingForm.id ? `#${matchingForm.id}` : null) ||
                              `form:nth-of-type(${(matchingForm.index || 0) + 1})`;
-              console.log(`[WorkflowAnalyzer] 🔧 Derived form selector from Playwright analysis: ${finalSelector}`);
+              console.log(`🔧 Derived form selector from Playwright analysis: ${finalSelector}`);
             }
           }
         }
@@ -955,7 +995,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       if (!finalSelector) {
         const legInfo = rawLeg.description || rawLeg.leg_id || rawLeg.type || `index_${index}`;
-        console.log(`[WorkflowAnalyzer] ⚠️ Skipping leg "${legInfo}" - no selector found. Available fields: ${Object.keys(rawLeg).join(', ')}`);
+        console.log(`⚠️ Skipping leg "${legInfo}" - no selector found. Available fields: ${Object.keys(rawLeg).join(', ')}`);
         // Log available selector fields for debugging
         const selectorFields = {
           selector: rawLeg.selector,
@@ -965,15 +1005,48 @@ IMPORTANT OUTPUT REQUIREMENTS:
           element_info_css: rawLeg.element_info?.css_selector,
           playwright_forms: workflowState.playwrightAnalysis?.forms?.length || 0
         };
-        console.log(`[WorkflowAnalyzer]   Selector fields checked:`, JSON.stringify(selectorFields));
-        return;
+        console.log(`  Selector fields checked:`, JSON.stringify(selectorFields));
+        continue;
       }
       const legId = generateLegId(rawLeg, index);
-      const description = rawLeg.description || rawLeg.summary || rawLeg.name || rawLeg.label || `Leg ${index + 1}`;
+      let description = rawLeg.description || rawLeg.summary || rawLeg.name || rawLeg.label || `Leg ${index + 1}`;
       const expectedOutcome = rawLeg.expected_outcome || rawLeg.expectedOutcome || rawLeg.expected_result || rawLeg.result || '';
       const testInstructions = rawLeg.test_instructions || rawLeg.instructions || rawLeg.steps || '';
       const priority = normalizePriority(rawLeg.priority || rawLeg.importance);
       const confidence = normalizeConfidence(rawLeg.confidence ?? rawLeg.score ?? rawLeg.confidence_score);
+
+      // Check if there's an existing action with action_discovery_prompt for this leg
+      // If so, use action_discovery_prompt instead of description for better matching
+      if (workflowState.pageId && legId) {
+        try {
+          const actionResponse = await axios.get(
+            `${this.backendUrl}/actions?leg_id=${legId}&page_id=${workflowState.pageId}`,
+            { timeout: 3000 }
+          );
+          const actions = Array.isArray(actionResponse.data) ? actionResponse.data : [];
+          const existingAction = actions.find(a => a.leg_id === legId);
+          if (existingAction && existingAction.action_discovery_prompt) {
+            description = existingAction.action_discovery_prompt;
+            console.log(`🔍 Using action_discovery_prompt for leg ${legId}`);
+          }
+        } catch (error) {
+          // Silently continue if fetch fails - use original description
+        }
+      }
+
+      // CRITICAL: Check for duplicates against existing legs before adding
+      const descKey = String(description).trim().toLowerCase().substring(0, 100);
+      const selKey = (selector || finalSelector || '').trim();
+      
+      // Check if a leg with the same description or selector already exists
+      const duplicateByDescription = existingLegsByDescription.get(descKey);
+      const duplicateBySelector = selKey ? existingLegsBySelector.get(selKey) : null;
+      
+      if (duplicateByDescription || duplicateBySelector) {
+        const duplicateLeg = duplicateByDescription || duplicateBySelector;
+        console.log(`⏭️ Skipping duplicate leg: "${description.substring(0, 60)}..." (matches existing leg_id: ${duplicateLeg.leg_id})`);
+        continue; // Skip this leg - it's a duplicate
+      }
 
       const normalizedLeg = {
         ...rawLeg,
@@ -1001,24 +1074,49 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
 
       normalizedLegs.push(normalizedLeg);
-    });
+      
+      // Update tracking maps for this batch
+      if (normalizedLeg.description) {
+        existingLegsByDescription.set(descKey, normalizedLeg);
+      }
+      if (normalizedLeg.selector) {
+        existingLegsBySelector.set(selKey, normalizedLeg);
+      }
+    }
 
     if (normalizedLegs.length === 0) {
-      console.log(`[WorkflowAnalyzer] ⚠️ No valid legs produced from ${source} response`);
+      console.log(`⚠️ No valid legs produced from ${source} response`);
       return [];
     }
 
-    workflowState.legs = normalizedLegs;
-    workflowState.legsToExecute = normalizedLegs; // CRITICAL: Set legsToExecute for for-each step
+    // CRITICAL: Merge with existing legs instead of replacing
+    // This ensures legs from previous analysis steps are preserved
+    const existingLegs = Array.isArray(workflowState.legs) ? workflowState.legs : [];
+    const mergedLegs = [...existingLegs, ...normalizedLegs];
+    
+    // Final deduplication pass by leg_id (in case same leg_id was generated differently)
+    const finalLegs = [];
+    const finalLegIds = new Set();
+    for (const leg of mergedLegs) {
+      if (!finalLegIds.has(leg.leg_id)) {
+        finalLegIds.add(leg.leg_id);
+        finalLegs.push(leg);
+      } else {
+        console.log(`⏭️ Final deduplication: Skipping duplicate leg_id: ${leg.leg_id}`);
+      }
+    }
+    
+    workflowState.legs = finalLegs;
+    workflowState.legsToExecute = finalLegs; // CRITICAL: Use merged legs (deduplicated)
     workflowState.legsSource = source;
-    workflowState.legResults = new Array(normalizedLegs.length).fill(null);
-    workflowState.actionsSummary = this.buildActionsSummary(normalizedLegs);
+    workflowState.legResults = new Array(finalLegs.length).fill(null);
+    workflowState.actionsSummary = this.buildActionsSummary(finalLegs);
 
     // Ensure context has legsToExecute for for-each step
     if (!workflowState.context) {
       workflowState.context = {};
     }
-    workflowState.context.legsToExecute = normalizedLegs;
+    workflowState.context.legsToExecute = finalLegs;
 
     // Save to variable pool for easy access and visibility
     this.initializeVariablePool(workflowState);
@@ -1031,12 +1129,20 @@ IMPORTANT OUTPUT REQUIREMENTS:
     if (!workflowState.aiAnalysisResult.page_description && workflowState.pageDescription) {
       workflowState.aiAnalysisResult.page_description = workflowState.pageDescription;
     }
-    workflowState.aiAnalysisResult.legs = normalizedLegs;
+    workflowState.aiAnalysisResult.legs = finalLegs;
     workflowState.aiAnalysisResult.source = source;
 
-    console.log(`[WorkflowAnalyzer] ✅ Normalized ${normalizedLegs.length} legs from ${source} (also set legsToExecute)`);
+    const newLegsCount = normalizedLegs.length;
+    const totalLegsCount = finalLegs.length;
+    const skippedCount = existingLegs.length > 0 ? (existingLegs.length + newLegsCount - totalLegsCount) : 0;
+    
+    if (skippedCount > 0) {
+      console.log(`✅ Normalized ${newLegsCount} new legs from ${source}, merged with ${existingLegs.length} existing legs (${skippedCount} duplicates skipped, total: ${totalLegsCount})`);
+    } else {
+      console.log(`✅ Normalized ${newLegsCount} legs from ${source} (total: ${totalLegsCount})`);
+    }
 
-    return normalizedLegs;
+    return finalLegs;
   }
 
   createFallbackPageDescription(stats = {}, workflowState = {}) {
@@ -1164,7 +1270,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       });
 
     } catch (error) {
-      console.error('[WorkflowAnalyzer] Error generating selectors:', error);
+      console.error('Error generating selectors:', error);
       return [{
         strategy: 'fallback',
         selector: 'unknown',
@@ -1264,7 +1370,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       
       // Use backend logger to append job log with attachments
-      console.log(`[WorkflowAnalyzer] Sending ${attachments.length} attachments:`, attachments.map(a => `${a.type} (${a.size} bytes)`));
+      console.log(`Sending ${attachments.length} attachments:`, attachments.map(a => `${a.type} (${a.size} bytes)`));
       
       const response = await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
         jobId: jobId,
@@ -1275,10 +1381,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         attachments: attachments
       });
       
-      console.log(`[WorkflowAnalyzer] Page description logged to job history with ${attachments.length} attachments`);
+      console.log(`Page description logged to job history with ${attachments.length} attachments`);
       return response.data;
     } catch (error) {
-      console.error('[WorkflowAnalyzer] Error logging page description:', error.message);
+      console.error('Error logging page description:', error.message);
       // Don't throw - this is not critical
     }
   }
@@ -1307,26 +1413,69 @@ IMPORTANT OUTPUT REQUIREMENTS:
         workflowData.job_id = jobId;
       }
       
-      console.log(`[WorkflowAnalyzer] 📝 Creating workflow: pageId=${pageId}, projectId=${projectId}, url=${url}`);
+      console.log(`📝 Creating workflow: pageId=${pageId}, projectId=${projectId}, url=${url}`);
       const response = await axios.post(`${this.backendUrl}/api/workflows`, workflowData, {
         headers: this.getAuthHeaders()
       });
 
       const workflow = response.data;
       if (!workflow || !workflow._id) {
-        console.error('[WorkflowAnalyzer] ❌ Workflow creation response missing _id:', workflow);
+        console.error('❌ Workflow creation response missing _id:', workflow);
         throw new Error('Workflow creation response missing _id');
       }
       
-      console.log(`[WorkflowAnalyzer] ✅ Workflow created successfully: ${workflow._id}`);
+      console.log(`✅ Workflow created successfully: ${workflow._id}`);
       return workflow;
     } catch (error) {
-      console.error('[WorkflowAnalyzer] ❌ Error creating workflow:', error.message);
+      console.error('❌ Error creating workflow:', error.message);
       if (error.response) {
-        console.error('[WorkflowAnalyzer] ❌ Response status:', error.response.status);
-        console.error('[WorkflowAnalyzer] ❌ Response data:', error.response.data);
+        console.error('❌ Response status:', error.response.status);
+        console.error('❌ Response data:', error.response.data);
       }
       throw error;
+    }
+  }
+
+  /**
+   * Ensure we have a pageId by discovering/upserting the page if missing.
+   */
+  async ensurePageId(workflowState, jobId) {
+    if (workflowState.pageId && workflowState.projectId) {
+      return workflowState.pageId;
+    }
+    if (!workflowState.projectId) {
+      return null;
+    }
+
+    try {
+      const payload = {
+        project_id: workflowState.projectId,
+        job_id: jobId,
+        url: workflowState.pageUrl,
+        title: workflowState.pageTitle,
+        content: workflowState.htmlContent,
+        forms: workflowState.playwrightAnalysis?.forms,
+        links: workflowState.playwrightAnalysis?.links,
+        interactive_elements: workflowState.playwrightAnalysis?.interactiveElements || workflowState.playwrightAnalysis?.interactive_elements,
+        analyzed: true
+      };
+
+      const response = await axios.post(`${this.backendUrl}/api/pages/discover`, payload, {
+        headers: this.getAuthHeaders()
+      });
+
+      const discovered = response.data;
+      const pageId = discovered?._id || discovered?.page_id || discovered?.page?._id;
+      if (pageId) {
+        workflowState.pageId = pageId;
+        console.log(`✅ Upserted page, obtained pageId=${pageId}`);
+        return pageId;
+      }
+      console.warn('⚠️ Page discover response missing _id');
+      return null;
+    } catch (err) {
+      console.warn(`⚠️ Failed to upsert page via /api/pages/discover: ${err.message}`);
+      return null;
     }
   }
 
@@ -1354,7 +1503,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       return response.data;
     } catch (error) {
-      console.error('[WorkflowAnalyzer] Error updating workflow:', error.message);
+      console.error('Error updating workflow:', error.message);
       throw error;
     }
   }
@@ -1378,7 +1527,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       // Validate required fields
       if (!projectId || !jobId || !url) {
-        console.error('[WorkflowAnalyzer] Missing required fields for page discovery:', {
+        console.error('Missing required fields for page discovery:', {
           projectId: !!projectId,
           jobId: !!jobId,
           url: !!url
@@ -1394,13 +1543,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       );
       
-      console.log(`[WorkflowAnalyzer] Page discovery updated: ${url} (${response.data.isNew ? 'new' : 'updated'})`);
+      console.log(`Page discovery updated: ${url} (${response.data.isNew ? 'new' : 'updated'})`);
       return response.data;
     } catch (error) {
-      console.error('[WorkflowAnalyzer] Error updating page discovery:', error.message);
+      console.error('Error updating page discovery:', error.message);
       if (error.response) {
-        console.error('[WorkflowAnalyzer] Response status:', error.response.status);
-        console.error('[WorkflowAnalyzer] Response data:', error.response.data);
+        console.error('Response status:', error.response.status);
+        console.error('Response data:', error.response.data);
       }
       // Don't throw - page discovery updates are non-critical
     }
@@ -1466,9 +1615,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       });
       
-      console.log(`[WorkflowAnalyzer] 📝 Logged workflow: ${decision}`);
+      console.log(`📝 Logged workflow: ${decision}`);
     } catch (error) {
-      console.error('[WorkflowAnalyzer] Error logging workflow decision:', error.message);
+      console.error('Error logging workflow decision:', error.message);
     }
   }
   
@@ -1519,9 +1668,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       });
       
-      console.log(`[WorkflowAnalyzer] 📝 Logged prompt usage: ${promptName}${stepInfo && stepInfo.step ? ` (Step ${stepInfo.stepIndex + 1}: ${stepInfo.step.name || stepInfo.step.type})` : ''}`);
+      console.log(`📝 Logged prompt usage: ${promptName}${stepInfo && stepInfo.step ? ` (Step ${stepInfo.stepIndex + 1}: ${stepInfo.step.name || stepInfo.step.type})` : ''}`);
     } catch (error) {
-      console.error('[WorkflowAnalyzer] Error logging prompt usage:', error.message);
+      console.error('Error logging prompt usage:', error.message);
     }
   }
 
@@ -1549,9 +1698,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         headers: this.getAuthHeaders()
       });
 
-      console.log(`[WorkflowAnalyzer] 📋 STEP PARAMS: ${JSON.stringify(stepConfig, null, 2)}`);
+      console.log(`📋 STEP PARAMS: ${JSON.stringify(stepConfig, null, 2)}`);
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ⚠️ Failed to log step execution: ${error.message}`);
+      console.error(`⚠️ Failed to log step execution: ${error.message}`);
     }
   }
 
@@ -1582,7 +1731,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         headers: this.getAuthHeaders()
       });
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ⚠️ Failed to log step outcome: ${error.message}`);
+      console.error(`⚠️ Failed to log step outcome: ${error.message}`);
     }
   }
 
@@ -1608,7 +1757,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         headers: this.getAuthHeaders()
       });
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ⚠️ Failed to send log to backend: ${error.message}`);
+      console.error(`⚠️ Failed to send log to backend: ${error.message}`);
     }
   }
 
@@ -1625,12 +1774,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Backend always provides job_id in context, so this ensures workflows can link to the job
     const effectiveJobId = jobId || this.context.job_id;
     if (!effectiveJobId) {
-      console.warn(`[WorkflowAnalyzer] ⚠️ No job_id available - workflows/actions/pages may not be linked to job`);
+      console.warn(`⚠️ No job_id available - workflows/actions/pages may not be linked to job`);
     }
     
-    console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
-    console.log(`[WorkflowAnalyzer] 🔄 EXECUTING WORKFLOW TEMPLATE STEPS (job_id: ${effectiveJobId || 'none'})`);
-    console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
+    console.log(`═══════════════════════════════════════════════════════`);
+    console.log(`🔄 EXECUTING WORKFLOW TEMPLATE STEPS (job_id: ${effectiveJobId || 'none'})`);
+    console.log(`═══════════════════════════════════════════════════════`);
     
     const resolvedOptions = {
       ...(this.context?.options || {})
@@ -1642,10 +1791,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
       resolvedOptions.single_action_only === true ||
       resolvedOptions.single_action_only === 'true';
 
+    // CRITICAL: Track initial URL to prevent navigation away from login page
+    const initialPageUrl = page.url();
+    const expectedLoginUrl = this.context?.page_url || initialPageUrl;
+    console.log(`📄 VAR_DUMP: executeWorkflowSteps - initialPageUrl=${initialPageUrl}`);
+    console.log(`📄 VAR_DUMP: executeWorkflowSteps - expectedLoginUrl=${expectedLoginUrl}`);
+    
     // Initialize workflow state
     const workflowState = {
       pageTitle: null,
-      pageUrl: page.url(),
+      pageUrl: initialPageUrl, // Use initial URL, not current (may have changed)
+      expectedLoginUrl: expectedLoginUrl, // Track expected login URL
       htmlContent: null,
       visibleText: null,
       screenshotBase64: null,
@@ -1665,10 +1821,51 @@ IMPORTANT OUTPUT REQUIREMENTS:
         ...(this.context?.context || {}),
         options: resolvedOptions
       },
-      inputCredentials: this.context?.credentials || {
-        username: this.context?.username || null,
-        password: this.context?.password || null
-      },
+      inputCredentials: (() => {
+        // CRITICAL: Credentials are only required for login jobs
+        // For crawl jobs, credentials are optional (only needed if login_enabled)
+        const isLoginJob = this.context?.jobType === 'login' || 
+                          this.context?.job_type === 'login' ||
+                          this.context?.isLoginJob === true;
+        const loginEnabled = this.context?.login_enabled === true || 
+                            this.context?.options?.login_enabled === true;
+        
+        // Only require credentials for login jobs or if login is explicitly enabled
+        if (isLoginJob || loginEnabled) {
+          if (!this.context?.credentials || !this.context.credentials.username || !this.context.credentials.password ||
+              this.context.credentials.username === 'MISSING' || this.context.credentials.username === 'missing' ||
+              this.context.credentials.password === 'MISSING' || this.context.credentials.password === 'missing') {
+            console.error(`❌ ERROR: Credentials missing or invalid in context.credentials!`);
+            console.error(`this.context.credentials:`, this.context?.credentials);
+            throw new Error('Credentials are required in context.credentials and must not contain placeholder values');
+          }
+          
+          const creds = this.context.credentials;
+          console.log(`📄 VAR_DUMP: inputCredentials initialization (login job/enabled)`);
+          console.log(`📄 VAR_DUMP: creds.username=${creds.username}`);
+          console.log(`📄 VAR_DUMP: creds.password=***`);
+          console.log(`🔑 Initialized inputCredentials: username=${creds.username}, password=***`);
+          return creds;
+        } else {
+          // Crawl job without login - credentials optional
+          // Use credentials if available, otherwise return null
+          if (this.context?.credentials && 
+              this.context.credentials.username && 
+              this.context.credentials.password &&
+              this.context.credentials.username !== 'MISSING' && 
+              this.context.credentials.username !== 'missing' &&
+              this.context.credentials.password !== 'MISSING' && 
+              this.context.credentials.password !== 'missing') {
+            const creds = this.context.credentials;
+            console.log(`📄 VAR_DUMP: inputCredentials initialization (crawl job, credentials available)`);
+            console.log(`🔑 Initialized inputCredentials: username=${creds.username}, password=***`);
+            return creds;
+          } else {
+            console.log(`ℹ️ No credentials provided for crawl job (login not enabled) - proceeding without credentials`);
+            return null;
+          }
+        }
+      })(),
       // Variable Pool - organized by namespace (job, page, cycle)
       variablePool: {
         job: {},      // Variables scoped to the entire job execution
@@ -1684,12 +1881,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
     workflowState.pageId = pageId || null;
     workflowState.projectId = projectId || null;
     workflowState.jobId = effectiveJobId; // Use effectiveJobId (from parameter or context)
+
+    // If we already have a projectId but no pageId, try to upsert/discover the page early
+    if (!workflowState.pageId && workflowState.projectId) {
+      await this.ensurePageId(workflowState, effectiveJobId);
+    }
     
     // Check if we should retry from a specific step (after self-adjustable workflow)
     let startStepIndex = 0;
     if (workflowState.shouldRetryFromStep !== undefined && workflowState.shouldRetryFromStep !== null) {
       startStepIndex = workflowState.shouldRetryFromStep;
-      console.log(`[WorkflowAnalyzer] 🔄 Retrying from step ${startStepIndex} with adjusted workflow`);
+      console.log(`🔄 Retrying from step ${startStepIndex} with adjusted workflow`);
       // Clear the flag so we don't loop
       delete workflowState.shouldRetryFromStep;
       // Clear the last script failure so self-adjustable workflow doesn't trigger again
@@ -1699,10 +1901,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Execute each step in sequence
     for (let i = startStepIndex; i < this.workflowTemplate.steps.length; i++) {
       const step = this.workflowTemplate.steps[i];
-      console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
-      console.log(`[WorkflowAnalyzer] 🔄 EXECUTING STEP ${i + 1}/${this.workflowTemplate.steps.length}: ${step.name}`);
-      console.log(`[WorkflowAnalyzer] Type: ${step.type}`);
-      console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
+      console.log(`═══════════════════════════════════════════════════════`);
+      console.log(`🔄 EXECUTING STEP ${i + 1}/${this.workflowTemplate.steps.length}: ${step.name}`);
+      console.log(`Type: ${step.type}`);
+      console.log(`═══════════════════════════════════════════════════════`);
       
       // Send log to backend
       await this.sendLogToBackend(effectiveJobId, 'info', `🔄 EXECUTING STEP ${i + 1}/${this.workflowTemplate.steps.length}: ${step.name} (${step.type})`, 'WORKFLOW-ANALYZER', {
@@ -1717,12 +1919,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // Process variable inputs before step execution
         const variableInputs = this.processVariableInputs(step, workflowState);
         if (Object.keys(variableInputs).length > 0) {
-          console.log(`[WorkflowAnalyzer] 📖 Loaded ${Object.keys(variableInputs).length} variable(s) for step execution`);
+          console.log(`📖 Loaded ${Object.keys(variableInputs).length} variable(s) for step execution`);
         }
 
         // Get step timeout
         const stepTimeout = this.getStepTimeout(step);
-        console.log(`[WorkflowAnalyzer] ⏱️  Step timeout: ${Math.round(stepTimeout / 1000)}s`);
+        console.log(`⏱️  Step timeout: ${Math.round(stepTimeout / 1000)}s`);
         
         // Log step execution with parameters
         await this.logStepExecution(step, jobId);
@@ -1750,25 +1952,30 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executePlaywrightAnalysisStep(page, step, workflowState, effectiveJobId);
             break;
             
-          case 'page-description':
-            await this.executePageDescriptionStep(page, step, workflowState, effectiveJobId, {
-              stepIndex: i,
-              siblings: this.workflowTemplate.steps
-            });
-            break;
-            
           case 'ai-prompt':
-            await this.executeAIPromptStep(page, step, workflowState, effectiveJobId, {
-              stepIndex: i,
-              siblings: this.workflowTemplate.steps
-            });
-            break;
-            
-          case 'workflow-analysis':
-            await this.executeWorkflowAnalysisStep(page, step, workflowState, effectiveJobId, {
-              stepIndex: i,
-              siblings: this.workflowTemplate.steps
-            });
+            try {
+              await this.executeAIPromptStep(page, step, workflowState, effectiveJobId, {
+                stepIndex: i,
+                siblings: this.workflowTemplate.steps
+              });
+            } catch (stepError) {
+              const errorMessage = `Step "${step.name || step.id}" (ai-prompt) failed: ${stepError.message}`;
+              console.error(`❌ ${errorMessage}`);
+              console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+              console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+              if (effectiveJobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(effectiveJobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+                  step_id: step.id,
+                  step_name: step.name,
+                  step_type: step.type,
+                  step_config: step.config,
+                  error: stepError.message,
+                  error_stack: stepError.stack,
+                  full_step: step
+                });
+              }
+              throw stepError; // Re-throw to fail workflow
+            }
             break;
           
           // Deterministic, hardcoded analysis for specific domains (e.g., Practical Test Automation)
@@ -1792,6 +1999,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executeSaveDataStep(page, step, workflowState, effectiveJobId);
             break;
             
+          case 'save-page-data':
+            await this.executeSavePageDataStep(page, step, workflowState, effectiveJobId);
+            break;
+            
           case 'execute-code':
             const nextStepForCode = i + 1 < this.workflowTemplate.steps.length ? this.workflowTemplate.steps[i + 1] : null;
             await this.executeCodeStep(page, step, workflowState, effectiveJobId, nextStepForCode);
@@ -1799,7 +2010,26 @@ IMPORTANT OUTPUT REQUIREMENTS:
             
           case 'execute-code-from-variable':
             const nextStep = i + 1 < this.workflowTemplate.steps.length ? this.workflowTemplate.steps[i + 1] : null;
-            await this.executeCodeFromVariableStep(page, step, workflowState, jobId, nextStep);
+            try {
+              await this.executeCodeFromVariableStep(page, step, workflowState, jobId, nextStep);
+            } catch (stepError) {
+              const errorMessage = `Step "${step.name || step.id}" (execute-code-from-variable) failed: ${stepError.message}`;
+              console.error(`❌ ${errorMessage}`);
+              console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+              console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+                  step_id: step.id,
+                  step_name: step.name,
+                  step_type: step.type,
+                  step_config: step.config,
+                  error: stepError.message,
+                  error_stack: stepError.stack,
+                  full_step: step
+                });
+              }
+              throw stepError; // Re-throw to fail workflow
+            }
             break;
             
           case 'cookie-add':
@@ -1818,11 +2048,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executeCookieCollectStep(page, step, workflowState, jobId);
             break;
             
-          case 'self-adjustable-ai-workflow':
-            await this.executeSelfAdjustableAIWorkflowStep(page, step, workflowState, jobId, pageId, projectId);
+          case 'job-configuration':
+            await this.executeJobConfigurationStep(step, workflowState, effectiveJobId);
             break;
             
-            case 'validate-response':
+          case 'content-change':
+            await this.executeContentChangeStep(step, workflowState, jobId);
+            break;
+            
+          case 'validate-response':
             await this.executeValidateResponseStep(step, workflowState);
             break;
             
@@ -1831,11 +2065,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
             break;
             
           case 'cycle-start':
-            console.log(`[WorkflowAnalyzer] 🔄 Starting cycle (${step.name})`);
+            console.log(`🔄 Starting cycle (${step.name})`);
             break;
             
           case 'cycle-end':
-            console.log(`[WorkflowAnalyzer] 🔚 Ending cycle (${step.name})`);
+            console.log(`🔚 Ending cycle (${step.name})`);
             break;
             
           case 'conditional':
@@ -1847,7 +2081,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
             break;
 
           case 'var-dump':
-            await this.executeVarDumpStep(step, workflowState, jobId);
+            // DEPRECATED: var-dump is now part of save-page-data
+            // For backward compatibility, execute as save-page-data with variableDump enabled
+            await this.executeSavePageDataStep(page, step, workflowState, effectiveJobId);
+            break;
+          case 'save-page-data':
+            await this.executeSavePageDataStep(page, step, workflowState, effectiveJobId);
             break;
             
           case 'sleep':
@@ -1871,12 +2110,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executeIfStep(page, step, workflowState, jobId);
             break;
             
-          case 'self-adjustable-ai-workflow':
-            await this.executeSelfAdjustableAIWorkflowStep(page, step, workflowState, jobId, pageId, projectId);
-            break;
-            
           default:
-            console.log(`[WorkflowAnalyzer] ⚠️ Unknown step type: ${step.type}`);
+            console.log(`⚠️ Unknown step type: ${step.type}`);
         }
             stepCompleted = true;
           })(),
@@ -1885,7 +2120,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
               if (!stepCompleted) {
                 // For for-each steps, check if page loaded successfully before failing
                 if (step.type === 'for-each' && pageLoadedSuccessfully) {
-                  console.log(`[WorkflowAnalyzer] ⚠️ Step "${step.name || step.id}" timed out but page loaded successfully - allowing to continue`);
+                  console.log(`⚠️ Step "${step.name || step.id}" timed out but page loaded successfully - allowing to continue`);
                   // Resolve instead of reject to allow step to continue
                   resolve();
                 } else {
@@ -1896,19 +2131,89 @@ IMPORTANT OUTPUT REQUIREMENTS:
           )
         ]);
         
+        // CRITICAL: Check if any step has signaled the workflow should stop
+        // This is workflow-driven: steps can set stopWorkflow in their results
+        // The workflow template controls when to stop by configuring steps appropriately
+        if (workflowState.stopWorkflow === true) {
+          const stopReason = workflowState.stopWorkflowReason || 'Workflow stopped by step configuration';
+          console.log(`🛑 Workflow stop signaled - STOPPING workflow (stopped at step ${i + 1}/${this.workflowTemplate.steps.length}): ${stopReason}`);
+          await this.sendLogToBackend(effectiveJobId, 'info', `🛑 Workflow stopped: ${stopReason}`, 'WORKFLOW-ANALYZER', {
+            workflow_id: workflowState.workflowId,
+            steps_executed: i + 1,
+            total_steps: this.workflowTemplate.steps.length,
+            stopped_early: true,
+            stop_reason: stopReason
+          });
+          
+          // Break out of the loop immediately - don't execute remaining steps
+          break;
+        }
+        
         // Add delay between steps
         await new Promise(resolve => setTimeout(resolve, 1000));
         
       } catch (stepError) {
-        console.error(`[WorkflowAnalyzer] ❌ Step ${i + 1} failed: ${stepError.message}`);
+        const errorMessage = `Step ${i + 1} "${step.name || step.id}" (${step.type}) failed: ${stepError.message}`;
+        console.error(`❌ ${errorMessage}`);
+        console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+        console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+        console.error(`❌ Error stack:`, stepError.stack);
         
-        // Send error log to backend
-        await this.sendLogToBackend(effectiveJobId, 'error', `❌ Step ${i + 1} failed: ${stepError.message}`, 'WORKFLOW-ANALYZER', {
+        // Upload variable pool as downloadable file on error
+        let variablePoolUrl = null;
+        try {
+          const variablePoolJson = JSON.stringify(workflowState.variablePool, null, 2);
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const fileName = `variable-pool-${effectiveJobId}-${timestamp}.json`;
+          variablePoolUrl = await this.uploadFileForDownload(effectiveJobId, variablePoolJson, fileName, 'application/json');
+          
+          if (variablePoolUrl) {
+            console.error(`❌ Variable Pool (full content at time of error):`);
+            console.error(`❌ 📥 Download: ${variablePoolUrl}`);
+          } else {
+            // Fallback: log preview if upload fails
+            console.error(`❌ Variable Pool (preview, upload failed):`);
+            console.error(`❌ ${variablePoolJson.substring(0, 2000)}...`);
+          }
+        } catch (varPoolError) {
+          console.error(`❌ Failed to upload variable pool: ${varPoolError.message}`);
+          // Try to log at least the structure
+          try {
+            const varPoolSummary = {
+              job: workflowState.variablePool?.job ? Object.keys(workflowState.variablePool.job) : [],
+              page: workflowState.variablePool?.page ? Object.keys(workflowState.variablePool.page) : [],
+              cycle: workflowState.variablePool?.cycle ? workflowState.variablePool.cycle.map((c, idx) => ({ index: idx, keys: Object.keys(c || {}) })) : [],
+              steps: workflowState.variablePool?.steps ? Object.keys(workflowState.variablePool.steps) : []
+            };
+            console.error(`❌ Variable Pool structure:`, JSON.stringify(varPoolSummary, null, 2));
+          } catch (summaryError) {
+            console.error(`❌ Failed to summarize variable pool: ${summaryError.message}`);
+          }
+        }
+        
+        // Send error log to backend with full context including variable pool URL
+        let variablePoolForBackend = null;
+        try {
+          variablePoolForBackend = workflowState.variablePool;
+        } catch (e) {
+          // If we can't access it, leave it null
+        }
+        
+        const errorLogMessage = variablePoolUrl 
+          ? `${errorMessage}\n📥 Variable Pool: ${variablePoolUrl}`
+          : errorMessage;
+        
+        await this.sendLogToBackend(effectiveJobId, 'error', errorLogMessage, 'WORKFLOW-ANALYZER', {
           step_id: step.id,
           step_name: step.name || step.type,
           step_type: step.type,
           step_order: i + 1,
-          error: stepError.message
+          step_config: step.config,
+          error: stepError.message,
+          error_stack: stepError.stack,
+          full_step: step,
+          variable_pool: variablePoolForBackend,
+          variable_pool_download_url: variablePoolUrl
         });
         
         // Check if this is a script execution failure and next step is self-adjustable-ai-workflow
@@ -1923,7 +2228,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         const nextStepIsAdjustable = nextStep && nextStep.type === 'self-adjustable-ai-workflow';
         
         if (isScriptExecutionFailure && nextStepIsAdjustable) {
-          console.log(`[WorkflowAnalyzer] 🔄 Script execution failed, next step is self-adjustable-ai-workflow - will retry`);
+          console.log(`🔄 Script execution failed, next step is self-adjustable-ai-workflow - will retry`);
           // Store failure info for retry, including which step failed and which step generated the script
           // Find the AI prompt step that generated this script (should be before the execute step)
           let scriptGenerationStep = null;
@@ -1951,27 +2256,32 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
     
-    console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
-    console.log(`[WorkflowAnalyzer] ✅ ALL WORKFLOW STEPS COMPLETED`);
-    console.log(`[WorkflowAnalyzer] ═══════════════════════════════════════════════════════`);
+    console.log(`═══════════════════════════════════════════════════════`);
+    console.log(`✅ ALL WORKFLOW STEPS COMPLETED`);
+    console.log(`═══════════════════════════════════════════════════════`);
     
     // CRITICAL: Ensure workflow_id is always set before returning (since create-workflow step was removed)
     // Create workflow if it doesn't exist yet (needed for leg execution even if no legs were found)
     if (!workflowState.workflowId) {
+      // If pageId is missing but we have projectId, try to upsert/discover the page to obtain pageId
+      if (!workflowState.pageId && workflowState.projectId) {
+        await this.ensurePageId(workflowState, effectiveJobId);
+      }
+
       if (workflowState.pageId && workflowState.projectId) {
         try {
-          console.log(`[WorkflowAnalyzer] 🔧 Creating workflow at end of execution: pageId=${workflowState.pageId}, projectId=${workflowState.projectId}`);
+          console.log(`🔧 Creating workflow at end of execution: pageId=${workflowState.pageId}, projectId=${workflowState.projectId}`);
           const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, effectiveJobId);
           workflowState.workflowId = workflow._id;
-          console.log(`[WorkflowAnalyzer] ✅ Auto-created workflow at end: ${workflow._id}`);
+          console.log(`✅ Auto-created workflow at end: ${workflow._id}`);
           await this.sendLogToBackend(effectiveJobId, 'info', `✅ Auto-created workflow: ${workflow._id}`, 'WORKFLOW-ANALYZER', {
             workflow_id: workflow._id,
             page_id: workflowState.pageId,
             project_id: workflowState.projectId
           });
         } catch (createError) {
-          console.error(`[WorkflowAnalyzer] ❌ Failed to auto-create workflow at end: ${createError.message}`);
-          console.error(`[WorkflowAnalyzer] ❌ Stack:`, createError.stack);
+          console.error(`❌ Failed to auto-create workflow at end: ${createError.message}`);
+          console.error(`❌ Stack:`, createError.stack);
           // Log error but don't fail - workflow_id will be null in result
           await this.sendLogToBackend(effectiveJobId, 'error', `❌ Failed to create workflow: ${createError.message}`, 'WORKFLOW-ANALYZER', {
             error: createError.message,
@@ -1982,7 +2292,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           });
         }
       } else {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Cannot create workflow: missing pageId (${workflowState.pageId}) or projectId (${workflowState.projectId})`);
+        console.warn(`⚠️ Cannot create workflow: missing pageId (${workflowState.pageId}) or projectId (${workflowState.projectId})`);
         await this.sendLogToBackend(effectiveJobId, 'warn', `⚠️ Cannot create workflow: missing pageId or projectId`, 'WORKFLOW-ANALYZER', {
           page_id: workflowState.pageId,
           project_id: workflowState.projectId,
@@ -1990,14 +2300,59 @@ IMPORTANT OUTPUT REQUIREMENTS:
         });
       }
     } else {
-      console.log(`[WorkflowAnalyzer] ✅ Workflow already exists: ${workflowState.workflowId}`);
+      console.log(`✅ Workflow already exists: ${workflowState.workflowId}`);
+    }
+    
+    // CRITICAL: For login jobs, check if login was successful and mark job as complete
+    const isLoginJob = workflowState.jobType === 'login' || 
+                       this.context?.jobType === 'login' || 
+                       this.context?.job_type === 'login' ||
+                       this.context?.isLoginJob === true;
+    
+    if (isLoginJob) {
+      // Extract login status from determine_completion step result
+      const determineResult = 
+        workflowState.results?.determine_completion?.result ||
+        workflowState.determine_completion?.result ||
+        workflowState.determine_completion ||
+        workflowState.context?.determine_completion?.result ||
+        workflowState.context?.determine_completion ||
+        null;
+      
+      const loginStatus = determineResult?.status || determineResult?.completion_status || null;
+      const loginSuccess = loginStatus === 'success' || 
+                          (determineResult?.is_complete === true && loginStatus !== 'failure');
+      
+      if (loginSuccess) {
+        await this.sendLogToBackend(effectiveJobId, 'info', `✅ LOGIN SUCCESSFUL - Job will stop after saving results`, 'WORKFLOW-ANALYZER', {
+          login_status: 'success',
+          workflow_id: workflowState.workflowId,
+          reason: determineResult?.reason || 'Login confirmed by AI analysis'
+        });
+        // Mark in workflowState that login was successful
+        workflowState.loginSuccess = true;
+        workflowState.loginStatus = 'success';
+        workflowState.context = workflowState.context || {};
+        workflowState.context.login_status = 'success';
+        workflowState.context.loginSuccess = true;
+      } else {
+        await this.sendLogToBackend(effectiveJobId, 'warn', `⚠️ Login not confirmed (status: ${loginStatus || 'unknown'})`, 'WORKFLOW-ANALYZER', {
+          login_status: loginStatus || 'unknown',
+          workflow_id: workflowState.workflowId,
+          reason: determineResult?.reason || 'Login status unclear'
+        });
+        workflowState.loginSuccess = false;
+        workflowState.loginStatus = loginStatus || 'unknown';
+      }
     }
     
     // Send log to backend
     await this.sendLogToBackend(effectiveJobId, 'info', `✅ ALL WORKFLOW STEPS COMPLETED${workflowState.workflowId ? ` (workflow: ${workflowState.workflowId})` : ' (no workflow_id)'}`, 'WORKFLOW-ANALYZER', {
       total_steps: this.workflowTemplate.steps.length,
       workflow_id: workflowState.workflowId,
-      legs_count: workflowState.legs?.length || 0
+      legs_count: workflowState.legs?.length || 0,
+      is_login_job: isLoginJob,
+      login_success: isLoginJob ? (workflowState.loginSuccess || false) : undefined
     });
     
     // CRITICAL: Include all step results in the return value
@@ -2047,8 +2402,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     // Final validation: ensure workflow_id is set
     if (!result.workflow_id) {
-      console.error(`[WorkflowAnalyzer] ❌ CRITICAL: workflow_id is still null after all attempts to create it!`);
-      console.error(`[WorkflowAnalyzer] ❌ State: pageId=${workflowState.pageId}, projectId=${workflowState.projectId}, legs=${workflowState.legs.length}`);
+      console.error(`❌ CRITICAL: workflow_id is still null after all attempts to create it!`);
+      console.error(`❌ State: pageId=${workflowState.pageId}, projectId=${workflowState.projectId}, legs=${workflowState.legs.length}`);
       await this.sendLogToBackend(effectiveJobId, 'error', `❌ CRITICAL: workflow_id is null after execution`, 'WORKFLOW-ANALYZER', {
         page_id: workflowState.pageId,
         project_id: workflowState.projectId,
@@ -2056,10 +2411,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         url: workflowState.pageUrl
       });
     } else {
-      console.log(`[WorkflowAnalyzer] ✅ Returning workflow results with workflow_id: ${result.workflow_id}`);
+      console.log(`✅ Returning workflow results with workflow_id: ${result.workflow_id}`);
     }
     
-    console.log(`[WorkflowAnalyzer] ✅ Returning workflow results with step results:`, Object.keys(result.results || {}));
+    console.log(`✅ Returning workflow results with step results:`, Object.keys(result.results || {}));
     
     return result;
   }
@@ -2070,7 +2425,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Tailored for domains like practicaltestautomation.com to avoid heavy AI usage
    */
   async executeHardcodedWorkflowAnalysisStep(page, step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🧩 Performing hardcoded workflow analysis (${step.name})`);
+    console.log(`🧩 Performing hardcoded workflow analysis (${step.name})`);
     const url = workflowState.pageUrl;
 
     // Ensure Playwright analysis exists (forms, links, interactive elements)
@@ -2083,14 +2438,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const force = step.config?.force === true;
     const isPracticalTestAutomation = typeof url === 'string' && /practicaltestautomation/i.test(url);
     if (!force && !isPracticalTestAutomation) {
-      console.log(`[WorkflowAnalyzer] ℹ️ Hardcoded analysis skipped (domain not matched, use config.force=true to override)`);
+      console.log(`ℹ️ Hardcoded analysis skipped (domain not matched, use config.force=true to override)`);
       return;
     }
 
-    const legs = this.generateLegsFromPlaywrightAnalysis(workflowState.playwrightAnalysis, url);
+    const legs = await this.generateLegsFromPlaywrightAnalysis(workflowState.playwrightAnalysis, url, workflowState);
 
     if (legs.length === 0) {
-      console.log(`[WorkflowAnalyzer] ⚠️ Hardcoded analysis produced no legs`);
+      console.log(`⚠️ Hardcoded analysis produced no legs`);
       return;
     }
 
@@ -2098,14 +2453,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
     workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
     workflowState.aiAnalysisResult.page_description = workflowState.aiAnalysisResult.page_description || workflowState.pageDescription || null;
     workflowState.aiAnalysisResult.legs = legs;
-    console.log(`[WorkflowAnalyzer] ✅ Hardcoded analysis completed: ${legs.length} legs identified`);
+    console.log(`✅ Hardcoded analysis completed: ${legs.length} legs identified`);
   }
 
   /**
    * Execute screenshot step
    */
   async executeScreenshotStep(page, step, workflowState, jobId, pageId) {
-    console.log(`[WorkflowAnalyzer] 📸 Taking screenshot (${step.name})`);
+    console.log(`📸 Taking screenshot (${step.name})`);
     const config = step.config || {};
     const fullPage = config.fullPage !== false;
     const upload = config.upload !== false;
@@ -2121,12 +2476,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
       screenshotOptions.quality = quality;
     }
 
-    console.log('[WorkflowAnalyzer] Screenshot options resolved:', screenshotOptions);
+    console.log('Screenshot options resolved:', screenshotOptions);
 
     const screenshot = await page.screenshot(screenshotOptions);
 
     workflowState.screenshotBase64 = screenshot.toString('base64');
-    console.log(`[WorkflowAnalyzer] ✅ Screenshot taken (${screenshot.length} bytes)`);
+    console.log(`✅ Screenshot taken (${screenshot.length} bytes)`);
 
     let uploaded = false;
     let publicUrl = null;
@@ -2134,7 +2489,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     if (upload) {
       try {
-        console.log(`[WorkflowAnalyzer] 📸 Requesting presigned URL for screenshot upload...`);
+        console.log(`📸 Requesting presigned URL for screenshot upload...`);
 
         const mimeType = screenshotOptions.type === 'jpeg' ? 'image/jpeg' : 'image/png';
 
@@ -2161,7 +2516,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         });
 
         uploaded = true;
-        console.log(`[WorkflowAnalyzer] ✅ Screenshot uploaded to MinIO: ${returnedUrl}`);
+        console.log(`✅ Screenshot uploaded to MinIO: ${returnedUrl}`);
 
         if (pageId) {
           await axios.post(`${this.backendUrl}/api/pages/${pageId}/screenshot`, {
@@ -2172,21 +2527,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
             headers: this.getAuthHeaders()
           });
 
-          console.log(`[WorkflowAnalyzer] ✅ Page ${pageId} updated with screenshot`);
+          console.log(`✅ Page ${pageId} updated with screenshot`);
         }
       } catch (error) {
-        console.error(`[WorkflowAnalyzer] ❌ Failed to upload screenshot: ${error.message}`);
+        console.error(`❌ Failed to upload screenshot: ${error.message}`);
       }
     }
 
-    this.storeStepResult(step, {
+    // Store result - storeStepResult will structure it according to schema
+    const result = {
+      screenshot_url: publicUrl || null,
+      screenshot_file_id: fileId || null,
+      screenshot_base64: uploaded ? null : screenshot.toString('base64'),
       size_bytes: screenshot.length,
-      uploaded,
-      fileId,
-      publicUrl,
-      fullPage,
-      quality
-    }, workflowState);
+      uploaded: uploaded
+    };
+    
+    this.storeStepResult(step, result, workflowState);
 
     // Create screenshot attachment for display in job history
     const screenshotAttachments = [];
@@ -2258,11 +2615,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute Playwright analysis step
    */
   async executePlaywrightAnalysisStep(page, step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🔍 Performing Playwright analysis (${step.name})`);
+    console.log(`🔍 Performing Playwright analysis (${step.name})`);
     
     const analysis = await this.performPlaywrightAnalysis(page);
     workflowState.playwrightAnalysis = analysis;
     
+    // Store result - storeStepResult will structure it according to schema
+    // But we need to pass the raw analysis object so structureResultWithNamespaces can properly format it
     this.storeStepResult(step, analysis, workflowState);
 
     const metadata = {
@@ -2291,12 +2650,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     // CRITICAL: Log forms being stored to verify they're preserved
     if (analysis.forms.length > 0) {
-      console.log(`[WorkflowAnalyzer] ✅ Stored ${analysis.forms.length} form(s) in workflowState.playwrightAnalysis.forms`);
+      console.log(`✅ Stored ${analysis.forms.length} form(s) in workflowState.playwrightAnalysis.forms`);
       analysis.forms.forEach((form, idx) => {
-        console.log(`[WorkflowAnalyzer]   Form ${idx + 1}: selector="${form.selector}", fields=${form.fields?.length || 0}, buttons=${form.buttons?.length || 0}`);
+        console.log(`  Form ${idx + 1}: selector="${form.selector}", fields=${form.fields?.length || 0}, buttons=${form.buttons?.length || 0}`);
       });
     } else {
-      console.log(`[WorkflowAnalyzer] ⚠️ WARNING: No forms found in Playwright analysis for ${workflowState.pageUrl || 'unknown page'}`);
+      console.log(`⚠️ WARNING: No forms found in Playwright analysis for ${workflowState.pageUrl || 'unknown page'}`);
     }
   }
 
@@ -2358,7 +2717,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute page description step
    */
   async executePageDescriptionStep(page, step, workflowState, jobId, stepContext = null) {
-    console.log(`[WorkflowAnalyzer] 📝 Generating page description (${step.name})`);
+    console.log(`📝 Generating page description (${step.name})`);
     
     // Get page title and content if not already collected
     if (!workflowState.pageTitle) {
@@ -2430,16 +2789,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     if (attachments.includes('forms')) {
       const formsCount = workflowState.playwrightAnalysis?.forms?.length || 0;
-      console.log(`[WorkflowAnalyzer] 🔍 Forms attachment requested. Checking workflowState...`);
-      console.log(`[WorkflowAnalyzer]   playwrightAnalysis exists: ${!!workflowState.playwrightAnalysis}`);
-      console.log(`[WorkflowAnalyzer]   forms array exists: ${!!workflowState.playwrightAnalysis?.forms}`);
-      console.log(`[WorkflowAnalyzer]   forms count: ${formsCount}`);
+      console.log(`🔍 Forms attachment requested. Checking workflowState...`);
+      console.log(`  playwrightAnalysis exists: ${!!workflowState.playwrightAnalysis}`);
+      console.log(`  forms array exists: ${!!workflowState.playwrightAnalysis?.forms}`);
+      console.log(`  forms count: ${formsCount}`);
       
       if (formsCount > 0) {
         const forms = workflowState.playwrightAnalysis.forms.slice(0, 30);
         descriptionPayload.forms = forms;
         descriptionPayload.forms_json = JSON.stringify(forms, null, 2);
-        console.log(`[WorkflowAnalyzer] ✅ Including ${forms.length} form(s) in AI payload for page-description step`);
+        console.log(`✅ Including ${forms.length} form(s) in AI payload for page-description step`);
         if (jobId && this.backendLogger) {
           await this.backendLogger.appendJobLog(jobId, 'info', `📋 Passing ${forms.length} form(s) to AI for leg generation`, 'WORKFLOW-ANALYZER', {
             forms_count: forms.length,
@@ -2447,8 +2806,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
           });
         }
       } else {
-        console.log(`[WorkflowAnalyzer] ❌ CRITICAL: Forms attachment requested but no forms found!`);
-        console.log(`[WorkflowAnalyzer]   playwrightAnalysis structure: ${JSON.stringify(Object.keys(workflowState.playwrightAnalysis || {}))}`);
+        console.log(`❌ CRITICAL: Forms attachment requested but no forms found!`);
+        console.log(`  playwrightAnalysis structure: ${JSON.stringify(Object.keys(workflowState.playwrightAnalysis || {}))}`);
         if (jobId && this.backendLogger) {
           await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ CRITICAL: Forms attachment requested but workflowState.playwrightAnalysis.forms is empty (count: ${formsCount})`, 'WORKFLOW-ANALYZER', {
             playwrightAnalysis_keys: workflowState.playwrightAnalysis ? Object.keys(workflowState.playwrightAnalysis) : [],
@@ -2520,7 +2879,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       // Log response structure for debugging
       const responseKeys = aiResponse && typeof aiResponse === 'object' ? Object.keys(aiResponse) : [];
-      console.log(`[WorkflowAnalyzer] 🔍 AI response structure: keys=${responseKeys.join(', ')}, legs at top level: ${Array.isArray(aiResponse?.legs) ? aiResponse.legs.length : 'none'}, has page_summary: ${!!aiResponse?.page_summary}`);
+      console.log(`🔍 AI response structure: keys=${responseKeys.join(', ')}, legs at top level: ${Array.isArray(aiResponse?.legs) ? aiResponse.legs.length : 'none'}, has page_summary: ${!!aiResponse?.page_summary}`);
       
       // Extract short_description with fallbacks (handle different response structures)
       const shortDescription = workflowState.pageDescription?.short_description ||
@@ -2531,7 +2890,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                                workflowState.pageTitle ||
                                'Page description generated';
       
-      console.log(`[WorkflowAnalyzer] ✅ Page description generated: ${shortDescription}`);
+      console.log(`✅ Page description generated: ${shortDescription}`);
       
       // Ensure pageDescription has short_description if it's missing
       if (workflowState.pageDescription && !workflowState.pageDescription.short_description) {
@@ -2540,18 +2899,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       // Log candidate legs before normalization
       if (candidateLegs.length > 0) {
-        console.log(`[WorkflowAnalyzer] 🔍 Found ${candidateLegs.length} candidate legs from AI response`);
+        console.log(`🔍 Found ${candidateLegs.length} candidate legs from AI response`);
         // Log sample of legs to see if they have selectors
         const sampleLegs = candidateLegs.slice(0, 3);
         sampleLegs.forEach((leg, idx) => {
           const hasSelector = !!(leg.selector || leg.css_selector || leg.element_info?.selector);
-          console.log(`[WorkflowAnalyzer]   Leg ${idx + 1}: ${leg.description || leg.leg_id || 'unnamed'}, has selector: ${hasSelector}, selector: ${leg.selector || 'none'}`);
+          console.log(`  Leg ${idx + 1}: ${leg.description || leg.leg_id || 'unnamed'}, has selector: ${hasSelector}, selector: ${leg.selector || 'none'}`);
         });
       } else {
-        console.log(`[WorkflowAnalyzer] ⚠️ No candidate legs found in AI response`);
+        console.log(`⚠️ No candidate legs found in AI response`);
         const formsCount = workflowState.playwrightAnalysis?.forms?.length || 0;
         if (formsCount > 0) {
-          console.log(`[WorkflowAnalyzer] ⚠️ WARNING: Forms detected (${formsCount}) but no legs generated by AI`);
+          console.log(`⚠️ WARNING: Forms detected (${formsCount}) but no legs generated by AI`);
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ CRITICAL: ${formsCount} form(s) detected but AI did not generate any legs. Forms data was passed to AI.`, 'WORKFLOW-ANALYZER', {
               forms_count: formsCount,
@@ -2565,10 +2924,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       let normalizedFromSummary = [];
       if (candidateLegs.length > 0) {
-        normalizedFromSummary = this.applyLegsToWorkflowState(candidateLegs, workflowState, 'page-summary');
+        normalizedFromSummary = await this.applyLegsToWorkflowState(candidateLegs, workflowState, 'page-summary');
         const filteredCount = candidateLegs.length - normalizedFromSummary.length;
         if (filteredCount > 0) {
-          console.log(`[WorkflowAnalyzer] ⚠️ Filtered out ${filteredCount} legs (likely missing selectors or navigation legs)`);
+          console.log(`⚠️ Filtered out ${filteredCount} legs (likely missing selectors or navigation legs)`);
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ ${filteredCount} legs filtered out (missing selectors or navigation)`, 'WORKFLOW-ANALYZER', {
               candidate_legs: candidateLegs.length,
@@ -2595,16 +2954,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
           this.saveVariable(workflowState, 'legsToExecute', normalizedFromSummary, 'page', null);
           this.saveVariable(workflowState, 'legs', normalizedFromSummary, 'page', null);
           
-          console.log(`[WorkflowAnalyzer] ✅ Page summary included ${normalizedFromSummary.length} legs (legsToExecute set and saved to variable pool)`);
+          console.log(`✅ Page summary included ${normalizedFromSummary.length} legs (legsToExecute set and saved to variable pool)`);
           
           // CRITICAL: Ensure workflow_id is set if not already set (since create-workflow step was removed)
           if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
             try {
               const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
               workflowState.workflowId = workflow._id;
-              console.log(`[WorkflowAnalyzer] ✅ Auto-created workflow: ${workflow._id} (page-description step)`);
+              console.log(`✅ Auto-created workflow: ${workflow._id} (page-description step)`);
             } catch (createError) {
-              console.warn(`[WorkflowAnalyzer] ⚠️ Failed to auto-create workflow: ${createError.message}`);
+              console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
               // Don't fail the step if workflow creation fails
             }
           }
@@ -2613,7 +2972,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           if (normalizedFromSummary.length > 0 && workflowState.workflowId) {
             try {
               await this.saveLegIterationsToWorkflow(workflowState, normalizedFromSummary, jobId);
-              console.log(`[WorkflowAnalyzer] 💾 Immediately saved ${normalizedFromSummary.length} action(s) to workflow ${workflowState.workflowId}`);
+              console.log(`💾 Immediately saved ${normalizedFromSummary.length} action(s) to workflow ${workflowState.workflowId}`);
               if (jobId && this.backendLogger) {
                 await this.backendLogger.appendJobLog(jobId, 'info', `💾 Saved ${normalizedFromSummary.length} action(s) to workflow immediately after discovery`, 'WORKFLOW-ANALYZER', {
                   total_legs: normalizedFromSummary.length,
@@ -2621,13 +2980,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 });
               }
             } catch (saveError) {
-              console.warn(`[WorkflowAnalyzer] ⚠️ Failed to immediately save legs: ${saveError.message}`);
+              console.warn(`⚠️ Failed to immediately save legs: ${saveError.message}`);
             }
           } else if (normalizedFromSummary.length > 0 && !workflowState.workflowId) {
-            console.log(`[WorkflowAnalyzer] ⏳ ${normalizedFromSummary.length} legs collected but workflowId not yet available - will save when workflow is created`);
+            console.log(`⏳ ${normalizedFromSummary.length} legs collected but workflowId not yet available - will save when workflow is created`);
           }
         } else {
-          console.log(`[WorkflowAnalyzer] ⚠️ All ${candidateLegs.length} candidate legs were filtered out during normalization`);
+          console.log(`⚠️ All ${candidateLegs.length} candidate legs were filtered out during normalization`);
           const formsCount = workflowState.playwrightAnalysis?.forms?.length || 0;
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ All ${candidateLegs.length} legs filtered out - likely missing selectors${formsCount > 0 ? ` (${formsCount} form(s) detected but no valid legs)` : ''}`, 'WORKFLOW-ANALYZER', {
@@ -2642,7 +3001,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         const formsCount = workflowState.playwrightAnalysis?.forms?.length || 0;
         const interactiveCount = workflowState.playwrightAnalysis?.interactive_elements?.length || 0;
         if (formsCount > 0 || interactiveCount > 0) {
-          console.log(`[WorkflowAnalyzer] ⚠️ WARNING: Page has ${formsCount} form(s) and ${interactiveCount} interactive element(s), but AI did not generate any legs`);
+          console.log(`⚠️ WARNING: Page has ${formsCount} form(s) and ${interactiveCount} interactive element(s), but AI did not generate any legs`);
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI did not generate legs despite ${formsCount} form(s) and ${interactiveCount} interactive element(s) on page`, 'WORKFLOW-ANALYZER', {
               forms_detected: formsCount,
@@ -2724,7 +3083,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       );
       
     } catch (error) {
-      console.warn(`[WorkflowAnalyzer] Failed to generate page description: ${error.message}`);
+      console.warn(`Failed to generate page description: ${error.message}`);
       workflowState.pageDescription = {
         short_description: `Page: ${workflowState.pageTitle}`,
         full_description: `Analysis of ${workflowState.pageUrl}`,
@@ -2761,7 +3120,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute AI prompt step
    */
   async executeAIPromptStep(page, step, workflowState, jobId, stepContext = null) {
-    console.log(`[WorkflowAnalyzer] 🤖 Executing AI prompt (${step.name})`);
+    console.log(`🤖 Executing AI prompt (${step.name})`);
     
     // Prompt template MUST be embedded directly in step config, not fetched from database
     const customTemplate = step.config?.template || step.config?.user_message_template || null;
@@ -2785,8 +3144,32 @@ IMPORTANT OUTPUT REQUIREMENTS:
       page_content: workflowState.htmlContent || await page.content(),
       additional_prompt_text: this.context.additional_prompt_text || ''
     };
+    // CRITICAL: Strict validation - credentials MUST be valid in workflowState.inputCredentials, no fallbacks
     if (workflowState.inputCredentials) {
-      stepPayload.input_credentials = workflowState.inputCredentials;
+      const creds = workflowState.inputCredentials;
+      // Check if credentials are valid (not "MISSING" placeholders)
+      // Only validate credentials if they're actually present
+      // For crawl jobs, credentials may be null (optional)
+      if (creds === null) {
+        console.log(`ℹ️ No credentials available for this step (crawl job without login)`);
+        // Don't add input_credentials if null
+      } else if (!creds.username || !creds.password ||
+          creds.username === 'MISSING' || creds.username === 'missing' ||
+          creds.password === 'MISSING' || creds.password === 'missing') {
+        // Only throw error for login jobs
+        const isLoginJob = this.context?.jobType === 'login' || 
+                          this.context?.job_type === 'login' ||
+                          this.context?.isLoginJob === true;
+        if (isLoginJob) {
+          console.error(`❌ ERROR: inputCredentials contains "MISSING" placeholder values!`);
+          console.error(`inputCredentials:`, creds);
+          throw new Error('Credentials in workflowState.inputCredentials must not contain placeholder values');
+        } else {
+          console.log(`ℹ️ Credentials invalid but not required (crawl job) - skipping`);
+        }
+      } else {
+        stepPayload.input_credentials = creds;
+      }
     }
     
     // Add workflow context information (always available)
@@ -2930,6 +3313,46 @@ IMPORTANT OUTPUT REQUIREMENTS:
       if (step.config.attachments.includes('screenshot') && workflowState.screenshotBase64) {
         stepPayload.screenshot = workflowState.screenshotBase64;
       }
+      // CRITICAL: Always include input_credentials if requested in attachments (for login script generation)
+      // Strict validation - must not contain "MISSING" placeholder values
+      if (step.config.attachments.includes('input_credentials') && workflowState.inputCredentials) {
+        const creds = workflowState.inputCredentials;
+        if (!creds.username || !creds.password ||
+            creds.username === 'MISSING' || creds.username === 'missing' ||
+            creds.password === 'MISSING' || creds.password === 'missing') {
+          console.error(`❌ ERROR: input_credentials requested but contains "MISSING" values!`);
+          throw new Error('Credentials in workflowState.inputCredentials must not contain placeholder values');
+        }
+        stepPayload.input_credentials = creds;
+        console.log(`✅ Added input_credentials to payload: username=${creds.username}, password=***`);
+      }
+    }
+    
+    // CRITICAL: Always ensure input_credentials is available for login-related steps (even if not in attachments)
+    // Only add credentials if they're valid (not MISSING) and if they exist
+    if (!stepPayload.input_credentials && workflowState.inputCredentials) {
+      const creds = workflowState.inputCredentials;
+      // Only validate and add if credentials are actually present and valid
+      if (creds && creds.username && creds.password &&
+          creds.username !== 'MISSING' && creds.username !== 'missing' &&
+          creds.password !== 'MISSING' && creds.password !== 'missing') {
+        stepPayload.input_credentials = creds;
+        console.log(`✅ Added input_credentials to payload: username=${creds.username}, password=***`);
+      } else if (creds === null) {
+        // Credentials are explicitly null (crawl job without login) - this is OK, don't add them
+        console.log(`ℹ️ No credentials available for this step (crawl job without login)`);
+      } else {
+        // Credentials exist but are invalid - only throw if this is a login job
+        const isLoginJob = this.context?.jobType === 'login' || 
+                          this.context?.job_type === 'login' ||
+                          this.context?.isLoginJob === true;
+        if (isLoginJob) {
+          console.error(`❌ ERROR: Cannot add input_credentials - contains "MISSING" values!`);
+          throw new Error('Credentials in workflowState.inputCredentials must not contain placeholder values');
+        } else {
+          console.log(`ℹ️ Credentials invalid but not required (crawl job) - skipping`);
+        }
+      }
     }
     
     // Log prompt usage with step information
@@ -2941,35 +3364,160 @@ IMPORTANT OUTPUT REQUIREMENTS:
     });
     
     try {
+      // Check if this is a determine_completion step and if current leg has an associated action with action_test_prompt
+      let finalTemplate = decoratedTemplate;
+      const isDetermineCompletion = step.id?.includes('determine_completion') || 
+                                    step.id?.includes('determine-completion') ||
+                                    step.name?.toLowerCase().includes('determine completion') ||
+                                    promptIdentifier?.includes('determine_completion');
+      
+      if (isDetermineCompletion && workflowState.currentLeg) {
+        const legId = workflowState.currentLeg.leg_id || workflowState.currentLeg.id;
+        if (legId && workflowState.pageId) {
+          try {
+            // Fetch action from backend using leg_id and page_id
+            const actionResponse = await axios.get(
+              `${this.backendUrl}/actions?leg_id=${legId}&page_id=${workflowState.pageId}`,
+              { timeout: 5000 }
+            );
+            
+            const actions = Array.isArray(actionResponse.data) ? actionResponse.data : [];
+            const action = actions.find(a => a.leg_id === legId);
+            
+            if (action && action.action_test_prompt) {
+              const mergeMode = step.config?.action_test_prompt_mode || 'merge'; // 'merge' or 'replace'
+              
+              if (mergeMode === 'replace') {
+                finalTemplate = action.action_test_prompt;
+                console.log(`🔄 Replaced prompt with action_test_prompt for leg ${legId}`);
+              } else {
+                // Merge: append action_test_prompt to the existing template
+                finalTemplate = `${decoratedTemplate}\n\n--- Additional Action-Specific Instructions ---\n${action.action_test_prompt}`;
+                console.log(`🔄 Merged action_test_prompt for leg ${legId}`);
+              }
+            }
+          } catch (error) {
+            console.warn(`⚠️ Failed to fetch action for leg ${legId}: ${error.message}`);
+            // Continue with original template if fetch fails
+          }
+        }
+      }
+      
       // Use embedded template from step config (required - no fallback to database)
       const promptConfig = {
-        user_message_template: decoratedTemplate,
+        user_message_template: finalTemplate,
         system_message: systemMessage,
         response_schema: responseSchema
       };
       
-      const aiResponse = await this.aiLogger.makeAICallWithPrompt(
-        promptIdentifier,
-        stepPayload,
-        jobId,
-        'workflow-step',
-        workflowState.pageUrl,
-        null,
-        stepPayload,
-        promptConfig // Pass full config (required - no fallback to database)
-      );
+      // CRITICAL: Ensure pageUrl is set correctly for AI conversation logging
+      const effectivePageUrl = workflowState.pageUrl || workflowState.expectedLoginUrl || page.url();
+      console.log(`📄 VAR_DUMP: executeAIPromptStep - effectivePageUrl=${effectivePageUrl}`);
+      console.log(`📄 VAR_DUMP: executeAIPromptStep - jobId=${jobId}`);
+      console.log(`📄 VAR_DUMP: executeAIPromptStep - promptIdentifier=${promptIdentifier}`);
+      console.log(`📄 VAR_DUMP: executeAIPromptStep - stepPayload.input_credentials=${stepPayload.input_credentials ? JSON.stringify({username: stepPayload.input_credentials.username || 'MISSING', password: stepPayload.input_credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
+      
+      let aiResponse;
+      try {
+        aiResponse = await this.aiLogger.makeAICallWithPrompt(
+          promptIdentifier,
+          stepPayload,
+          jobId,
+          'workflow-step',
+          effectivePageUrl, // Use effectivePageUrl to ensure conversations are linked to correct page
+          null,
+          stepPayload,
+          promptConfig // Pass full config (required - no fallback to database)
+        );
+      } catch (aiError) {
+        const errorMessage = `OpenAI API call failed for step "${step.name || step.id}": ${aiError.message}`;
+        const fullContext = {
+          step_id: step.id,
+          step_name: step.name,
+          step_type: step.type,
+          prompt_identifier: promptIdentifier,
+          step_config: step.config,
+          step_payload_keys: Object.keys(stepPayload || {}),
+          error: aiError.message,
+          error_stack: aiError.stack
+        };
+        console.error(`❌ ${errorMessage}`);
+        console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+        }
+        throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+      }
+      
+      // CRITICAL: Validate OpenAI response exists
+      if (!aiResponse) {
+        const errorMessage = `OpenAI returned null/undefined response for step "${step.name || step.id}"`;
+        const fullContext = {
+          step_id: step.id,
+          step_name: step.name,
+          step_type: step.type,
+          prompt_identifier: promptIdentifier,
+          step_config: step.config,
+          step_payload_keys: Object.keys(stepPayload || {}),
+          ai_response: null
+        };
+        console.error(`❌ ${errorMessage}`);
+        console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+        }
+        throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+      }
       
       let parsedResponse = aiResponse;
       if (typeof aiResponse === 'string') {
         try {
           parsedResponse = JSON.parse(aiResponse);
-        } catch (_) {
-          // keep original string when JSON parse fails
+        } catch (parseError) {
+          const errorMessage = `Failed to parse OpenAI JSON response for step "${step.name || step.id}": ${parseError.message}`;
+          const fullContext = {
+            step_id: step.id,
+            step_name: step.name,
+            step_type: step.type,
+            prompt_identifier: promptIdentifier,
+            step_config: step.config,
+            raw_response: aiResponse,
+            parse_error: parseError.message
+          };
+          console.error(`❌ ${errorMessage}`);
+          console.error(`❌ Raw response:`, aiResponse);
+          console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+          }
+          throw new Error(`${errorMessage}\nRaw response: ${aiResponse}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
         }
       }
 
+      // CRITICAL: Validate parsed response is an object
+      if (!parsedResponse || typeof parsedResponse !== 'object' || Array.isArray(parsedResponse)) {
+        const errorMessage = `OpenAI returned invalid response type for step "${step.name || step.id}". Expected object, got: ${typeof parsedResponse}`;
+        const fullContext = {
+          step_id: step.id,
+          step_name: step.name,
+          step_type: step.type,
+          prompt_identifier: promptIdentifier,
+          step_config: step.config,
+          response_type: typeof parsedResponse,
+          response_value: parsedResponse,
+          raw_response: aiResponse
+        };
+        console.error(`❌ ${errorMessage}`);
+        console.error(`❌ Response value:`, parsedResponse);
+        console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+        }
+        throw new Error(`${errorMessage}\nResponse: ${JSON.stringify(parsedResponse)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+      }
+
       // Debug: Log what was returned
-      console.log(`[WorkflowAnalyzer] 🔍 AI Response for step ${step.id}:`, JSON.stringify(parsedResponse, null, 2).substring(0, 500));
+      console.log(`🔍 AI Response for step ${step.id} (${step.name}):`, JSON.stringify(parsedResponse, null, 2).substring(0, 1000));
       
       // Generate summary for AI request
       let summaryMessage = '';
@@ -2980,7 +3528,57 @@ IMPORTANT OUTPUT REQUIREMENTS:
       };
       
       if (parsedResponse && typeof parsedResponse === 'object') {
-        console.log(`[WorkflowAnalyzer] 🔍 Response keys: ${Object.keys(parsedResponse).join(', ')}`);
+        console.log(`🔍 Response keys: ${Object.keys(parsedResponse).join(', ')}`);
+        // CRITICAL: For generate_login_script step, validate required playwright_script field
+        if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
+          if (!parsedResponse.playwright_script) {
+            const errorMessage = `Missing required field "playwright_script" in generate_login_script response for step "${step.name || step.id}"`;
+            const missingPath = 'response.playwright_script';
+            const fullContext = {
+              step_id: step.id,
+              step_name: step.name,
+              step_type: step.type,
+              step_config: step.config,
+              missing_field: 'playwright_script',
+              missing_path: missingPath,
+              available_keys: Object.keys(parsedResponse),
+              full_response: parsedResponse
+            };
+            console.error(`❌ ${errorMessage}`);
+            console.error(`❌ Missing JSON path: ${missingPath}`);
+            console.error(`❌ Available keys: ${Object.keys(parsedResponse).join(', ')}`);
+            console.error(`❌ Full response:`, JSON.stringify(parsedResponse, null, 2));
+            console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+            }
+            throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys: ${Object.keys(parsedResponse).join(', ')}\nFull response: ${JSON.stringify(parsedResponse, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+          }
+          
+          // Validate playwright_script is a string
+          if (typeof parsedResponse.playwright_script !== 'string' || parsedResponse.playwright_script.trim().length === 0) {
+            const errorMessage = `Invalid playwright_script value in generate_login_script response for step "${step.name || step.id}". Expected non-empty string, got: ${typeof parsedResponse.playwright_script}`;
+            const fullContext = {
+              step_id: step.id,
+              step_name: step.name,
+              step_type: step.type,
+              step_config: step.config,
+              invalid_value_type: typeof parsedResponse.playwright_script,
+              invalid_value: parsedResponse.playwright_script,
+              full_response: parsedResponse
+            };
+            console.error(`❌ ${errorMessage}`);
+            console.error(`❌ playwright_script value:`, parsedResponse.playwright_script);
+            console.error(`❌ Full response:`, JSON.stringify(parsedResponse, null, 2));
+            console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+            }
+            throw new Error(`${errorMessage}\nplaywright_script value: ${JSON.stringify(parsedResponse.playwright_script)}\nFull response: ${JSON.stringify(parsedResponse, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+          }
+          
+          console.log(`✅ playwright_script PRESENT in response: ${parsedResponse.playwright_script.length} chars`);
+        }
         
         // Extract summary information based on response content
         if (parsedResponse.legs && Array.isArray(parsedResponse.legs)) {
@@ -3010,22 +3608,67 @@ IMPORTANT OUTPUT REQUIREMENTS:
           await this.backendLogger.appendJobLog(jobId, 'info', summaryMessage, 'WORKFLOW-ANALYZER', summaryMetadata);
         }
         
+        // CRITICAL: Store playwright_script as legScriptToExecute for ALL AI prompt steps that return it
+        // This is used by execute-code-from-variable steps
         if (parsedResponse.playwright_script) {
-          console.log(`[WorkflowAnalyzer] ✅ playwright_script found: ${parsedResponse.playwright_script.length} chars`);
-          // Log to job history
+          console.log(`✅ playwright_script found: ${parsedResponse.playwright_script.length} chars`);
+          console.log(`📄 VAR_DUMP: playwright_script length=${parsedResponse.playwright_script.length}`);
+          console.log(`📄 VAR_DUMP: playwright_script preview: ${parsedResponse.playwright_script.substring(0, 300)}`);
+          
+          // CRITICAL: Verify script uses input_credentials (only for login steps)
+          if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
+            const scriptUsesCredentials = parsedResponse.playwright_script.includes('input_credentials') || 
+                                         parsedResponse.playwright_script.includes('input_credentials.username') ||
+                                         parsedResponse.playwright_script.includes('input_credentials.password');
+            console.log(`📄 VAR_DUMP: scriptUsesCredentials=${scriptUsesCredentials}`);
+            if (!scriptUsesCredentials) {
+              console.error(`❌ ERROR: Generated script does NOT use input_credentials!`);
+              console.error(`Script preview: ${parsedResponse.playwright_script.substring(0, 500)}`);
+              console.error(`Available credentials: username=${workflowState.inputCredentials?.username || 'MISSING'}, password=${workflowState.inputCredentials?.password ? '***' : 'MISSING'}`);
+            } else {
+              console.log(`✅ Generated script uses input_credentials`);
+            }
+          }
+          
+          // Note: We rely on AI to generate appropriate scripts without hardcoded pattern checks
+          // The AI should analyze the page state and generate scripts accordingly
+          
+          // Upload playwright script as downloadable file
+          let scriptUrl = null;
+          if (jobId) {
+            try {
+              const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+              const stepName = (step.name || step.id || 'script').replace(/[^a-z0-9]/gi, '-').toLowerCase();
+              const fileName = `playwright-script-${jobId}-${stepName}-${timestamp}.js`;
+              scriptUrl = await this.uploadFileForDownload(jobId, parsedResponse.playwright_script, fileName, 'text/javascript');
+              
+              if (scriptUrl) {
+                console.log(`✅ Playwright script uploaded: 📥 ${scriptUrl}`);
+              }
+            } catch (uploadError) {
+              console.warn(`⚠️ Failed to upload playwright script: ${uploadError.message}`);
+            }
+          }
+          
+          // Log to job history with download link
+          const scriptLogMessage = scriptUrl
+            ? `✅ playwright_script extracted: ${parsedResponse.playwright_script.length} chars\n📥 Download: ${scriptUrl}`
+            : `✅ playwright_script extracted: ${parsedResponse.playwright_script.length} chars`;
+          
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'info',
-              `✅ playwright_script extracted: ${parsedResponse.playwright_script.length} chars`,
+              scriptLogMessage,
               'WORKFLOW-ANALYZER',
               {
                 step_id: step.id,
                 script_length: parsedResponse.playwright_script.length,
                 script_preview: parsedResponse.playwright_script.substring(0, 200),
-                script_ends_with: parsedResponse.playwright_script.substring(Math.max(0, parsedResponse.playwright_script.length - 100))
+                script_download_url: scriptUrl
               }
             );
           }
 
+          // CRITICAL: Store as legScriptToExecute for execute-code-from-variable steps
           const cleanedScript = this.cleanScript(parsedResponse.playwright_script);
           if (cleanedScript && cleanedScript.trim().length > 0) {
             workflowState.legScriptToExecute = cleanedScript;
@@ -3033,9 +3676,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
               workflowState.context = {};
             }
             workflowState.context.legScriptToExecute = cleanedScript;
+            // Also store in variable pool for easy access
+            this.initializeVariablePool(workflowState);
+            this.saveVariable(workflowState, 'legScriptToExecute', cleanedScript, 'page', step);
+            console.log(`✅ Stored playwright_script as legScriptToExecute in workflowState, context, and variablePool: ${cleanedScript.length} chars`);
+          } else {
+            console.warn(`⚠️ Cleaned script is empty after cleaning`);
           }
         } else {
-          console.log(`[WorkflowAnalyzer] ⚠️ playwright_script NOT found in response`);
+          console.log(`⚠️ playwright_script NOT found in response`);
+          console.log(`📄 VAR_DUMP: parsedResponse keys: ${Object.keys(parsedResponse || {}).join(', ')}`);
+          console.log(`📄 VAR_DUMP: parsedResponse preview: ${JSON.stringify(parsedResponse).substring(0, 1000)}`);
           // Log to job history
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'warn',
@@ -3086,10 +3737,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         if (candidateLegs.length > 0) {
-          console.log(`[WorkflowAnalyzer] 🔍 Found ${candidateLegs.length} legs in AI response, normalizing and storing in context.legsToExecute`);
+          console.log(`🔍 Found ${candidateLegs.length} legs in AI response, normalizing and storing in context.legsToExecute`);
           // Normalize legs using applyLegsToWorkflowState which sets both workflowState.legs and context.legsToExecute
-          const normalizedLegs = this.applyLegsToWorkflowState(candidateLegs, workflowState, 'ai-prompt');
-          console.log(`[WorkflowAnalyzer] ✅ Stored ${normalizedLegs.length} normalized legs in workflowState.context.legsToExecute`);
+          const normalizedLegs = await this.applyLegsToWorkflowState(candidateLegs, workflowState, 'ai-prompt');
+          console.log(`✅ Stored ${normalizedLegs.length} normalized legs in workflowState.context.legsToExecute`);
+          
+          // CRITICAL: Also store legs in the structured result so it's accessible from step result
+          // The structured result will be stored by storeStepResult, but we need to ensure legs are extractable
+          // Store legs in variable pool with namespace 'page' for for-each access
+          this.initializeVariablePool(workflowState);
+          workflowState.variablePool.page['legsToExecute'] = {
+            value: normalizedLegs,
+            savedAt: new Date().toISOString(),
+            stepSlug: step.slug,
+            stepName: step.name
+          };
           
           // CRITICAL: Save legs immediately to workflow database so they're visible right away
           if (normalizedLegs.length > 0) {
@@ -3105,9 +3767,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
               try {
                 const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
                 workflowState.workflowId = workflow._id;
-                console.log(`[WorkflowAnalyzer] ✅ Auto-created workflow: ${workflow._id} (ai-prompt step)`);
+                console.log(`✅ Auto-created workflow: ${workflow._id} (ai-prompt step)`);
               } catch (createError) {
-                console.warn(`[WorkflowAnalyzer] ⚠️ Failed to auto-create workflow: ${createError.message}`);
+                console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
               }
             }
             
@@ -3115,12 +3777,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
             if (workflowState.workflowId) {
               try {
                 await this.saveLegIterationsToWorkflow(workflowState, normalizedLegs, jobId);
-                console.log(`[WorkflowAnalyzer] 💾 Immediately saved ${normalizedLegs.length} action(s) to workflow ${workflowState.workflowId} with status 'discovered'`);
+                console.log(`💾 Immediately saved ${normalizedLegs.length} action(s) to workflow ${workflowState.workflowId} with status 'discovered'`);
               } catch (saveError) {
-                console.warn(`[WorkflowAnalyzer] ⚠️ Failed to immediately save legs: ${saveError.message}`);
+                console.warn(`⚠️ Failed to immediately save legs: ${saveError.message}`);
               }
             } else {
-              console.log(`[WorkflowAnalyzer] ⏳ Legs collected but workflowId not yet available - will save when workflow is created`);
+              console.log(`⏳ Legs collected but workflowId not yet available - will save when workflow is created`);
             }
           }
           
@@ -3132,7 +3794,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             });
           }
         } else {
-          console.log(`[WorkflowAnalyzer] ⚠️ No legs found in AI response`);
+          console.log(`⚠️ No legs found in AI response`);
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ No legs found in AI response. Response keys: ${parsedResponse && typeof parsedResponse === 'object' ? Object.keys(parsedResponse).join(', ') : 'invalid'}`, 'WORKFLOW-ANALYZER');
           }
@@ -3141,10 +3803,60 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       // Store response in workflow state (legacy key and slug-based)
       workflowState[`${step.name}_response`] = parsedResponse;
-      this.storeStepResult(step, parsedResponse, workflowState);
       
+      // CRITICAL: For generate_login_script step, extract playwright_script BEFORE storeStepResult
+      // This ensures we have the raw value before it gets structured
+      // Note: The code at line 3200-3207 already stores it as legScriptToExecute, but we also store as playwright_script for direct access
+      if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
+        const scriptValue = parsedResponse.playwright_script;
+        if (scriptValue) {
+          // Store playwright_script directly in page namespace for easy access
+          this.initializeVariablePool(workflowState);
+          this.saveVariable(workflowState, 'playwright_script', scriptValue, 'page', step);
+          // Also store directly in workflowState for immediate access
+          workflowState.playwright_script = scriptValue;
+          // Also ensure legScriptToExecute is set (the code at line 3200-3207 does this, but ensure it's available)
+          const cleanedScript = this.cleanScript(scriptValue);
+          if (cleanedScript && cleanedScript.trim().length > 0) {
+            workflowState.legScriptToExecute = cleanedScript;
+            if (!workflowState.context) {
+              workflowState.context = {};
+            }
+            workflowState.context.legScriptToExecute = cleanedScript;
+          }
+          console.log(`✅ Extracted playwright_script to page namespace, workflowState, and legScriptToExecute: ${scriptValue.substring(0, 100)}...`);
+        } else {
+          console.warn(`⚠️ playwright_script not found in generate_login_script result. Keys: ${Object.keys(parsedResponse || {}).join(', ')}`);
+        }
+      }
+      
+      // Store result - storeStepResult will structure it according to schema
+      this.storeStepResult(step, parsedResponse, workflowState);
+
       // CRITICAL: For determine_completion step, also store directly by ID for easy access
       if (step.id === 'determine_completion' || step.name?.includes('Determine Login Progress')) {
+        // Validate that status field is present
+        if (!parsedResponse.status && !parsedResponse.completion_status && parsedResponse.is_complete === undefined) {
+          console.error(`❌ ERROR: determine_completion response missing status field!`);
+          console.error(`Response keys: ${Object.keys(parsedResponse).join(', ')}`);
+          console.error(`Full response:`, JSON.stringify(parsedResponse, null, 2).substring(0, 1000));
+          
+          // Set a default status if missing
+          parsedResponse.status = parsedResponse.completion_status || 'stuck';
+          console.warn(`⚠️ Set default status to: ${parsedResponse.status}`);
+          
+          if (jobId) {
+            await this.sendLogToBackend(jobId, 'error', 
+              `❌ determine_completion response missing status field. Defaulting to '${parsedResponse.status}'`, 
+              'WORKFLOW-ANALYZER', {
+                step_id: step.id,
+                response_keys: Object.keys(parsedResponse),
+                defaulted_status: parsedResponse.status
+              }
+            );
+          }
+        }
+        
         if (!workflowState.determine_completion) {
           workflowState.determine_completion = {};
         }
@@ -3158,13 +3870,36 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         workflowState.results.determine_completion.result = parsedResponse;
         
-        console.log(`[WorkflowAnalyzer] ✅ Stored determine_completion result: status=${parsedResponse?.status || parsedResponse?.completion_status || 'none'}`);
+        // Also store directly by step ID for easy access
+        workflowState[step.id] = { result: parsedResponse };
+        
+        // CRITICAL: Also store in variablePool.steps for condition path resolution
+        if (!workflowState.variablePool) {
+          workflowState.variablePool = { steps: {} };
+        }
+        if (!workflowState.variablePool.steps) {
+          workflowState.variablePool.steps = {};
+        }
+        workflowState.variablePool.steps[step.id] = { result: parsedResponse };
+        
+        workflowState.variablePool.steps['determine_completion'] = { result: parsedResponse }; // Also store by name
+        
+        console.log(`✅ Stored determine_completion result: status=${parsedResponse?.status || parsedResponse?.completion_status || 'none'}`);
+        console.log(`📄 Stored in: workflowState.determine_completion.result, workflowState.results.determine_completion.result, workflowState[${step.id}].result, workflowState.variablePool.steps[${step.id}].result`);
+        
+        // CRITICAL: Allow step result to signal workflow should stop
+        // This is workflow-driven: any step can set stopWorkflow in its result
+        // The workflow template controls when to stop by configuring steps appropriately
+        if (parsedResponse.stopWorkflow === true || parsedResponse.stop_workflow === true) {
+          workflowState.stopWorkflow = true;
+          console.log(`🛑 Step "${step.name || step.id}" signaled workflow should stop`);
+        }
       }
       
       const logPreview = typeof aiResponse === 'string' ? aiResponse.substring(0, 100) : JSON.stringify(parsedResponse).substring(0, 100);
-      console.log(`[WorkflowAnalyzer] ✅ AI prompt completed: ${logPreview}...`);
+      console.log(`✅ AI prompt completed: ${logPreview}...`);
     } catch (aiError) {
-      console.error(`[WorkflowAnalyzer] ❌ AI prompt failed: ${aiError.message}`);
+      console.error(`❌ AI prompt failed: ${aiError.message}`);
       throw aiError;
     }
   }
@@ -3173,7 +3908,26 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute workflow analysis step
    */
   async executeWorkflowAnalysisStep(page, step, workflowState, jobId, stepContext = null) {
-    console.log(`[WorkflowAnalyzer] 🔍 Performing workflow analysis (${step.name})`);
+    // CRITICAL: Skip workflow analysis for login jobs - they don't need legs
+    const isLoginJob = workflowState.jobType === 'login' || 
+                       this.context?.jobType === 'login' || 
+                       this.context?.job_type === 'login' ||
+                       this.context?.isLoginJob === true ||
+                       workflowState?.variablePool?.job?.isLoginJob === true ||
+                       workflowState?.variablePool?.job?.jobType === 'login';
+    
+    if (isLoginJob) {
+      console.log(`⏭️ Skipping workflow analysis step for login job (login jobs don't analyze legs)`);
+      await this.sendLogToBackend(jobId, 'info', `⏭️ Skipping workflow analysis step (login jobs do not analyze legs)`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name,
+        step_type: step.type,
+        reason: 'Login jobs only authenticate, they do not generate test legs'
+      });
+      return; // Skip the entire workflow analysis step
+    }
+    
+    console.log(`🔍 Performing workflow analysis (${step.name})`);
     
     // Prompt template MUST be embedded directly in step config
     const customTemplate = step.config?.template || step.config?.user_message_template || null;
@@ -3195,25 +3949,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     const summaryLegCount = legsFromPageSummary ? legsFromPageSummary.length : 0;
     const existingLegCount = Array.isArray(workflowState.legs) ? workflowState.legs.length : 0;
-    console.log(`[WorkflowAnalyzer] ♻️ Summary legs count before workflow-analysis: ${summaryLegCount} (existing legs: ${existingLegCount}, source: ${workflowState.legsSource || 'none'})`);
+    console.log(`♻️ Summary legs count before workflow-analysis: ${summaryLegCount} (existing legs: ${existingLegCount}, source: ${workflowState.legsSource || 'none'})`);
 
     if (legsFromPageSummary && legsFromPageSummary.length > 0) {
       if (!Array.isArray(workflowState.legs) || workflowState.legs.length === 0) {
-        this.applyLegsToWorkflowState(legsFromPageSummary, workflowState, 'page-summary');
+        await this.applyLegsToWorkflowState(legsFromPageSummary, workflowState, 'page-summary');
       } else if (workflowState.legsSource !== 'page-summary') {
-        this.applyLegsToWorkflowState(legsFromPageSummary, workflowState, 'page-summary');
+        await this.applyLegsToWorkflowState(legsFromPageSummary, workflowState, 'page-summary');
       }
 
-      console.log(`[WorkflowAnalyzer] ♻️ Reusing ${workflowState.legs.length} legs from page summary; skipping additional workflow-analysis request`);
+      console.log(`♻️ Reusing ${workflowState.legs.length} legs from page summary; skipping additional workflow-analysis request`);
       
       // CRITICAL: Ensure workflow_id is set if not already set (since create-workflow step was removed)
       if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
         try {
           const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
           workflowState.workflowId = workflow._id;
-          console.log(`[WorkflowAnalyzer] ✅ Auto-created workflow: ${workflow._id} (workflow-analysis step, reused legs)`);
+          console.log(`✅ Auto-created workflow: ${workflow._id} (workflow-analysis step, reused legs)`);
         } catch (createError) {
-          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to auto-create workflow: ${createError.message}`);
+          console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
           // Don't fail the step if workflow creation fails
         }
       }
@@ -3289,7 +4043,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       );
       
       if (workflowState.aiAnalysisResult && Array.isArray(workflowState.aiAnalysisResult.legs)) {
-        const normalizedLegs = this.applyLegsToWorkflowState(
+        const normalizedLegs = await this.applyLegsToWorkflowState(
           workflowState.aiAnalysisResult.legs,
           workflowState,
           step.id || 'workflow-analysis'
@@ -3300,16 +4054,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
 
         workflowState.aiAnalysisResult.legs = normalizedLegs;
-        console.log(`[WorkflowAnalyzer] ✅ Workflow analysis completed: ${normalizedLegs.length} legs identified`);
+        console.log(`✅ Workflow analysis completed: ${normalizedLegs.length} legs identified`);
         
         // CRITICAL: Ensure workflow_id is set if not already set (since create-workflow step was removed)
         if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
           try {
             const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
             workflowState.workflowId = workflow._id;
-            console.log(`[WorkflowAnalyzer] ✅ Auto-created workflow: ${workflow._id} (workflow-analysis step)`);
+            console.log(`✅ Auto-created workflow: ${workflow._id} (workflow-analysis step)`);
           } catch (createError) {
-            console.warn(`[WorkflowAnalyzer] ⚠️ Failed to auto-create workflow: ${createError.message}`);
+            console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
             // Don't fail the step if workflow creation fails
           }
         }
@@ -3333,7 +4087,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         throw new Error('OpenAI did not return valid workflow legs');
       }
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Workflow analysis failed: ${error.message}`);
+      console.error(`❌ Workflow analysis failed: ${error.message}`);
       throw error;
     }
   }
@@ -3342,12 +4096,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute create workflow step
    */
   async executeCreateWorkflowStep(step, workflowState, pageId, projectId, jobId) {
-    console.log(`[WorkflowAnalyzer] 📝 Creating workflow document (${step.name})`);
+    console.log(`📝 Creating workflow document (${step.name})`);
     
     try {
       const workflow = await this.createWorkflow(pageId, projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
       workflowState.workflowId = workflow._id;
-      console.log(`[WorkflowAnalyzer] ✅ Created workflow: ${workflow._id}${jobId ? ` (linked to job ${jobId})` : ''}`);
+      console.log(`✅ Created workflow: ${workflow._id}${jobId ? ` (linked to job ${jobId})` : ''}`);
 
       // CRITICAL: Automatically discover page immediately when workflow is created
       // This ensures pages appear in the UI as soon as they're analyzed
@@ -3363,9 +4117,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
             analyzed: false // Will be marked as analyzed after AI analysis completes
           }
         );
-        console.log(`[WorkflowAnalyzer] ✅ Page discovered immediately after workflow creation`);
+        console.log(`✅ Page discovered immediately after workflow creation`);
       } catch (discoveryError) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to discover page immediately: ${discoveryError.message}`);
+        console.warn(`⚠️ Failed to discover page immediately: ${discoveryError.message}`);
         // Don't fail the workflow if page discovery fails
       }
 
@@ -3386,7 +4140,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       );
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Failed to create workflow: ${error.message}`);
+      console.error(`❌ Failed to create workflow: ${error.message}`);
       throw error;
     }
   }
@@ -3395,7 +4149,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute update workflow step
    */
   async executeUpdateWorkflowStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 📝 Updating workflow with analysis (${step.name})`);
+    console.log(`📝 Updating workflow with analysis (${step.name})`);
     
     if (!workflowState.workflowId) {
       throw new Error('No workflow ID available for update');
@@ -3432,7 +4186,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         createActions,
         jobId  // Pass jobId so actions are linked to the current job
       );
-      console.log(`[WorkflowAnalyzer] ✅ Workflow updated with analysis${createActions ? ' (actions created immediately)' : ''}`);
+      console.log(`✅ Workflow updated with analysis${createActions ? ' (actions created immediately)' : ''}`);
 
       if (updateResult?.legs && Array.isArray(updateResult.legs)) {
         workflowState.legs = updateResult.legs;
@@ -3458,9 +4212,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
               actions_summary: workflowState.actionsSummary
             }
           );
-          console.log(`[WorkflowAnalyzer] ✅ Page discovery updated with analysis and actions`);
+          console.log(`✅ Page discovery updated with analysis and actions`);
         } catch (discoveryError) {
-          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to update page discovery: ${discoveryError.message}`);
+          console.warn(`⚠️ Failed to update page discovery: ${discoveryError.message}`);
           // Don't fail the workflow if page discovery update fails
         }
       }
@@ -3486,7 +4240,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       );
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Failed to update workflow: ${error.message}`);
+      console.error(`❌ Failed to update workflow: ${error.message}`);
       throw error;
     }
   }
@@ -3495,7 +4249,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute page discovery step
    */
   async executePageDiscoveryStep(step, workflowState, jobId, pageId, projectId) {
-    console.log(`[WorkflowAnalyzer] 📡 Updating page discovery (${step.name})`);
+    console.log(`📡 Updating page discovery (${step.name})`);
     
     const config = step.config || {};
     const includeContent = config.includeContent !== false;
@@ -3590,7 +4344,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const effectiveProjectId = workflowState.projectId || projectId;
 
     try {
-      console.log('[WorkflowAnalyzer] 🚀 Page discovery payload summary:', {
+      console.log('🚀 Page discovery payload summary:', {
         url: workflowState.pageUrl,
         hasDescription: !!discoveryData.page_description,
         stats,
@@ -3605,7 +4359,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         workflowState.currentLeg?.id ||
         null;
       const response = await this.updatePageDiscovery(jobIdentifier, pageId, effectiveProjectId, workflowState.pageUrl, discoveryData);
-      console.log(`[WorkflowAnalyzer] ✅ Page discovery updated`);
+      console.log(`✅ Page discovery updated`);
  
       let legSaveResults = null;
       if (saveLegsData) {
@@ -3613,7 +4367,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         let legsToSave = Array.isArray(workflowState.legsToExecute) ? workflowState.legsToExecute : 
                         (Array.isArray(workflowState.legs) ? workflowState.legs : []);
         
-        console.log('[WorkflowAnalyzer] 🧾 Leg save candidates before filtering:', {
+        console.log('🧾 Leg save candidates before filtering:', {
           total: Array.isArray(legsToSave) ? legsToSave.length : 0,
           workflowId: workflowState.workflowId || 'not set',
           source: Array.isArray(workflowState.legsToExecute) ? 'legsToExecute' : 'legs',
@@ -3630,13 +4384,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
             );
             if (workflowResponse.data && workflowResponse.data._id) {
               workflowState.workflowId = workflowResponse.data._id;
-              console.log('[WorkflowAnalyzer] ✅ Found workflowId:', workflowState.workflowId);
+              console.log('✅ Found workflowId:', workflowState.workflowId);
             }
           } catch (e) {
-            console.log('[WorkflowAnalyzer] ⚠️ Could not find workflowId, will save after workflow is created');
+            console.log('⚠️ Could not find workflowId, will save after workflow is created');
           }
         }
-        console.log('[WorkflowAnalyzer] 🔎 Current leg id for save:', workflowState.currentLeg?.leg_id);
+        console.log('🔎 Current leg id for save:', workflowState.currentLeg?.leg_id);
         if (actionsScope === 'current_leg') {
           if (resolvedLegId) {
             legsToSave = legsToSave.filter(leg => leg.leg_id === resolvedLegId || leg.leg_id === workflowState.currentLeg?.leg_id);
@@ -3645,7 +4399,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             legsToSave = legsToSave.filter(leg => (leg.description || '').toLowerCase() === targetDescription);
           }
         }
-        console.log('[WorkflowAnalyzer] 📊 Leg iterations snapshot:', legsToSave.map(leg => ({
+        console.log('📊 Leg iterations snapshot:', legsToSave.map(leg => ({
           leg_id: leg.leg_id || leg.id || 'no-id',
           iterations: Array.isArray(leg.iterations) ? leg.iterations.length : 0
         })));
@@ -3658,7 +4412,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           const alreadyIncluded = legsToSave.some(leg => (leg.leg_id || leg.id) === currentLegId);
           if (!alreadyIncluded) {
             legsToSave.push(workflowState.currentLeg);
-            console.log('[WorkflowAnalyzer] ➕ Added current leg to save list:', currentLegId);
+            console.log('➕ Added current leg to save list:', currentLegId);
           }
         }
         
@@ -3667,7 +4421,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           legsToSave = legsToSave.filter(leg => Array.isArray(leg.iterations) && leg.iterations.length > 0);
         }
         
-        console.log('[WorkflowAnalyzer] 🧮 Leg save candidates after filtering:', {
+        console.log('🧮 Leg save candidates after filtering:', {
           total: legsToSave.length,
           legIds: legsToSave.map(leg => leg.leg_id || leg.id || 'no-id'),
           hasWorkflowId: !!workflowState.workflowId
@@ -3676,9 +4430,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // Save legs if we have a workflowId
         if (legsToSave.length > 0 && workflowState.workflowId) {
           legSaveResults = await this.saveLegIterationsToWorkflow(workflowState, legsToSave, jobId);
-          console.log('[WorkflowAnalyzer] ✅ Saved leg iterations to workflow:', legSaveResults);
+          console.log('✅ Saved leg iterations to workflow:', legSaveResults);
         } else if (legsToSave.length > 0 && !workflowState.workflowId) {
-          console.log('[WorkflowAnalyzer] ⏳ Legs ready to save but workflowId not yet available - will save when workflow is created');
+          console.log('⏳ Legs ready to save but workflowId not yet available - will save when workflow is created');
         }
       }
 
@@ -3712,7 +4466,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       );
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Failed to update page discovery: ${error.message}`);
+      console.error(`❌ Failed to update page discovery: ${error.message}`);
     }
   }
 
@@ -3742,11 +4496,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       const results = response.data?.results || null;
       if (results) {
-        console.log('[WorkflowAnalyzer] 💾 Saved leg iterations via page-discovery:', results.legs || results);
+        console.log('💾 Saved leg iterations via page-discovery:', results.legs || results);
       }
       return results;
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Failed to save leg iterations: ${error.message}`);
+      console.error(`❌ Failed to save leg iterations: ${error.message}`);
       return null;
     }
   }
@@ -3755,7 +4509,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute save-data step - saves discovered data immediately to database
    */
   async executeSaveDataStep(page, step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 💾 Executing save-data step (${step.name})`);
+    console.log(`💾 Executing save-data step (${step.name})`);
     
     if (!workflowState.workflowId) {
       throw new Error('No workflow ID available for save-data step');
@@ -3769,6 +4523,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const saveNonInteractiveElements = config.saveNonInteractiveElements === true;
     const saveLinks = config.saveLinks === true;
     const saveCookies = config.saveCookies === true;
+    const saveSeoData = config.saveSeoData === true;
+    const saveContentData = config.saveContentData === true;
+    const saveAccessibilityData = config.saveAccessibilityData === true;
     
     // Collect data from workflowState
     // CRITICAL: Use legsToExecute if available (the active legs array), otherwise fall back to legs
@@ -3778,7 +4535,38 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const nonInteractiveElements = workflowState.playwrightAnalysis?.non_interactive_elements || [];
     const links = workflowState.playwrightAnalysis?.links || [];
     
-    console.log(`[WorkflowAnalyzer] 💾 Save-data step: saving ${legs.length} legs (from ${workflowState.legsToExecute ? 'legsToExecute' : 'legs'})`);
+    // Get SEO analysis from workflowState (set by SEO analysis step via variableOutputs)
+    // Check multiple locations where it might be stored
+    const seoAnalysis = workflowState.seoAnalysis || 
+                        workflowState.context?.seoAnalysis || 
+                        (workflowState.variablePool?.step?.seoAnalysis?.value) ||
+                        (workflowState.stepResults?.seo_analysis?.seo_analysis) ||
+                        (workflowState.stepResults?.seo_analysis?.result?.seo_analysis) ||
+                        null;
+    
+    // Get Content analysis from workflowState
+    const contentAnalysis = workflowState.contentAnalysis ||
+                            workflowState.context?.contentAnalysis ||
+                            (workflowState.variablePool?.step?.contentAnalysis?.value) ||
+                            (workflowState.stepResults?.content_optimization_analysis?.content_analysis) ||
+                            (workflowState.stepResults?.content_optimization_analysis?.result?.content_analysis) ||
+                            null;
+    
+    // Get Accessibility analysis from workflowState
+    const accessibilityAnalysis = workflowState.accessibilityAnalysis ||
+                                   workflowState.context?.accessibilityAnalysis ||
+                                   (workflowState.variablePool?.step?.accessibilityAnalysis?.value) ||
+                                   (workflowState.stepResults?.accessibility_analysis?.accessibility_analysis) ||
+                                   (workflowState.stepResults?.accessibility_analysis?.result?.accessibility_analysis) ||
+                                   null;
+    
+    const dataTypes = [];
+    if (saveLegs && legs.length > 0) dataTypes.push(`${legs.length} legs`);
+    if (saveSeoData && seoAnalysis) dataTypes.push('SEO data');
+    if (saveContentData && contentAnalysis) dataTypes.push('Content data');
+    if (saveAccessibilityData && accessibilityAnalysis) dataTypes.push('Accessibility data');
+    
+    console.log(`💾 Save-data step: saving ${dataTypes.join(', ')}`);
     
     // Get cookies from page context
     let cookies = [];
@@ -3787,7 +4575,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         const pageCookies = await page.context().cookies();
         cookies = pageCookies;
       } catch (error) {
-        console.warn(`[WorkflowAnalyzer] Failed to collect cookies: ${error.message}`);
+        console.warn(`Failed to collect cookies: ${error.message}`);
       }
     }
     
@@ -3798,11 +4586,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
       saveNonInteractiveElements,
       saveLinks,
       saveCookies,
+      saveSeoData,
+      saveContentData,
+      saveAccessibilityData,
       legs: saveLegs ? legs : [],
       interactiveElements: saveInteractiveElements ? interactiveElements : [],
       nonInteractiveElements: saveNonInteractiveElements ? nonInteractiveElements : [],
       links: saveLinks ? links : [],
       cookies: saveCookies ? cookies : [],
+      seoData: saveSeoData && seoAnalysis ? seoAnalysis : null,
+      contentData: saveContentData && contentAnalysis ? contentAnalysis : null,
+      accessibilityData: saveAccessibilityData && accessibilityAnalysis ? accessibilityAnalysis : null,
       job_id: jobId
     };
     
@@ -3817,11 +4611,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       const results = response.data?.results || {};
       
-      console.log(`[WorkflowAnalyzer] ✅ Saved data:`, {
+      console.log(`✅ Saved data:`, {
         legs: results.legs,
         actions: results.actions,
         page: results.page,
-        cookies: results.cookies
+        cookies: results.cookies,
+        seo: results.seo,
+        content: results.content,
+        accessibility: results.accessibility
       });
       
       this.storeStepResult(step, {
@@ -3829,10 +4626,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
         results
       }, workflowState);
       
+      const savedItems = [];
+      if (results.legs?.created || results.legs?.updated) {
+        savedItems.push(`${results.legs.created || 0} new legs, ${results.legs.updated || 0} updated legs`);
+      }
+      if (results.actions?.created || results.actions?.updated) {
+        savedItems.push(`${results.actions.created || 0} new actions, ${results.actions.updated || 0} updated actions`);
+      }
+      if (results.seo?.saved) savedItems.push('SEO data');
+      if (results.content?.saved) savedItems.push('Content data');
+      if (results.accessibility?.saved) savedItems.push('Accessibility data');
+      
+      const logMessage = `💾 [SAVE-DATA] Saved ${savedItems.join(', ')}`;
+      
       await this.logStepOutcome(
         step,
         jobId,
-        `💾 [SAVE-DATA] Saved ${results.legs?.created || 0} new legs, ${results.legs?.updated || 0} updated legs, ${results.actions?.created || 0} new actions, ${results.actions?.updated || 0} updated actions`,
+        logMessage,
         {
           results,
           config: {
@@ -3840,31 +4650,171 @@ IMPORTANT OUTPUT REQUIREMENTS:
             saveInteractiveElements,
             saveNonInteractiveElements,
             saveLinks,
-            saveCookies
+            saveCookies,
+            saveSeoData,
+            saveContentData,
+            saveAccessibilityData
           }
         }
       );
       
       return results;
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Failed to save data: ${error.message}`);
+      console.error(`❌ Failed to save data: ${error.message}`);
       throw error;
     }
   }
 
   /**
-   * Store step result by slug
+   * Execute save-page-data step - saves page data and optionally performs variable dump
+   * This combines the functionality of save-data and var-dump steps
+   */
+  async executeSavePageDataStep(page, step, workflowState, jobId) {
+    console.log(`💾 Executing save-page-data step (${step.name})`);
+    
+    const config = step.config || {};
+    const variableDump = config.variableDump === true; // Optional variable dump feature
+    
+    // If variableDump is enabled, perform var-dump first
+    if (variableDump) {
+      console.log(`🧾 Variable dump enabled in save-page-data step`);
+      await this.executeVarDumpStep(step, workflowState, jobId);
+    }
+    
+    // Then execute save-data functionality
+    // For login jobs, we want to save page data even if there's no workflowId
+    // Check if this is a login job
+    const isLoginJob = workflowState.jobType === 'login' || 
+                       this.context?.jobType === 'login' || 
+                       this.context?.isLoginJob === true;
+    
+    if (isLoginJob) {
+      // For login jobs, save page data to job logs and optionally to database
+      console.log(`💾 Saving page data for login job`);
+      
+      // Collect available data based on config
+      const pageData = {
+        url: page.url(),
+        title: await page.title().catch(() => 'Unknown'),
+        timestamp: new Date().toISOString(),
+        jobId: jobId
+      };
+      
+      // Collect data based on config options
+      if (config.saveInteractiveElements && workflowState.playwrightAnalysis?.interactive_elements) {
+        pageData.interactiveElements = workflowState.playwrightAnalysis.interactive_elements;
+      }
+      if (config.saveNonInteractiveElements && workflowState.playwrightAnalysis?.non_interactive_elements) {
+        pageData.nonInteractiveElements = workflowState.playwrightAnalysis.non_interactive_elements;
+      }
+      if (config.saveLinks && workflowState.playwrightAnalysis?.links) {
+        pageData.links = workflowState.playwrightAnalysis.links;
+      }
+      if (config.saveCookies) {
+        try {
+          const pageCookies = await page.context().cookies();
+          pageData.cookies = pageCookies;
+        } catch (error) {
+          console.warn(`Failed to collect cookies: ${error.message}`);
+        }
+      }
+      if (config.saveLegs) {
+        const legs = workflowState.legsToExecute || workflowState.context?.legsToExecute || workflowState.legs || [];
+        if (legs.length > 0) {
+          pageData.legs = legs;
+        }
+      }
+      
+      // Add variable dump snapshot if enabled
+      if (variableDump) {
+        const { snapshot } = this.buildVarDumpSnapshot(step, workflowState, {
+          maxDepth: Math.max(1, this.coerceToInteger(config.maxDepth) ?? 4),
+          maxArrayLength: Math.max(1, this.coerceToInteger(config.maxArrayLength) ?? 20),
+          maxStringLength: Math.max(50, this.coerceToInteger(config.maxStringLength) ?? 1200)
+        }, config);
+        pageData.workflowState = snapshot;
+      }
+      
+      // Save to job logs as metadata
+      try {
+        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+          jobId,
+          level: 'info',
+          message: `💾 [SAVE-PAGE-DATA] ${step.name || 'Page data saved'}`,
+          component: 'WORKFLOW-SAVE-PAGE-DATA',
+          metadata: {
+            step_type: 'save-page-data',
+            step_name: step.name,
+            step_slug: step.slug || null,
+            pageData,
+            config: {
+              variableDump,
+              saveLegs: config.saveLegs,
+              saveInteractiveElements: config.saveInteractiveElements,
+              saveNonInteractiveElements: config.saveNonInteractiveElements,
+              saveLinks: config.saveLinks,
+              saveCookies: config.saveCookies
+            }
+          }
+        }, {
+          headers: this.getAuthHeaders()
+        });
+        
+        this.storeStepResult(step, {
+          success: true,
+          pageData,
+          variableDump: variableDump
+        }, workflowState);
+        
+        const savedItems = [];
+        if (pageData.interactiveElements) savedItems.push('interactive elements');
+        if (pageData.nonInteractiveElements) savedItems.push('non-interactive elements');
+        if (pageData.links) savedItems.push('links');
+        if (pageData.cookies) savedItems.push('cookies');
+        if (pageData.legs) savedItems.push('legs');
+        if (variableDump) savedItems.push('variable dump');
+        
+        console.log(`✅ Saved page data for login job: ${savedItems.join(', ') || 'basic page info'}`);
+      } catch (error) {
+        console.error(`❌ Failed to save page data for login job: ${error.message}`);
+        // Don't throw - login jobs should continue even if data saving fails
+      }
+    } else {
+      // For non-login jobs, use the standard save-data functionality
+      if (!workflowState.workflowId) {
+        console.warn(`⚠️ No workflow ID available for save-page-data step, skipping save-data`);
+        if (variableDump) {
+          // Still perform var-dump even without workflowId
+          return;
+        }
+        return;
+      }
+      
+      // Execute standard save-data step
+      await this.executeSaveDataStep(page, step, workflowState, jobId);
+    }
+  }
+
+  /**
+   * Store step result by slug with structured JSON format including namespaces
    */
   storeStepResult(step, result, workflowState) {
     const slug = step.slug || this.generateSlug(step.name || 'step');
+    
+    // Get output schema for this step type to determine namespaces
+    const outputSchema = step.config?.output_schema || this.getDefaultOutputSchema(step.type);
+    
+    // Convert result to structured format with namespaces
+    const structuredResult = this.structureResultWithNamespaces(result, outputSchema, step.type);
+    
     if (!workflowState[slug]) {
       workflowState[slug] = {};
     }
-    workflowState[slug].result = result;
+    workflowState[slug].result = structuredResult;
     workflowState[slug].stepName = step.name;
     workflowState[slug].stepType = step.type;
     // Also store by name for backward compatibility
-    workflowState[`${step.name}_result`] = result;
+    workflowState[`${step.name}_result`] = structuredResult;
     
     // Also store by step ID if it exists (for nested steps in for-each)
     if (step.id) {
@@ -3874,29 +4824,302 @@ IMPORTANT OUTPUT REQUIREMENTS:
       if (!workflowState.results[step.id]) {
         workflowState.results[step.id] = {};
       }
-      workflowState.results[step.id].result = result;
+      workflowState.results[step.id].result = structuredResult;
       workflowState.results[step.id].stepName = step.name;
       workflowState.results[step.id].stepType = step.type;
       
       // Also store directly on workflowState for easier access
       workflowState[step.id] = {
-        result,
+        result: structuredResult,
         stepName: step.name,
         stepType: step.type
       };
     }
 
-    // Store in variablePool.steps for easy reference
+    // Store in variablePool.steps for easy reference with structured format
     this.initializeVariablePool(workflowState);
     workflowState.variablePool.steps[slug] = {
-      result,
+      result: structuredResult,
       stepName: step.name,
       stepType: step.type,
       stepId: step.id
     };
 
     // Process variable outputs if configured
-    this.processVariableOutputs(step, workflowState, result);
+    this.processVariableOutputs(step, workflowState, structuredResult);
+    
+    // Also store individual fields in their appropriate namespaces
+    this.storeResultFieldsToNamespaces(structuredResult, workflowState, step);
+  }
+
+  /**
+   * Get default output schema for a step type
+   */
+  getDefaultOutputSchema(stepType) {
+    const schemas = {
+      'screenshot': {
+        screenshot_url: { namespace: 'page' },
+        screenshot_file_id: { namespace: 'page' },
+        screenshot_base64: { namespace: 'page' }
+      },
+      'playwright-analysis': {
+        playwright_analysis: { namespace: 'page' }
+      },
+      'ai-prompt': {
+        result: { namespace: 'step' }
+      },
+      'content-change': {
+        success: { namespace: 'step' },
+        operation: { namespace: 'step' },
+        message: { namespace: 'step' }
+      },
+      'for-each': {
+        iterations: { namespace: 'step' },
+        total_iterations: { namespace: 'step' }
+      },
+      'while-loop': {
+        iterations: { namespace: 'step' },
+        total_iterations: { namespace: 'step' },
+        condition_result: { namespace: 'step' }
+      },
+      'conditional': {
+        condition_met: { namespace: 'step' },
+        route_taken: { namespace: 'step' }
+      }
+    };
+    return schemas[stepType] || {};
+  }
+
+  /**
+   * Structure result with namespace information
+   */
+  structureResultWithNamespaces(result, outputSchema, stepType) {
+    if (!result || typeof result !== 'object' || Array.isArray(result)) {
+      // For simple values, wrap in structured format
+      const defaultSchema = this.getDefaultOutputSchema(stepType);
+      const firstKey = Object.keys(defaultSchema)[0];
+      if (firstKey) {
+        return {
+          [firstKey]: {
+            value: result,
+            namespace: defaultSchema[firstKey].namespace || 'step'
+          }
+        };
+      }
+      return { value: result, namespace: 'step' };
+    }
+
+    // For objects, structure each field with namespace information
+    const structured = {};
+    const schemaKeys = Object.keys(outputSchema || {});
+    
+    // If we have a schema, use it to structure the result
+    if (schemaKeys.length > 0) {
+      for (const key of schemaKeys) {
+        const schemaField = outputSchema[key];
+        const namespace = schemaField?.namespace || 'step';
+        
+        if (result[key] !== undefined) {
+          structured[key] = {
+            value: result[key],
+            namespace: namespace
+          };
+        } else if (schemaField?.value && typeof schemaField.value === 'object') {
+          // Handle nested structures - recursively structure nested objects
+          const nestedValue = result[key];
+          if (nestedValue !== undefined && typeof nestedValue === 'object' && !Array.isArray(nestedValue) && nestedValue !== null) {
+            const nestedStructured = {};
+            // Structure each nested field according to schema
+            if (schemaField.value && typeof schemaField.value === 'object') {
+              for (const [nestedKey, nestedSchema] of Object.entries(schemaField.value)) {
+                if (nestedValue[nestedKey] !== undefined) {
+                  const nestedNs = nestedSchema?.namespace || 'step';
+                  nestedStructured[nestedKey] = {
+                    value: nestedValue[nestedKey],
+                    namespace: nestedNs
+                  };
+                }
+              }
+            }
+            // Include any fields not in schema but present in result
+            for (const nestedKey of Object.keys(nestedValue)) {
+              if (!nestedStructured[nestedKey]) {
+                // Try to find namespace from schema, otherwise default to parent namespace or 'step'
+                const nestedNs = schemaField.value?.[nestedKey]?.namespace || namespace || 'step';
+                nestedStructured[nestedKey] = {
+                  value: nestedValue[nestedKey],
+                  namespace: nestedNs
+                };
+              }
+            }
+            structured[key] = {
+              value: nestedStructured,
+              namespace: namespace
+            };
+          } else if (nestedValue !== undefined) {
+            // For non-object nested values, wrap directly
+            structured[key] = {
+              value: nestedValue,
+              namespace: namespace
+            };
+          }
+        }
+      }
+      
+      // Also include any fields not in schema (for backward compatibility)
+      for (const key of Object.keys(result)) {
+        if (!structured[key]) {
+          structured[key] = {
+            value: result[key],
+            namespace: 'step'
+          };
+        }
+      }
+    } else {
+      // No schema, wrap entire result
+      for (const key of Object.keys(result)) {
+        structured[key] = {
+          value: result[key],
+          namespace: 'step'
+        };
+      }
+    }
+    
+    // CRITICAL: For AI prompt steps, also extract top-level fields to their own namespace entries
+    // This allows direct access like "playwright_script" instead of "stepId.result.playwright_script"
+    if (stepType === 'ai-prompt' && result && typeof result === 'object' && !Array.isArray(result)) {
+      for (const [key, value] of Object.entries(result)) {
+        // If this field isn't already in structured (from schema), add it
+        if (!structured[key]) {
+          // Extract to page namespace for easy access (especially for scripts)
+          const namespace = (key === 'playwright_script' || key.includes('script')) ? 'page' : 'step';
+          // Handle both object and primitive values
+          if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+            // If it's already a structured value, keep it; otherwise wrap it
+            structured[key] = value.value !== undefined ? value : {
+              value: value,
+              namespace: namespace
+            };
+          } else {
+            structured[key] = {
+              value: value,
+              namespace: namespace
+            };
+          }
+        }
+      }
+    }
+    
+    return structured;
+  }
+
+  /**
+   * Store result fields to their appropriate namespaces in variablePool
+   * Also handles nested structures and extracts individual fields
+   */
+  storeResultFieldsToNamespaces(structuredResult, workflowState, step) {
+    if (!structuredResult || typeof structuredResult !== 'object') return;
+    
+    this.initializeVariablePool(workflowState);
+    
+    // Helper function to recursively store nested structures
+    const storeField = (key, fieldData, namespace, step) => {
+      if (!fieldData || typeof fieldData !== 'object') return;
+      
+      // Handle structured format: {value: ..., namespace: ...}
+      if (fieldData.namespace && fieldData.value !== undefined) {
+        const actualNamespace = fieldData.namespace;
+        const actualValue = fieldData.value;
+        
+        // Store the main field
+        if (actualNamespace === 'job') {
+          workflowState.variablePool.job[key] = {
+            value: actualValue,
+            savedAt: new Date().toISOString(),
+            stepSlug: step.slug,
+            stepName: step.name
+          };
+        } else if (actualNamespace === 'page') {
+          workflowState.variablePool.page[key] = {
+            value: actualValue,
+            savedAt: new Date().toISOString(),
+            stepSlug: step.slug,
+            stepName: step.name
+          };
+          
+          // CRITICAL: For playwright_analysis, also extract nested fields for easy access
+          if (key === 'playwright_analysis' && typeof actualValue === 'object' && actualValue !== null) {
+            // Store forms, links, interactive_elements, visible_text individually for backward compatibility
+            if (actualValue.forms !== undefined) {
+              workflowState.variablePool.page['forms'] = {
+                value: actualValue.forms,
+                savedAt: new Date().toISOString(),
+                stepSlug: step.slug,
+                stepName: step.name
+              };
+            }
+            if (actualValue.links !== undefined) {
+              workflowState.variablePool.page['links'] = {
+                value: actualValue.links,
+                savedAt: new Date().toISOString(),
+                stepSlug: step.slug,
+                stepName: step.name
+              };
+            }
+            if (actualValue.interactive_elements !== undefined) {
+              workflowState.variablePool.page['interactive_elements'] = {
+                value: actualValue.interactive_elements,
+                savedAt: new Date().toISOString(),
+                stepSlug: step.slug,
+                stepName: step.name
+              };
+            }
+            if (actualValue.visible_text !== undefined) {
+              workflowState.variablePool.page['visible_text'] = {
+                value: actualValue.visible_text,
+                savedAt: new Date().toISOString(),
+                stepSlug: step.slug,
+                stepName: step.name
+              };
+              // Also store in workflowState for backward compatibility
+              workflowState.visibleText = actualValue.visible_text;
+            }
+            // Also keep the full object in workflowState for backward compatibility
+            workflowState.playwrightAnalysis = actualValue;
+          }
+          
+        } else if (actualNamespace === 'cycle' && workflowState.cycleStack.length > 0) {
+          const cycleIndex = workflowState.cycleStack.length - 1;
+          if (!workflowState.variablePool.cycle[cycleIndex]) {
+            workflowState.variablePool.cycle[cycleIndex] = {};
+          }
+          workflowState.variablePool.cycle[cycleIndex][key] = {
+            value: actualValue,
+            savedAt: new Date().toISOString(),
+            stepSlug: step.slug,
+            stepName: step.name,
+            cycleIndex: cycleIndex
+          };
+        }
+        
+        // If the value itself is an object with structured fields, recurse
+        if (typeof actualValue === 'object' && actualValue !== null && !Array.isArray(actualValue)) {
+          for (const [nestedKey, nestedFieldData] of Object.entries(actualValue)) {
+            if (nestedFieldData && typeof nestedFieldData === 'object' && nestedFieldData.namespace && nestedFieldData.value !== undefined) {
+              storeField(nestedKey, nestedFieldData, nestedFieldData.namespace, step);
+            }
+          }
+        }
+      }
+    };
+    
+    // Process all top-level fields
+    for (const [key, fieldData] of Object.entries(structuredResult)) {
+      if (fieldData && typeof fieldData === 'object') {
+        const namespace = fieldData.namespace || 'step';
+        storeField(key, fieldData, namespace, step);
+      }
+    }
   }
 
   /**
@@ -4066,9 +5289,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
 
         this.saveVariable(workflowState, output.variableName, value, namespace, step);
-        console.log(`[WorkflowAnalyzer] 💾 Saved variable "${output.variableName}" to namespace "${namespace}" from path "${output.sourcePath}"`);
+        console.log(`💾 Saved variable "${output.variableName}" to namespace "${namespace}" from path "${output.sourcePath}"`);
       } else {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Could not resolve value for variable "${output.variableName}" from path "${output.sourcePath}"`);
+        console.warn(`⚠️ Could not resolve value for variable "${output.variableName}" from path "${output.sourcePath}"`);
       }
     }
   }
@@ -4098,13 +5321,277 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         this.setNestedValue(workflowState.context, input.targetPath, value);
         inputs[input.variableName] = value;
-        console.log(`[WorkflowAnalyzer] 📖 Loaded variable "${input.variableName}" from namespace "${input.namespace || 'auto'}" to context.${input.targetPath}`);
+        console.log(`📖 Loaded variable "${input.variableName}" from namespace "${input.namespace || 'auto'}" to context.${input.targetPath}`);
       } else {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Variable "${input.variableName}" not found in namespace "${input.namespace || 'auto'}"`);
+        console.warn(`⚠️ Variable "${input.variableName}" not found in namespace "${input.namespace || 'auto'}"`);
       }
     }
 
     return inputs;
+  }
+
+  /**
+   * Execute content-change step - performs variable operations (set, update, delete, export) using JSON configuration
+   */
+  async executeContentChangeStep(step, workflowState, jobId = null) {
+    console.log(`🔧 Executing content-change step (${step.name})`);
+    
+    try {
+      const config = step.config || {};
+      let jsonConfig = config.json || '{}';
+      
+      // Parse JSON configuration
+      let operation;
+      try {
+        // Handle both string and object JSON
+        if (typeof jsonConfig === 'string') {
+          operation = JSON.parse(jsonConfig);
+        } else {
+          operation = jsonConfig;
+        }
+      } catch (parseError) {
+        throw new Error(`Invalid JSON configuration: ${parseError.message}`);
+      }
+      
+      if (!operation.operation) {
+        const errorMessage = `Missing required field "operation" in content-change step "${step.name || step.id}"`;
+        const missingPath = 'step.config.json.operation';
+        console.error(`❌ ${errorMessage}`);
+        console.error(`❌ Missing JSON path: ${missingPath}`);
+        console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+        console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+        console.error(`❌ Parsed operation:`, JSON.stringify(operation, null, 2));
+        
+        const fullContext = {
+          step_id: step.id,
+          step_name: step.name || step.type,
+          step_type: step.type,
+          step_config: step.config,
+          parsed_operation: operation,
+          full_step: step
+        };
+        
+        if (jobId && this.backendLogger) {
+          try {
+            await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+              ...fullContext,
+              missing_path: missingPath
+            });
+          } catch (e) {
+            console.error(`❌ Failed to log error to backend:`, e.message);
+          }
+        }
+        
+        throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
+      }
+      
+      this.initializeVariablePool(workflowState);
+      
+      const opType = operation.operation.toLowerCase();
+      let result = { success: true, operation: opType };
+      
+      switch (opType) {
+        case 'set':
+          // Support both single variable (legacy) and multiple variables (new)
+          if (operation.variables && Array.isArray(operation.variables)) {
+            // Multiple variables: [{name, value, namespace}, ...]
+            const setResults = [];
+            for (const varConfig of operation.variables) {
+              if (!varConfig.name) {
+                console.warn(`⚠️ Skipping variable config missing "name" field`);
+                continue;
+              }
+              const varNamespace = varConfig.namespace || operation.namespace || (workflowState.cycleDepth > 0 ? 'cycle' : 'page');
+              const varValue = varConfig.value;
+              this.saveVariable(workflowState, varConfig.name, varValue, varNamespace, step);
+              setResults.push(`${varConfig.name}=${JSON.stringify(varValue)}`);
+              console.log(`✅ Set variable "${varConfig.name}" to ${JSON.stringify(varValue)} in namespace "${varNamespace}"`);
+            }
+            result.message = `Set ${setResults.length} variable(s): ${setResults.join(', ')}`;
+            console.log(`✅ ${result.message}`);
+          } else {
+            // Single variable (legacy format)
+            if (!operation.name) {
+              throw new Error('Set operation requires "name" field or "variables" array');
+            }
+            const namespace = operation.namespace || (workflowState.cycleDepth > 0 ? 'cycle' : 'page');
+            const value = operation.value;
+            this.saveVariable(workflowState, operation.name, value, namespace, step);
+            result.message = `Variable "${operation.name}" set to ${JSON.stringify(value)} in namespace "${namespace}"`;
+            console.log(`✅ ${result.message}`);
+          }
+          break;
+          
+        case 'update':
+          if (!operation.name || !operation.expression) {
+            throw new Error('Update operation requires "name" and "expression" fields');
+          }
+          const currentValue = this.readVariable(workflowState, operation.name);
+          if (currentValue === undefined) {
+            throw new Error(`Variable "${operation.name}" not found for update`);
+          }
+          // Simple expression evaluation: replace $value with current value
+          let expression = operation.expression;
+          expression = expression.replace(/\$value/g, JSON.stringify(currentValue));
+          try {
+            // Evaluate expression safely (limited context)
+            const newValue = eval(`(${expression})`);
+            const updateNamespace = operation.namespace || (workflowState.cycleDepth > 0 ? 'cycle' : 'page');
+            this.saveVariable(workflowState, operation.name, newValue, updateNamespace, step);
+            result.message = `Variable "${operation.name}" updated from ${JSON.stringify(currentValue)} to ${JSON.stringify(newValue)}`;
+            console.log(`✅ ${result.message}`);
+          } catch (evalError) {
+            throw new Error(`Failed to evaluate expression "${operation.expression}": ${evalError.message}`);
+          }
+          break;
+          
+        case 'delete':
+          if (!operation.name) {
+            throw new Error('Delete operation requires "name" field');
+          }
+          // Delete from all namespaces (search order: cycle -> page -> job)
+          const cycleIndex = workflowState.cycleStack.length - 1;
+          let deleted = false;
+          if (cycleIndex >= 0 && workflowState.variablePool.cycle[cycleIndex]?.[operation.name]) {
+            delete workflowState.variablePool.cycle[cycleIndex][operation.name];
+            deleted = true;
+          }
+          if (workflowState.variablePool.page[operation.name]) {
+            delete workflowState.variablePool.page[operation.name];
+            deleted = true;
+          }
+          if (workflowState.variablePool.job[operation.name]) {
+            delete workflowState.variablePool.job[operation.name];
+            deleted = true;
+          }
+          if (!deleted) {
+            throw new Error(`Variable "${operation.name}" not found for deletion`);
+          }
+          result.message = `Variable "${operation.name}" deleted`;
+          console.log(`✅ ${result.message}`);
+          break;
+          
+        case 'export':
+          if (!operation.exports || !Array.isArray(operation.exports)) {
+            throw new Error('Export operation requires "exports" array field');
+          }
+          for (const exportItem of operation.exports) {
+            if (!exportItem.source || !exportItem.target) {
+              console.warn(`⚠️ Skipping export item missing source or target`);
+              continue;
+            }
+            
+            // Resolve source value
+            const sourceParts = exportItem.source.split('.');
+            let sourceValue;
+            if (sourceParts[0] === 'loop' || sourceParts[0] === 'cycle') {
+              const cycleIdx = workflowState.cycleStack.length - 1;
+              if (cycleIdx >= 0) {
+                const sourceVar = sourceParts.slice(1).join('.');
+                sourceValue = this.readVariable(workflowState, sourceVar, 'cycle');
+              }
+            } else if (sourceParts[0] === 'shared' || sourceParts[0] === 'page') {
+              const sourceVar = sourceParts.slice(1).join('.');
+              sourceValue = this.readVariable(workflowState, sourceVar, 'page');
+            } else if (sourceParts[0] === 'job') {
+              const sourceVar = sourceParts.slice(1).join('.');
+              sourceValue = this.readVariable(workflowState, sourceVar, 'job');
+            } else if (sourceParts[0] === 'step' || sourceParts[0] === 'state') {
+              // Resolve from workflowState
+              const sourcePath = sourceParts.slice(1).join('.');
+              sourceValue = this.getNestedValue(workflowState, sourcePath);
+            } else {
+              // Try direct path
+              sourceValue = this.getNestedValue(workflowState, exportItem.source);
+            }
+            
+            if (sourceValue === undefined) {
+              console.warn(`⚠️ Source value not found: ${exportItem.source}`);
+              continue;
+            }
+            
+            // Resolve target namespace and variable name
+            const targetParts = exportItem.target.split('.');
+            let targetNamespace = 'page';
+            let targetVar;
+            if (targetParts[0] === 'shared' || targetParts[0] === 'page') {
+              targetNamespace = 'page';
+              targetVar = targetParts.slice(1).join('.');
+            } else if (targetParts[0] === 'job') {
+              targetNamespace = 'job';
+              targetVar = targetParts.slice(1).join('.');
+            } else {
+              targetVar = exportItem.target;
+            }
+            
+            const strategy = exportItem.strategy || 'replace';
+            if (strategy === 'replace') {
+              this.saveVariable(workflowState, targetVar, sourceValue, targetNamespace, step);
+            } else if (strategy === 'merge' && typeof sourceValue === 'object' && sourceValue !== null) {
+              const existing = this.readVariable(workflowState, targetVar, targetNamespace);
+              if (existing && typeof existing === 'object' && !Array.isArray(existing)) {
+                const merged = { ...existing, ...sourceValue };
+                this.saveVariable(workflowState, targetVar, merged, targetNamespace, step);
+              } else {
+                this.saveVariable(workflowState, targetVar, sourceValue, targetNamespace, step);
+              }
+            } else if (strategy === 'append' && Array.isArray(sourceValue)) {
+              const existing = this.readVariable(workflowState, targetVar, targetNamespace);
+              if (Array.isArray(existing)) {
+                const appended = [...existing, ...sourceValue];
+                this.saveVariable(workflowState, targetVar, appended, targetNamespace, step);
+              } else {
+                this.saveVariable(workflowState, targetVar, sourceValue, targetNamespace, step);
+              }
+            } else {
+              this.saveVariable(workflowState, targetVar, sourceValue, targetNamespace, step);
+            }
+            
+            console.log(`✅ Exported ${exportItem.source} → ${exportItem.target} (${strategy})`);
+          }
+          result.message = `Exported ${operation.exports.length} variable(s)`;
+          break;
+          
+        default:
+          throw new Error(`Unknown operation type: ${opType}. Supported: set, update, delete, export`);
+      }
+      
+      this.storeStepResult(step, result, workflowState);
+      
+      if (jobId) {
+        try {
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'info',
+            message: `🔧 Content-change: ${result.message}`,
+            component: 'WORKFLOW-ANALYZER',
+            metadata: {
+              step_id: step.id,
+              step_name: step.name,
+              step_type: 'content-change',
+              operation: opType,
+              result: result
+            }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        } catch (e) {
+          // Silent fail
+        }
+      }
+      
+      return result;
+      
+    } catch (error) {
+      console.error(`❌ Content-change step failed: ${error.message}`);
+      const errorResult = {
+        success: false,
+        error: error.message,
+        operation: step.config?.json ? (typeof step.config.json === 'string' ? JSON.parse(step.config.json).operation : step.config.json.operation) : 'unknown'
+      };
+      this.storeStepResult(step, errorResult, workflowState);
+      throw error;
+    }
   }
 
   /**
@@ -4214,6 +5701,113 @@ IMPORTANT OUTPUT REQUIREMENTS:
   /**
    * Clean script to remove markdown code blocks and function declarations
    */
+  /**
+   * Parse script to extract meaningful action lines for logging
+   */
+  parseScriptActions(script) {
+    if (!script || typeof script !== 'string') return [];
+    
+    const actions = [];
+    const lines = script.split('\n');
+    
+    // Common Playwright action patterns - more comprehensive
+    const actionPatterns = [
+      /await\s+page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur)/i,
+      /await\s+page\.locator\([^)]+\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur|waitFor)/i,
+      /await\s+page\.mouse\.(move|click|down|up|wheel)/i,
+      /await\s+page\.keyboard\.(press|type|down|up)/i,
+      /await\s+element\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur)/i,
+      /page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur)/i,
+      /page\.locator\([^)]+\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur)/i,
+      /page\.mouse\.(move|click|down|up|wheel)/i,
+      /page\.keyboard\.(press|type|down|up)/i,
+    ];
+    
+    // Track if we're inside the IIFE body (skip the wrapper lines)
+    let insideIIFE = false;
+    let braceDepth = 0;
+    
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i].trim();
+      
+      // Skip empty lines and comments
+      if (!line || line.startsWith('//') || line.startsWith('/*') || line.startsWith('*')) {
+        continue;
+      }
+      
+      // Detect start of async IIFE: "return await (async () => {" or "async () => {"
+      if (line.match(/^(return\s+await\s*\(async|async\s*\(\)\s*=>\s*\{)/)) {
+        insideIIFE = true;
+        // Count opening braces
+        braceDepth = (line.match(/\{/g) || []).length;
+        continue;
+      }
+      
+      // Count braces to detect when we exit the IIFE
+      if (insideIIFE) {
+        const openBraces = (line.match(/\{/g) || []).length;
+        const closeBraces = (line.match(/\}/g) || []).length;
+        braceDepth += openBraces - closeBraces;
+        
+        // If we hit the closing of the IIFE, skip it
+        if (braceDepth <= 0 && (line.includes('})();') || line.includes('})()'))) {
+          insideIIFE = false;
+          continue;
+        }
+        
+        // Skip closing braces that are just structure
+        if (line === '}' || line === '});' || line === '})();') {
+          continue;
+        }
+      }
+      
+      // Skip standalone return statements that are just control flow (but allow return { success: ... })
+      if (line.match(/^return\s*;$/)) {
+        continue;
+      }
+      
+      // Skip try/catch/if/else/for/while declarations on their own line (but keep their content)
+      if (line.match(/^(try|catch|if|else|for|while)\s*[\{\(]$/)) {
+        continue;
+      }
+      
+      // Skip variable declarations (but allow if they contain actions)
+      if (line.match(/^(const|let|var)\s+\w+\s*=\s*[^a-zA-Z]/) && !line.match(/page\.|element\./)) {
+        continue;
+      }
+      
+      // Check if line contains a Playwright action
+      for (const pattern of actionPatterns) {
+        if (pattern.test(line)) {
+          // Clean up the action line for display
+          let displayLine = line;
+          
+          // Remove leading/trailing semicolons and whitespace
+          displayLine = displayLine.replace(/^[;\s]+|[;\s]+$/g, '');
+          
+          // Truncate very long lines but preserve the action
+          if (displayLine.length > 150) {
+            const match = displayLine.match(/(await\s+)?(page|element|page\.mouse|page\.keyboard|page\.locator)\.([a-zA-Z]+)/);
+            if (match) {
+              const awaitPart = match[1] || '';
+              const objPart = match[2];
+              const methodPart = match[3];
+              displayLine = `${awaitPart}${objPart}.${methodPart}(...)`;
+            } else {
+              // Fallback: just truncate
+              displayLine = displayLine.substring(0, 147) + '...';
+            }
+          }
+          
+          actions.push(displayLine);
+          break;
+        }
+      }
+    }
+    
+    return actions;
+  }
+
   cleanScript(script) {
     if (!script || typeof script !== 'string') {
       return script;
@@ -4322,7 +5916,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    */
   async executeCodeStep(page, step, workflowState, jobId = null, nextStep = null) {
     const startTime = Date.now();
-    console.log(`[WorkflowAnalyzer] 🚀 Executing static code (${step.name})`);
+    console.log(`🚀 Executing static code (${step.name})`);
     
     // Log execution start
     if (jobId) {
@@ -4350,20 +5944,33 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const originalCodeLength = code?.length || 0;
     
     if (!code) {
-      if (jobId) {
+      const errorMessage = `Missing required field "code" for step "${step.name || step.id}"`;
+      const missingPath = 'step.config.code';
+      console.error(`❌ ${errorMessage}`);
+      console.error(`❌ Missing JSON path: ${missingPath}`);
+      console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+      console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+      
+      const fullContext = {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        step_config: step.config,
+        full_step: step
+      };
+      
+      if (jobId && this.backendLogger) {
         try {
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'error',
-            message: `❌ No code provided for step: ${step.name}`,
-            component: 'WORKFLOW-ANALYZER',
-            metadata: { step_id: step.id, step_name: step.name }
-          }, {
-            headers: this.getAuthHeaders()
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+            ...fullContext,
+            missing_path: missingPath
           });
-        } catch (e) {}
+        } catch (e) {
+          console.error(`❌ Failed to log error to backend:`, e.message);
+        }
       }
-      throw new Error(`No code provided for step: ${step.name}`);
+      
+      throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
     }
     
     // Clean the code to remove markdown code blocks and function declarations
@@ -4603,14 +6210,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const isResultArray = Array.isArray(result);
       const resultKeys = result && typeof result === 'object' && !Array.isArray(result) ? Object.keys(result) : [];
       
-      console.log(`[WorkflowAnalyzer] 🔍 Checking result for merge - type: ${resultType}, isArray: ${isResultArray}, keys: ${resultKeys.join(', ') || 'N/A'}`);
+      console.log(`🔍 Checking result for merge - type: ${resultType}, isArray: ${isResultArray}, keys: ${resultKeys.join(', ') || 'N/A'}`);
       
       try {
         const resultStr = JSON.stringify(result);
-        console.log(`[WorkflowAnalyzer] 🔍 Result preview: ${resultStr.substring(0, 500)}${resultStr.length > 500 ? '...' : ''}`);
+        console.log(`🔍 Result preview: ${resultStr.substring(0, 500)}${resultStr.length > 500 ? '...' : ''}`);
       } catch (e) {
-        console.log(`[WorkflowAnalyzer] ⚠️ Could not stringify result: ${e.message}`);
-        console.log(`[WorkflowAnalyzer] 🔍 Result:`, result);
+        console.log(`⚠️ Could not stringify result: ${e.message}`);
+        console.log(`🔍 Result:`, result);
       }
       
       // Check if result has legsToExecute (handle both object and array results)
@@ -4620,53 +6227,53 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (result.length > 0) {
           const firstItem = result[0];
           const firstItemKeys = typeof firstItem === 'object' && firstItem !== null ? Object.keys(firstItem) : [];
-          console.log(`[WorkflowAnalyzer] 🔍 Array result: length=${result.length}, first item keys: ${firstItemKeys.join(', ')}`);
+          console.log(`🔍 Array result: length=${result.length}, first item keys: ${firstItemKeys.join(', ')}`);
           
           if (typeof firstItem === 'object' && firstItem !== null && (firstItem.leg_id || firstItem.legId || firstItem.id || firstItem.type)) {
             // It's an array of leg objects - wrap it
             resultObj = { legsToExecute: result };
-            console.log(`[WorkflowAnalyzer] 🔄 Wrapped array result into object with legsToExecute (${result.length} items)`);
+            console.log(`🔄 Wrapped array result into object with legsToExecute (${result.length} items)`);
           } else {
-            console.log(`[WorkflowAnalyzer] ⚠️ Result is array but doesn't appear to be legs. Length: ${result.length}, first item type: ${typeof firstItem}, keys: ${firstItemKeys.join(',') || 'N/A'}`);
+            console.log(`⚠️ Result is array but doesn't appear to be legs. Length: ${result.length}, first item type: ${typeof firstItem}, keys: ${firstItemKeys.join(',') || 'N/A'}`);
             // Check if it's an array containing a single object with legsToExecute
             if (result.length === 1 && typeof result[0] === 'object' && result[0] !== null && result[0].legsToExecute) {
-              console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute in nested array object`);
+              console.log(`🔄 Found legsToExecute in nested array object`);
               resultObj = result[0];
             } else {
               resultObj = null; // Can't extract legsToExecute from this array
             }
           }
         } else {
-          console.log(`[WorkflowAnalyzer] ⚠️ Result is empty array`);
+          console.log(`⚠️ Result is empty array`);
           resultObj = null;
         }
       }
       
       if (resultObj && typeof resultObj === 'object' && !Array.isArray(resultObj)) {
         if (resultObj.legsToExecute && Array.isArray(resultObj.legsToExecute)) {
-          console.log(`[WorkflowAnalyzer] 📦 Merging legsToExecute: ${resultObj.legsToExecute.length} items`);
+          console.log(`📦 Merging legsToExecute: ${resultObj.legsToExecute.length} items`);
           if (resultObj.summary) {
-            console.log(`[WorkflowAnalyzer] 📊 Legs summary:`, JSON.stringify(resultObj.summary));
+            console.log(`📊 Legs summary:`, JSON.stringify(resultObj.summary));
           }
           workflowState.legsToExecute = resultObj.legsToExecute;
           if (!workflowState.context) {
             workflowState.context = {};
           }
           workflowState.context.legsToExecute = resultObj.legsToExecute;
-          console.log(`[WorkflowAnalyzer] ✅ Merged legsToExecute into workflowState and context`);
+          console.log(`✅ Merged legsToExecute into workflowState and context`);
         } else {
           const availableKeys = Object.keys(resultObj);
-          console.log(`[WorkflowAnalyzer] ⚠️ Result doesn't have legsToExecute array. Result keys: ${availableKeys.join(', ')}`);
+          console.log(`⚠️ Result doesn't have legsToExecute array. Result keys: ${availableKeys.join(', ')}`);
           // Try to find legsToExecute with different naming
           const legsKey = availableKeys.find(k => k.toLowerCase().includes('leg') && k.toLowerCase().includes('execute'));
           if (legsKey && Array.isArray(resultObj[legsKey])) {
-            console.log(`[WorkflowAnalyzer] 🔄 Found legsToExecute with different key name: ${legsKey}`);
+            console.log(`🔄 Found legsToExecute with different key name: ${legsKey}`);
             workflowState.legsToExecute = resultObj[legsKey];
             if (!workflowState.context) {
               workflowState.context = {};
             }
             workflowState.context.legsToExecute = resultObj[legsKey];
-            console.log(`[WorkflowAnalyzer] ✅ Merged legsToExecute from key ${legsKey}`);
+            console.log(`✅ Merged legsToExecute from key ${legsKey}`);
           }
         }
         if (resultObj.context && typeof resultObj.context === 'object') {
@@ -4676,14 +6283,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
           workflowState.legs = resultObj.legs;
         }
       } else if (resultObj === null && isResultArray && result.length === 0) {
-        console.log(`[WorkflowAnalyzer] ⚠️ Result is empty array - code may have failed or returned nothing`);
+        console.log(`⚠️ Result is empty array - code may have failed or returned nothing`);
       }
       
       this.storeStepResult(step, result, workflowState);
-      console.log(`[WorkflowAnalyzer] ✅ Code execution completed: ${JSON.stringify(result).substring(0, 100)}...`);
+      console.log(`✅ Code execution completed: ${JSON.stringify(result).substring(0, 100)}...`);
     } catch (error) {
       const executionTime = Date.now() - startTime;
-      console.error(`[WorkflowAnalyzer] ❌ Code execution failed: ${error.message}`);
+      console.error(`❌ Code execution failed: ${error.message}`);
       
       // Log execution failure
       if (jobId) {
@@ -4712,7 +6319,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       // If next step is self-adjustable-ai-workflow, don't throw - let workflow continue
       if (nextStep && nextStep.type === 'self-adjustable-ai-workflow') {
-        console.log(`[WorkflowAnalyzer] 🔄 Script execution failed, but next step is self-adjustable-ai-workflow - will retry`);
+        console.log(`🔄 Script execution failed, but next step is self-adjustable-ai-workflow - will retry`);
         // Store failure info for retry
         workflowState.lastScriptFailure = {
           step: step,
@@ -4738,39 +6345,298 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute code from variable step
    */
   async executeCodeFromVariableStep(page, step, workflowState, jobId, nextStep = null) {
-    console.log(`[WorkflowAnalyzer] 🚀 Executing code from variable (${step.name})`);
+    console.log(`🚀 Executing code from variable (${step.name})`);
     
     const sourceField = step.config?.sourceField;
     if (!sourceField) {
-      throw new Error(`No sourceField provided for step: ${step.name}`);
+      const errorMessage = `Missing required field "sourceField" in step config for step "${step.name || step.id}"`;
+      const missingPath = 'step.config.sourceField';
+      const fullContext = {
+        step_id: step.id,
+        step_name: step.name,
+        step_type: step.type,
+        step_config: step.config,
+        missing_field: 'sourceField',
+        missing_path: missingPath,
+        full_step: step
+      };
+      console.error(`❌ ${errorMessage}`);
+      console.error(`❌ Missing JSON path: ${missingPath}`);
+      console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+      console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+      }
+      throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
     }
     
     // Resolve the path with slug support
-    let code = this.resolvePath(sourceField, workflowState);
-
+    let code = null;
+    
+    console.log(`🔍 Resolving code from sourceField: "${sourceField}"`);
+    
+    // CRITICAL: First check variable pool (page namespace) for direct variable access
+    if (workflowState.variablePool?.page?.[sourceField]) {
+      const varData = workflowState.variablePool.page[sourceField];
+      code = varData?.value !== undefined ? varData.value : varData;
+      if (code) {
+        console.log(`✅ Resolved code from variable pool (page namespace): ${sourceField} (${code.length} chars)`);
+      }
+    }
+    
+    // Also check if it's stored directly in workflowState (from structureResultWithNamespaces or direct assignment)
+    if (!code && workflowState[sourceField]) {
+      const fieldData = workflowState[sourceField];
+      if (typeof fieldData === 'object' && fieldData !== null && fieldData.value !== undefined) {
+        code = fieldData.value;
+        console.log(`✅ Resolved code from workflowState[${sourceField}].value (${code.length} chars)`);
+      } else if (typeof fieldData === 'string') {
+        code = fieldData;
+        console.log(`✅ Resolved code from workflowState[${sourceField}] (direct string, ${code.length} chars)`);
+      }
+    }
+    
+    // Also check context.legScriptToExecute (legacy location)
+    if (!code && workflowState.context?.[sourceField]) {
+      code = workflowState.context[sourceField];
+      console.log(`✅ Resolved code from workflowState.context[${sourceField}] (${typeof code === 'string' ? code.length + ' chars' : typeof code})`);
+    }
+    
+    // Also check resolvePathValue which handles variable pool access
+    if (!code) {
+      code = this.resolvePathValue(workflowState, sourceField, 'context');
+      if (code) {
+        console.log(`✅ Resolved code from resolvePathValue (context): ${sourceField} (${typeof code === 'string' ? code.length + ' chars' : typeof code})`);
+      }
+    }
+    
+    // Also try resolvePathValue with 'results' source type
+    if (!code) {
+      code = this.resolvePathValue(workflowState, sourceField, 'results');
+      if (code) {
+        console.log(`✅ Resolved code from resolvePathValue (results): ${sourceField} (${typeof code === 'string' ? code.length + ' chars' : typeof code})`);
+      }
+    }
+    
+    if (!code) {
+      code = this.resolvePath(sourceField, workflowState);
+      if (code) {
+        console.log(`✅ Resolved code from resolvePath: ${sourceField} (${typeof code === 'string' ? code.length + ' chars' : typeof code})`);
+      }
+    }
+    
     // Fall back to workflowState.context if direct resolution failed
     if (!code && workflowState?.context) {
       code = this.resolvePath(sourceField, workflowState.context);
+      if (code) {
+        console.log(`✅ Resolved code from resolvePath(context): ${sourceField} (${typeof code === 'string' ? code.length + ' chars' : typeof code})`);
+      }
     }
 
     // Fall back to checking plain context paths (e.g., context.legScriptToExecute)
     if (!code && workflowState?.context) {
       code = this.getNestedValue(workflowState.context, sourceField);
+      if (code) {
+        console.log(`✅ Resolved code from getNestedValue(context): ${sourceField} (${typeof code === 'string' ? code.length + ' chars' : typeof code})`);
+      }
+    }
+    
+    // Final fallback: log available keys for debugging and fail if code still not found
+    if (!code) {
+      // Try final fallbacks
+      if (workflowState.legScriptToExecute) {
+        code = workflowState.legScriptToExecute;
+        console.log(`✅ Using workflowState.legScriptToExecute as fallback: ${code.length} chars`);
+      }
+      if (!code && workflowState.context?.legScriptToExecute) {
+        code = workflowState.context.legScriptToExecute;
+        console.log(`✅ Using workflowState.context.legScriptToExecute as fallback: ${code.length} chars`);
+      }
+      
+      // If still not found, fail with detailed error
+      if (!code) {
+        const errorMessage = `Missing required field "${sourceField}" for step "${step.name || step.id}"`;
+        const missingPath = `workflowState.${sourceField}`;
+        const workflowKeys = Object.keys(workflowState || {});
+        const contextKeys = workflowState.context ? Object.keys(workflowState.context) : [];
+        const varPoolPageKeys = workflowState.variablePool?.page ? Object.keys(workflowState.variablePool.page) : [];
+        const fullContext = {
+          step_id: step.id,
+          step_name: step.name,
+          step_type: step.type,
+          step_config: step.config,
+          missing_field: sourceField,
+          missing_path: missingPath,
+          available_keys_workflowState: workflowKeys,
+          available_keys_context: contextKeys,
+          available_keys_variablePool_page: varPoolPageKeys,
+          workflowState_sample: Object.fromEntries(Object.entries(workflowState || {}).slice(0, 20)),
+          context_sample: workflowState.context ? Object.fromEntries(Object.entries(workflowState.context).slice(0, 20)) : null
+        };
+        console.error(`❌ ${errorMessage}`);
+        console.error(`❌ Missing JSON path: ${missingPath}`);
+        console.error(`❌ Available keys in workflowState (${workflowKeys.length}): ${workflowKeys.slice(0, 30).join(', ')}${workflowKeys.length > 30 ? '...' : ''}`);
+        console.error(`❌ Available keys in workflowState.context (${contextKeys.length}): ${contextKeys.slice(0, 30).join(', ')}${contextKeys.length > 30 ? '...' : ''}`);
+        console.error(`❌ Available keys in workflowState.variablePool.page (${varPoolPageKeys.length}): ${varPoolPageKeys.join(', ')}`);
+        console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+        }
+        throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys in workflowState: ${workflowKeys.join(', ')}\nAvailable keys in context: ${contextKeys.join(', ')}\nAvailable keys in variablePool.page: ${varPoolPageKeys.join(', ')}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+      }
+    }
+    
+    // CRITICAL: If path contains ".result.", try to extract from structured format
+    // Structured results are stored as: workflowState[stepId].result = { field: { value: ..., namespace: ... } }
+    if (!code && sourceField.includes('.result.')) {
+      const pathParts = sourceField.split('.result.');
+      const stepId = pathParts[0];
+      const fieldPath = pathParts[1];
+      
+      console.log(`🔍 Trying to resolve structured path: ${stepId}.result.${fieldPath}`);
+      
+      // Try multiple locations for step result
+      const stepResult = workflowState[stepId]?.result || 
+                        workflowState.results?.[stepId]?.result ||
+                        workflowState.variablePool?.steps?.[stepId]?.result ||
+                        null;
+      
+        if (stepResult) {
+          console.log(`🔍 Found step result, extracting field: ${fieldPath}`);
+          console.log(`🔍 Step result structure:`, JSON.stringify(Object.keys(stepResult || {}).join(', ')));
+          
+          // Try to extract field from structured format
+          // Structured format: { result: { value: { playwright_script: { value: "...", namespace: "step" } } } }
+          // OR: { result: { playwright_script: { value: "...", namespace: "step" } } }
+          // OR: { playwright_script: { value: "...", namespace: "step" } }
+          
+          let fieldValue = null;
+          
+          // Try direct path first
+          fieldValue = this.getNestedValue(stepResult, fieldPath);
+          
+          // If not found and fieldPath contains dots, try each segment with structured value extraction
+          if (!fieldValue && fieldPath.includes('.')) {
+            const fieldParts = fieldPath.split('.');
+            let current = stepResult;
+            for (const part of fieldParts) {
+              if (current && typeof current === 'object') {
+                current = current[part];
+                // If we hit a structured value with .value, extract it
+                if (current && typeof current === 'object' && current.value !== undefined && !Array.isArray(current.value)) {
+                  current = current.value;
+                }
+              } else {
+                current = undefined;
+                break;
+              }
+            }
+            fieldValue = current;
+          }
+          
+          // Also try if stepResult has a "result" wrapper
+          if (!fieldValue && stepResult.result) {
+            fieldValue = this.getNestedValue(stepResult.result, fieldPath);
+            if (fieldValue && typeof fieldValue === 'object' && fieldValue.value !== undefined) {
+              fieldValue = fieldValue.value;
+            }
+          }
+          
+          if (fieldValue) {
+            // If it's still a structured value with .value, extract it
+            if (fieldValue && typeof fieldValue === 'object' && fieldValue.value !== undefined && !Array.isArray(fieldValue.value)) {
+              code = fieldValue.value;
+            } else {
+              code = fieldValue;
+            }
+            console.log(`✅ Resolved code from structured format: ${stepId}.result.${fieldPath}`);
+          } else {
+            console.warn(`⚠️ Field path "${fieldPath}" not found in step result. Available keys: ${Object.keys(stepResult || {}).join(', ')}`);
+            if (stepResult.result) {
+              console.warn(`⚠️ stepResult.result keys: ${Object.keys(stepResult.result || {}).join(', ')}`);
+            }
+          }
+        }
+      
+      // Also try slug-based lookup
+      if (!code) {
+        const stepSlug = this.generateSlug(stepId);
+        console.log(`🔍 Trying slug-based lookup: ${stepSlug}`);
+        const slugResult = workflowState[stepSlug]?.result || 
+                          workflowState.results?.[stepSlug]?.result ||
+                          workflowState.variablePool?.steps?.[stepSlug]?.result ||
+                          null;
+        if (slugResult) {
+          let fieldValue = this.getNestedValue(slugResult, fieldPath);
+          if (fieldValue) {
+            code = (fieldValue && typeof fieldValue === 'object' && fieldValue.value !== undefined) ? fieldValue.value : fieldValue;
+            console.log(`✅ Resolved code from slug-based structured format: ${stepSlug}.result.${fieldPath}`);
+          }
+        }
+      }
     }
 
     if (!code) {
-      console.warn(`[WorkflowAnalyzer] ⚠️ Unable to resolve code for path "${sourceField}". Available keys:`, Object.keys(workflowState || {}));
+      console.warn(`⚠️ Unable to resolve code for path "${sourceField}". Available keys:`, Object.keys(workflowState || {}));
       if (workflowState?.context) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Context keys:`, Object.keys(workflowState.context));
+        console.warn(`⚠️ Context keys:`, Object.keys(workflowState.context));
+      }
+      if (workflowState?.results) {
+        console.warn(`⚠️ Results keys:`, Object.keys(workflowState.results));
       }
       throw new Error(`Code not found at path "${sourceField}" in workflowState for step: ${step.name}`);
     }
     
-    console.log(`[WorkflowAnalyzer] 📦 Resolved code from "${sourceField}": ${code ? 'found' : 'not found'}`);
+    console.log(`📦 Resolved code from "${sourceField}": ${code ? 'found' : 'not found'}`);
+    
+    // Parse script to extract action lines BEFORE cleaning (to preserve original structure)
+    const actionLines = this.parseScriptActions(code);
+    console.log(`📋 Parsed ${actionLines.length} action lines from script`);
+    
+    // Log parsing result to job logs for debugging
+    if (jobId && actionLines.length > 0) {
+      try {
+        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+          jobId: jobId,
+          level: 'debug',
+          message: `📋 Parsed ${actionLines.length} action lines from script (will log during execution)`,
+          component: 'WORKFLOW-ANALYZER',
+          metadata: {
+            step_id: step.id,
+            step_name: step.name,
+            action_lines_count: actionLines.length,
+            script_length: code.length
+          }
+        }, {
+          headers: this.getAuthHeaders()
+        });
+      } catch (logError) {
+        console.error(`❌ Failed to log parsing result: ${logError.message}`);
+      }
+    } else if (jobId && actionLines.length === 0) {
+      try {
+        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+          jobId: jobId,
+          level: 'warn',
+          message: `⚠️ No action lines parsed from script (script length: ${code.length} chars) - script may be empty or in unexpected format`,
+          component: 'WORKFLOW-ANALYZER',
+          metadata: {
+            step_id: step.id,
+            step_name: step.name,
+            script_length: code.length,
+            script_preview: code.substring(0, 300)
+          }
+        }, {
+          headers: this.getAuthHeaders()
+        });
+      } catch (logError) {
+        console.error(`❌ Failed to log parsing warning: ${logError.message}`);
+      }
+    }
     
     // Clean the code to remove markdown code blocks and function declarations
     code = this.cleanScript(code);
-    console.log(`[WorkflowAnalyzer] 🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
+    console.log(`🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
     
     if (!code || code.trim().length === 0) {
       throw new Error(`Script is empty after cleaning for step: ${step.name}`);
@@ -4782,6 +6648,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // Capture URL before action
       const urlBeforeAction = page.url();
       workflowState.urlBeforeAction = urlBeforeAction;
+      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - urlBeforeAction=${urlBeforeAction}`);
+      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - expectedLoginUrl=${workflowState.expectedLoginUrl}`);
+      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - code preview: ${code.substring(0, 300)}`);
+      
+      // CRITICAL: Check if we're navigating away from login page
+      if (workflowState.expectedLoginUrl && urlBeforeAction !== workflowState.expectedLoginUrl) {
+        console.warn(`⚠️ WARNING: Page is NOT on expected login URL! Current URL: ${urlBeforeAction}, Expected: ${workflowState.expectedLoginUrl}`);
+      }
       
       // Take screenshot before action
       let screenshotBeforeKey = null;
@@ -4823,16 +6697,37 @@ IMPORTANT OUTPUT REQUIREMENTS:
           });
         }
       } catch (screenshotError) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to capture before screenshot: ${screenshotError.message}`);
+        console.warn(`⚠️ Failed to capture before screenshot: ${screenshotError.message}`);
+      }
+      
+      // Upload script as downloadable file before execution
+      let executedScriptUrl = null;
+      if (jobId && code) {
+        try {
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const stepName = (step.name || step.id || 'script').replace(/[^a-z0-9]/gi, '-').toLowerCase();
+          const fileName = `playwright-script-executed-${jobId}-${stepName}-${timestamp}.js`;
+          executedScriptUrl = await this.uploadFileForDownload(jobId, code, fileName, 'text/javascript');
+          
+          if (executedScriptUrl) {
+            console.log(`✅ Script uploaded before execution: 📥 ${executedScriptUrl}`);
+          }
+        } catch (uploadError) {
+          console.warn(`⚠️ Failed to upload script before execution: ${uploadError.message}`);
+        }
       }
       
       // Log execution start
+      const executionStartMessage = executedScriptUrl
+        ? `▶️ Executing Playwright script in Node.js context...\n📥 Download: ${executedScriptUrl}`
+        : `▶️ Executing Playwright script in Node.js context...`;
+      
       if (jobId) {
         try {
           await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
             jobId: jobId,
             level: 'debug',
-            message: `▶️ Executing Playwright script in Node.js context...`,
+            message: executionStartMessage,
             component: 'WORKFLOW-ANALYZER',
             metadata: {
               step_id: step.id,
@@ -4840,33 +6735,454 @@ IMPORTANT OUTPUT REQUIREMENTS:
               url_before: urlBeforeAction,
               timeout_ms: timeout,
               script_length: code.length,
-              script_preview: code.substring(0, 300)
+              script_preview: code.substring(0, 300),
+              script_download_url: executedScriptUrl
             }
           }, {
             headers: this.getAuthHeaders()
           });
+          
+          // Log each action line with [executing] prefix
+          console.log(`📋 Found ${actionLines.length} action lines to log`);
+          if (actionLines.length > 0) {
+            let loggedCount = 0;
+            let failedCount = 0;
+            for (const actionLine of actionLines) {
+              console.log(`📝 Logging action: [executing] ${actionLine.substring(0, 100)}`);
+              try {
+                const response = await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+                  jobId: jobId,
+                  level: 'info',
+                  message: `[executing] ${actionLine}`,
+                  component: 'WORKFLOW-ANALYZER',
+                  metadata: {
+                    step_id: step.id,
+                    step_name: step.name,
+                    action_type: 'script_action',
+                    action_line: actionLine
+                  }
+                }, {
+                  headers: this.getAuthHeaders(),
+                  timeout: 5000 // 5 second timeout
+                });
+                if (response.status === 200 || response.status === 201) {
+                  loggedCount++;
+                } else {
+                  failedCount++;
+                  console.error(`❌ Failed to log action line: HTTP ${response.status}`);
+                }
+              } catch (logError) {
+                failedCount++;
+                console.error(`❌ Failed to log action line: ${logError.message}`, logError.response?.data || '');
+              }
+            }
+            console.log(`✅ Logged ${loggedCount}/${actionLines.length} action lines (${failedCount} failed)`);
+            
+            // Log summary if some failed
+            if (failedCount > 0 && jobId) {
+              try {
+                await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+                  jobId: jobId,
+                  level: 'warn',
+                  message: `⚠️ Failed to log ${failedCount} out of ${actionLines.length} action lines`,
+                  component: 'WORKFLOW-ANALYZER',
+                  metadata: {
+                    step_id: step.id,
+                    step_name: step.name,
+                    logged_count: loggedCount,
+                    failed_count: failedCount,
+                    total_count: actionLines.length
+                  }
+                }, {
+                  headers: this.getAuthHeaders()
+                });
+              } catch (summaryError) {
+                console.error(`❌ Failed to log summary: ${summaryError.message}`);
+              }
+            }
+          } else {
+            console.warn(`⚠️ No action lines found in script (script length: ${code.length})`);
+          }
         } catch (e) {
-          // Silent fail - don't block execution
+          console.error(`❌ Failed to log execution start: ${e.message}`, e);
         }
       }
       
       // Playwright scripts must execute in Node.js context, not browser context
       // The 'page' object is available in Node.js, not in browser
-      // Create an async function that has access to the page object
-      const executeInNodeContext = async (pageObj, scriptCode) => {
+      // Create an async function that has access to the page object and credentials
+      const inputCredentials = workflowState.inputCredentials || this.context?.credentials || null;
+      
+      // CRITICAL: Log credentials being passed to script execution
+      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - inputCredentials check`);
+      console.log(`📄 VAR_DUMP: inputCredentials=${inputCredentials ? 'EXISTS' : 'NULL'}`);
+      if (inputCredentials) {
+        console.log(`📄 VAR_DUMP: inputCredentials.username=${inputCredentials.username || 'MISSING'}`);
+        console.log(`📄 VAR_DUMP: inputCredentials.password=${inputCredentials.password ? '***' : 'MISSING'}`);
+        console.log(`🔑 Passing credentials to script: username=${inputCredentials.username || 'MISSING'}, password=${inputCredentials.password ? '***' : 'MISSING'}`);
+        if (!inputCredentials.username || !inputCredentials.password) {
+          console.warn(`⚠️ WARNING: Credentials incomplete! username=${!!inputCredentials.username}, password=${!!inputCredentials.password}`);
+        }
+      } else {
+        console.error(`❌ ERROR: No credentials available for script execution!`);
+        console.error(`workflowState.inputCredentials:`, workflowState.inputCredentials);
+        console.error(`this.context.credentials:`, this.context?.credentials);
+      }
+      
+      // CRITICAL: Verify script uses credentials
+      const scriptUsesCredentials = code.includes('input_credentials') || 
+                                   code.includes('input_credentials.username') ||
+                                   code.includes('input_credentials.password');
+      console.log(`📄 VAR_DUMP: scriptUsesCredentials=${scriptUsesCredentials}`);
+      if (!scriptUsesCredentials && inputCredentials) {
+        console.error(`❌ ERROR: Generated script does NOT use input_credentials!`);
+        console.error(`Script preview: ${code.substring(0, 500)}`);
+      }
+      
+      // DEFAULT: Allow navigation (crawl jobs can navigate to test everything)
+      // Only restrict navigation if this is explicitly configured as a login job
+      // Login jobs are configured via workflow configuration step, not by default
+      const isLoginJob = this.context?.jobType === 'login' || 
+                        this.context?.job_type === 'login' || 
+                        this.context?.isLoginJob === true ||
+                        workflowState?.variablePool?.job?.isLoginJob === true ||
+                        workflowState?.variablePool?.job?.jobType === 'login' ||
+                        workflowState?.variablePool?.job?.preventNavigation === true;
+      
+      if (isLoginJob) {
+        // Check for forbidden navigation patterns
+        const hasPageGoto = code.includes('page.goto(') || code.includes('page.goto(');
+        const hasNavigationLinks = code.includes('click(') && (
+          code.includes('/courses') || 
+          code.includes('/home') || 
+          code.includes('/about') ||
+          code.includes('href') ||
+          code.includes('navigation') ||
+          code.includes('menu')
+        );
+        
+        if (hasPageGoto) {
+          console.error(`❌ ERROR: Login job script contains page.goto() - this is FORBIDDEN!`);
+          console.error(`Script preview: ${code.substring(0, 500)}`);
+          
+          if (jobId) {
+            await this.sendLogToBackend(jobId, 'error', 
+              `❌ Login job script contains forbidden page.goto() - login jobs must NOT navigate to other pages`, 
+              'WORKFLOW-ANALYZER', {
+                step_id: step.id,
+                script_preview: code.substring(0, 500)
+              }
+            );
+          }
+          
+          throw new Error('Login job script contains forbidden page.goto() - login jobs must only interact with login forms, not navigate to other pages');
+        }
+        
+        if (hasNavigationLinks) {
+          console.warn(`⚠️ WARNING: Login job script may be clicking navigation links - this is discouraged`);
+          console.warn(`Script preview: ${code.substring(0, 500)}`);
+        }
+      }
+      
+      // Wrap page object to intercept ALL Playwright method calls and log execution
+      const createPageWrapperWithScreenshot = (pageObj, jobId, backendUrl, getAuthHeaders, stepInfo = null) => {
+        console.log(`🔧 Creating page wrapper for jobId: ${jobId}`);
+        const wrapper = {};
+        
+        // Helper function to log action execution
+        const logAction = async (methodName, args = []) => {
+          if (!jobId) {
+            console.log(`⚠️ logAction called but no jobId: ${methodName}`);
+            return;
+          }
+          
+          try {
+            // Format the action for display
+            let actionDisplay = methodName;
+            if (args.length > 0) {
+              // Format first argument (usually selector or value)
+              const firstArg = args[0];
+              if (typeof firstArg === 'string') {
+                // Truncate long selectors/values
+                const truncated = firstArg.length > 50 ? firstArg.substring(0, 47) + '...' : firstArg;
+                actionDisplay = `${methodName}(${truncated})`;
+              } else if (typeof firstArg === 'object' && firstArg !== null) {
+                actionDisplay = `${methodName}({...})`;
+              } else {
+                actionDisplay = `${methodName}(${String(firstArg).substring(0, 30)})`;
+              }
+            } else {
+              actionDisplay = `${methodName}()`;
+            }
+            
+            console.log(`📝 Logging action: [executing] await page.${actionDisplay}`);
+            
+            const metadata = {
+              action_type: 'playwright_method',
+              method_name: methodName,
+              action_display: actionDisplay
+            };
+            
+            // Add step info if available
+            if (stepInfo) {
+              if (stepInfo.id) metadata.step_id = stepInfo.id;
+              if (stepInfo.name) metadata.step_name = stepInfo.name;
+            }
+            
+            try {
+              const response = await axios.post(`${backendUrl}/api/logs/jobs/append`, {
+                jobId: jobId,
+                level: 'info',
+                message: `[executing] await page.${actionDisplay}`,
+                component: 'WORKFLOW-ANALYZER',
+                metadata: metadata
+              }, {
+                headers: getAuthHeaders(),
+                timeout: 5000 // 5 second timeout
+              });
+              
+              console.log(`✅ Successfully logged action: ${actionDisplay} (status: ${response.status})`);
+            } catch (axiosError) {
+              // Log the error but don't fail execution
+              console.error(`❌ Failed to log action via axios: ${axiosError.message}`);
+              if (axiosError.response) {
+                console.error(`Response status: ${axiosError.response.status}`);
+                console.error(`Response data:`, axiosError.response.data);
+              }
+              // Try to log via console as fallback
+              console.log(`[executing] await page.${actionDisplay}`);
+            }
+          } catch (logError) {
+            // Don't fail execution if logging fails
+            console.error(`❌ Failed to log action: ${logError.message}`, logError);
+          }
+        };
+        
+        // Wrap common Playwright methods to log execution
+        const wrapMethod = (methodName, originalMethod) => {
+          return async function(...args) {
+            console.log(`🔍 Wrapper called for method: ${methodName}`);
+            await logAction(methodName, args);
+            return await originalMethod.apply(pageObj, args);
+          };
+        };
+        
+        // Wrap common page methods
+        wrapper.click = wrapMethod('click', pageObj.click.bind(pageObj));
+        wrapper.fill = wrapMethod('fill', pageObj.fill.bind(pageObj));
+        wrapper.type = wrapMethod('type', pageObj.type.bind(pageObj));
+        wrapper.press = wrapMethod('press', pageObj.press.bind(pageObj));
+        wrapper.goto = wrapMethod('goto', pageObj.goto.bind(pageObj));
+        wrapper.waitForTimeout = wrapMethod('waitForTimeout', pageObj.waitForTimeout.bind(pageObj));
+        wrapper.waitFor = wrapMethod('waitFor', pageObj.waitFor.bind(pageObj));
+        wrapper.waitForLoadState = wrapMethod('waitForLoadState', pageObj.waitForLoadState.bind(pageObj));
+        wrapper.waitForSelector = wrapMethod('waitForSelector', pageObj.waitForSelector.bind(pageObj));
+        wrapper.selectOption = wrapMethod('selectOption', pageObj.selectOption.bind(pageObj));
+        wrapper.check = wrapMethod('check', pageObj.check.bind(pageObj));
+        wrapper.uncheck = wrapMethod('uncheck', pageObj.uncheck.bind(pageObj));
+        wrapper.hover = wrapMethod('hover', pageObj.hover.bind(pageObj));
+        wrapper.focus = wrapMethod('focus', pageObj.focus.bind(pageObj));
+        wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
+        
+        // Wrap locator method to also intercept methods on locators
+        const originalLocator = pageObj.locator.bind(pageObj);
+        wrapper.locator = function(selector, options) {
+          const locator = originalLocator(selector, options);
+          
+          // Wrap locator methods
+          const wrapLocatorMethod = (methodName, originalLocatorMethod) => {
+            return async function(...args) {
+              await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).${methodName}`, args);
+              return await originalLocatorMethod.apply(locator, args);
+            };
+          };
+          
+          // Wrap common locator methods
+          if (locator.click) {
+            const originalLocatorClick = locator.click.bind(locator);
+            locator.click = wrapLocatorMethod('click', originalLocatorClick);
+          }
+          if (locator.fill) {
+            const originalLocatorFill = locator.fill.bind(locator);
+            locator.fill = wrapLocatorMethod('fill', originalLocatorFill);
+          }
+          if (locator.type) {
+            const originalLocatorType = locator.type.bind(locator);
+            locator.type = wrapLocatorMethod('type', originalLocatorType);
+          }
+          if (locator.press) {
+            const originalLocatorPress = locator.press.bind(locator);
+            locator.press = wrapLocatorMethod('press', originalLocatorPress);
+          }
+          if (locator.selectOption) {
+            const originalLocatorSelectOption = locator.selectOption.bind(locator);
+            locator.selectOption = wrapLocatorMethod('selectOption', originalLocatorSelectOption);
+          }
+          if (locator.check) {
+            const originalLocatorCheck = locator.check.bind(locator);
+            locator.check = wrapLocatorMethod('check', originalLocatorCheck);
+          }
+          if (locator.uncheck) {
+            const originalLocatorUncheck = locator.uncheck.bind(locator);
+            locator.uncheck = wrapLocatorMethod('uncheck', originalLocatorUncheck);
+          }
+          if (locator.hover) {
+            const originalLocatorHover = locator.hover.bind(locator);
+            locator.hover = wrapLocatorMethod('hover', originalLocatorHover);
+          }
+          if (locator.screenshot) {
+            const originalLocatorScreenshot = locator.screenshot.bind(locator);
+            locator.screenshot = wrapLocatorMethod('screenshot', originalLocatorScreenshot);
+          }
+          
+          return locator;
+        };
+        
+        // Wrap screenshot method to capture and log screenshots during script execution
+        const originalScreenshot = pageObj.screenshot.bind(pageObj);
+        wrapper.screenshot = async function(options = {}) {
+          try {
+            // Log the action execution
+            await logAction('screenshot', [options]);
+            
+            // Take the screenshot
+            const screenshotBuffer = await originalScreenshot(options);
+            
+            // Log and upload screenshot if jobId and backendUrl are available
+            if (jobId && backendUrl) {
+              try {
+                const authHeaders = getAuthHeaders();
+                
+                const presignedResponse = await axios.post(`${backendUrl}/api/upload/presigned-url`, {
+                  type: 'screenshot',
+                  jobId: jobId,
+                  contentType: 'image/png'
+                }, {
+                  headers: authHeaders
+                });
+                
+                if (presignedResponse.data.key && presignedResponse.data.url) {
+                  // Upload screenshot
+                  await axios.put(presignedResponse.data.url, screenshotBuffer, {
+                    headers: { 'Content-Type': 'image/png' },
+                    maxBodyLength: Infinity,
+                    maxContentLength: Infinity
+                  });
+                  
+                  const screenshotKey = presignedResponse.data.key;
+                  
+                  // Log screenshot with screenshot_type metadata (like screenshot-type elements)
+                  await axios.post(`${backendUrl}/api/logs/jobs/append`, {
+                    jobId: jobId,
+                    level: 'info',
+                    message: `📸 Screenshot captured`,
+                    component: 'WORKFLOW-ANALYZER',
+                    metadata: {
+                      screenshot_type: 'script_execution',
+                      screenshot_key: screenshotKey,
+                      screenshot_file_id: screenshotKey,
+                      is_screenshot: true,
+                      action_type: 'screenshot',
+                      screenshot_options: options,
+                      step_id: step.id,
+                      step_name: step.name
+                    }
+                  }, {
+                    headers: authHeaders
+                  });
+                }
+              } catch (screenshotLogError) {
+                // Don't fail script execution if screenshot logging fails
+                console.warn(`Failed to log screenshot: ${screenshotLogError.message}`);
+              }
+            }
+            
+            return screenshotBuffer;
+          } catch (screenshotError) {
+            // Re-throw screenshot errors
+            throw screenshotError;
+          }
+        };
+        
+        // Track which methods we've explicitly wrapped so Proxy can use them
+        const wrappedMethods = new Set(Object.keys(wrapper).filter(key => typeof wrapper[key] === 'function'));
+        
+        // Use Proxy to intercept ALL method calls - always wrap, never return direct references
+        const proxy = new Proxy(pageObj, {
+          get(target, prop, receiver) {
+            const originalValue = target[prop];
+            
+            // If we've explicitly wrapped this method in our wrapper object, use that
+            if (wrappedMethods.has(prop)) {
+              return wrapper[prop];
+            }
+            
+            // For all functions, wrap them to log execution
+            if (typeof originalValue === 'function') {
+              // Bind the function to maintain 'this' context
+              const boundFn = originalValue.bind(target);
+              return async function(...args) {
+                console.log(`🔍 Proxy intercepted method: ${String(prop)}`);
+                await logAction(String(prop), args);
+                return await boundFn(...args);
+              };
+            }
+            
+            // For non-functions (properties), return as-is
+            return originalValue;
+          },
+          // Also proxy property setting to maintain page object behavior
+          set(target, prop, value) {
+            target[prop] = value;
+            return true;
+          }
+        });
+        
+        return proxy;
+      };
+      
+      const executeInNodeContext = async (pageObj, scriptCode, credentials) => {
+        console.log(`📄 VAR_DUMP: executeInNodeContext called`);
+        console.log(`📄 VAR_DUMP: credentials passed=${credentials ? JSON.stringify({username: credentials.username || 'MISSING', password: credentials.password ? '***' : 'MISSING'}) : 'NULL'}`);
+        console.log(`📄 VAR_DUMP: jobId=${jobId}, backendUrl=${this.backendUrl}`);
+        
+        // Wrap page object to intercept ALL method calls
+        let wrappedPage;
+        try {
+          console.log(`🔧 About to create page wrapper...`);
+          // Pass step info for logging context
+          const stepInfo = step ? { id: step.id, name: step.name } : null;
+          wrappedPage = createPageWrapperWithScreenshot(pageObj, jobId, this.backendUrl, () => this.getAuthHeaders(), stepInfo);
+          console.log(`✅ Page wrapper created successfully`);
+        } catch (wrapperError) {
+          console.error(`❌ Failed to create page wrapper: ${wrapperError.message}`, wrapperError);
+          // Fall back to original page object if wrapper creation fails
+          wrappedPage = pageObj;
+        }
+        
+        // Verify wrapper is working - test that wrappedPage.click exists and is our wrapper
+        console.log(`🔍 Testing wrapper: wrappedPage.click is function? ${typeof wrappedPage.click === 'function'}`);
+        console.log(`🔍 Testing wrapper: wrappedPage.locator is function? ${typeof wrappedPage.locator === 'function'}`);
+        console.log(`🔍 Testing wrapper: wrappedPage type=${typeof wrappedPage}, isProxy=${wrappedPage !== pageObj}`);
+        
         // Use string concatenation (not template literals) to avoid escaping issues
         // This allows the script code to contain backticks, ${}, etc. without problems
         const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
         
-        // Create a function with page as parameter
-        const fn = new Function('page', functionBody);
-        return await fn(pageObj);
+        // Create a function with page and input_credentials as parameters
+        console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
+        const fn = new Function('page', 'input_credentials', functionBody);
+        console.log(`🚀 Executing script with wrapped page object...`);
+        const result = await fn(wrappedPage, credentials);
+        console.log(`✅ Script execution completed, result.success=${result?.success}`);
+        console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
+        return result;
       };
       
       // Wrap script execution with timeout
       const executionStartTime = Date.now();
       const result = await Promise.race([
-        executeInNodeContext(page, code),
+        executeInNodeContext(page, code, inputCredentials),
         new Promise((_, reject) => 
           setTimeout(() => reject(new Error(`Code execution timed out after ${timeout}ms`)), timeout)
         )
@@ -4874,13 +7190,28 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       const executionTime = Date.now() - executionStartTime;
       
+      // CRITICAL: Check URL after execution to detect navigation
+      const urlAfterAction = page.url();
+      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - urlAfterAction=${urlAfterAction}`);
+      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - urlChanged=${urlBeforeAction !== urlAfterAction}`);
+      if (urlBeforeAction !== urlAfterAction) {
+        console.log(`📄 VAR_DUMP: URL changed from ${urlBeforeAction} to ${urlAfterAction}`);
+        // Note: We rely on AI to determine if navigation is appropriate based on page analysis
+        // No hardcoded URL pattern checks - AI should analyze page state dynamically
+      }
+      workflowState.urlAfterAction = urlAfterAction;
+      
       // Log successful execution
+      const successMessage = executedScriptUrl
+        ? `✅ Playwright script executed successfully (${executionTime}ms)\n📥 Script: ${executedScriptUrl}`
+        : `✅ Playwright script executed successfully (${executionTime}ms)`;
+      
       if (jobId) {
         try {
           await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
             jobId: jobId,
             level: 'info',
-            message: `✅ Playwright script executed successfully (${executionTime}ms)`,
+            message: successMessage,
             component: 'WORKFLOW-ANALYZER',
             metadata: {
               step_id: step.id,
@@ -4888,7 +7219,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
               execution_time_ms: executionTime,
               url_before: urlBeforeAction,
               url_after: page.url(),
-              result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500)
+              result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500),
+              script_download_url: executedScriptUrl
             }
           }, {
             headers: this.getAuthHeaders()
@@ -4901,21 +7233,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // After executing code, wait for page to stabilize (navigation, DOM updates, etc.)
       try {
         await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
-          console.warn('[WorkflowAnalyzer] Page DOM not fully loaded after 30s, continuing anyway');
+          console.warn('Page DOM not fully loaded after 30s, continuing anyway');
         });
         await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (waitError) {
-        console.log(`[WorkflowAnalyzer] ⚠️ Page wait warning: ${waitError.message}`);
+        console.log(`⚠️ Page wait warning: ${waitError.message}`);
       }
       
-      // Capture URL after action
-      const urlAfterAction = page.url();
-      workflowState.urlAfterAction = urlAfterAction;
+      // Capture URL after action (already captured above, just update state)
       const pageChanged = urlBeforeAction !== urlAfterAction;
       
       // Update workflow state with current page URL in case navigation occurred
       if (pageChanged) {
-        console.log(`[WorkflowAnalyzer] 🔄 Page navigation detected: ${urlBeforeAction} → ${urlAfterAction}`);
+        console.log(`🔄 Page navigation detected: ${urlBeforeAction} → ${urlAfterAction}`);
         workflowState.pageUrl = urlAfterAction;
         workflowState.pageTitle = await page.title().catch(() => '');
       }
@@ -4963,7 +7293,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           });
         }
       } catch (screenshotError) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to capture after screenshot: ${screenshotError.message}`);
+        console.warn(`⚠️ Failed to capture after screenshot: ${screenshotError.message}`);
       }
       
       const executionResult = {
@@ -4977,19 +7307,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       try {
         const execPreview = JSON.stringify(executionResult);
-        console.log(`[WorkflowAnalyzer] 🎯 Execution result preview: ${execPreview.substring(0, 300)}${execPreview.length > 300 ? '…' : ''}`);
+        console.log(`🎯 Execution result preview: ${execPreview.substring(0, 300)}${execPreview.length > 300 ? '…' : ''}`);
       } catch (e) {
-        console.log('[WorkflowAnalyzer] 🎯 Execution result (non-serializable)', executionResult);
+        console.log('🎯 Execution result (non-serializable)', executionResult);
       }
 
       workflowState.lastExecutionResult = executionResult;
       this.storeStepResult(step, executionResult, workflowState);
       
-      console.log(`[WorkflowAnalyzer] ✅ Code execution completed. Page changed: ${pageChanged}`);
+      console.log(`✅ Code execution completed. Page changed: ${pageChanged}`);
       
       return executionResult;
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Code execution failed: ${error.message}`);
+      console.error(`❌ Code execution failed: ${error.message}`);
       const urlAfterAction = page.url();
       const errorResult = {
         success: false,
@@ -5003,7 +7333,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       // If next step is self-adjustable-ai-workflow, don't throw - let workflow continue
       if (nextStep && nextStep.type === 'self-adjustable-ai-workflow') {
-        console.log(`[WorkflowAnalyzer] 🔄 Script execution failed, but next step is self-adjustable-ai-workflow - will retry`);
+        console.log(`🔄 Script execution failed, but next step is self-adjustable-ai-workflow - will retry`);
         // Store failure info for retry
         workflowState.lastScriptFailure = {
           step: step,
@@ -5034,11 +7364,41 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute cookie add step
    */
   async executeCookieAddStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🍪 Adding cookie (${step.name})`);
+    console.log(`🍪 Adding cookie (${step.name})`);
     
     const config = step.config || {};
     if (!config.name || !config.value) {
-      throw new Error(`Cookie name and value are required for step: ${step.name}`);
+      const missingFields = [];
+      if (!config.name) missingFields.push('name');
+      if (!config.value) missingFields.push('value');
+      const errorMessage = `Missing required field(s) "${missingFields.join('", "')}" in cookie-add step "${step.name || step.id}"`;
+      const missingPath = `step.config.${missingFields[0]}`;
+      console.error(`❌ ${errorMessage}`);
+      console.error(`❌ Missing JSON path: ${missingPath}`);
+      console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+      console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+      
+      const fullContext = {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        step_config: step.config,
+        missing_fields: missingFields,
+        full_step: step
+      };
+      
+      if (jobId && this.backendLogger) {
+        try {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+            ...fullContext,
+            missing_path: missingPath
+          });
+        } catch (e) {
+          console.error(`❌ Failed to log error to backend:`, e.message);
+        }
+      }
+      
+      throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
     }
 
     try {
@@ -5057,7 +7417,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       if (!projectId && this.context?.project_id) {
         const ctxProjectId = this.context.project_id;
         projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
-        console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
+        console.log(`ℹ️ Using project_id from context: ${projectId}`);
       }
       
       if (!projectId) {
@@ -5094,9 +7454,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       });
 
       this.storeStepResult(step, { cookie: newCookie, added: true }, workflowState);
-      console.log(`[WorkflowAnalyzer] ✅ Cookie "${config.name}" added successfully`);
+      console.log(`✅ Cookie "${config.name}" added successfully`);
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Cookie add failed: ${error.message}`);
+      console.error(`❌ Cookie add failed: ${error.message}`);
       throw error;
     }
   }
@@ -5105,11 +7465,41 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute cookie update step
    */
   async executeCookieUpdateStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] ✏️ Updating cookie (${step.name})`);
+    console.log(`✏️ Updating cookie (${step.name})`);
     
     const config = step.config || {};
     if (!config.cookieName || !config.value) {
-      throw new Error(`Cookie name and value are required for step: ${step.name}`);
+      const missingFields = [];
+      if (!config.cookieName) missingFields.push('cookieName');
+      if (!config.value) missingFields.push('value');
+      const errorMessage = `Missing required field(s) "${missingFields.join('", "')}" in cookie-update step "${step.name || step.id}"`;
+      const missingPath = `step.config.${missingFields[0]}`;
+      console.error(`❌ ${errorMessage}`);
+      console.error(`❌ Missing JSON path: ${missingPath}`);
+      console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+      console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+      
+      const fullContext = {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        step_config: step.config,
+        missing_fields: missingFields,
+        full_step: step
+      };
+      
+      if (jobId && this.backendLogger) {
+        try {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+            ...fullContext,
+            missing_path: missingPath
+          });
+        } catch (e) {
+          console.error(`❌ Failed to log error to backend:`, e.message);
+        }
+      }
+      
+      throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
     }
 
     try {
@@ -5128,7 +7518,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       if (!projectId && this.context?.project_id) {
         const ctxProjectId = this.context.project_id;
         projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
-        console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
+        console.log(`ℹ️ Using project_id from context: ${projectId}`);
       }
       
       if (!projectId) {
@@ -5173,9 +7563,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       });
 
       this.storeStepResult(step, { cookieName: config.cookieName, updated: true }, workflowState);
-      console.log(`[WorkflowAnalyzer] ✅ Cookie "${config.cookieName}" updated successfully`);
+      console.log(`✅ Cookie "${config.cookieName}" updated successfully`);
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Cookie update failed: ${error.message}`);
+      console.error(`❌ Cookie update failed: ${error.message}`);
       throw error;
     }
   }
@@ -5184,14 +7574,41 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute cookie remove step
    */
   async executeCookieRemoveStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🗑️ Removing cookie (${step.name})`);
+    console.log(`🗑️ Removing cookie (${step.name})`);
     
     const config = step.config || {};
     const removeAll = config.removeAll || false;
     const cookieName = config.cookieName;
 
     if (!removeAll && !cookieName) {
-      throw new Error(`Cookie name is required or removeAll must be true for step: ${step.name}`);
+      const errorMessage = `Missing required field "cookieName" in cookie-remove step "${step.name || step.id}" (removeAll is false)`;
+      const missingPath = 'step.config.cookieName';
+      console.error(`❌ ${errorMessage}`);
+      console.error(`❌ Missing JSON path: ${missingPath}`);
+      console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+      console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+      
+      const fullContext = {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        step_config: step.config,
+        removeAll: removeAll,
+        full_step: step
+      };
+      
+      if (jobId && this.backendLogger) {
+        try {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+            ...fullContext,
+            missing_path: missingPath
+          });
+        } catch (e) {
+          console.error(`❌ Failed to log error to backend:`, e.message);
+        }
+      }
+      
+      throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
     }
 
     try {
@@ -5210,7 +7627,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       if (!projectId && this.context?.project_id) {
         const ctxProjectId = this.context.project_id;
         projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
-        console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
+        console.log(`ℹ️ Using project_id from context: ${projectId}`);
       }
       
       if (!projectId) {
@@ -5223,7 +7640,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           headers: this.getAuthHeaders()
         });
         this.storeStepResult(step, { removedAll: true }, workflowState);
-        console.log(`[WorkflowAnalyzer] ✅ All cookies removed successfully`);
+        console.log(`✅ All cookies removed successfully`);
       } else {
         // Remove specific cookie
         const currentCookiesResponse = await axios.get(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
@@ -5245,10 +7662,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         });
 
         this.storeStepResult(step, { cookieName, removed: true }, workflowState);
-        console.log(`[WorkflowAnalyzer] ✅ Cookie "${cookieName}" removed successfully`);
+        console.log(`✅ Cookie "${cookieName}" removed successfully`);
       }
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Cookie remove failed: ${error.message}`);
+      console.error(`❌ Cookie remove failed: ${error.message}`);
       throw error;
     }
   }
@@ -5257,7 +7674,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute cookie collect step
    */
   async executeCookieCollectStep(page, step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🔍 Collecting cookies from browser (${step.name})`);
+    console.log(`🔍 Collecting cookies from browser (${step.name})`);
     
     const config = step.config || {};
     let collectedCookies = []; // Declare early so it's available in catch block
@@ -5271,7 +7688,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // Collect all cookies from the browser context
       const contextCookies = await page.context().cookies();
       collectedCookies = contextCookies;
-      console.log(`[WorkflowAnalyzer] ✅ Collected ${collectedCookies.length} cookie(s) from browser`);
+      console.log(`✅ Collected ${collectedCookies.length} cookie(s) from browser`);
       
       // Try to get project_id to save cookies to project (optional)
       let projectId = null;
@@ -5290,16 +7707,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
           if (!projectId && this.context?.project_id) {
             const ctxProjectId = this.context.project_id;
             projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
-            console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context: ${projectId}`);
+            console.log(`ℹ️ Using project_id from context: ${projectId}`);
           }
         } catch (jobError) {
-          console.warn(`[WorkflowAnalyzer] ⚠️ Could not fetch job to get project_id: ${jobError.message}`);
+          console.warn(`⚠️ Could not fetch job to get project_id: ${jobError.message}`);
           
           // Try to get from context as fallback
           if (this.context?.project_id) {
             const ctxProjectId = this.context.project_id;
             projectId = typeof ctxProjectId === 'object' && ctxProjectId.toString ? ctxProjectId.toString() : String(ctxProjectId);
-            console.log(`[WorkflowAnalyzer] ℹ️ Using project_id from context as fallback: ${projectId}`);
+            console.log(`ℹ️ Using project_id from context as fallback: ${projectId}`);
           }
           // Don't throw - we already have cookies
         }
@@ -5320,24 +7737,24 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }, {
             headers: this.getAuthHeaders()
           });
-          console.log(`[WorkflowAnalyzer] ✅ Saved ${collectedCookies.length} cookie(s) to project`);
+          console.log(`✅ Saved ${collectedCookies.length} cookie(s) to project`);
         } catch (saveError) {
-          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to save cookies to project: ${saveError.message}`);
+          console.warn(`⚠️ Failed to save cookies to project: ${saveError.message}`);
           // Don't throw - cookies are still collected
         }
       }
 
       this.storeStepResult(step, { cookies: collectedCookies, count: collectedCookies.length }, workflowState);
-      console.log(`[WorkflowAnalyzer] ✅ Collected ${collectedCookies.length} cookie(s) successfully`);
+      console.log(`✅ Collected ${collectedCookies.length} cookie(s) successfully`);
     } catch (error) {
       // If we have cookies collected, don't fail the step
       if (collectedCookies && collectedCookies.length > 0) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Cookie collect had errors but cookies were collected: ${error.message}`);
+        console.warn(`⚠️ Cookie collect had errors but cookies were collected: ${error.message}`);
         this.storeStepResult(step, { cookies: collectedCookies }, workflowState);
-        console.log(`[WorkflowAnalyzer] ✅ Cookie collection completed despite errors: ${collectedCookies.length} cookie(s)`);
+        console.log(`✅ Cookie collection completed despite errors: ${collectedCookies.length} cookie(s)`);
         return; // Success - cookies collected
       }
-      console.error(`[WorkflowAnalyzer] ❌ Cookie collect failed: ${error.message}`);
+      console.error(`❌ Cookie collect failed: ${error.message}`);
       throw error;
     }
   }
@@ -5346,13 +7763,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute validate response step
    */
   async executeValidateResponseStep(step, workflowState) {
-    console.log(`[WorkflowAnalyzer] ✅ Validating response (${step.name})`);
+    console.log(`✅ Validating response (${step.name})`);
     
     const responseToValidate = workflowState[step.config?.responseField || 'last_ai_response'];
     const schema = step.config?.schema;
     
     if (!responseToValidate) {
-      console.log(`[WorkflowAnalyzer] ⚠️ No response to validate for step: ${step.name}`);
+      console.log(`⚠️ No response to validate for step: ${step.name}`);
       return;
     }
     
@@ -5367,9 +7784,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
           throw new Error(`Missing required fields: ${missingFields.join(', ')}`);
         }
         
-        console.log(`[WorkflowAnalyzer] ✅ Response validation passed`);
+        console.log(`✅ Response validation passed`);
       } catch (error) {
-        console.error(`[WorkflowAnalyzer] ❌ Response validation failed: ${error.message}`);
+        console.error(`❌ Response validation failed: ${error.message}`);
         throw error;
       }
     }
@@ -5379,13 +7796,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute filter response step
    */
   async executeFilterResponseStep(step, workflowState) {
-    console.log(`[WorkflowAnalyzer] 🔍 Filtering response (${step.name})`);
+    console.log(`🔍 Filtering response (${step.name})`);
     
     const responseToFilter = workflowState[step.config?.responseField || 'last_ai_response'];
     const filter = step.config?.filter;
     
     if (!responseToFilter || !filter) {
-      console.log(`[WorkflowAnalyzer] ⚠️ No response or filter to apply for step: ${step.name}`);
+      console.log(`⚠️ No response or filter to apply for step: ${step.name}`);
       return;
     }
     
@@ -5393,9 +7810,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
     try {
       const filteredResponse = this.applyFilter(responseToFilter, filter);
       workflowState[`${step.name}_filtered`] = filteredResponse;
-      console.log(`[WorkflowAnalyzer] ✅ Response filtered successfully`);
+      console.log(`✅ Response filtered successfully`);
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Response filtering failed: ${error.message}`);
+      console.error(`❌ Response filtering failed: ${error.message}`);
       throw error;
     }
   }
@@ -5404,7 +7821,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute conditional step
    */
   async executeConditionalStep(step, workflowState) {
-    console.log(`[WorkflowAnalyzer] ❓ Evaluating condition (${step.name})`);
+    console.log(`❓ Evaluating condition (${step.name})`);
     
     const field = step.config?.field;
     const operator = step.config?.operator || '==';
@@ -5413,7 +7830,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     const responseToCheck = workflowState[responseField];
     if (!responseToCheck) {
-      console.log(`[WorkflowAnalyzer] ⚠️ No response to check condition for step: ${step.name}`);
+      console.log(`⚠️ No response to check condition for step: ${step.name}`);
       return;
     }
     
@@ -5437,10 +7854,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         conditionMet = String(fieldValue).includes(String(value));
         break;
       default:
-        console.log(`[WorkflowAnalyzer] ⚠️ Unknown operator: ${operator}`);
+        console.log(`⚠️ Unknown operator: ${operator}`);
     }
     
-    console.log(`[WorkflowAnalyzer] ${conditionMet ? '✅' : '❌'} Condition ${field} ${operator} ${value}: ${conditionMet}`);
+    console.log(`${conditionMet ? '✅' : '❌'} Condition ${field} ${operator} ${value}: ${conditionMet}`);
     
     // Store condition result
     workflowState[`${step.name}_condition_met`] = conditionMet;
@@ -5450,7 +7867,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute complete-leg step - marks a workflow leg as completed
    */
   async executeCompleteLegStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] ✅ Executing complete-leg step (${step.name})`);
+    console.log(`✅ Executing complete-leg step (${step.name})`);
     
     const config = step.config || {};
     
@@ -5506,7 +7923,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       );
       
-      console.log(`[WorkflowAnalyzer] ✅ Marked leg ${legId} as ${finalResult}`);
+      console.log(`✅ Marked leg ${legId} as ${finalResult}`);
       
       // Log to backend
       await this.sendLogToBackend(jobId, 'info', `✅ Leg ${legId} completed with status: ${finalResult}`, 'WORKFLOW-ANALYZER', {
@@ -5523,7 +7940,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }, workflowState);
       
     } catch (completeError) {
-      console.error(`[WorkflowAnalyzer] ❌ Failed to mark leg ${legId} as completed: ${completeError.message}`);
+      console.error(`❌ Failed to mark leg ${legId} as completed: ${completeError.message}`);
       throw completeError;
     }
   }
@@ -5532,7 +7949,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute var-dump step - capture workflow state snapshot
    */
   async executeVarDumpStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🧾 Executing var-dump step (${step.name})`);
+    console.log(`🧾 Executing var-dump step (${step.name})`);
 
     // Ensure variablePool is initialized before capturing snapshot
     this.initializeVariablePool(workflowState);
@@ -5588,18 +8005,104 @@ IMPORTANT OUTPUT REQUIREMENTS:
         preview: this.createVarDumpPreview(snapshot)
       }, workflowState);
 
-      console.log(`[WorkflowAnalyzer] ✅ Var dump captured (${scopes.join(', ')})`);
+      console.log(`✅ Var dump captured (${scopes.join(', ')})`);
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Var dump step failed: ${error.message}`);
+      console.error(`❌ Var dump step failed: ${error.message}`);
       throw error;
     }
+  }
+
+  /**
+   * Execute job configuration step - sets job-level configuration that affects entire workflow behavior
+   * This step changes job behavior from default "crawl" (test everything) to specific modes like "login" (collect data only)
+   */
+  async executeJobConfigurationStep(step, workflowState, jobId) {
+    console.log(`🔧 Configuring job behavior (${step.name})`);
+    
+    const config = step.config || {};
+    const jobType = config.jobType || 'crawl'; // Default is crawl
+    const isLoginJob = config.isLoginJob === true || jobType === 'login';
+    const preventCrawling = config.preventCrawling !== false && isLoginJob; // Default true for login jobs
+    const preventNavigation = config.preventNavigation !== false && isLoginJob; // Default true for login jobs
+    const preventLinkDiscovery = config.preventLinkDiscovery !== false && isLoginJob; // Default true for login jobs
+    const scope = config.scope || (isLoginJob ? 'data_collection' : 'testing'); // login = data collection, crawl = testing
+    
+    // Initialize variable pool if needed
+    this.initializeVariablePool(workflowState);
+    
+    // Set job configuration variables
+    this.saveVariable(workflowState, 'jobType', jobType, 'job', step);
+    this.saveVariable(workflowState, 'isLoginJob', isLoginJob, 'job', step);
+    this.saveVariable(workflowState, 'preventCrawling', preventCrawling, 'job', step);
+    this.saveVariable(workflowState, 'preventNavigation', preventNavigation, 'job', step);
+    this.saveVariable(workflowState, 'preventLinkDiscovery', preventLinkDiscovery, 'job', step);
+    this.saveVariable(workflowState, 'scope', scope, 'job', step);
+    
+    // Sync to context immediately so it affects subsequent steps
+    const previousJobType = this.context.jobType || 'crawl';
+    this.context.jobType = jobType;
+    this.context.isLoginJob = isLoginJob;
+    this.context.preventCrawling = preventCrawling;
+    this.context.preventNavigation = preventNavigation;
+    this.context.preventLinkDiscovery = preventLinkDiscovery;
+    
+    const jobConfig = {
+      jobType,
+      isLoginJob,
+      preventCrawling,
+      preventNavigation,
+      preventLinkDiscovery,
+      scope
+    };
+    
+    console.log(`🔧 Job configuration applied:`, jobConfig);
+    if (previousJobType !== jobType) {
+      console.log(`🔧 Job type changed: ${previousJobType} → ${jobType}`);
+      if (isLoginJob) {
+        console.log(`🔐 LOGIN JOB MODE ACTIVATED: Job behavior changed from crawl (test everything) to login (collect data only)`);
+      }
+    }
+    
+    // Log to backend
+    if (jobId) {
+      try {
+        await this.sendLogToBackend(jobId, 'info', 
+          `🔧 Job configuration applied: ${jobType} mode (${scope === 'data_collection' ? 'data collection' : 'testing'})`, 
+          'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            step_name: step.name,
+            step_type: 'job-configuration',
+            previous_job_type: previousJobType,
+            new_job_type: jobType,
+            configuration: jobConfig
+          }
+        );
+      } catch (e) {
+        // Silent fail
+      }
+    }
+    
+    // Store step result
+    this.storeStepResult(step, {
+      success: true,
+      jobType,
+      isLoginJob,
+      preventCrawling,
+      preventNavigation,
+      preventLinkDiscovery,
+      scope,
+      previousJobType,
+      message: `Job configured as ${jobType} mode (${scope === 'data_collection' ? 'data collection' : 'testing'})`
+    }, workflowState);
+    
+    return jobConfig;
   }
 
   /**
    * Execute print step - logs a message to job history
    */
   async executePrintStep(step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 📝 Printing message (${step.name})`);
+    console.log(`📝 Printing message (${step.name})`);
     
     const config = step.config || {};
     const rawMessage = typeof config.message === 'string'
@@ -5666,9 +8169,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         printed: true,
         items_logged: Array.isArray(itemsToLog) ? itemsToLog.length : 0
       }, workflowState);
-      console.log(`[WorkflowAnalyzer] ✅ Printed message: "${message}" (level: ${level})`);
+      console.log(`✅ Printed message: "${message}" (level: ${level})`);
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Print step failed: ${error.message}`);
+      console.error(`❌ Print step failed: ${error.message}`);
       throw error;
     }
   }
@@ -5735,8 +8238,28 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const expressionRegex = /\{\{\s*([^}]+?)\s*\}\}/g;
     return template.replace(expressionRegex, (_, expression) => {
       try {
-        const fn = new Function(...Object.keys(scope), `return (${expression});`);
-        const result = fn(...Object.values(scope));
+        // Escape single quotes in the expression to prevent issues with string literals
+        // Replace double quotes with single quotes for safer evaluation
+        // This handles expressions like: determine_completion.status || loginStatus || "unknown"
+        let safeExpression = expression;
+        
+        // If expression contains double-quoted strings, convert them to single-quoted strings
+        // This prevents "Arg string terminates parameters early" errors
+        safeExpression = safeExpression.replace(/"([^"]*)"/g, (match, content) => {
+          // Escape single quotes in the content and wrap in single quotes
+          const escapedContent = content.replace(/'/g, "\\'");
+          return `'${escapedContent}'`;
+        });
+        
+        // Build function with proper parameter names
+        const paramNames = Object.keys(scope);
+        const paramValues = Object.values(scope);
+        
+        // Create a safe wrapper that handles the expression
+        const fnBody = `try { return (${safeExpression}); } catch(e) { return undefined; }`;
+        const fn = new Function(...paramNames, fnBody);
+        const result = fn(...paramValues);
+        
         if (result === undefined || result === null) {
           return '';
         }
@@ -5745,7 +8268,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         return String(result);
       } catch (error) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to evaluate print expression "${expression}": ${error.message}`);
+        console.warn(`⚠️ Failed to evaluate print expression "${expression}": ${error.message}`);
         return '';
       }
     });
@@ -6032,21 +8555,50 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute sleep step - pauses execution for specified milliseconds
    */
   async executeSleepStep(step, workflowState) {
-    console.log(`[WorkflowAnalyzer] 😴 Sleeping (${step.name})`);
+    console.log(`😴 Sleeping (${step.name})`);
     
     const config = step.config || {};
     const ms = config.ms || 1000;
 
     if (ms < 0 || ms > 300000) {
-      throw new Error(`Sleep duration must be between 0 and 300000ms, got: ${ms}`);
+      const errorMessage = `Invalid sleep duration "${ms}" in sleep step "${step.name || step.id}". Must be between 0 and 300000ms`;
+      const missingPath = 'step.config.ms';
+      console.error(`❌ ${errorMessage}`);
+      console.error(`❌ Invalid value path: ${missingPath}`);
+      console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+      console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+      
+      const fullContext = {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        step_config: step.config,
+        invalid_value: ms,
+        full_step: step
+      };
+      
+      // Note: jobId is not available in executeSleepStep signature, but we can try to get it from workflowState or context
+      const effectiveJobId = workflowState.jobId || this.context?.jobId;
+      if (effectiveJobId && this.backendLogger) {
+        try {
+          await this.backendLogger.appendJobLog(effectiveJobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+            ...fullContext,
+            invalid_path: missingPath
+          });
+        } catch (e) {
+          console.error(`❌ Failed to log error to backend:`, e.message);
+        }
+      }
+      
+      throw new Error(`${errorMessage}\nInvalid value path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
     }
 
     try {
       await new Promise(resolve => setTimeout(resolve, ms));
       this.storeStepResult(step, { duration: ms, slept: true }, workflowState);
-      console.log(`[WorkflowAnalyzer] ✅ Slept for ${ms}ms`);
+      console.log(`✅ Slept for ${ms}ms`);
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Sleep step failed: ${error.message}`);
+      console.error(`❌ Sleep step failed: ${error.message}`);
       throw error;
     }
   }
@@ -6055,7 +8607,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute for-each step - iterate over items and execute nested steps
    */
   async executeForEachStep(page, step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🔁 Executing for-each step (${step.name})`);
+    console.log(`🔁 Executing for-each step (${step.name})`);
     
     const config = step.config || {};
     const {
@@ -6069,7 +8621,33 @@ IMPORTANT OUTPUT REQUIREMENTS:
     } = config;
 
     if (!itemsPath) {
-      throw new Error(`for-each step ${step.id || ''} is missing required config.itemsPath`);
+      const errorMessage = `Missing required field "itemsPath" in for-each step "${step.name || step.id}"`;
+      const missingPath = 'step.config.itemsPath';
+      console.error(`❌ ${errorMessage}`);
+      console.error(`❌ Missing JSON path: ${missingPath}`);
+      console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+      console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+      
+      const fullContext = {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        step_config: step.config,
+        full_step: step
+      };
+      
+      if (jobId && this.backendLogger) {
+        try {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+            ...fullContext,
+            missing_path: missingPath
+          });
+        } catch (e) {
+          console.error(`❌ Failed to log error to backend:`, e.message);
+        }
+      }
+      
+      throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
     }
 
     // Initialize variable pool if needed
@@ -6099,8 +8677,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // Read directly from variable pool (page namespace) - exact location where AI step stores it
       items = this.readVariable(workflowState, 'legsToExecute', 'page');
       
-      console.log(`[WorkflowAnalyzer] 🔍 For-each step: Reading "legsToExecute" from variable pool (page namespace)`);
-      console.log(`[WorkflowAnalyzer] 🔍 Result: ${Array.isArray(items) ? `array with ${items.length} items` : `not found (${typeof items})`}`);
+      console.log(`🔍 For-each step: Reading "legsToExecute" from variable pool (page namespace)`);
+      console.log(`🔍 Result: ${Array.isArray(items) ? `array with ${items.length} items` : `not found (${typeof items})`}`);
       
       if (!Array.isArray(items)) {
         throw new Error(`for-each step expected "legsToExecute" in variable pool (page namespace), but it was not found. The AI step must store legs there before this step executes.`);
@@ -6109,8 +8687,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // For other paths, use resolvePathValue
       items = this.resolvePathValue(workflowState, itemsPath, sourceType);
       
-      console.log(`[WorkflowAnalyzer] 🔍 For-each resolving items from path "${itemsPath}" (source: ${sourceType})`);
-      console.log(`[WorkflowAnalyzer] 🔍 Resolved items: ${Array.isArray(items) ? `array with ${items.length} items` : `not an array (${typeof items})`}`);
+      console.log(`🔍 For-each resolving items from path "${itemsPath}" (source: ${sourceType})`);
+      console.log(`🔍 Resolved items: ${Array.isArray(items) ? `array with ${items.length} items` : `not an array (${typeof items})`}`);
       
       if (!Array.isArray(items)) {
         throw new Error(`for-each step expected an array at path "${itemsPath}" (source: ${sourceType}), got: ${typeof items}`);
@@ -6124,7 +8702,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       this.context?.options?.single_action_only === true;
 
     if (isSingleActionMode && items.length > 1) {
-      console.log(`[WorkflowAnalyzer] 🎯 Single-action mode enabled - limiting items from ${items.length} to 1`);
+      console.log(`🎯 Single-action mode enabled - limiting items from ${items.length} to 1`);
       items = items.slice(0, 1);
       workflowState.legsToExecute = items;
       if (!workflowState.context) {
@@ -6146,14 +8724,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const nestedStepsArray = Array.isArray(nestedStepsConfig) ? nestedStepsConfig : [];
     const iterationSummaries = [];
 
-    console.log(`[WorkflowAnalyzer] 🔁 Iterating over ${effectiveItems.length} items`);
+    console.log(`🔁 Iterating over ${effectiveItems.length} items`);
 
     for (let idx = 0; idx < effectiveItems.length; idx++) {
       const item = effectiveItems[idx];
       workflowState[itemVariable] = item;
       workflowState[indexVariable] = idx;
 
-      console.log(`[WorkflowAnalyzer] 🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
+      console.log(`🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
       
       // Report progress: current iteration
       await this.updateJobProgress(jobId, {
@@ -6185,7 +8763,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                                 nestedStep.type === 'playwright-analysis' ? 'Page analysis' :
                                 stepName;
           
-          console.log(`[WorkflowAnalyzer] 🔁 Executing nested step ${nestedIdx + 1}/${nestedStepsArray.length}: ${stepName} (iteration ${idx + 1})`);
+          console.log(`🔁 Executing nested step ${nestedIdx + 1}/${nestedStepsArray.length}: ${stepName} (iteration ${idx + 1})`);
           
           // Report progress: current step
           await this.updateJobProgress(jobId, {
@@ -6202,7 +8780,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
               siblings: nestedStepsArray
             });
           } catch (nestedError) {
-            console.error(`[WorkflowAnalyzer] ❌ Nested step failed in iteration ${idx + 1}: ${nestedError.message}`);
+            console.error(`❌ Nested step failed in iteration ${idx + 1}: ${nestedError.message}`);
             // Continue with next step unless critical
             if (nestedStep.config?.critical) {
               throw nestedError;
@@ -6261,11 +8839,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     this.storeStepResult(step, {
       iterations: iterationSummaries,
-      totalIterations: iterationSummaries.length,
+      total_iterations: iterationSummaries.length,
       resultKey
     }, workflowState);
 
-    console.log(`[WorkflowAnalyzer] ✅ For-each step completed: ${iterationSummaries.length} iterations`);
+    console.log(`✅ For-each step completed: ${iterationSummaries.length} iterations`);
   }
 
   /**
@@ -6273,7 +8851,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * General-purpose looping element that can loop based on conditions from code or AI
    */
   async executeWhileLoopStep(page, step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🔄 Executing while-loop (${step.name})`);
+    console.log(`🔄 Executing while-loop (${step.name})`);
     
     const config = step.config || {};
     const maxIterations = config.maxIterations || 10;
@@ -6283,7 +8861,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const nestedSteps = config.steps || [];
     
     if (!nestedSteps.length) {
-      console.log(`[WorkflowAnalyzer] ⚠️ While-loop has no nested steps`);
+      console.log(`⚠️ While-loop has no nested steps`);
       return;
     }
     
@@ -6291,7 +8869,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     let condition = true; // Start with true to enter loop
     let lastResult = null;
     
-    console.log(`[WorkflowAnalyzer] 🔄 Starting while-loop (max ${maxIterations} iterations)`);
+    console.log(`🔄 Starting while-loop (max ${maxIterations} iterations)`);
     
     // Send log to backend
     await this.sendLogToBackend(jobId, 'info', `🔄 Starting while-loop (max ${maxIterations} iterations)`, 'WORKFLOW-ANALYZER', {
@@ -6322,9 +8900,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
     if (iteration === 0 && workflowState.workflowId && currentLeg?.leg_id) {
       try {
         await this.updateLegStatus(workflowState.workflowId, currentLeg.leg_id, 'analyzing', jobId);
-        console.log(`[WorkflowAnalyzer] 📊 Updated action status to 'analyzing' for leg: ${currentLeg.leg_id}`);
+        console.log(`📊 Updated action status to 'analyzing' for leg: ${currentLeg.leg_id}`);
       } catch (statusError) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to update status to 'analyzing': ${statusError.message}`);
+        console.warn(`⚠️ Failed to update status to 'analyzing': ${statusError.message}`);
       }
     }
     
@@ -6339,7 +8917,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       if (iteration === 1 && workflowState.workflowId && currentLeg?.leg_id) {
         try {
           await this.updateLegStatus(workflowState.workflowId, currentLeg.leg_id, 'testing', jobId);
-          console.log(`[WorkflowAnalyzer] 📊 Updated action status to 'testing' for leg: ${currentLeg.leg_id}`);
+          console.log(`📊 Updated action status to 'testing' for leg: ${currentLeg.leg_id}`);
           
           // Also update in workflowState for immediate access
           if (workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute)) {
@@ -6351,11 +8929,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
             }
           }
         } catch (statusError) {
-          console.warn(`[WorkflowAnalyzer] ⚠️ Failed to update status to 'testing': ${statusError.message}`);
+          console.warn(`⚠️ Failed to update status to 'testing': ${statusError.message}`);
         }
       }
       
-      console.log(`[WorkflowAnalyzer] 🔄 While-loop iteration ${iteration}/${maxIterations}`);
+      console.log(`🔄 While-loop iteration ${iteration}/${maxIterations}`);
       
       // Send log to backend
       await this.sendLogToBackend(jobId, 'info', `🔄 While-loop iteration ${iteration}/${maxIterations}`, 'WORKFLOW-ANALYZER', {
@@ -6372,10 +8950,30 @@ IMPORTANT OUTPUT REQUIREMENTS:
           const nestedStep = nestedSteps[nestedIdx];
           
           try {
-            await this.executeStepByType(page, nestedStep, workflowState, jobId, {
-              stepIndex: nestedIdx,
-              siblings: nestedSteps
-            });
+            // Get timeout for nested step
+            const nestedStepTimeout = this.getStepTimeout(nestedStep);
+            console.log(`⏱️  Nested step "${nestedStep.name || nestedStep.id}" timeout: ${Math.round(nestedStepTimeout / 1000)}s`);
+            
+            // Execute nested step with timeout protection
+            let nestedStepCompleted = false;
+            await Promise.race([
+              (async () => {
+                await this.executeStepByType(page, nestedStep, workflowState, jobId, {
+                  stepIndex: nestedIdx,
+                  siblings: nestedSteps
+                });
+                nestedStepCompleted = true;
+              })(),
+              new Promise((resolve, reject) => 
+                setTimeout(() => {
+                  if (!nestedStepCompleted) {
+                    reject(new Error(`Nested step "${nestedStep.name || nestedStep.id}" timed out after ${Math.round(nestedStepTimeout / 1000)}s`));
+                  } else {
+                    resolve();
+                  }
+                }, nestedStepTimeout)
+              )
+            ]);
             
             // CRITICAL: If this is the determine_completion step, store its result for condition evaluation
             const stepId = nestedStep.id || nestedStep.slug || '';
@@ -6384,29 +8982,143 @@ IMPORTANT OUTPUT REQUIREMENTS:
                                    stepName.includes('determine') && (stepName.includes('completion') || stepName.includes('complete'));
             
             if (isDetermineStep) {
-              // Store result in multiple places for easy access
-              const stepResult = workflowState[nestedStep.id] || 
-                               workflowState.results?.[nestedStep.id] ||
-                               workflowState.variablePool?.steps?.[nestedStep.id]?.result ||
-                               null;
+              // CRITICAL: Store result immediately after step execution for condition evaluation
+              // Wait a bit for storeStepResult to complete (it's async)
+              await new Promise(resolve => setTimeout(resolve, 100));
+              
+              // Try multiple locations where storeStepResult might have stored it
+              // storeStepResult stores in: workflowState[step.id].result, workflowState.results[step.id].result, workflowState.variablePool.steps[slug].result
+              const stepId = nestedStep.id;
+              const stepSlug = nestedStep.slug || this.generateSlug(nestedStep.name || 'step');
+              
+              let stepResult = null;
+              
+              // Try by step ID first
+              if (workflowState[stepId]?.result) {
+                stepResult = workflowState[stepId].result;
+                console.log(`✅ Found determine_completion result in workflowState[${stepId}].result`);
+              } else if (workflowState.results?.[stepId]?.result) {
+                stepResult = workflowState.results[stepId].result;
+                console.log(`✅ Found determine_completion result in workflowState.results[${stepId}].result`);
+              } else if (workflowState.variablePool?.steps?.[stepId]?.result) {
+                stepResult = workflowState.variablePool.steps[stepId].result;
+                console.log(`✅ Found determine_completion result in workflowState.variablePool.steps[${stepId}].result`);
+              } else if (workflowState.variablePool?.steps?.[stepSlug]?.result) {
+                stepResult = workflowState.variablePool.steps[stepSlug].result;
+                console.log(`✅ Found determine_completion result in workflowState.variablePool.steps[${stepSlug}].result`);
+              } else if (workflowState[stepId]) {
+                stepResult = workflowState[stepId];
+                console.log(`✅ Found determine_completion result in workflowState[${stepId}] (direct)`);
+              } else if (workflowState.results?.[stepId]) {
+                stepResult = workflowState.results[stepId];
+                console.log(`✅ Found determine_completion result in workflowState.results[${stepId}] (direct)`);
+              }
+              
+              console.log(`🔍 Looking for determine_completion result from step ${nestedStep.id}`);
+              console.log(`🔍 workflowState[${nestedStep.id}]:`, workflowState[nestedStep.id] ? 'exists' : 'missing');
+              console.log(`🔍 workflowState.results[${nestedStep.id}]:`, workflowState.results?.[nestedStep.id] ? 'exists' : 'missing');
+              console.log(`🔍 workflowState.variablePool.steps[${nestedStep.id}]:`, workflowState.variablePool?.steps?.[nestedStep.id] ? 'exists' : 'missing');
               
               if (stepResult) {
+                const normalizedResult = stepResult?.result || stepResult;
+                console.log(`✅ Found determine_completion result, normalizing...`);
+                console.log(`🔍 Normalized result keys: ${Object.keys(normalizedResult || {}).join(', ')}`);
+                
+                // CRITICAL: Validate status field is present - fail if missing
+                if (!normalizedResult.status && !normalizedResult.completion_status && normalizedResult.is_complete === undefined) {
+                  const errorMessage = `Missing required field "status" in determine_completion result for step "${nestedStep.name || nestedStep.id}" (iteration ${iteration})`;
+                  const missingPath = `workflowState.determine_completion.result.status`;
+                  const fullContext = {
+                    step_id: nestedStep.id,
+                    step_name: nestedStep.name,
+                    step_type: nestedStep.type,
+                    step_config: nestedStep.config,
+                    iteration: iteration,
+                    missing_field: 'status',
+                    missing_path: missingPath,
+                    available_keys: Object.keys(normalizedResult || {}),
+                    normalized_result: normalizedResult,
+                    step_result: stepResult,
+                    full_response: normalizedResult
+                  };
+                  console.error(`❌ ${errorMessage}`);
+                  console.error(`❌ Missing JSON path: ${missingPath}`);
+                  console.error(`❌ Available keys: ${Object.keys(normalizedResult || {}).join(', ')}`);
+                  console.error(`❌ Normalized result:`, JSON.stringify(normalizedResult, null, 2));
+                  console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+                  if (jobId && this.backendLogger) {
+                    await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+                  }
+                  throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys: ${Object.keys(normalizedResult || {}).join(', ')}\nNormalized result: ${JSON.stringify(normalizedResult, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+                }
+                
+                // Store in determine_completion for easy access
                 workflowState.determine_completion = {
-                  result: stepResult,
+                  result: normalizedResult,
                   step_id: nestedStep.id,
                   iteration: iteration
                 };
+                
                 // Also store directly for backward compatibility
                 if (!workflowState.results) {
                   workflowState.results = {};
                 }
-                workflowState.results.determine_completion = { result: stepResult };
+                workflowState.results.determine_completion = {
+                  result: normalizedResult,
+                  step_id: nestedStep.id,
+                  iteration: iteration
+                };
                 
-                console.log(`[WorkflowAnalyzer] ✅ Stored determine_completion result from nested step ${nestedStep.id} (iteration ${iteration})`);
+                // CRITICAL: Also store directly by step ID for condition path resolution
+                if (!workflowState[nestedStep.id]) {
+                  workflowState[nestedStep.id] = {};
+                }
+                workflowState[nestedStep.id].result = normalizedResult;
+                
+                // CRITICAL: Store in variablePool.steps for condition path resolution
+                if (!workflowState.variablePool) {
+                  workflowState.variablePool = { steps: {} };
+                }
+                if (!workflowState.variablePool.steps) {
+                  workflowState.variablePool.steps = {};
+                }
+                workflowState.variablePool.steps[nestedStep.id] = { result: normalizedResult };
+                workflowState.variablePool.steps['determine_completion'] = { result: normalizedResult }; // Also store by name
+                
+                console.log(`✅ Stored determine_completion result from nested step ${nestedStep.id} (iteration ${iteration}): status=${normalizedResult.status || normalizedResult.completion_status || normalizedResult.is_complete}`);
+                console.log(`📄 Stored in: workflowState.determine_completion.result, workflowState.results.determine_completion.result, workflowState[${nestedStep.id}].result, workflowState.variablePool.steps[${nestedStep.id}].result`);
+              } else {
+                const errorMessage = `determine_completion step executed but result not found in expected locations for step "${nestedStep.name || nestedStep.id}" (iteration ${iteration})`;
+                const missingPath = `workflowState.determine_completion.result`;
+                const availableKeys = Object.keys(workflowState).filter(k => k.includes('determine') || k.includes('completion'));
+                const availableResultsKeys = workflowState.results ? Object.keys(workflowState.results).filter(k => k.includes('determine') || k.includes('completion')) : [];
+                const availableVarPoolKeys = workflowState.variablePool?.steps ? Object.keys(workflowState.variablePool.steps).filter(k => k.includes('determine') || k.includes('completion')) : [];
+                const fullContext = {
+                  step_id: nestedStep.id,
+                  step_name: nestedStep.name,
+                  step_type: nestedStep.type,
+                  step_config: nestedStep.config,
+                  iteration: iteration,
+                  missing_path: missingPath,
+                  available_keys_workflowState: availableKeys,
+                  available_keys_results: availableResultsKeys,
+                  available_keys_variablePool_steps: availableVarPoolKeys,
+                  workflowState_sample: Object.fromEntries(Object.entries(workflowState).slice(0, 20))
+                };
+                console.error(`❌ ${errorMessage}`);
+                console.error(`❌ Missing JSON path: ${missingPath}`);
+                console.error(`❌ Available keys in workflowState: ${availableKeys.join(', ') || 'none'}`);
+                console.error(`❌ Available keys in workflowState.results: ${availableResultsKeys.join(', ') || 'none'}`);
+                console.error(`❌ Available keys in workflowState.variablePool.steps: ${availableVarPoolKeys.join(', ') || 'none'}`);
+                console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+                }
+                throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys in workflowState: ${availableKeys.join(', ') || 'none'}\nAvailable keys in results: ${availableResultsKeys.join(', ') || 'none'}\nAvailable keys in variablePool.steps: ${availableVarPoolKeys.join(', ') || 'none'}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
               }
             }
           } catch (nestedError) {
-            console.error(`[WorkflowAnalyzer] ❌ Nested step ${nestedIdx + 1} failed in iteration ${iteration}: ${nestedError.message}`);
+            console.error(`❌ Nested step ${nestedIdx + 1} failed in iteration ${iteration}: ${nestedError.message}`);
             if (nestedStep.config?.critical) {
               throw nestedError;
             }
@@ -6436,6 +9148,29 @@ IMPORTANT OUTPUT REQUIREMENTS:
           let conditionValue = undefined;
           const pathVariants = [];
           
+          // CRITICAL: Validate conditionPath is provided
+          if (!conditionPath) {
+            const errorMessage = `Missing required field "conditionPath" in while-loop step "${step.name || step.id}"`;
+            const missingPath = 'step.config.conditionPath';
+            const fullContext = {
+              step_id: step.id,
+              step_name: step.name,
+              step_type: step.type,
+              step_config: step.config,
+              missing_field: 'conditionPath',
+              missing_path: missingPath,
+              full_step: step
+            };
+            console.error(`❌ ${errorMessage}`);
+            console.error(`❌ Missing JSON path: ${missingPath}`);
+            console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+            console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+            }
+            throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+          }
+          
           if (conditionPath) {
             // Original path
             pathVariants.push(conditionPath);
@@ -6453,7 +9188,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
               // Try in results namespace
               conditionValue = this.resolvePathValue(workflowState, variant, 'results');
               if (conditionValue !== undefined && conditionValue !== null) {
-                console.log(`[WorkflowAnalyzer] ✅ Found condition value via path "${variant}" in results: ${conditionValue}`);
+                console.log(`✅ Found condition value via path "${variant}" in results: ${conditionValue}`);
                 break;
               }
               
@@ -6473,7 +9208,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   }
                   if (current !== undefined) {
                     conditionValue = current;
-                    console.log(`[WorkflowAnalyzer] ✅ Found condition value via path "${variant}" in variablePool.steps: ${conditionValue}`);
+                    console.log(`✅ Found condition value via path "${variant}" in variablePool.steps: ${conditionValue}`);
                     break;
                   }
                 }
@@ -6494,7 +9229,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 }
                 if (current !== undefined) {
                   conditionValue = current;
-                  console.log(`[WorkflowAnalyzer] ✅ Found condition value via path "${variant}" in workflowState: ${conditionValue}`);
+                  console.log(`✅ Found condition value via path "${variant}" in workflowState: ${conditionValue}`);
                   break;
                 }
               }
@@ -6508,7 +9243,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             
             if (workflowState.determine_completion?.result) {
               determineStepResult = workflowState.determine_completion.result;
-              console.log(`[WorkflowAnalyzer] ✅ Found determine_completion result from workflowState.determine_completion`);
+              console.log(`✅ Found determine_completion result from workflowState.determine_completion`);
             } else {
               // Try multiple step ID variants
               const stepIdVariants = ['determine-completion', 'determine_completion', 'determineCompletion'];
@@ -6519,7 +9254,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                                      workflowState.variablePool?.steps?.[stepId]?.result ||
                                      null;
                 if (determineStepResult) {
-                  console.log(`[WorkflowAnalyzer] ✅ Found determine_completion result via stepId "${stepId}"`);
+                  console.log(`✅ Found determine_completion result via stepId "${stepId}"`);
                   break;
                 }
               }
@@ -6530,7 +9265,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   if (stepKey.includes('determine') && (stepKey.includes('completion') || stepKey.includes('complete'))) {
                     determineStepResult = stepData?.result;
                     if (determineStepResult) {
-                      console.log(`[WorkflowAnalyzer] ✅ Found determine_completion result via nested step key "${stepKey}"`);
+                      console.log(`✅ Found determine_completion result via nested step key "${stepKey}"`);
                       break;
                     }
                   }
@@ -6543,7 +9278,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   if (stepKey.includes('determine') && (stepKey.includes('completion') || stepKey.includes('complete'))) {
                     determineStepResult = stepResult?.result || stepResult;
                     if (determineStepResult) {
-                      console.log(`[WorkflowAnalyzer] ✅ Found determine_completion result via results key "${stepKey}"`);
+                      console.log(`✅ Found determine_completion result via results key "${stepKey}"`);
                       break;
                     }
                   }
@@ -6559,35 +9294,80 @@ IMPORTANT OUTPUT REQUIREMENTS:
             // Extract condition from step result
             if (conditionPath && determineStepResult) {
               const pathSegments = conditionPath.split('.');
+              // CRITICAL: If path starts with "determine_completion", skip the first segment and use determineStepResult directly
+              // This handles paths like "determine_completion.status" where determineStepResult IS the determine_completion result
+              let pathToResolve = conditionPath;
+              if (pathSegments[0] === 'determine_completion' || pathSegments[0] === 'determine-completion') {
+                // Skip the first segment and resolve the rest from determineStepResult
+                pathToResolve = pathSegments.slice(1).join('.');
+              }
+              
               let current = determineStepResult;
-              for (const segment of pathSegments) {
-                if (current && typeof current === 'object') {
-                  current = current[segment];
-                } else {
-                  current = undefined;
-                  break;
+              console.log(`🔍 Extracting condition from path "${conditionPath}" (resolved to "${pathToResolve}" from determineStepResult)`);
+              console.log(`🔍 determineStepResult keys: ${Object.keys(determineStepResult || {}).join(', ')}`);
+              
+              if (pathToResolve) {
+                const remainingSegments = pathToResolve.split('.');
+                for (const segment of remainingSegments) {
+                  if (current && typeof current === 'object') {
+                    console.log(`🔍 Accessing segment "${segment}" from:`, Object.keys(current || {}).join(', '));
+                    current = current[segment];
+                  } else {
+                    console.log(`⚠️ Cannot access segment "${segment}" - current is:`, typeof current);
+                    current = undefined;
+                    break;
+                  }
                 }
               }
               conditionValue = current;
               if (conditionValue !== undefined) {
-                console.log(`[WorkflowAnalyzer] ✅ Extracted condition value from determineStepResult via path "${conditionPath}": ${conditionValue}`);
+                console.log(`✅ Extracted condition value from determineStepResult via path "${conditionPath}": ${conditionValue}`);
+              } else {
+                console.log(`⚠️ Path "${conditionPath}" not found in determineStepResult`);
+                console.log(`🔍 Full determineStepResult:`, JSON.stringify(determineStepResult, null, 2).substring(0, 500));
               }
             } else if (determineStepResult) {
               // Default: check status, fallback to is_complete
-              conditionValue = determineStepResult.status || determineStepResult.is_complete;
+              console.log(`🔍 No conditionPath specified, using default: check status or is_complete`);
+              conditionValue = determineStepResult.status || determineStepResult.completion_status || determineStepResult.is_complete;
               if (conditionValue !== undefined) {
-                console.log(`[WorkflowAnalyzer] ✅ Found default condition value from determineStepResult: ${conditionValue}`);
+                console.log(`✅ Found default condition value from determineStepResult: ${conditionValue}`);
+              } else {
+                console.log(`⚠️ No status or is_complete found in determineStepResult`);
+                console.log(`🔍 determineStepResult keys: ${Object.keys(determineStepResult || {}).join(', ')}`);
               }
             }
           }
           
-          // Log what we found (or didn't find)
+          // Log what we found (or didn't find) with detailed debugging
           if (conditionValue === undefined || conditionValue === null) {
-            console.log(`[WorkflowAnalyzer] ⚠️ Condition value not found. Available step results: ${Object.keys(workflowState.results || {}).join(', ') || 'none'}`);
-            console.log(`[WorkflowAnalyzer] ⚠️ Available in workflowState: ${Object.keys(workflowState).filter(k => k.includes('determine')).join(', ') || 'none'}`);
+            console.log(`⚠️ Condition value not found for path "${conditionPath}"`);
+            console.log(`⚠️ Available step results: ${Object.keys(workflowState.results || {}).join(', ') || 'none'}`);
+            console.log(`⚠️ Available in workflowState: ${Object.keys(workflowState).filter(k => k.includes('determine')).join(', ') || 'none'}`);
             if (workflowState.variablePool?.steps) {
-              console.log(`[WorkflowAnalyzer] ⚠️ Available in variablePool.steps: ${Object.keys(workflowState.variablePool.steps).filter(k => k.includes('determine')).join(', ') || 'none'}`);
+              console.log(`⚠️ Available in variablePool.steps: ${Object.keys(workflowState.variablePool.steps).filter(k => k.includes('determine')).join(', ') || 'none'}`);
             }
+            if (workflowState.determine_completion) {
+              console.log(`🔍 workflowState.determine_completion structure:`, JSON.stringify({
+                hasResult: !!workflowState.determine_completion.result,
+                resultKeys: workflowState.determine_completion.result ? Object.keys(workflowState.determine_completion.result) : [],
+                status: workflowState.determine_completion.result?.status,
+                completion_status: workflowState.determine_completion.result?.completion_status,
+                is_complete: workflowState.determine_completion.result?.is_complete
+              }, null, 2));
+            }
+            
+            // Send detailed log to backend
+            await this.sendLogToBackend(jobId, 'warn', 
+              `⚠️ Condition path "${conditionPath}" not found. Available: ${Object.keys(workflowState.results || {}).join(', ') || 'none'}`, 
+              'WORKFLOW-ANALYZER', {
+                step_id: step.id,
+                condition_path: conditionPath,
+                available_results: Object.keys(workflowState.results || {}),
+                determine_completion_keys: workflowState.determine_completion?.result ? Object.keys(workflowState.determine_completion.result) : [],
+                iteration: iteration
+              }
+            );
           }
           
           if (conditionValue !== undefined && conditionValue !== null) {
@@ -6596,7 +9376,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
               // New format: status field with 'success', 'failure', 'continue', 'stuck'
               const expectedValue = config.conditionValue || 'continue';
               condition = conditionValue === expectedValue;
-              console.log(`[WorkflowAnalyzer] 🔍 Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
+              console.log(`🔍 Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
             } else {
               // Legacy format: boolean is_complete
               condition = conditionValue === true || conditionValue === 'true' || conditionValue === 1 || conditionValue === 'complete';
@@ -6604,7 +9384,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           } else {
             // If path not found and it's required, default to false (exit loop)
             if (conditionPath) {
-              console.log(`[WorkflowAnalyzer] ⚠️ Condition path "${conditionPath}" not found, exiting loop`);
+              console.log(`⚠️ Condition path "${conditionPath}" not found, exiting loop`);
               
               // Send log to backend
               await this.sendLogToBackend(jobId, 'warn', `⚠️ Condition path "${conditionPath}" not found, exiting loop`, 'WORKFLOW-ANALYZER', {
@@ -6643,7 +9423,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         workflowState.lastExecutionResult.determine_completion = iterationState.determine_completion || 
                                                                 workflowState.determine_completion;
         
-        console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: condition=${condition} (inverted=${invertCondition}, should continue=${invertCondition ? !condition : condition})`);
+        console.log(`🔄 Iteration ${iteration} complete: condition=${condition} (inverted=${invertCondition}, should continue=${invertCondition ? !condition : condition})`);
         
         // CRITICAL: Update leg with iteration result immediately so it can be saved by "Save Page Data" step
         const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
@@ -6717,15 +9497,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
             // Also update currentLeg for reference
             currentLeg.iterations = leg.iterations;
             
-            console.log(`[WorkflowAnalyzer] ✅ Updated leg ${currentLeg.leg_id} with iteration ${iteration} result: ${status}`);
+            console.log(`✅ Updated leg ${currentLeg.leg_id} with iteration ${iteration} result: ${status}`);
             
             // CRITICAL: Save immediately to make results visible in UI right away
             if (workflowState.workflowId) {
               try {
                 await this.saveLegIterationsToWorkflow(workflowState, [leg], jobId);
-                console.log(`[WorkflowAnalyzer] 💾 Immediately saved iteration ${iteration} for leg ${currentLeg.leg_id} to workflow`);
+                console.log(`💾 Immediately saved iteration ${iteration} for leg ${currentLeg.leg_id} to workflow`);
               } catch (saveError) {
-                console.warn(`[WorkflowAnalyzer] ⚠️ Failed to immediately save iteration: ${saveError.message}`);
+                console.warn(`⚠️ Failed to immediately save iteration: ${saveError.message}`);
               }
             }
           }
@@ -6748,7 +9528,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
       } catch (iterationError) {
-        console.error(`[WorkflowAnalyzer] ❌ Iteration ${iteration} failed: ${iterationError.message}`);
+        console.error(`❌ Iteration ${iteration} failed: ${iterationError.message}`);
         
         // Send error log to backend
         await this.sendLogToBackend(jobId, 'error', `❌ Iteration ${iteration} failed: ${iterationError.message}`, 'WORKFLOW-ANALYZER', {
@@ -6805,23 +9585,26 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     // Promote to top level for easy access (even if empty, for debugging)
     if (lastDetermineCompletion) {
-      if (!workflowState.determine_completion) {
-        workflowState.determine_completion = {};
+      // Avoid circular references by cloning the result and not nesting it under "result"
+      let safeResult;
+      try {
+        safeResult = JSON.parse(JSON.stringify(lastDetermineCompletion));
+      } catch (cloneErr) {
+        console.warn(`⚠️ Failed to deep clone determine_completion result: ${cloneErr.message}. Falling back to shallow copy.`);
+        safeResult = { ...(lastDetermineCompletion || {}) };
       }
-      workflowState.determine_completion.result = lastDetermineCompletion;
-      
+
+      workflowState.determine_completion = safeResult;
+
       if (!workflowState.results) {
         workflowState.results = {};
       }
-      if (!workflowState.results.determine_completion) {
-        workflowState.results.determine_completion = {};
-      }
-      workflowState.results.determine_completion.result = lastDetermineCompletion;
+      workflowState.results.determine_completion = safeResult;
       
-      const statusDisplay = lastDetermineCompletion.status || lastDetermineCompletion.completion_status || 'none';
-      console.log(`[WorkflowAnalyzer] ✅ Promoted determine_completion result: status=${statusDisplay}, is_complete=${lastDetermineCompletion.is_complete}`);
+      const statusDisplay = safeResult.status || safeResult.completion_status || 'none';
+      console.log(`✅ Promoted determine_completion result: status=${statusDisplay}, is_complete=${safeResult.is_complete}`);
     } else {
-      console.warn(`[WorkflowAnalyzer] ⚠️ No determine_completion result found after ${iteration} iterations`);
+      console.warn(`⚠️ No determine_completion result found after ${iteration} iterations`);
     }
     
     // Determine final status from last determine_completion result
@@ -6909,9 +9692,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (workflowState.workflowId) {
           try {
             await this.saveLegIterationsToWorkflow(workflowState, [leg], jobId);
-            console.log(`[WorkflowAnalyzer] 💾 Saved leg ${finalCurrentLeg.leg_id} with final status: ${finalLegStatus}`);
+            console.log(`💾 Saved leg ${finalCurrentLeg.leg_id} with final status: ${finalLegStatus}`);
           } catch (saveError) {
-            console.warn(`[WorkflowAnalyzer] ⚠️ Failed to save final leg status: ${saveError.message}`);
+            console.warn(`⚠️ Failed to save final leg status: ${saveError.message}`);
           }
         }
         
@@ -6929,16 +9712,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 headers: this.getAuthHeaders()
               }
             );
-            console.log(`[WorkflowAnalyzer] ✅ Marked leg ${finalCurrentLeg.leg_id} as completed with status: ${finalLegResult}`);
+            console.log(`✅ Marked leg ${finalCurrentLeg.leg_id} as completed with status: ${finalLegResult}`);
           } catch (completeError) {
-            console.warn(`[WorkflowAnalyzer] ⚠️ Failed to mark leg as completed: ${completeError.message}`);
+            console.warn(`⚠️ Failed to mark leg as completed: ${completeError.message}`);
           }
         }
       }
     }
     
     const finalResult = {
-      iterations: iteration,
+      iterations: loopState.iterations || [],
+      total_iterations: iteration,
+      condition_result: invertCondition ? !condition : condition,
       maxIterations,
       exitedEarly: iteration < maxIterations && (invertCondition ? condition : !condition),
       finalCondition: condition,
@@ -6949,7 +9734,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     };
     
     this.storeStepResult(step, finalResult, workflowState);
-    console.log(`[WorkflowAnalyzer] ✅ While-loop completed after ${iteration} iterations${finalLegStatus ? ` (final status: ${finalLegStatus})` : ''}`);
+    console.log(`✅ While-loop completed after ${iteration} iterations${finalLegStatus ? ` (final status: ${finalLegStatus})` : ''}`);
     
     // Send log to backend for job history
     if (jobId) {
@@ -6975,7 +9760,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           headers: this.getAuthHeaders()
         });
       } catch (error) {
-        console.error(`[WorkflowAnalyzer] ⚠️ Failed to log while-loop completion: ${error.message}`);
+        console.error(`⚠️ Failed to log while-loop completion: ${error.message}`);
       }
     }
   }
@@ -6985,7 +9770,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * General-purpose conditional element
    */
   async executeIfStep(page, step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🔀 Executing if-step (${step.name})`);
+    console.log(`🔀 Executing if-step (${step.name})`);
     
     // Send log to backend
     await this.sendLogToBackend(jobId, 'info', `🔀 Executing if-step (${step.name})`, 'WORKFLOW-ANALYZER', {
@@ -7001,8 +9786,71 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const nestedSteps = config.steps || [];
     const elseSteps = config.elseSteps || []; // Optional else branch
     
+    // Validate required fields based on conditionType
+    if (conditionType === 'code' && !conditionCode) {
+      const errorMessage = `Missing required field "conditionCode" in if-step "${step.name || step.id}" (conditionType is "code")`;
+      const missingPath = 'step.config.conditionCode';
+      console.error(`❌ ${errorMessage}`);
+      console.error(`❌ Missing JSON path: ${missingPath}`);
+      console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+      console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+      
+      const fullContext = {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        step_config: step.config,
+        conditionType: conditionType,
+        full_step: step
+      };
+      
+      if (jobId && this.backendLogger) {
+        try {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+            ...fullContext,
+            missing_path: missingPath
+          });
+        } catch (e) {
+          console.error(`❌ Failed to log error to backend:`, e.message);
+        }
+      }
+      
+      throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
+    }
+    
+    if ((conditionType === 'path' || conditionType === 'ai-response') && !conditionPath) {
+      const errorMessage = `Missing required field "conditionPath" in if-step "${step.name || step.id}" (conditionType is "${conditionType}")`;
+      const missingPath = 'step.config.conditionPath';
+      console.error(`❌ ${errorMessage}`);
+      console.error(`❌ Missing JSON path: ${missingPath}`);
+      console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+      console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+      
+      const fullContext = {
+        step_id: step.id,
+        step_name: step.name || step.type,
+        step_type: step.type,
+        step_config: step.config,
+        conditionType: conditionType,
+        full_step: step
+      };
+      
+      if (jobId && this.backendLogger) {
+        try {
+          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+            ...fullContext,
+            missing_path: missingPath
+          });
+        } catch (e) {
+          console.error(`❌ Failed to log error to backend:`, e.message);
+        }
+      }
+      
+      throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
+    }
+    
     if (!nestedSteps.length) {
-      console.log(`[WorkflowAnalyzer] ⚠️ If-step has no nested steps`);
+      console.log(`⚠️ If-step has no nested steps`);
       return;
     }
     
@@ -7035,7 +9883,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
       
-      console.log(`[WorkflowAnalyzer] 🔀 Condition evaluated: ${condition}`);
+      console.log(`🔀 Condition evaluated: ${condition}`);
       
       // Send log to backend
       await this.sendLogToBackend(jobId, 'info', `🔀 Condition evaluated: ${condition}`, 'WORKFLOW-ANALYZER', {
@@ -7059,7 +9907,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
               siblings: stepsToExecute
             });
           } catch (nestedError) {
-            console.error(`[WorkflowAnalyzer] ❌ Nested step ${nestedIdx + 1} failed in if-step: ${nestedError.message}`);
+            console.error(`❌ Nested step ${nestedIdx + 1} failed in if-step: ${nestedError.message}`);
             if (nestedStep.config?.critical) {
               throw nestedError;
             }
@@ -7075,7 +9923,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       };
       
       this.storeStepResult(step, result, workflowState);
-      console.log(`[WorkflowAnalyzer] ✅ If-step completed: executed ${condition ? 'then' : 'else'} branch (${stepsToExecute.length} steps)`);
+      console.log(`✅ If-step completed: executed ${condition ? 'then' : 'else'} branch (${stepsToExecute.length} steps)`);
       
       // Send log to backend
       await this.sendLogToBackend(jobId, 'info', `✅ If-step completed: executed ${condition ? 'then' : 'else'} branch (${stepsToExecute.length} steps)`, 'WORKFLOW-ANALYZER', {
@@ -7088,7 +9936,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       });
       
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ If-step failed: ${error.message}`);
+      console.error(`❌ If-step failed: ${error.message}`);
       
       // Send error log to backend
       await this.sendLogToBackend(jobId, 'error', `❌ If-step failed: ${error.message}`, 'WORKFLOW-ANALYZER', {
@@ -7107,7 +9955,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute test-leg-iteratively step - recursively tests a leg until AI says it's complete
    */
   async executeTestLegIterativelyStep(page, step, workflowState, jobId) {
-    console.log(`[WorkflowAnalyzer] 🔄 Executing iterative leg test (${step.name})`);
+    console.log(`🔄 Executing iterative leg test (${step.name})`);
     
     const config = step.config || {};
     const maxIterations = config.maxIterations || 10;
@@ -7125,13 +9973,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
     let finalResult = null;
     let executionErrorType = null; // Track if error is execution-related
     
-    console.log(`[WorkflowAnalyzer] 🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id}`);
+    console.log(`🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id}`);
     
     // Update status to 'testing' when starting to test this action
     if (workflowState.workflowId && currentLeg.leg_id) {
       try {
         await this.updateLegStatus(workflowState.workflowId, currentLeg.leg_id, 'testing', jobId);
-        console.log(`[WorkflowAnalyzer] 📊 Updated action status to 'testing' for leg: ${currentLeg.leg_id}`);
+        console.log(`📊 Updated action status to 'testing' for leg: ${currentLeg.leg_id}`);
         
         // Also update in workflowState for immediate access
         if (workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute)) {
@@ -7143,14 +9991,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
         }
       } catch (statusError) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to update status to 'testing': ${statusError.message}`);
+        console.warn(`⚠️ Failed to update status to 'testing': ${statusError.message}`);
       }
     }
     
     // Iterate until leg succeeded, leg failed, or max iterations reached
     while (iteration < maxIterations) {
       iteration++;
-      console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration}/${maxIterations} for leg: ${currentLeg.leg_id}`);
+      console.log(`🔄 Iteration ${iteration}/${maxIterations} for leg: ${currentLeg.leg_id}`);
       
       try {
         // Step 1: Capture page state before action (only visible elements)
@@ -7182,11 +10030,42 @@ IMPORTANT OUTPUT REQUIREMENTS:
         
         // Step 3: Generate action script (only on first iteration, or if new content detected, or if no script is stored)
         if (iteration === 1 || (lastExecutionResult && lastExecutionResult.new_content_detected) || !workflowState.legScriptToExecute) {
-          // Get previous execution history for this leg (only what's needed for testification)
+          // Get previous execution history for this leg (from both database and current loop execution)
           let previousExecutionHistory = [];
           
-          // Try to get leg iterations from workflow if available
-          if (workflowState.workflowId && currentLeg.leg_id) {
+          // First, check for iterations from current loop execution (previous iterations in this while-loop)
+          if (workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute)) {
+            const legIndex = workflowState.legsToExecute.findIndex(l => 
+              (l.leg_id === currentLeg.leg_id) || 
+              (l.id === currentLeg.leg_id) ||
+              (l.leg_id === currentLeg.id) ||
+              (l.id === currentLeg.id)
+            );
+            
+            if (legIndex >= 0) {
+              const currentLegData = workflowState.legsToExecute[legIndex];
+              if (currentLegData.iterations && Array.isArray(currentLegData.iterations) && currentLegData.iterations.length > 0) {
+                // Build execution history from current loop's previous iterations
+                previousExecutionHistory = currentLegData.iterations
+                  .filter(iter => iter.script_executed || iter.error || iter.reason) // Include attempts with scripts, errors, or reasoning
+                  .map(iter => ({
+                    attempt_number: iter.attempt_number || iter.iteration_number || 0,
+                    iteration_number: iter.iteration_number || null,
+                    script_executed: iter.script_executed ? iter.script_executed.substring(0, 1000) : null, // Truncate for context
+                    result: iter.result || 'unknown',
+                    status: iter.status || iter.completion_status || null,
+                    reason: iter.reason || iter.what_happened || null, // CRITICAL: Include reasoning from determine_completion
+                    error: iter.error || null,
+                    page_url_before: iter.page_url_before || null,
+                    page_url_after: iter.page_url_after || null,
+                    is_retry: iter.is_retry || (iter.attempt_number > 1) || false
+                  }));
+              }
+            }
+          }
+          
+          // Also try to get leg iterations from workflow database if available (for persistence across runs)
+          if (workflowState.workflowId && currentLeg.leg_id && previousExecutionHistory.length === 0) {
             try {
               const workflowResponse = await axios.get(
                 `${this.backendUrl}/api/workflows/${workflowState.workflowId}`,
@@ -7196,27 +10075,32 @@ IMPORTANT OUTPUT REQUIREMENTS:
               const leg = workflow.legs?.find(l => l.leg_id === currentLeg.leg_id);
               
               if (leg && leg.iterations && leg.iterations.length > 0) {
-                // Build minimal execution history (only what's needed for testification)
+                // Build execution history with reasoning from previous attempts
                 previousExecutionHistory = leg.iterations
-                  .filter(iter => iter.script_executed || iter.error) // Only include attempts with scripts or errors
+                  .filter(iter => iter.script_executed || iter.error || iter.reason) // Include attempts with scripts, errors, or reasoning
                   .map(iter => ({
                     attempt_number: iter.attempt_number || iter.iteration_number || 0,
                     iteration_number: iter.iteration_number || null,
                     script_executed: iter.script_executed ? iter.script_executed.substring(0, 1000) : null, // Truncate for context
                     result: iter.result || 'unknown',
+                    status: iter.status || iter.completion_status || null,
+                    reason: iter.reason || iter.what_happened || null, // CRITICAL: Include reasoning from determine_completion
                     error: iter.error || null,
+                    page_url_before: iter.page_url_before || null,
+                    page_url_after: iter.page_url_after || null,
                     is_retry: iter.is_retry || (iter.attempt_number > 1) || false
                   }))
                   .slice(-5); // Only last 5 attempts to avoid too much context
               }
             } catch (error) {
-              console.warn(`[WorkflowAnalyzer] Could not fetch leg iterations from workflow: ${error.message}`);
+              console.warn(`Could not fetch leg iterations from workflow: ${error.message}`);
             }
           }
           
           // Store execution history for attachment (only if there's history)
           if (previousExecutionHistory.length > 0) {
             workflowState.execution_history = JSON.stringify(previousExecutionHistory, null, 2);
+            console.log(`📚 Built execution history with ${previousExecutionHistory.length} previous attempts (including reasoning)`);
           }
           
           await this.executeAIPromptStep(page, {
@@ -7268,7 +10152,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           executionErrorType = null; // Reset error type on success
         } catch (execError) {
           // Catch execution errors (syntax errors, timeouts, etc.)
-          console.error(`[WorkflowAnalyzer] ❌ Execution error for leg ${currentLeg.leg_id}:`, execError.message);
+          console.error(`❌ Execution error for leg ${currentLeg.leg_id}:`, execError.message);
           executionErrorType = 'execution';
           lastExecutionResult = {
             error: execError.message,
@@ -7314,13 +10198,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }, workflowState, jobId);
         
         // Step 6: Use AI to determine if leg testing is complete
+        // Build attachments list - include execution_history if available
+        const determineAttachments = ['current_leg', 'last_execution_result', 'page_description', 'visible_text', 'interactive_elements', 'forms'];
+        if (workflowState.execution_history) {
+          determineAttachments.push('execution_history');
+        }
+        
         await this.executeAIPromptStep(page, {
           id: `${step.id}_iteration_${iteration}_determine_completion`,
           name: `Determine Completion (Iteration ${iteration})`,
           type: 'ai-prompt',
           config: {
             prompt_slug: 'determine-leg-completion',
-            attachments: ['current_leg', 'last_execution_result', 'page_description', 'visible_text', 'interactive_elements', 'forms'],
+            attachments: determineAttachments,
             maxRetries: 1
           }
         }, workflowState, jobId);
@@ -7428,6 +10318,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
               }
             }
             
+            // CRITICAL: Also update in workflowState.legsToExecute so iterations are available for next iteration
+            if (workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute)) {
+              const legsToExecuteIndex = workflowState.legsToExecute.findIndex(l => 
+                (l.leg_id === currentLeg.leg_id) || 
+                (l.id === currentLeg.leg_id) ||
+                (l.leg_id === currentLeg.id) ||
+                (l.id === currentLeg.id)
+              );
+              if (legsToExecuteIndex >= 0) {
+                if (!Array.isArray(workflowState.legsToExecute[legsToExecuteIndex].iterations)) {
+                  workflowState.legsToExecute[legsToExecuteIndex].iterations = [];
+                }
+                workflowState.legsToExecute[legsToExecuteIndex].iterations.push(iterationData);
+                workflowState.legsToExecute[legsToExecuteIndex].status = leg.status; // Update status
+              }
+            }
+            
             // Update action status via save-data to ensure it's persisted
             // Include status in leg object so save-data endpoint updates it
             leg.status = leg.status || 'testing'; // Ensure status is set
@@ -7435,33 +10342,33 @@ IMPORTANT OUTPUT REQUIREMENTS:
             // Save iteration immediately to workflow (status will be updated via save-data)
             try {
               await this.saveLegIterationsToWorkflow(workflowState, [leg], jobId);
-              console.log(`[WorkflowAnalyzer] 💾 Immediately saved iteration ${iteration} for leg ${currentLeg.leg_id} to workflow with status: ${leg.status}`);
+              console.log(`💾 Immediately saved iteration ${iteration} for leg ${currentLeg.leg_id} to workflow with status: ${leg.status}`);
             } catch (saveError) {
-              console.warn(`[WorkflowAnalyzer] ⚠️ Failed to save iteration: ${saveError.message}`);
+              console.warn(`⚠️ Failed to save iteration: ${saveError.message}`);
             }
             
             // Also update currentLeg for reference
             currentLeg.iterations = leg.iterations;
             
-            console.log(`[WorkflowAnalyzer] ✅ Updated leg ${currentLeg.leg_id} with iteration ${iteration} result: ${status}`);
+            console.log(`✅ Updated leg ${currentLeg.leg_id} with iteration ${iteration} result: ${status}`);
             
             // CRITICAL: Save immediately to make results visible in UI right away
             if (workflowState.workflowId) {
               try {
                 await this.saveLegIterationsToWorkflow(workflowState, [leg], jobId);
-                console.log(`[WorkflowAnalyzer] 💾 Immediately saved iteration ${iteration} for leg ${currentLeg.leg_id} to workflow`);
+                console.log(`💾 Immediately saved iteration ${iteration} for leg ${currentLeg.leg_id} to workflow`);
               } catch (saveError) {
-                console.warn(`[WorkflowAnalyzer] ⚠️ Failed to immediately save iteration: ${saveError.message}`);
+                console.warn(`⚠️ Failed to immediately save iteration: ${saveError.message}`);
               }
             }
           }
         }
         
-        console.log(`[WorkflowAnalyzer] 🔄 Iteration ${iteration} complete: legSucceeded=${legSucceeded}, legFailed=${legFailed}`);
+        console.log(`🔄 Iteration ${iteration} complete: legSucceeded=${legSucceeded}, legFailed=${legFailed}`);
         
         // Clear exit conditions: if OpenAI says succeeded or failed - exit the loop
         if (legSucceeded) {
-          console.log(`[WorkflowAnalyzer] ✅ Leg testing succeeded after ${iteration} iterations. Reason: ${completionResult.reason || 'AI determined success'}`);
+          console.log(`✅ Leg testing succeeded after ${iteration} iterations. Reason: ${completionResult.reason || 'AI determined success'}`);
           finalResult = {
             success: true,
             completed: true,
@@ -7473,7 +10380,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         if (legFailed) {
-          console.log(`[WorkflowAnalyzer] ❌ Leg testing failed after ${iteration} iterations. Reason: ${completionResult.reason || 'AI determined failure'}`);
+          console.log(`❌ Leg testing failed after ${iteration} iterations. Reason: ${completionResult.reason || 'AI determined failure'}`);
           finalResult = {
             success: false,
             completed: true,
@@ -7486,18 +10393,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         // Otherwise, continue to next iteration
-        console.log(`[WorkflowAnalyzer] 🔄 Continuing iteration - leg not yet succeeded or failed`);
+        console.log(`🔄 Continuing iteration - leg not yet succeeded or failed`);
         await new Promise(resolve => setTimeout(resolve, 1000));
         
       } catch (iterationError) {
-        console.error(`[WorkflowAnalyzer] ❌ Iteration ${iteration} failed: ${iterationError.message}`);
+        console.error(`❌ Iteration ${iteration} failed: ${iterationError.message}`);
         
         // NOTE: Saving is now handled by workflow steps (save-data elements), not hardcoded here
         // This deprecated method should not be used - use while-loop workflow step instead
         
         // If max iterations reached, exit
         if (iteration >= maxIterations) {
-          console.log(`[WorkflowAnalyzer] ⚠️ Max iterations (${maxIterations}) reached`);
+          console.log(`⚠️ Max iterations (${maxIterations}) reached`);
           finalResult = {
             success: false,
             completed: false,
@@ -7538,7 +10445,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       finished_at: new Date().toISOString()
     };
     
-    console.log(`[WorkflowAnalyzer] ✅ Iterative leg testing completed: ${finalResult.completed ? 'COMPLETE' : 'INCOMPLETE'} after ${finalResult.iterations} iterations`);
+    console.log(`✅ Iterative leg testing completed: ${finalResult.completed ? 'COMPLETE' : 'INCOMPLETE'} after ${finalResult.iterations} iterations`);
     
     return finalResult;
   }
@@ -7558,7 +10465,26 @@ IMPORTANT OUTPUT REQUIREMENTS:
         await this.executePageDescriptionStep(page, step, workflowState, jobId, stepContext);
         break;
       case 'ai-prompt':
-        await this.executeAIPromptStep(page, step, workflowState, jobId, stepContext);
+        try {
+          await this.executeAIPromptStep(page, step, workflowState, jobId, stepContext);
+        } catch (stepError) {
+          const errorMessage = `Step "${step.name || step.id}" (ai-prompt) failed: ${stepError.message}`;
+          console.error(`❌ ${errorMessage}`);
+          console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+          console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+              step_id: step.id,
+              step_name: step.name,
+              step_type: step.type,
+              step_config: step.config,
+              error: stepError.message,
+              error_stack: stepError.stack,
+              full_step: step
+            });
+          }
+          throw stepError; // Re-throw to fail workflow
+        }
         break;
       case 'workflow-analysis':
         await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId, stepContext);
@@ -7576,13 +10502,35 @@ IMPORTANT OUTPUT REQUIREMENTS:
         await this.executeCodeStep(page, step, workflowState);
         break;
       case 'execute-code-from-variable':
-        await this.executeCodeFromVariableStep(page, step, workflowState, jobId);
+        try {
+          await this.executeCodeFromVariableStep(page, step, workflowState, jobId);
+        } catch (stepError) {
+          const errorMessage = `Step "${step.name || step.id}" (execute-code-from-variable) failed: ${stepError.message}`;
+          console.error(`❌ ${errorMessage}`);
+          console.error(`❌ Step config:`, JSON.stringify(step.config, null, 2));
+          console.error(`❌ Full step:`, JSON.stringify(step, null, 2));
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', {
+              step_id: step.id,
+              step_name: step.name,
+              step_type: step.type,
+              step_config: step.config,
+              error: stepError.message,
+              error_stack: stepError.stack,
+              full_step: step
+            });
+          }
+          throw stepError; // Re-throw to fail workflow
+        }
         break;
       case 'validate-response':
         await this.executeValidateResponseStep(step, workflowState);
         break;
       case 'filter-response':
         await this.executeFilterResponseStep(step, workflowState);
+        break;
+      case 'job-configuration':
+        await this.executeJobConfigurationStep(step, workflowState, jobId);
         break;
       case 'print':
         await this.executePrintStep(step, workflowState, jobId);
@@ -7592,6 +10540,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
         break;
       case 'sleep':
         await this.executeSleepStep(step, workflowState);
+        break;
+      case 'cookie-add':
+        await this.executeCookieAddStep(step, workflowState, jobId);
+        break;
+      case 'cookie-update':
+        await this.executeCookieUpdateStep(step, workflowState, jobId);
+        break;
+      case 'cookie-remove':
+        await this.executeCookieRemoveStep(step, workflowState, jobId);
+        break;
+      case 'cookie-collect':
+        await this.executeCookieCollectStep(page, step, workflowState, jobId);
         break;
       case 'for-each':
         await this.executeForEachStep(page, step, workflowState, jobId);
@@ -7606,8 +10566,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
       case 'save-data':
         await this.executeSaveDataStep(page, step, workflowState, jobId);
         break;
+      case 'save-page-data':
+        await this.executeSavePageDataStep(page, step, workflowState, jobId);
+        break;
       default:
-        console.log(`[WorkflowAnalyzer] ⚠️ Unknown nested step type: ${step.type}`);
+        console.log(`⚠️ Unknown nested step type: ${step.type}`);
     }
   }
 
@@ -7620,7 +10583,47 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
 
     const segments = path.split('.').map(part => part.trim()).filter(Boolean);
+
+    // CRITICAL: First check variable pool for direct variable access (e.g., 'legsToExecute', 'visible_text', 'playwright_script')
+    if (segments.length === 1 && source.variablePool) {
+      const varName = segments[0];
+      // Check in order: cycle (current) -> page -> job
+      const cycleIndex = source.cycleStack?.length - 1;
+      if (cycleIndex >= 0 && source.variablePool.cycle[cycleIndex]?.[varName]) {
+        const varData = source.variablePool.cycle[cycleIndex][varName];
+        const value = varData?.value !== undefined ? varData.value : varData;
+        if (value !== undefined) {
+          console.log(`✅ Resolved "${path}" from variablePool.cycle[${cycleIndex}]: ${typeof value}`);
+          return value;
+        }
+      }
+      if (source.variablePool.page[varName]) {
+        const varData = source.variablePool.page[varName];
+        const value = varData?.value !== undefined ? varData.value : varData;
+        if (value !== undefined) {
+          console.log(`✅ Resolved "${path}" from variablePool.page: ${typeof value}`);
+          return value;
+        }
+      }
+      if (source.variablePool.job[varName]) {
+        const varData = source.variablePool.job[varName];
+        const value = varData?.value !== undefined ? varData.value : varData;
+        if (value !== undefined) {
+          console.log(`✅ Resolved "${path}" from variablePool.job: ${typeof value}`);
+          return value;
+        }
+      }
+    }
     
+    // Also check direct access on source (for workflowState.playwright_script)
+    if (segments.length === 1 && source[segments[0]] !== undefined) {
+      const value = source[segments[0]];
+      if (typeof value === 'string' || (typeof value === 'object' && value !== null)) {
+        console.log(`✅ Resolved "${path}" from direct source access: ${typeof value}`);
+        return value;
+      }
+    }
+
     // Determine starting point based on sourceType
     let current;
     if (sourceType === 'results') {
@@ -7639,7 +10642,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
         current = source.context || source;
       }
     }
+
+    // Use getNestedValue which handles structured format automatically
+    let value = this.getNestedValue(current, path);
+    if (value !== undefined) {
+      return value;
+    }
     
+    // Fallback to manual traversal for backward compatibility
     for (const segment of segments) {
       if (current === null || current === undefined) {
         return undefined;
@@ -7652,6 +10662,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         current = current[index];
       } else if (typeof current === 'object') {
+        // Handle structured format: {value: ..., namespace: ...}
+        if (current.value !== undefined && current.namespace !== undefined) {
+          current = current.value;
+        }
+        
         if (Object.prototype.hasOwnProperty.call(current, segment)) {
           current = current[segment];
         } else if (current.result && typeof current.result === 'object' && Object.prototype.hasOwnProperty.call(current.result, segment)) {
@@ -7666,6 +10681,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
 
+    // Handle structured format in final value
+    if (current && typeof current === 'object' && !Array.isArray(current) && current.value !== undefined && current.namespace !== undefined) {
+      return current.value;
+    }
+    
     return current;
   }
 
@@ -7915,8 +10935,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Get nested value from object using dot notation
    */
   getNestedValue(obj, path) {
+    if (!obj || !path) return undefined;
+    
     return path.split('.').reduce((current, key) => {
-      return current && current[key] !== undefined ? current[key] : undefined;
+      if (!current || current[key] === undefined) return undefined;
+      
+      const value = current[key];
+      
+      // If value is in structured format {value: ..., namespace: ...}, extract the value
+      if (value && typeof value === 'object' && !Array.isArray(value) && 'value' in value && 'namespace' in value) {
+        return value.value;
+      }
+      
+      return value;
     }, obj);
   }
 
@@ -7925,7 +10956,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Retries failed script execution with modified prompts up to a configurable number of times
    */
   async executeSelfAdjustableAIWorkflowStep(page, step, workflowState, jobId, pageId, projectId) {
-    console.log(`[WorkflowAnalyzer] 🔄 Executing self-adjustable AI workflow step (${step.name})`);
+    console.log(`🔄 Executing self-adjustable AI workflow step (${step.name})`);
     
     // Get configuration
     const config = step.config || {};
@@ -7942,7 +10973,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     // Check if we've exceeded max retries
     if (retryCount >= maxRetries) {
-      console.log(`[WorkflowAnalyzer] ❌ Max retries (${maxRetries}) exceeded for self-adjustable AI workflow`);
+      console.log(`❌ Max retries (${maxRetries}) exceeded for self-adjustable AI workflow`);
       await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
         jobId: jobId,
         level: 'error',
@@ -7958,11 +10989,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Check if there was a previous script failure
     const lastFailure = workflowState.lastScriptFailure;
     if (!lastFailure) {
-      console.log(`[WorkflowAnalyzer] ℹ️ No previous script failure found, skipping retry`);
+      console.log(`ℹ️ No previous script failure found, skipping retry`);
       return;
     }
     
-    console.log(`[WorkflowAnalyzer] 🔄 Retry ${retryCount + 1}/${maxRetries} for failed script execution`);
+    console.log(`🔄 Retry ${retryCount + 1}/${maxRetries} for failed script execution`);
     
     // Log retry attempt
     await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
@@ -7986,11 +11017,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const scriptGenerationStepIndex = lastFailure.scriptGenerationStepIndex;
     
     if (!scriptGenerationStep || scriptGenerationStepIndex === null) {
-      console.error(`[WorkflowAnalyzer] ❌ No script generation step found in failure info`);
+      console.error(`❌ No script generation step found in failure info`);
       throw new Error('No script generation step found in failure info');
     }
     
-    console.log(`[WorkflowAnalyzer] 📍 Found script generation step at index ${scriptGenerationStepIndex}: ${scriptGenerationStep.name || scriptGenerationStep.id}`);
+    console.log(`📍 Found script generation step at index ${scriptGenerationStepIndex}: ${scriptGenerationStep.name || scriptGenerationStep.id}`);
     
     // Get current page state for retry
     const pageUrl = page.url();
@@ -8007,7 +11038,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
         screenshotBase64 = screenshot.toString('base64');
       } catch (e) {
-        console.warn(`[WorkflowAnalyzer] ⚠️ Failed to capture screenshot: ${e.message}`);
+        console.warn(`⚠️ Failed to capture screenshot: ${e.message}`);
       }
     }
     
@@ -8017,7 +11048,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                             '';
     
     if (!originalTemplate) {
-      console.error(`[WorkflowAnalyzer] ❌ No template found in script generation step`);
+      console.error(`❌ No template found in script generation step`);
       throw new Error('No template found in script generation step');
     }
     
@@ -8080,7 +11111,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       );
       
       const newWorkflowId = workflowResponse.data._id;
-      console.log(`[WorkflowAnalyzer] ✅ Created new AI-generated workflow: ${newWorkflowId}`);
+      console.log(`✅ Created new AI-generated workflow: ${newWorkflowId}`);
       
       // Update workflow state with new workflow ID
       workflowState.aiGeneratedWorkflowId = newWorkflowId;
@@ -8120,7 +11151,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState.shouldRetryFromStep = scriptGenerationStepIndex;
       workflowState.retryWorkflowId = newWorkflowId;
       
-      console.log(`[WorkflowAnalyzer] 🔄 Loaded new workflow, will continue from step ${scriptGenerationStepIndex} (script generation step)`);
+      console.log(`🔄 Loaded new workflow, will continue from step ${scriptGenerationStepIndex} (script generation step)`);
       
       await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
         jobId: jobId,
@@ -8149,7 +11180,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         message: `Created new workflow for retry ${retryCount + 1}, continuing from step ${scriptGenerationStepIndex}`
       };
     } catch (error) {
-      console.error(`[WorkflowAnalyzer] ❌ Failed to create new workflow: ${error.message}`);
+      console.error(`❌ Failed to create new workflow: ${error.message}`);
       throw error;
     }
   }
