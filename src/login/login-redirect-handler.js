@@ -3,7 +3,7 @@
  * Detects login page redirections during crawling and handles them
  */
 
-import * as backendLogger from './backend-logger.js';
+import * as backendLogger from '../backend-logger.js';
 
 /**
  * Send log to backend (wrapper for backendLogger)

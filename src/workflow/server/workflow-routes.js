@@ -1,5 +1,5 @@
 import express from 'express';
-import { WorkflowStepExecutor } from './workflow-step-executor.js';
+import { WorkflowStepExecutor } from '../execution/workflow-step-executor.js';
 
 const router = express.Router();
 

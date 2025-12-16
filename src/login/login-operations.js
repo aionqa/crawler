@@ -9,14 +9,14 @@
  * - appendAIChatLog() for AI conversation logs via shared ai-conversation-logger
  */
 
-import * as backendLogger from './backend-logger.js';
-import { humanType } from './human-typing.js';
-import WorkflowAnalyzer from './workflow-analyzer.js';
+import * as backendLogger from '../backend-logger.js';
+import { humanType } from '../browser/human-typing.js';
+import WorkflowAnalyzer from '../workflow/analysis/workflow-analyzer.js';
 
 // Import AI conversation logger (same as unified-crawler pattern)
 let aiLogger = null;
 try {
-  const aiModule = await import('/app/shared/ai-conversation-logger.js');
+  const aiModule = await import('../../shared/ai-conversation-logger.js');
   aiLogger = aiModule.aiConversationLogger;
   console.log('[LOGIN-SERVICE] ✅ Shared AI logger initialized');
 } catch (error) {
@@ -860,7 +860,7 @@ export async function performLoginWithWorkflow(
 
     let conversationLogger = aiLogger;
     if (!conversationLogger) {
-      const { AIConversationLogger } = await import('/app/shared/ai-conversation-logger.js');
+      const { AIConversationLogger } = await import('../../shared/ai-conversation-logger.js');
       conversationLogger = new AIConversationLogger(BACKEND_URL, normalizedContext.runner_token);
       console.log(`📄 VAR_DUMP: Created new AIConversationLogger with runner_token=${normalizedContext.runner_token ? 'EXISTS' : 'MISSING'}`);
     } else {

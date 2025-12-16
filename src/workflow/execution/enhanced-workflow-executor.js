@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { appendRequirementToTemplate, getRequirementTextForNextStep } from './step-requirements.js';
+import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../../step-requirements.js';
 
 /**
  * EnhancedWorkflowExecutor
@@ -160,7 +160,9 @@ class EnhancedWorkflowExecutor {
    */
   async checkJobStatus(jobId) {
     try {
-      const response = await axios.get(`${this.backendUrl}/jobs/${jobId}`, {
+      // Use /api/jobs/:id which doesn't require authentication (runner-friendly endpoint)
+      const response = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+        headers: this.getAuthHeaders(), // Still send auth headers for logging/tracking
         timeout: 5000
       });
       return response.data?.status || 'unknown';
@@ -319,12 +321,18 @@ class EnhancedWorkflowExecutor {
   async findExistingAction(actionPayload, projectId, pageId) {
     try {
       // Query for existing actions with matching criteria
+      // CRITICAL: Include job_id to prevent duplicates within the same job
       const queryParams = new URLSearchParams({
         project_id: projectId,
         page_id: pageId,
         kind: actionPayload.kind,
         text: actionPayload.text
       });
+      
+      // Include job_id if available to ensure we only find actions from the same job
+      if (actionPayload.job_id) {
+        queryParams.append('job_id', actionPayload.job_id);
+      }
       
       if (actionPayload.selector) {
         queryParams.append('selector', actionPayload.selector);
@@ -337,14 +345,16 @@ class EnhancedWorkflowExecutor {
       
       const actions = response.data || [];
       
-      // Find exact match
+      // Find exact match (including job_id if provided)
       const exactMatch = actions.find(a => {
         const matchesKind = a.kind === actionPayload.kind;
         const matchesText = a.text === actionPayload.text;
         const matchesSelector = (!actionPayload.selector && !a.selector) || (a.selector === actionPayload.selector);
         const matchesPage = a.page_id?.toString() === pageId.toString();
+        // CRITICAL: Also match job_id if provided to prevent duplicates within the same job
+        const matchesJob = !actionPayload.job_id || (a.job_id?.toString() === actionPayload.job_id.toString());
         
-        return matchesKind && matchesText && matchesSelector && matchesPage;
+        return matchesKind && matchesText && matchesSelector && matchesPage && matchesJob;
       });
       
       return exactMatch || null;
@@ -1053,19 +1063,6 @@ class EnhancedWorkflowExecutor {
     return inSingleQuote || inDoubleQuote || inTemplateLiteral;
   }
 
-  /**
-   * OLD HARDCODED CODE REMOVED - All execution now goes through workflow steps
-   * This method contained a massive hardcoded while loop that has been removed
-   * All execution now delegates to workflow step types (while-loop, if-step, etc.)
-   */
-  async _REMOVED_OLD_HARDCODED_LOOP(page, jobId, workflowId, leg) {
-    throw new Error('Old hardcoded loop removed - use workflow steps instead');
-  }
-
-  /**
-   * DUPLICATE METHOD REMOVED - All old hardcoded loop code has been removed
-   * All execution now goes through workflow steps (while-loop, if-step, etc.)
-   */
 
   /**
    * Check if script has incomplete string literals
@@ -1353,7 +1350,7 @@ class EnhancedWorkflowExecutor {
       
       // Add human-like pre-execution behaviors
       try {
-        const { addHumanBehavior, humanDelay } = await import('./stealth-config.js');
+        const { addHumanBehavior, humanDelay } = await import('../../browser/stealth-config.js');
         const { moveMouse, randomScroll } = await addHumanBehavior(page);
         
         // Random mouse movement (humans move mouse even when not clicking)
@@ -1377,7 +1374,7 @@ class EnhancedWorkflowExecutor {
       // The 'page' object is available in Node.js, not in browser
       
       // Create action-logged page wrapper to intercept and log all Playwright actions
-      const { createActionLoggedPage } = await import('./playwright-action-logger.js');
+      const { createActionLoggedPage } = await import('../../playwright-action-logger.js');
       const loggedPage = createActionLoggedPage(page, jobId);
       
       // Create an async function that has access to the page object

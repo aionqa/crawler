@@ -1,7 +1,7 @@
 import { chromium } from 'playwright';
 import axios from 'axios';
-import { AIConversationLogger } from '../shared/ai-conversation-logger.js';
-import * as BackendLogger from './backend-logger.js';
+import { AIConversationLogger } from '../../shared/ai-conversation-logger.js';
+import * as BackendLogger from '../backend-logger.js';
 
 /**
  * WorkflowStepExecutor
@@ -123,7 +123,7 @@ export class WorkflowStepExecutor {
   async getBrowserForJob(jobId) {
     if (!this.activeBrowsers.has(jobId)) {
       // Import stealth configuration
-      const { getStealthLaunchArgs } = await import('./stealth-config.js');
+      const { getStealthLaunchArgs } = await import('../browser/stealth-config.js');
       
       const browser = await chromium.launch({
         headless: true,
@@ -142,7 +142,7 @@ export class WorkflowStepExecutor {
     const page = await browser.newPage();
     
     // Inject stealth scripts to hide automation
-    const { injectStealthScripts } = await import('./stealth-config.js');
+    const { injectStealthScripts } = await import('../browser/stealth-config.js');
     await injectStealthScripts(page);
     
     // Navigate to URL if provided
