@@ -4,14 +4,14 @@
  * Works similar to GitHub Actions runners
  */
 
-import { startCrawl } from './unified-operations.js';
-import { performLogin } from './login-operations.js';
+import { startCrawl } from './crawling/unified-operations.js';
+import { performLogin } from './login/login-operations.js';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import express from 'express';
-import VideoStreamManager from './video-stream-manager.js';
-import VideoRecorder from './video-recorder.js';
+import VideoStreamManager from './browser/video-stream-manager.js';
+import VideoRecorder from './browser/video-recorder.js';
 // Minimal HTTP server for ECS health checks only (not for workflow endpoints - rule 51-runner-architecture.mdc)
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
@@ -202,12 +202,20 @@ function stopVideoStream(jobId) {
  */
 async function checkJobStatus(jobId) {
   try {
-    const response = await axios.get(`${BACKEND_URL}/jobs/${jobId}`, {
+    // Use /api/jobs/:id endpoint with RUNNER_TOKEN authentication
+    const response = await axios.get(`${BACKEND_URL}/api/jobs/${jobId}`, {
+      headers: getAuthHeaders(), // Required: sends RUNNER_TOKEN for authentication
       timeout: 5000
     });
     return response.data?.status || 'unknown';
   } catch (error) {
     console.error(`❌ Error checking job status:`, error.message);
+    if (error.response?.status === 401) {
+      console.error(`   Status: 401 Unauthorized - Authentication failed`);
+      console.error(`   Runner ID: ${RUNNER_ID}`);
+      console.error(`   Token configured: ${RUNNER_TOKEN ? 'Yes (length: ' + RUNNER_TOKEN.length + ')' : 'NO - THIS IS THE PROBLEM!'}`);
+      console.error(`   Fix: Ensure RUNNER_TOKEN environment variable is set and token exists in database`);
+    }
     return 'unknown';
   }
 }
@@ -247,7 +255,10 @@ async function executeJob(job) {
     try {
       await fetch(`${BACKEND_URL}/jobs/${job.id}/status`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
         body: JSON.stringify({ status: 'running' })
       });
       console.log(`🔄 Updated job ${job.id} status to 'running'`);
@@ -414,7 +425,7 @@ async function executeLoginJob(job, streamInterval) {
     getStealthLaunchArgs, 
     getStealthContextOptions, 
     injectStealthScripts 
-  } = await import('./stealth-config.js');
+  } = await import('./browser/stealth-config.js');
   
   const browser = await chromium.launch({ 
     headless: true,
@@ -451,7 +462,7 @@ async function executeLoginJob(job, streamInterval) {
     await page.waitForTimeout(1000);
     console.log(`[DEBUG] Navigated to login URL: ${page.url()}`);
 
-    const { performLoginWithWorkflow } = await import('./login-operations.js');
+    const { performLoginWithWorkflow } = await import('./login/login-operations.js');
     console.log(
       `[DEBUG] About to execute performLoginWithWorkflow with context:`,
       JSON.stringify({
@@ -470,7 +481,7 @@ async function executeLoginJob(job, streamInterval) {
     );
 
     if (result.success) {
-      const { safeGetLocalStorage, safeGetSessionStorage } = await import('./unified-operations.js');
+      const { safeGetLocalStorage, safeGetSessionStorage } = await import('./crawling/unified-operations.js');
 
       let cookies = Array.isArray(result.cookies) ? result.cookies : [];
       if ((!cookies || cookies.length === 0) && Array.isArray(result.iterationCookies)) {

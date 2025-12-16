@@ -4,7 +4,7 @@
  * in the order defined by workflow connections
  */
 
-import * as backendLogger from './backend-logger.js';
+import * as backendLogger from '../../backend-logger.js';
 
 /**
  * StaticNodeExecutor - Executes static workflow nodes

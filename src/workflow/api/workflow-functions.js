@@ -5,7 +5,7 @@
  */
 
 import axios from 'axios';
-import { AIConversationLogger } from '/app/shared/ai-conversation-logger.js';
+import { AIConversationLogger } from '../../../shared/ai-conversation-logger.js';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 

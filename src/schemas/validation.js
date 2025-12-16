@@ -100,9 +100,6 @@ export function validateInput(request) {
   // Validate method-specific parameters
   let schema;
   switch (method) {
-    case 'attemptLogin':
-      schema = LoginRequestSchema;
-      break;
     case 'startCrawl':
       schema = CrawlRequestSchema;
       break;

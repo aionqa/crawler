@@ -1,6 +1,6 @@
 import axios from 'axios';
-import { StaticNodeExecutor } from './static-node-executor.js';
-import { appendRequirementToTemplate, getRequirementTextForNextStep } from './step-requirements.js';
+import { StaticNodeExecutor } from '../execution/static-node-executor.js';
+import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../../step-requirements.js';
 
 /**
  * WorkflowAnalyzer - Updated 2025-10-15
@@ -4519,7 +4519,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     // Determine what to save based on config
     const saveLegs = config.saveLegs !== false; // Default true
-    const saveInteractiveElements = config.saveInteractiveElements === true;
+    const saveInteractiveElements = config.saveInteractiveElements !== false; // CRITICAL: Always save interactive elements by default (default true)
     const saveNonInteractiveElements = config.saveNonInteractiveElements === true;
     const saveLinks = config.saveLinks === true;
     const saveCookies = config.saveCookies === true;
@@ -4530,7 +4530,52 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Collect data from workflowState
     // CRITICAL: Use legsToExecute if available (the active legs array), otherwise fall back to legs
     // legsToExecute is set by AI steps and contains the latest discovered actions
-    const legs = workflowState.legsToExecute || workflowState.context?.legsToExecute || workflowState.legs || [];
+    let legs = workflowState.legsToExecute || workflowState.context?.legsToExecute || workflowState.legs || [];
+    
+    // CRITICAL: Filter out legs that have already been analyzed in this job
+    // Once an action is collected/analyzed in a job, it should not be analyzed again
+    if (saveLegs && legs.length > 0 && jobId) {
+      try {
+        const axios = (await import('axios')).default;
+        // Get all existing actions for this job
+        const existingActionsResponse = await axios.get(`${this.backendUrl}/api/actions`, {
+          params: {
+            job_id: jobId
+          },
+          headers: this.getAuthHeaders(),
+          timeout: 5000
+        });
+        
+        const existingActions = Array.isArray(existingActionsResponse.data) ? existingActionsResponse.data : [];
+        const existingLegIds = new Set(existingActions.map(a => a.leg_id).filter(Boolean));
+        
+        // Filter out legs that already have actions in this job
+        const originalLegCount = legs.length;
+        legs = legs.filter(leg => {
+          if (!leg.leg_id) return true; // Keep legs without leg_id (shouldn't happen, but be safe)
+          if (existingLegIds.has(leg.leg_id)) {
+            console.log(`⏭️ Skipping leg ${leg.leg_id} - already analyzed in job ${jobId}`);
+            return false;
+          }
+          return true;
+        });
+        
+        const skippedCount = originalLegCount - legs.length;
+        if (skippedCount > 0) {
+          console.log(`⏭️ Filtered out ${skippedCount} legs that were already analyzed in job ${jobId}`);
+          await this.sendLogToBackend(jobId, 'info', `⏭️ Skipped ${skippedCount} legs already analyzed in this job`, 'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            step_name: step.name,
+            skipped_count: skippedCount,
+            remaining_legs: legs.length
+          });
+        }
+      } catch (filterError) {
+        // If check fails, log warning but continue with all legs (don't block save-data)
+        console.warn(`⚠️ Could not check for existing actions to filter legs: ${filterError.message}`);
+      }
+    }
+    
     const interactiveElements = workflowState.playwrightAnalysis?.interactive_elements || [];
     const nonInteractiveElements = workflowState.playwrightAnalysis?.non_interactive_elements || [];
     const links = workflowState.playwrightAnalysis?.links || [];
@@ -5711,16 +5756,31 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const lines = script.split('\n');
     
     // Common Playwright action patterns - more comprehensive
+    // CRITICAL: Match patterns even if they span multiple lines or are in different formats
     const actionPatterns = [
-      /await\s+page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur)/i,
-      /await\s+page\.locator\([^)]+\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur|waitFor)/i,
+      // Standard await patterns
+      /await\s+page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur|evaluate|setContent|setViewportSize|setExtraHTTPHeaders)/i,
+      /await\s+page\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur|waitFor|textContent|innerText|innerHTML|getAttribute|isVisible|isEnabled|isChecked)/i,
       /await\s+page\.mouse\.(move|click|down|up|wheel)/i,
-      /await\s+page\.keyboard\.(press|type|down|up)/i,
+      /await\s+page\.keyboard\.(press|type|down|up|insertText|sendCharacter)/i,
       /await\s+element\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur)/i,
-      /page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur)/i,
-      /page\.locator\([^)]+\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur)/i,
+      // Without await (some scripts don't use await)
+      /page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur|evaluate|setContent|setViewportSize)/i,
+      /page\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur|waitFor)/i,
       /page\.mouse\.(move|click|down|up|wheel)/i,
-      /page\.keyboard\.(press|type|down|up)/i,
+      /page\.keyboard\.(press|type|down|up|insertText|sendCharacter)/i,
+      // Additional patterns for common operations
+      /await\s+page\.waitForSelector\(/i,
+      /await\s+page\.waitForLoadState\(/i,
+      /await\s+page\.waitForNavigation\(/i,
+      /await\s+page\.waitForResponse\(/i,
+      /await\s+page\.waitForRequest\(/i,
+      /page\.waitForSelector\(/i,
+      /page\.waitForLoadState\(/i,
+      /page\.waitForNavigation\(/i,
+      // Locator patterns (more flexible)
+      /await\s+page\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\(/i,
+      /page\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\(/i,
     ];
     
     // Track if we're inside the IIFE body (skip the wrapper lines)
@@ -5772,36 +5832,66 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       
       // Skip variable declarations (but allow if they contain actions)
-      if (line.match(/^(const|let|var)\s+\w+\s*=\s*[^a-zA-Z]/) && !line.match(/page\.|element\./)) {
+      if (line.match(/^(const|let|var)\s+\w+\s*=\s*[^a-zA-Z]/) && !line.match(/page\.|element\.|getBy/)) {
         continue;
       }
       
-      // Check if line contains a Playwright action
+      // CRITICAL: Check if line contains a Playwright action
+      // Also check multi-line patterns by looking ahead/behind if needed
+      let matchedPattern = null;
       for (const pattern of actionPatterns) {
         if (pattern.test(line)) {
-          // Clean up the action line for display
-          let displayLine = line;
-          
-          // Remove leading/trailing semicolons and whitespace
-          displayLine = displayLine.replace(/^[;\s]+|[;\s]+$/g, '');
-          
-          // Truncate very long lines but preserve the action
-          if (displayLine.length > 150) {
-            const match = displayLine.match(/(await\s+)?(page|element|page\.mouse|page\.keyboard|page\.locator)\.([a-zA-Z]+)/);
-            if (match) {
-              const awaitPart = match[1] || '';
-              const objPart = match[2];
-              const methodPart = match[3];
-              displayLine = `${awaitPart}${objPart}.${methodPart}(...)`;
-            } else {
-              // Fallback: just truncate
-              displayLine = displayLine.substring(0, 147) + '...';
-            }
-          }
-          
-          actions.push(displayLine);
+          matchedPattern = pattern;
           break;
         }
+      }
+      
+      // If no match on current line, check if it's part of a multi-line statement
+      // by checking if line ends with certain characters that suggest continuation
+      if (!matchedPattern && (line.endsWith('(') || line.endsWith('.') || line.endsWith('['))) {
+        // Look ahead a few lines to see if there's an action
+        let combinedLine = line;
+        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+          const nextLine = lines[j].trim();
+          if (!nextLine) continue;
+          combinedLine += ' ' + nextLine;
+          
+          // Check combined line
+          for (const pattern of actionPatterns) {
+            if (pattern.test(combinedLine)) {
+              matchedPattern = pattern;
+              break;
+            }
+          }
+          if (matchedPattern) break;
+          
+          // Stop if we hit a semicolon or closing brace
+          if (nextLine.includes(';') || nextLine.includes('}')) break;
+        }
+      }
+      
+      if (matchedPattern) {
+        // Clean up the action line for display
+        let displayLine = line;
+        
+        // Remove leading/trailing semicolons and whitespace
+        displayLine = displayLine.replace(/^[;\s]+|[;\s]+$/g, '');
+        
+        // Truncate very long lines but preserve the action
+        if (displayLine.length > 150) {
+          const match = displayLine.match(/(await\s+)?(page|element|page\.mouse|page\.keyboard|page\.locator|page\.getBy)\.?([a-zA-Z]+)?/);
+          if (match) {
+            const awaitPart = match[1] || '';
+            const objPart = match[2] || 'page';
+            const methodPart = match[3] || 'action';
+            displayLine = `${awaitPart}${objPart}.${methodPart}(...)`;
+          } else {
+            // Fallback: just truncate
+            displayLine = displayLine.substring(0, 147) + '...';
+          }
+        }
+        
+        actions.push(displayLine);
       }
     }
     
@@ -6613,18 +6703,34 @@ IMPORTANT OUTPUT REQUIREMENTS:
       } catch (logError) {
         console.error(`❌ Failed to log parsing result: ${logError.message}`);
       }
-    } else if (jobId && actionLines.length === 0) {
+    } else if (jobId && actionLines.length === 0 && code && code.trim().length > 0) {
+      // Only warn if script is non-empty but no actions found
+      // This is just for logging/debugging - script will still execute
       try {
+        // Check if script might be valid but just not matching our patterns
+        const hasAsyncFunction = /async\s*\(\)\s*=>|async\s+function|\(async\s*\(\)/.test(code);
+        const hasPageReference = /page\.|await\s+page|page\.locator|page\.getBy/.test(code);
+        const hasReturn = /return\s+/.test(code);
+        
+        // If script has async/page references, it's likely valid - reduce warning severity
+        const warningLevel = (hasAsyncFunction || hasPageReference || hasReturn) ? 'debug' : 'warn';
+        const warningMessage = (hasAsyncFunction || hasPageReference || hasReturn)
+          ? `ℹ️ No action lines parsed from script for logging (script length: ${code.length} chars) - script appears valid but may use patterns not recognized by parser`
+          : `⚠️ No action lines parsed from script (script length: ${code.length} chars) - script may be empty or in unexpected format`;
+        
         await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
           jobId: jobId,
-          level: 'warn',
-          message: `⚠️ No action lines parsed from script (script length: ${code.length} chars) - script may be empty or in unexpected format`,
+          level: warningLevel,
+          message: warningMessage,
           component: 'WORKFLOW-ANALYZER',
           metadata: {
             step_id: step.id,
             step_name: step.name,
             script_length: code.length,
-            script_preview: code.substring(0, 300)
+            script_preview: code.substring(0, 300),
+            has_async: hasAsyncFunction,
+            has_page_ref: hasPageReference,
+            has_return: hasReturn
           }
         }, {
           headers: this.getAuthHeaders()

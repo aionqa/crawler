@@ -389,7 +389,9 @@ class WorkflowExecutor {
    */
   async checkJobStatus(jobId) {
     try {
-      const response = await axios.get(`${this.backendUrl}/jobs/${jobId}`, {
+      // Use /api/jobs/:id which doesn't require authentication (runner-friendly endpoint)
+      const response = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
+        headers: this.getAuthHeaders(), // Still send auth headers for logging/tracking
         timeout: 5000
       });
       return response.data?.status || 'unknown';
@@ -1004,7 +1006,7 @@ class WorkflowExecutor {
 
         // Step 4: Add human-like pre-execution behaviors
         try {
-          const { addHumanBehavior, humanDelay } = await import('./stealth-config.js');
+          const { addHumanBehavior, humanDelay } = await import('../../browser/stealth-config.js');
           const { moveMouse, randomScroll } = await addHumanBehavior(page);
           
           // Random mouse movement (humans move mouse even when not clicking)
@@ -1414,8 +1416,11 @@ class WorkflowExecutor {
 
     let executedCount = 0;
 
-    // CRITICAL: Pre-check database for already-executed actions to avoid re-execution
-    // This prevents executing legs that have already been analyzed/tested in this job
+    // CRITICAL: Pre-check database for already-executed OR currently-executing actions to avoid re-execution
+    // This prevents executing legs that have already been analyzed/tested in this job OR are currently being executed
+    // Check for ANY action with leg_id + job_id, regardless of status, because:
+    // - 'pending' means the leg is currently being executed
+    // - 'success'/'failed_action'/'failed_testing' means the leg was already executed
     const executedLegIds = new Set();
     if (effectiveJobId) {
       try {
@@ -1428,9 +1433,11 @@ class WorkflowExecutor {
         
         if (executedActionsResponse.data && Array.isArray(executedActionsResponse.data)) {
           executedActionsResponse.data.forEach(action => {
-            if (action.leg_id && action.status && action.status !== 'pending') {
+            // CRITICAL: Check for ANY action with leg_id, regardless of status
+            // This prevents duplicate execution even if the first execution is still in 'pending' status
+            if (action.leg_id) {
               executedLegIds.add(action.leg_id);
-              console.log(`[WorkflowExecutor] Found already-executed leg ${action.leg_id} (status: ${action.status})`);
+              console.log(`[WorkflowExecutor] Found leg ${action.leg_id} already associated with this job (status: ${action.status || 'unknown'}) - will skip execution`);
             }
           });
         }
@@ -2004,9 +2011,9 @@ class WorkflowExecutor {
       // Playwright scripts must execute in Node.js context, not browser context
       // The 'page' object is available in Node.js, not in browser
       // Import human behavior functions
-      const { humanClick } = await import('./human-behavior-wrapper.js');
-      const { humanType } = await import('./human-typing.js');
-      const { humanDelay } = await import('./stealth-config.js');
+      const { humanClick } = await import('../../browser/human-behavior-wrapper.js');
+      const { humanType } = await import('../../browser/human-typing.js');
+      const { humanDelay } = await import('../../browser/stealth-config.js');
       
       // Create a wrapper page object that intercepts ALL Playwright methods to log execution
       const createPageWrapper = (pageObj, jobId, backendLogger) => {

@@ -6,13 +6,13 @@ import { chromium } from 'playwright';
 import OpenAI from 'openai';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import * as backendLogger from './backend-logger.js';
+import * as backendLogger from '../backend-logger.js';
 import fs from 'fs';
-import { createOpenAIClient } from './openai-client-factory.js';
+import { createOpenAIClient } from '../openai-client-factory.js';
 import ffmpeg from 'fluent-ffmpeg';
-import WorkflowAnalyzer from './workflow-analyzer.js';
-import WorkflowExecutor from './workflow-executor.js';
-import OptimizedWorkflowAnalyzer from './optimized-workflow-analyzer.js';
+import WorkflowAnalyzer from '../workflow/analysis/workflow-analyzer.js';
+import WorkflowExecutor from '../workflow/execution/workflow-executor.js';
+import OptimizedWorkflowAnalyzer from '../workflow/analysis/optimized-workflow-analyzer.js';
 import axios from 'axios';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -24,22 +24,32 @@ let aiConversationLogger = null;
 /**
  * Check job status from backend
  */
-async function checkJobStatus(jobId) {
+async function checkJobStatus(jobId, runnerToken = null) {
   try {
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
-    const response = await axios.get(`${backendUrl}/jobs/${jobId}`, {
+    const headers = {};
+    if (runnerToken) {
+      headers['Authorization'] = `Bearer ${runnerToken}`;
+    }
+    // Use /api/jobs/:id which doesn't require authentication (runner-friendly endpoint)
+    const response = await axios.get(`${backendUrl}/api/jobs/${jobId}`, {
+      headers,
       timeout: 5000
     });
     return response.data?.status || 'unknown';
   } catch (error) {
     console.error(`❌ [UNIFIED-OPERATIONS] Error checking job status:`, error.message);
+    if (error.response?.status === 401) {
+      console.error(`   Status: 401 Unauthorized - Authentication failed`);
+      console.error(`   Runner token provided: ${runnerToken ? 'Yes (length: ' + runnerToken.length + ')' : 'NO - THIS IS THE PROBLEM!'}`);
+    }
     return 'unknown';
   }
 }
 
 try {
   // Try to import shared modules (works in container)
-  const aiModule = await import('/app/shared/ai-conversation-logger.js');
+  const aiModule = await import('../../shared/ai-conversation-logger.js');
   aiConversationLogger = aiModule.aiConversationLogger;
   
   console.log('[UNIFIED-CRAWLER] ✅ AI conversation logger loaded');
@@ -1431,7 +1441,7 @@ async function withBrowser(action, options = {}) {
     getStealthLaunchArgs, 
     getStealthContextOptions, 
     injectStealthScripts 
-  } = await import('./stealth-config.js');
+  } = await import('../browser/stealth-config.js');
   
   let browser;
   
@@ -1709,7 +1719,15 @@ const modeHandlers = {
         // Check if job has been cancelled
         try {
           const axios = (await import('axios')).default;
-          const jobStatusResponse = await axios.get(`${backendUrl}/jobs/${jobId}`, { timeout: 5000 });
+          const headers = {};
+          if (context.runner_token) {
+            headers['Authorization'] = `Bearer ${context.runner_token}`;
+          }
+          // Use /api/jobs/:id which doesn't require authentication (runner-friendly endpoint)
+          const jobStatusResponse = await axios.get(`${backendUrl}/api/jobs/${jobId}`, {
+            headers,
+            timeout: 5000
+          });
           const jobStatus = jobStatusResponse.data?.status;
           if (jobStatus === 'cancelled' || jobStatus === 'failed') {
             await sendLog(jobId, 'info', `⏹️ Job ${jobStatus}, stopping crawl`);
@@ -1791,7 +1809,7 @@ const modeHandlers = {
         const handleLoginRedirect = context.handle_login_redirect;
         if (!isLoginJob && handleLoginRedirect && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail')) {
           try {
-            const { handleLoginRedirect: handleRedirect } = await import('./login-redirect-handler.js');
+            const { handleLoginRedirect: handleRedirect } = await import('../login/login-redirect-handler.js');
             const redirectResult = await handleRedirect(page, jobId, finalUrl, context, openaiClient, handleLoginRedirect);
             
             if (redirectResult && redirectResult.reauthenticated) {
@@ -1828,7 +1846,7 @@ const modeHandlers = {
         if (shouldRunPerformanceAnalysis) {
           try {
             await sendLog(jobId, 'info', `🔍 Running performance analysis...`);
-            const { analyzePageWithLighthouse } = await import('./lighthouse-analyzer.js');
+            const { analyzePageWithLighthouse } = await import('../lighthouse-analyzer.js');
             lighthouseResults = await analyzePageWithLighthouse(page, jobId, finalUrl);
             
             if (lighthouseResults.success) {
@@ -1884,6 +1902,47 @@ const modeHandlers = {
         const projectStartUrl = context.start_url || actualPageUrl; // Fallback to current URL if not provided
         const pageResult = await sendBasicPageToBackend(jobId, actualPageUrl, pageTitle, projectId, projectStartUrl, lighthouseResults);
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
+        
+        // CRITICAL: Check if this page has already been analyzed in this job to prevent duplicate workflows
+        let existingWorkflow = null;
+        try {
+          const axios = (await import('axios')).default;
+          const headers = {};
+          if (context.runner_token) {
+            headers['Authorization'] = `Bearer ${context.runner_token}`;
+          }
+          const workflowsResponse = await axios.get(`${backendUrl}/api/workflows`, {
+            params: {
+              project_id: projectId,
+              page_id: createdPageId,
+              job_id: jobId
+            },
+            headers,
+            timeout: 5000
+          });
+          
+          // Response can be array or object with workflows property
+          const workflowsArray = Array.isArray(workflowsResponse.data) 
+            ? workflowsResponse.data 
+            : (workflowsResponse.data?.workflows || []);
+          
+          if (workflowsArray.length > 0) {
+            // Find workflow for this page+job combination
+            existingWorkflow = workflowsArray.find(w => 
+              w.page_id?.toString() === createdPageId.toString() && 
+              w.job_id?.toString() === jobId.toString()
+            );
+            
+            if (existingWorkflow) {
+              await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrl} already analyzed in this job (workflow: ${existingWorkflow._id}), skipping duplicate analysis`);
+              // Skip analysis but still process links if needed
+              continue;
+            }
+          }
+        } catch (workflowCheckError) {
+          // If check fails, log warning but continue (don't block analysis)
+          console.warn(`[WORKFLOW] Could not check for existing workflow: ${workflowCheckError.message}`);
+        }
         
         // Check if we should skip AI analysis
         const skipAIAnalysisOption = context.options?.skip_ai_analysis || false;
@@ -2780,7 +2839,8 @@ async function performMediaCrawl(page, context, openaiClient) {
   // Perform recursive crawl with approach name
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'media', openaiClient, {
     max_depth: context.options?.max_depth ?? 3,
-    max_pages: context.options?.max_pages ?? 50
+    max_pages: context.options?.max_pages ?? 50,
+    runner_token: context.runner_token
   });
   
   // Build overall conclusion
@@ -2919,7 +2979,8 @@ async function performTextCrawl(page, context, openaiClient) {
   // Perform recursive crawl with approach name
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'text', openaiClient, {
     max_depth: context.options?.max_depth ?? 3,
-    max_pages: context.options?.max_pages ?? 50
+    max_pages: context.options?.max_pages ?? 50,
+    runner_token: context.runner_token
   });
   
   // Build overall conclusion
@@ -3063,7 +3124,8 @@ async function performFormsCrawl(page, context, openaiClient) {
   // Perform recursive crawl with approach name
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'forms', openaiClient, {
     max_depth: context.options?.max_depth ?? 3,
-    max_pages: context.options?.max_pages ?? 50
+    max_pages: context.options?.max_pages ?? 50,
+    runner_token: context.runner_token
   });
   
   // Build overall conclusion
@@ -3738,7 +3800,15 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
     try {
       const axios = (await import('axios')).default;
       const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
-      const jobStatusResponse = await axios.get(`${backendUrl}/jobs/${jobId}`, { timeout: 5000 });
+      const headers = {};
+      if (options.runner_token) {
+        headers['Authorization'] = `Bearer ${options.runner_token}`;
+      }
+      // Use /api/jobs/:id which doesn't require authentication (runner-friendly endpoint)
+      const jobStatusResponse = await axios.get(`${backendUrl}/api/jobs/${jobId}`, {
+        headers,
+        timeout: 5000
+      });
       const jobStatus = jobStatusResponse.data?.status;
       if (jobStatus === 'cancelled' || jobStatus === 'failed') {
         await sendLog(jobId, 'info', `⏹️ Job ${jobStatus}, stopping crawl`);
@@ -3747,6 +3817,10 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
     } catch (statusCheckError) {
       // Continue if status check fails (don't block crawl)
       console.warn(`Failed to check job status: ${statusCheckError.message}`);
+      if (statusCheckError.response?.status === 401) {
+        console.warn(`   Status: 401 Unauthorized - Authentication failed`);
+        console.warn(`   Runner token provided: ${options.runner_token ? 'Yes (length: ' + options.runner_token.length + ')' : 'NO - THIS IS THE PROBLEM!'}`);
+      }
     }
     
     try {
@@ -3991,7 +4065,8 @@ async function performStaticCrawl(page, context, openaiClient) {
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'static', openaiClient, {
     max_depth: context.options?.max_depth ?? 3,
     max_pages: context.options?.max_pages ?? 50,
-    skip_crawled_pages: context.options?.skip_crawled_pages ?? false
+    skip_crawled_pages: context.options?.skip_crawled_pages ?? false,
+    runner_token: context.runner_token
   });
   
   // Build overall conclusion
@@ -5333,15 +5408,6 @@ async function executeApproachSequence(page, jobId, context, openaiClient, pageI
 }
 
 // Main exported functions
-/**
- * @deprecated This function is deprecated. Use performLoginWithWorkflow from login-operations.js instead.
- * The runner should use performLoginWithWorkflow directly (rule 10-service-separation.mdc).
- * This function uses the old modeHandlers pattern which is being phased out.
- */
-export async function attemptLogin(url, username, password, cookies, context, openaiApiKey = null) {
-  console.warn('[DEPRECATED] attemptLogin() is deprecated. Use performLoginWithWorkflow() from login-operations.js instead.');
-  throw new Error('attemptLogin() is deprecated. Use performLoginWithWorkflow() from login-operations.js instead (rule 10-service-separation.mdc)');
-}
 
 export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   const startTime = Date.now();
@@ -5358,7 +5424,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   await sendLog(jobId, 'info', `🚀 Starting WORKFLOW mode crawl process for ${url} (template: ${context.workflow_template_id})`, { mode, workflow_template_id: context.workflow_template_id });
   
   // Check job status before starting
-  const jobStatus = await checkJobStatus(jobId);
+  const jobStatus = await checkJobStatus(jobId, context.runner_token);
   if (jobStatus !== 'running') {
     await sendLog(jobId, 'warn', `⚠️ Job status is ${jobStatus}, stopping crawl execution`, { mode, jobStatus });
     throw new Error(`Job status is ${jobStatus}, cannot start crawl`);

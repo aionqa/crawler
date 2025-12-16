@@ -1,6 +1,6 @@
 import axios from 'axios';
 import fetch from 'node-fetch';
-import { analyzePageWithLighthouse } from './lighthouse-analyzer.js';
+import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
 
 /**
  * SimpleWorkflowExecutor
@@ -299,7 +299,7 @@ class SimpleWorkflowExecutor {
     
     try {
       // Import aiConversationLogger
-      const { aiConversationLogger } = await import('/app/shared/ai-conversation-logger.js');
+      const { aiConversationLogger } = await import('../../../shared/ai-conversation-logger.js');
       
       // Get OpenAI API key from environment
       const openaiApiKey = process.env.OPENAI_API_KEY;
@@ -308,7 +308,7 @@ class SimpleWorkflowExecutor {
       }
       
       // Use configured endpoint if available
-      const { createOpenAIClient } = await import('./openai-client-factory.js');
+      const { createOpenAIClient } = await import('../../openai-client-factory.js');
       const openaiClient = createOpenAIClient(this.context, openaiApiKey);
       
       // Get current page context
