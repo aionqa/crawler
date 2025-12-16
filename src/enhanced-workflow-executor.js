@@ -411,6 +411,8 @@ class EnhancedWorkflowExecutor {
           return await this.executeIfStep(page, jobId, workflowId, step);
         case 'execute-code':
           return await this.executeCodeStep(page, jobId, workflowId, step);
+        case 'browser-config':
+          return await this.executeBrowserConfigStep(page, jobId, workflowId, step);
         case 'ai-prompt':
           return await this.executeAIPromptStep(page, jobId, workflowId, step, { nextStep });
         case 'cycle':
@@ -681,6 +683,94 @@ class EnhancedWorkflowExecutor {
       screenshot_after: screenshotAfterKey,
       playwright_script: playwrightScript
     };
+  }
+
+  /**
+   * Execute a browser-config step - Configures browser settings
+   */
+  async executeBrowserConfigStep(page, jobId, workflowId, step) {
+    const config = step.config || {};
+    
+    console.log(`[EnhancedWorkflowExecutor] Executing browser-config step: ${step.id}`);
+    
+    try {
+      // Get browser configuration from step config
+      const browserConfig = {
+        viewport: config.viewport || { width: 1920, height: 1080 },
+        userAgent: config.userAgent || config.user_agent || null,
+        timeout: config.timeout || 30000,
+        isMobile: config.isMobile || config.is_mobile || false,
+        hasTouch: config.hasTouch || config.has_touch || false,
+        deviceScaleFactor: config.deviceScaleFactor || config.device_scale_factor || 1,
+        locale: config.locale || 'en-US',
+        timezoneId: config.timezoneId || config.timezone_id || 'America/New_York'
+      };
+      
+      // Apply viewport
+      if (browserConfig.viewport) {
+        await page.setViewportSize(browserConfig.viewport);
+        console.log(`[EnhancedWorkflowExecutor] Viewport set to ${browserConfig.viewport.width}x${browserConfig.viewport.height}`);
+      }
+      
+      // Apply user agent via context (if page has context)
+      if (browserConfig.userAgent) {
+        const context = page.context();
+        await context.setExtraHTTPHeaders({
+          'User-Agent': browserConfig.userAgent
+        });
+        // Also set via evaluate to override navigator.userAgent
+        await page.evaluate((ua) => {
+          Object.defineProperty(navigator, 'userAgent', {
+            get: () => ua,
+            configurable: true
+          });
+        }, browserConfig.userAgent);
+        console.log(`[EnhancedWorkflowExecutor] User agent set to: ${browserConfig.userAgent.substring(0, 50)}...`);
+      }
+      
+      // Apply mobile emulation if needed
+      if (browserConfig.isMobile) {
+        const context = page.context();
+        // Mobile devices typically have touch support
+        await context.addInitScript(() => {
+          Object.defineProperty(navigator, 'maxTouchPoints', {
+            get: () => 5,
+            configurable: true
+          });
+        });
+        console.log(`[EnhancedWorkflowExecutor] Mobile emulation enabled`);
+      }
+      
+      // Store config in workflow state for future reference
+      const workflow = await this.getWorkflow(workflowId);
+      if (!workflow.browserConfig) {
+        workflow.browserConfig = {};
+      }
+      Object.assign(workflow.browserConfig, browserConfig);
+      
+      await this.updateStepStatus(workflowId, step.id, 'completed', jobId);
+      
+      await this.logWorkflowStep(
+        'browser-config',
+        `🌐 Browser configured: ${browserConfig.viewport.width}x${browserConfig.viewport.height}${browserConfig.isMobile ? ' (mobile)' : ''}`,
+        { browserConfig }
+      );
+      
+      return {
+        step_id: step.id,
+        result: 'success',
+        browserConfig: browserConfig,
+        message: `Browser configured: ${browserConfig.viewport.width}x${browserConfig.viewport.height}${browserConfig.isMobile ? ' (mobile)' : ''}`
+      };
+    } catch (error) {
+      console.error(`[EnhancedWorkflowExecutor] Browser config error: ${error.message}`);
+      await this.updateStepStatus(workflowId, step.id, 'failed', jobId);
+      return {
+        step_id: step.id,
+        result: 'failure',
+        error: error.message
+      };
+    }
   }
 
   /**
@@ -1285,6 +1375,11 @@ class EnhancedWorkflowExecutor {
       
       // Playwright scripts must execute in Node.js context, not browser context
       // The 'page' object is available in Node.js, not in browser
+      
+      // Create action-logged page wrapper to intercept and log all Playwright actions
+      const { createActionLoggedPage } = await import('./playwright-action-logger.js');
+      const loggedPage = createActionLoggedPage(page, jobId);
+      
       // Create an async function that has access to the page object
       const executeInNodeContext = async (pageObj, scriptCode) => {
         // Use string concatenation (not template literals) to avoid escaping issues
@@ -1300,7 +1395,7 @@ class EnhancedWorkflowExecutor {
       
       // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
       const result = await Promise.race([
-        executeInNodeContext(page, cleanedScript),
+        executeInNodeContext(loggedPage, cleanedScript),
         new Promise((_, reject) => 
           setTimeout(() => reject(new Error('Script execution timeout after 45 seconds')), 45000)
         )

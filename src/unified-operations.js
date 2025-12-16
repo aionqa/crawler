@@ -411,7 +411,7 @@ async function sendLog(jobId, level, message, data = {}, conversationId = null) 
   }
   
   // Always log to console for docker logs (human-readable)
-  console.log(`[${level.toUpperCase()}] [${componentName}] ${cleanedMessage}`);
+  console.log(`${cleanedMessage}`);
   
   try {
     const pageUrl = data.page_url;
@@ -1472,30 +1472,30 @@ async function withBrowser(action, options = {}) {
   // Set viewport to match window size (1920x1080 from launch args)
   await page.setViewportSize({ width: 1920, height: 1080 });
   
-  console.log('[CRAWLER] Context and page created, calling callbacks...');
-  console.log('[CRAWLER] options.onContextReady exists:', !!options.onContextReady);
-  console.log('[CRAWLER] options.onContextReady type:', typeof options.onContextReady);
-  console.log('[CRAWLER] options.onPageReady exists:', !!options.onPageReady);
+  console.log('Context and page created, calling callbacks...');
+  console.log('options.onContextReady exists:', !!options.onContextReady);
+  console.log('options.onContextReady type:', typeof options.onContextReady);
+  console.log('options.onPageReady exists:', !!options.onPageReady);
   
   // Call onContextReady callback for video recording (if provided)
   if (options.onContextReady && typeof options.onContextReady === 'function') {
     try {
-      console.log('[CRAWLER] Calling onContextReady callback');
+      console.log('Calling onContextReady callback');
       options.onContextReady(context, page);
     } catch (e) {
-      console.error(`[CRAWLER] onContextReady callback error:`, e);
+      console.error(`onContextReady callback error:`, e);
     }
   } else {
-    console.log('[CRAWLER] ⚠️ onContextReady callback not available or not a function');
+    console.log('⚠️ onContextReady callback not available or not a function');
   }
   
   // Call onPageReady callback for streaming (if provided)
   if (options.onPageReady && typeof options.onPageReady === 'function') {
     try {
-      console.log('[CRAWLER] Calling onPageReady callback');
+      console.log('Calling onPageReady callback');
       options.onPageReady(page);
     } catch (e) {
-      console.error(`[CRAWLER] onPageReady callback error:`, e);
+      console.error(`onPageReady callback error:`, e);
     }
   }
   
@@ -1568,7 +1568,7 @@ async function withBrowser(action, options = {}) {
       } catch (callbackError) {
         const jobIdForLogs = options.job_id || options.jobId || 'unknown';
         await sendLog(jobIdForLogs, 'warn', `⚠️ Video finalization callback failed: ${callbackError.message}`);
-        console.error('[CRAWLER] beforeBrowserClose callback error:', callbackError);
+        console.error('beforeBrowserClose callback error:', callbackError);
       }
     }
     await browser.close();
@@ -1717,7 +1717,7 @@ const modeHandlers = {
           }
         } catch (statusCheckError) {
           // Continue if status check fails (don't block crawl)
-          console.warn(`[CRAWLER] Failed to check job status: ${statusCheckError.message}`);
+          console.warn(`Failed to check job status: ${statusCheckError.message}`);
         }
         
         visitedUrls.add(currentUrl);
@@ -1750,7 +1750,7 @@ const modeHandlers = {
                 await sendLog(jobId, 'info', `🔄 Page redirected from ${currentUrl} to ${finalUrl}`);
               }
             } catch (urlError) {
-              console.warn(`[CRAWLER] Could not get page URL after navigation: ${urlError.message}`);
+              console.warn(`Could not get page URL after navigation: ${urlError.message}`);
             }
           } catch (navError) {
             await sendLog(jobId, 'warn', `⚠️ Navigation failed: ${navError.message}`);
@@ -1774,7 +1774,52 @@ const modeHandlers = {
               await sendLog(jobId, 'info', `🔄 Page navigated from ${currentUrl} to ${finalUrl} (likely due to cookies)`);
             }
           } catch (urlError) {
-            console.warn(`[CRAWLER] Could not get page URL: ${urlError.message}`);
+            console.warn(`Could not get page URL: ${urlError.message}`);
+          }
+        }
+        
+        // CRITICAL: Check for login page redirection and handle it
+        // ONLY run if explicitly configured AND not a login job
+        // Login jobs are identified by jobType in context (set by backend/runner)
+        const isLoginJob = context?.jobType === 'login' || 
+                          context?.job_type === 'login' || 
+                          context?.isLoginJob === true ||
+                          context?.preventCrawling === true;
+        
+        // Only check for login redirects if explicitly configured (not default)
+        // AND only for crawl jobs (not login jobs)
+        const handleLoginRedirect = context.handle_login_redirect;
+        if (!isLoginJob && handleLoginRedirect && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail')) {
+          try {
+            const { handleLoginRedirect: handleRedirect } = await import('./login-redirect-handler.js');
+            const redirectResult = await handleRedirect(page, jobId, finalUrl, context, openaiClient, handleLoginRedirect);
+            
+            if (redirectResult && redirectResult.reauthenticated) {
+              // Re-authentication successful, update context and continue from root
+              await sendLog(jobId, 'info', `✅ Re-authenticated successfully, continuing crawl from ${redirectResult.newUrl}`);
+              // Update context with new cookies
+              if (redirectResult.cookies) {
+                context.cookies = redirectResult.cookies;
+                // Also update browser context cookies
+                try {
+                  await page.context().addCookies(redirectResult.cookies);
+                } catch (cookieError) {
+                  console.warn(`Failed to update browser cookies: ${cookieError.message}`);
+                }
+              }
+              // Reset URL queue to start from root
+              urlQueue.length = 0;
+              urlQueue.push({ url: redirectResult.newUrl, depth: 0 });
+              visitedUrls.clear(); // Clear visited URLs to restart crawl
+              pagesAnalyzed = 0; // Reset page counter
+              await sendLog(jobId, 'info', `🔄 Restarting crawl from root path with fresh authentication`);
+              continue; // Skip current page and start fresh
+            }
+          } catch (redirectError) {
+            // If handleLoginRedirect is 'fail', the error is already thrown
+            // If it's 'auto_retry' and fails, we should also fail
+            await sendLog(jobId, 'error', `❌ Login redirect handling failed: ${redirectError.message}`);
+            throw redirectError;
           }
         }
         
@@ -1855,20 +1900,66 @@ const modeHandlers = {
 
           const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, createdPageId, projectId);
 
-          // Log workflow analysis results
-          const legsCount = typeof analysisResult?.legs_count === 'number' ? analysisResult.legs_count : null;
-          const legsArray = analysisResult?.legs || [];
-          const actualLegsCount = legsArray.length;
+          // CRITICAL: For login jobs, check if login was successful and stop immediately
+          const isLoginJob = context?.jobType === 'login' || 
+                            context?.job_type === 'login' || 
+                            context?.isLoginJob === true ||
+                            context?.preventCrawling === true;
           
-          if (legsCount !== null && legsCount > 0) {
-            await sendLog(jobId, 'info', `✅ Workflow executed with ${legsCount} testable legs`);
-          } else if (legsCount === 0) {
-            await sendLog(jobId, 'info', `ℹ️ Workflow analysis completed with 0 legs (no testable actions found)`);
+          if (isLoginJob) {
+            // Extract login status from workflow result
+            const determineResult = 
+              analysisResult?.determine_completion?.result ||
+              analysisResult?.determine_completion ||
+              analysisResult?.results?.determine_completion?.result ||
+              analysisResult?.results?.determine_completion ||
+              analysisResult?.context?.determine_completion?.result ||
+              analysisResult?.context?.determine_completion ||
+              null;
+            
+            const loginStatus = determineResult?.status || determineResult?.completion_status || null;
+            const loginSuccess = loginStatus === 'success' || 
+                                (determineResult?.is_complete === true && loginStatus !== 'failure');
+            
+            if (loginSuccess) {
+              await sendLog(jobId, 'info', `✅ Login successful - stopping job (login-only mode)`);
+              // Return early to prevent link discovery and crawling
+              return {
+                success: true,
+                loginStatus: 'success',
+                finalUrl: page.url(),
+                cookies: await page.context().cookies().catch(() => []),
+                workflowResult: analysisResult,
+                stopped: true,
+                reason: 'Login successful - job stopped as configured for login-only mode'
+              };
+            } else {
+              await sendLog(jobId, 'warn', `⚠️ Login not confirmed (status: ${loginStatus || 'unknown'}) - continuing workflow`);
+            }
           }
+
+          // Log workflow analysis results (skip for login jobs - they don't generate legs)
+          // Check if this is a login job (already checked above, but re-check for clarity)
+          const shouldSkipLegsLogging = context?.jobType === 'login' || 
+                            context?.job_type === 'login' || 
+                            context?.isLoginJob === true ||
+                            context?.preventCrawling === true;
           
-          // Check for discrepancy between reported legs_count and actual legs array
-          if (legsCount !== null && legsCount !== actualLegsCount) {
-            await sendLog(jobId, 'warn', `⚠️ Discrepancy: legs_count=${legsCount} but legs array has ${actualLegsCount} items`);
+          if (!shouldSkipLegsLogging) {
+            const legsCount = typeof analysisResult?.legs_count === 'number' ? analysisResult.legs_count : null;
+            const legsArray = analysisResult?.legs || [];
+            const actualLegsCount = legsArray.length;
+            
+            if (legsCount !== null && legsCount > 0) {
+              await sendLog(jobId, 'info', `✅ Workflow executed with ${legsCount} testable legs`);
+            } else if (legsCount === 0) {
+              await sendLog(jobId, 'info', `ℹ️ Workflow analysis completed with 0 legs (no testable actions found)`);
+            }
+            
+            // Check for discrepancy between reported legs_count and actual legs array
+            if (legsCount !== null && legsCount !== actualLegsCount) {
+              await sendLog(jobId, 'warn', `⚠️ Discrepancy: legs_count=${legsCount} but legs array has ${actualLegsCount} items`);
+            }
           }
           
           if (analysisResult?.page_description) {
@@ -1948,7 +2039,7 @@ const modeHandlers = {
                 const executionResult = await workflowExecutor.executeLegsDirectly(page, jobId, filteredLegs, null);
                 await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed, no workflow_id - execution only)`);
               } catch (execError) {
-                console.error(`[WORKFLOW] Leg execution failed:`, execError);
+                console.error(`Leg execution failed:`, execError);
                 await sendLog(jobId, 'error', `❌ Failed to execute workflow legs: ${execError.message}`);
               }
             } else {
@@ -1978,7 +2069,19 @@ const modeHandlers = {
                   }
                 }
 
-                await sendLog(jobId, 'info', `▶️ Executing ${legsToExecute.length} workflow legs for ${analysisResult.workflow_id}...`);
+                // CRITICAL: Calculate how many legs to execute to reach 80% threshold
+                // If we have many legs, execute at least 80% of them
+                const totalLegs = legsToExecute.length;
+                const targetPercentage = 80;
+                const targetLegsCount = Math.ceil(totalLegs * (targetPercentage / 100));
+                // Execute at least 80% of legs, but ensure we execute at least the target count
+                const legsToExecuteForThreshold = legsToExecute.slice(0, Math.max(targetLegsCount, Math.ceil(totalLegs * 0.8)));
+                
+                if (legsToExecuteForThreshold.length < totalLegs) {
+                  await sendLog(jobId, 'info', `📊 Executing ${legsToExecuteForThreshold.length}/${totalLegs} legs to reach ${targetPercentage}% threshold (${((legsToExecuteForThreshold.length / totalLegs) * 100).toFixed(1)}%)`);
+                } else {
+                  await sendLog(jobId, 'info', `▶️ Executing all ${legsToExecute.length} workflow legs for ${analysisResult.workflow_id}...`);
+                }
                 // For single-page scans, temporarily update workflow in database to filter navigation legs
                 if (isSinglePageScan && legsToExecute.length < (analysisResult.legs?.length || 0)) {
                   const axios = (await import('axios')).default;
@@ -2001,7 +2104,7 @@ const modeHandlers = {
                     const executionResult = await workflowExecutor.executeWorkflow(page, jobId, workflowId);
                     await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
                   } catch (updateError) {
-                    console.warn(`[WORKFLOW] Failed to filter legs for single-page scan: ${updateError.message}`);
+                    console.warn(`Failed to filter legs for single-page scan: ${updateError.message}`);
                     // Fall back to executing all legs
                     const executionResult = await workflowExecutor.executeWorkflow(page, jobId, workflowId);
                     await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
@@ -2015,12 +2118,79 @@ const modeHandlers = {
                         timeout: 5000
                       });
                     } catch (restoreError) {
-                      console.error(`[WORKFLOW] Failed to restore original legs: ${restoreError.message}`);
+                      console.error(`Failed to restore original legs: ${restoreError.message}`);
                     }
                   }
                 } else {
-                  const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
-                  await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
+                  // Execute workflow with legs to reach 80% threshold
+                  // Use legsToExecuteForThreshold if calculated, otherwise use all legs
+                  const finalLegsToExecute = legsToExecuteForThreshold.length > 0 ? legsToExecuteForThreshold : legsToExecute;
+                  
+                  // First, update workflow temporarily with legs to execute (if we're filtering)
+                  try {
+                    const axios = (await import('axios')).default;
+                    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+                    const workflowId = analysisResult.workflow_id;
+                    
+                    // Get original workflow
+                    const originalWorkflowResponse = await axios.get(`${backendUrl}/api/workflows/${workflowId}`, {
+                      headers: workflowExecutor.getAuthHeaders ? workflowExecutor.getAuthHeaders() : {},
+                      timeout: 5000
+                    });
+                    const originalWorkflow = originalWorkflowResponse.data;
+                    const originalLegs = originalWorkflow?.legs || [];
+                    
+                    // Temporarily update workflow with legs to execute (for 80% threshold)
+                    if (finalLegsToExecute.length < totalLegs) {
+                      await axios.put(`${backendUrl}/api/workflows/${workflowId}`, {
+                        legs: finalLegsToExecute
+                      }, {
+                        headers: workflowExecutor.getAuthHeaders ? workflowExecutor.getAuthHeaders() : {},
+                        timeout: 5000
+                      });
+                    }
+                    
+                    const executionResult = await workflowExecutor.executeWorkflow(page, jobId, workflowId);
+                    await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
+                    
+                    // Restore original legs if we filtered them
+                    if (finalLegsToExecute.length < totalLegs) {
+                      await axios.put(`${backendUrl}/api/workflows/${workflowId}`, {
+                        legs: originalLegs
+                      }, {
+                        headers: workflowExecutor.getAuthHeaders ? workflowExecutor.getAuthHeaders() : {},
+                        timeout: 5000
+                      });
+                    }
+                    
+                    // Verify we reached 80% threshold
+                    try {
+                      const actionsResponse = await axios.get(`${backendUrl}/api/actions?job_id=${jobId}`, {
+                        timeout: 5000
+                      });
+                      const allActions = Array.isArray(actionsResponse.data) ? actionsResponse.data : [];
+                      const totalActions = allActions.length;
+                      const completedActions = allActions.filter(a => 
+                        a.status === 'completed' || a.status === 'failed'
+                      ).length;
+                      
+                      if (totalActions > 0) {
+                        const analyzedPercentage = (completedActions / totalActions) * 100;
+                        await sendLog(jobId, 'info', `📊 Action analysis: ${analyzedPercentage.toFixed(1)}% (${completedActions}/${totalActions})`);
+                        
+                        if (analyzedPercentage < 80) {
+                          await sendLog(jobId, 'warn', `⚠️ Action analysis below 80% threshold. Consider executing more legs.`);
+                        }
+                      }
+                    } catch (statsError) {
+                      console.warn(`Failed to verify action analysis percentage: ${statsError.message}`);
+                    }
+                  } catch (execError) {
+                    // Fallback to executing all legs if threshold logic fails
+                    console.warn(`Failed to execute with threshold logic: ${execError.message}, falling back to all legs`);
+                    const executionResult = await workflowExecutor.executeWorkflow(page, jobId, analysisResult.workflow_id);
+                    await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed)`);
+                  }
                 }
               } catch (execError) {
                 await sendLog(jobId, 'warn', `⚠️ Workflow leg execution encountered issues: ${execError.message}`);
@@ -2062,14 +2232,42 @@ const modeHandlers = {
                 continue;
               }
               
-              // Regular link - use base URL (without hash) for deduplication
-              const urlToCheck = link.split('#')[0];
-              if (!visitedUrls.has(urlToCheck)) {
-                urlQueue.push({ url: urlToCheck, depth: depth + 1 });
+              // DEFAULT: Queue links for crawling (crawl jobs test everything)
+              // Only skip if this is explicitly configured as a login job
+              // Login jobs are configured via workflow configuration step, not by default
+              const isLoginJob = context?.jobType === 'login' || 
+                                context?.job_type === 'login' || 
+                                context?.isLoginJob === true ||
+                                context?.preventCrawling === true ||
+                                context?.preventLinkDiscovery === true;
+              
+              // DEFAULT BEHAVIOR: Queue links (crawl job)
+              // Only skip if explicitly configured as login job
+              if (!isLoginJob) {
+                // Regular link - use base URL (without hash) for deduplication
+                const urlToCheck = link.split('#')[0];
+                if (!visitedUrls.has(urlToCheck)) {
+                  urlQueue.push({ url: urlToCheck, depth: depth + 1 });
+                }
+              } else {
+                console.log(`[UNIFIED-OPERATIONS] 🔐 Login job detected - skipping link queuing (login-only mode)`);
               }
             }
             
-            await sendLog(jobId, 'info', `🔗 Found ${internalLinks.length} internal links, queued ${Math.min(20, internalLinks.length)} for crawling`);
+            // DEFAULT: Queue links for crawling (crawl jobs test everything)
+            // Only skip if this is explicitly configured as a login job
+            const isLoginJob = context?.jobType === 'login' || 
+                              context?.job_type === 'login' || 
+                              context?.isLoginJob === true ||
+                              context?.preventCrawling === true ||
+                              context?.preventLinkDiscovery === true;
+            
+            if (isLoginJob) {
+              await sendLog(jobId, 'info', `🔗 Found ${internalLinks.length} internal links (NOT queued - login-only job configured)`);
+            } else {
+              // DEFAULT BEHAVIOR: Queue links for crawling
+              await sendLog(jobId, 'info', `🔗 Found ${internalLinks.length} internal links, queued ${Math.min(20, internalLinks.length)} for crawling`);
+            }
           } else {
             await sendLog(jobId, 'info', `⏭️ Skipping link collection (max_pages: ${maxPages}, current: ${pagesAnalyzed}, max_depth: ${maxDepth}, current: ${depth})`);
           }
@@ -3548,7 +3746,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       }
     } catch (statusCheckError) {
       // Continue if status check fails (don't block crawl)
-      console.warn(`[CRAWLER] Failed to check job status: ${statusCheckError.message}`);
+      console.warn(`Failed to check job status: ${statusCheckError.message}`);
     }
     
     try {

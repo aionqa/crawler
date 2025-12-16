@@ -1430,6 +1430,15 @@ export class AIConversationLogger {
         separate_screenshots: options.separate_screenshots || false
       };
 
+      console.log(`[AI-CONVERSATION] 📤 Sending conversation to backend:`, {
+        jobId,
+        conversationId: explicitConversationId,
+        conversationType,
+        hasRequest: !!textRequest,
+        hasResponse: !!aiResponse,
+        attachmentsCount: attachments.length
+      });
+      
       const httpResponse = await fetch(`${this.backendUrl}/ai-conversations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1437,14 +1446,26 @@ export class AIConversationLogger {
       });
 
       if (httpResponse.ok) {
-        console.log(`[AI-CONVERSATION] 🤖 Structured AI conversation sent to chat mode for job ${jobId} by agent ${agentName}`);
+        const responseData = await httpResponse.json().catch(() => ({}));
+        console.log(`[AI-CONVERSATION] ✅ Structured AI conversation sent to chat mode for job ${jobId} by agent ${agentName}`, {
+          conversation_id: responseData.conversation_id,
+          chat_context_id: responseData.chat_context_id
+        });
         console.log(`[AI-CONVERSATION] 📝 Human Request: ${humanRequest}`);
         console.log(`[AI-CONVERSATION] 🤖 AI Response: ${humanResponse}`);
       } else {
-        console.log(`[AI-CONVERSATION] ⚠️ Failed to send structured AI conversation: ${httpResponse.status}`);
+        const errorText = await httpResponse.text().catch(() => 'Unknown error');
+        console.error(`[AI-CONVERSATION] ❌ Failed to send structured AI conversation: ${httpResponse.status}`, errorText);
+        console.error(`[AI-CONVERSATION] Request data:`, {
+          jobId,
+          conversationId: explicitConversationId,
+          conversationType,
+          pageUrl
+        });
       }
     } catch (error) {
-      console.log(`[AI-CONVERSATION] ⚠️ Error sending structured AI conversation: ${error.message}`);
+      console.error(`[AI-CONVERSATION] ❌ Error sending structured AI conversation: ${error.message}`, error);
+      console.error(`[AI-CONVERSATION] Stack:`, error.stack);
     }
   }
 

@@ -17,9 +17,6 @@ const FALLBACK_REQUIREMENTS = {
   },
   'validate-response': () => [
     'Return a JSON object that matches the schema expected by the upcoming validation step.'
-  ],
-  'validate-login': () => [
-    'Provide login execution results, including success flag, message, and any credential/session details required for validation.'
   ]
 };
 
