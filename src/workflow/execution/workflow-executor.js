@@ -1,9 +1,12 @@
 import axios from 'axios';
+import { detectModal, analyzeModalPaths, waitForModal } from '../utils/modalDetector.js';
+import { generateModalPath, appendToModalPath, getActionNameFromElement, getPageNameFromModal } from '../utils/modalPathNotation.js';
 
 /**
  * WorkflowExecutor
  * Handles execution of workflow legs with iterative OpenAI testing
  * Each leg is tested until OpenAI confirms completion or failure
+ * Supports modal detection and sub-leg creation (rule 55)
  */
 class WorkflowExecutor {
   constructor(backendUrl, aiLogger, backendLogger, context = {}, videoRecorder = null) {
@@ -995,14 +998,35 @@ class WorkflowExecutor {
           
           console.log(`[WorkflowExecutor] ✅ Successfully extracted Playwright script (${playwrightScript.length} characters) - NO sanitization applied`);
           
-          // Update leg with script
+          // Update leg with script - CRITICAL: This ensures the script is persisted
           await this.updateLeg(workflowId, leg.leg_id, { 
             playwright_script: playwrightScript,
             update_action: true  // Signal backend to also update action document
           });
+          
+          // CRITICAL: Verify script was set correctly
+          if (!playwrightScript || typeof playwrightScript !== 'string' || playwrightScript.trim().length === 0) {
+            throw new Error(`Playwright script extraction succeeded but script is empty or invalid`);
+          }
+        }
+        
+        // CRITICAL: At this point, playwrightScript MUST exist (either from leg or from generation)
+        // If it doesn't exist, that's a critical bug and we should fail
+        if (!playwrightScript || typeof playwrightScript !== 'string' || playwrightScript.trim().length === 0) {
+          console.error(`[WorkflowExecutor] ❌ CRITICAL BUG: playwrightScript is missing after generation/loading!`);
+          console.error(`[WorkflowExecutor] leg.playwright_script: ${leg.playwright_script ? `exists (${leg.playwright_script.length} chars)` : 'missing'}`);
+          throw new Error(`Playwright script is required but missing for leg ${leg.leg_id}. This indicates a bug in script generation or loading.`);
         }
 
-        console.log(`[WorkflowExecutor] Executing script for leg ${leg.leg_id}`);
+        // CRITICAL: Validate script exists before execution
+        if (!playwrightScript || typeof playwrightScript !== 'string' || playwrightScript.trim().length === 0) {
+          console.error(`[WorkflowExecutor] ❌ CRITICAL: playwrightScript is missing before execution!`);
+          console.error(`[WorkflowExecutor] playwrightScript type: ${typeof playwrightScript}, value: ${playwrightScript ? 'exists' : 'null/undefined'}`);
+          console.error(`[WorkflowExecutor] leg.playwright_script: ${leg.playwright_script ? 'exists' : 'missing'}`);
+          throw new Error(`Playwright script is required but missing before execution for leg ${leg.leg_id}. Script generation must succeed.`);
+        }
+        
+        console.log(`[WorkflowExecutor] Executing script for leg ${leg.leg_id} (${playwrightScript.length} characters)`);
 
         // Step 4: Add human-like pre-execution behaviors
         try {
@@ -1082,6 +1106,127 @@ class WorkflowExecutor {
           );
         }
 
+        // Step 6.5: CRITICAL - Detect modal after action execution (rule 55)
+        // If modal appears, analyze it and create sub-legs for each distinct path
+        let modalDetected = null;
+        let subLegsCreated = [];
+        
+        try {
+          // Wait a bit for modal to appear (modals often have animation delays)
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          // Detect if modal appeared
+          modalDetected = await waitForModal(page, 3000);
+          
+          if (modalDetected && modalDetected.detected) {
+            console.log(`[WorkflowExecutor] 🔍 Modal detected after action execution: ${modalDetected.modalId || modalDetected.modalClass || 'unknown'}`);
+            await this.backendLogger.appendJobLog(jobId, 'info',
+              `🔍 Modal detected: ${modalDetected.modalText?.substring(0, 100) || 'Modal appeared'}`,
+              'WORKFLOW-EXECUTOR',
+              { 
+                leg_id: leg.leg_id, 
+                modal_id: modalDetected.modalId,
+                modal_class: modalDetected.modalClass,
+                interactive_elements_count: modalDetected.interactiveElements?.length || 0
+              }
+            );
+            
+            // Analyze modal to find distinct paths
+            const modalPaths = analyzeModalPaths(modalDetected);
+            console.log(`[WorkflowExecutor] Found ${modalPaths.length} distinct paths in modal`);
+            
+            if (modalPaths.length > 0) {
+              // Get current page URL for path notation
+              const currentUrl = page.url();
+              
+              // Get action name from leg element_info
+              const actionName = getActionNameFromElement(leg.element_info || {});
+              
+              // Create sub-legs for each path
+              for (let pathIdx = 0; pathIdx < modalPaths.length; pathIdx++) {
+                const path = modalPaths[pathIdx];
+                
+                // Generate modal path notation
+                const basePath = leg.modal_path || currentUrl;
+                const pageName = getPageNameFromModal(modalDetected, pathIdx + 1);
+                const modalPath = appendToModalPath(basePath, actionName, pageName);
+                
+                // Create sub-leg
+                const subLegId = `${leg.leg_id}_modal_${pathIdx + 1}`;
+                const subLeg = {
+                  leg_id: subLegId,
+                  parent_leg_id: leg.leg_id,
+                  type: path.type === 'form_submit' ? 'form_submit' : 'click',
+                  action: path.action || 'interact',
+                  description: `${leg.description} → ${path.description}`,
+                  test_instructions: `Continue modal interaction: ${path.description}. Complete all required steps until modal closes or success is verified.`,
+                  element_info: {
+                    ...leg.element_info,
+                    modal_selector: modalDetected.selector,
+                    modal_id: modalDetected.modalId,
+                    modal_class: modalDetected.modalClass,
+                    path_action: path.action,
+                    path_selector: path.selector || path.formId,
+                    in_modal: true
+                  },
+                  modal_path: modalPath,
+                  modal_info: {
+                    opened_by_action_id: leg.leg_id,
+                    modal_selector: modalDetected.selector,
+                    modal_type: modalDetected.isMultiStep ? 'wizard' : 'dialog',
+                    steps: modalDetected.isMultiStep ? [{
+                      step_name: pageName,
+                      step_number: pathIdx + 1,
+                      actions: [path.action]
+                    }] : []
+                  },
+                  confidence: 0.7,
+                  status: 'pending',
+                  metadata: {
+                    generated_by: 'modal-detection',
+                    source: 'modal',
+                    parent_leg: leg.leg_id
+                  }
+                };
+                
+                // Save sub-leg to workflow via backend API
+                try {
+                  await axios.put(
+                    `${this.backendUrl}/api/workflows/${workflowId}/legs/${subLegId}`,
+                    subLeg,
+                    { headers: this.getAuthHeaders() }
+                  );
+                  
+                  subLegsCreated.push(subLegId);
+                  console.log(`[WorkflowExecutor] ✅ Created sub-leg ${subLegId} with path: ${modalPath}`);
+                  
+                  await this.backendLogger.appendJobLog(jobId, 'info',
+                    `✅ Created sub-leg: ${subLeg.description} (path: ${modalPath})`,
+                    'WORKFLOW-EXECUTOR',
+                    { 
+                      leg_id: subLegId,
+                      parent_leg_id: leg.leg_id,
+                      modal_path: modalPath
+                    }
+                  );
+                } catch (subLegError) {
+                  console.error(`[WorkflowExecutor] Failed to create sub-leg ${subLegId}:`, subLegError.message);
+                }
+              }
+              
+              // Update parent leg to indicate it opened a modal
+              await this.updateLeg(workflowId, leg.leg_id, {
+                modal_opened: true,
+                sub_legs_count: subLegsCreated.length,
+                modal_path: appendToModalPath(leg.modal_path || currentUrl, actionName, 'modal')
+              });
+            }
+          }
+        } catch (modalError) {
+          // Don't fail leg execution if modal detection fails
+          console.warn(`[WorkflowExecutor] Modal detection error: ${modalError.message}`);
+        }
+        
         // Step 7: Always call determine completion to get clear reasoning (even if script failed)
         // This provides clear failure/success reasons for all outcomes
         const determineCompletionRequest = {
@@ -1198,17 +1343,25 @@ class WorkflowExecutor {
             timezone: await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone),
             locale: await page.evaluate(() => navigator.language)
           },
-          script: playwrightScript,
+          script: playwrightScript, // Script must exist - validated before execution
           timestamp: new Date().toISOString()
         };
 
         // Step 8: Record iteration with FULL data including determine completion reasoning and execution state
+        // CRITICAL: playwrightScript must exist at this point - if it doesn't, that's a bug
+        if (!playwrightScript || typeof playwrightScript !== 'string' || playwrightScript.trim().length === 0) {
+          console.error(`[WorkflowExecutor] ❌ CRITICAL: playwrightScript is missing when saving iteration!`);
+          console.error(`[WorkflowExecutor] playwrightScript type: ${typeof playwrightScript}, value: ${playwrightScript ? 'exists' : 'null/undefined'}`);
+          console.error(`[WorkflowExecutor] leg.playwright_script: ${leg.playwright_script ? 'exists' : 'missing'}`);
+          throw new Error(`Playwright script is required but missing when saving iteration for leg ${leg.leg_id}`);
+        }
+        
         await this.addIteration(workflowId, leg.leg_id, {
           screenshot_before: screenshotBeforeKey,
           screenshot_after: screenshotAfterKey,
           html_sent: htmlContent,
           html_after: htmlAfter,
-          script_executed: playwrightScript,
+          script_executed: playwrightScript, // Script must exist - validated above
           openai_request: determineCompletionRequest,
           openai_response: determineCompletionResponse,
           result: determineCompletionResponse.status === 'success' ? 'success' : 
@@ -1244,7 +1397,29 @@ class WorkflowExecutor {
         } catch (error) {
           console.error(`[WorkflowExecutor] Error in execution:`, error.message);
           console.error(`[WorkflowExecutor] Error stack:`, error.stack);
-          lastError = error.message;
+          
+          // Build a descriptive error message
+          const errorType = error.message?.includes('OpenAI') ? 'Script Generation Failed' :
+                           error.message?.includes('timeout') ? 'Execution Timeout' :
+                           error.message?.includes('syntax') ? 'Script Syntax Error' :
+                           error.message?.includes('Script') ? 'Script Error' :
+                           'Execution Failed';
+          
+          const descriptiveError = `${errorType}: ${error.message || 'Unknown error occurred during action execution'}`;
+          lastError = descriptiveError;
+          
+          // Determine script to save - use whatever script was available when error occurred
+          // If script generation failed before script was extracted, playwrightScript will be undefined/null
+          // If script execution failed, playwrightScript should exist (was extracted successfully)
+          let scriptToSave = null;
+          if (playwrightScript && typeof playwrightScript === 'string' && playwrightScript.trim().length > 0) {
+            scriptToSave = playwrightScript;
+          } else {
+            // Script generation failed before we got a script - log this clearly
+            console.error(`[WorkflowExecutor] ❌ No script available to save - script generation failed before extraction`);
+            console.error(`[WorkflowExecutor] playwrightScript: ${playwrightScript ? 'exists but invalid' : 'null/undefined'}`);
+            // scriptToSave remains null - this is correct if generation failed
+          }
 
           // Try to collect execution state even on error (if page is still available)
           let executionState = null;
@@ -1272,7 +1447,7 @@ class WorkflowExecutor {
                 timezone: await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone),
                 locale: await page.evaluate(() => navigator.language)
               },
-              script: typeof playwrightScript !== 'undefined' ? playwrightScript : null,
+              script: scriptToSave,
               timestamp: new Date().toISOString()
             };
           } catch (stateError) {
@@ -1295,13 +1470,14 @@ class WorkflowExecutor {
             screenshot_before: screenshotBeforeKey || null,
             screenshot_after: null,
             html_sent: htmlContent || null,
-            script_executed: typeof playwrightScript !== 'undefined' ? playwrightScript : null,
+            script_executed: scriptToSave, // Script if generation succeeded (null if generation failed before extraction)
             openai_request: null,
             openai_response: null,
             result: 'failure',
             status: 'failure',
-            error: error.message,
-            reason: error.message, // Use error message as reason for execution history
+            error: error.message, // Keep original error for technical details
+            reason: descriptiveError, // Use descriptive error as reason for execution history
+            failure_reason: descriptiveError, // Also set failure_reason field
             page_url_before: pageUrlBefore,
             page_url_after: pageUrlAfter,
             execution_state: executionState, // Save state even on error if available
@@ -1478,10 +1654,18 @@ class WorkflowExecutor {
         continue;
       }
 
-      // Skip legs that are not pending (already completed/failed/skipped)
-      if (leg.status && leg.status !== 'pending') {
-        console.log(`[WorkflowExecutor] Skipping leg ${leg.leg_id} - status: ${leg.status}`);
+      // CRITICAL: Only skip legs that have already been executed (success/failure/skipped)
+      // Do NOT skip legs with 'discovered', 'analyzing', 'testing' - these need to be executed
+      // Legs without status should be executed
+      const executedStatuses = ['success', 'failure', 'failed', 'skipped', 'completed'];
+      if (leg.status && executedStatuses.includes(leg.status.toLowerCase())) {
+        console.log(`[WorkflowExecutor] Skipping leg ${leg.leg_id} - already executed with status: ${leg.status}`);
         continue;
+      }
+      
+      // Log if leg has a non-executed status (for debugging)
+      if (leg.status && !executedStatuses.includes(leg.status.toLowerCase()) && leg.status !== 'pending') {
+        console.log(`[WorkflowExecutor] Leg ${leg.leg_id} has status '${leg.status}' (will execute)`);
       }
 
       // Execute the leg

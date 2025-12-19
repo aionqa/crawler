@@ -3952,13 +3952,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`♻️ Summary legs count before workflow-analysis: ${summaryLegCount} (existing legs: ${existingLegCount}, source: ${workflowState.legsSource || 'none'})`);
 
     if (legsFromPageSummary && legsFromPageSummary.length > 0) {
-      if (!Array.isArray(workflowState.legs) || workflowState.legs.length === 0) {
+      // Only apply legs from page summary if we don't already have legs, or if existing legs are from a different source
+      // BUT skip if legs are already from page-summary to avoid duplicates
+      const shouldApplyLegs = (!Array.isArray(workflowState.legs) || workflowState.legs.length === 0) || 
+                              (workflowState.legsSource && workflowState.legsSource !== 'page-summary');
+      
+      if (shouldApplyLegs) {
         await this.applyLegsToWorkflowState(legsFromPageSummary, workflowState, 'page-summary');
-      } else if (workflowState.legsSource !== 'page-summary') {
-        await this.applyLegsToWorkflowState(legsFromPageSummary, workflowState, 'page-summary');
+        console.log(`♻️ Applied ${workflowState.legs.length} legs from page summary; skipping additional workflow-analysis request`);
+      } else {
+        // Legs already from page-summary, skip to avoid duplicates
+        console.log(`♻️ Legs already from page-summary (${workflowState.legs.length} legs), skipping duplicate application`);
       }
-
-      console.log(`♻️ Reusing ${workflowState.legs.length} legs from page summary; skipping additional workflow-analysis request`);
       
       // CRITICAL: Ensure workflow_id is set if not already set (since create-workflow step was removed)
       if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
