@@ -440,7 +440,8 @@ class EnhancedWorkflowExecutor {
    */
   async executeWhileLoopStep(page, jobId, workflowId, step) {
     const config = step.config || {};
-    const maxIterations = config.maxIterations || 20;
+    // CRITICAL: Force 1 iteration per job - no multiple iterations allowed
+    const maxIterations = 1;
     const conditionPath = config.conditionPath;
     const conditionType = config.conditionType || 'ai-response';
     const conditionValue = config.conditionValue;
@@ -529,7 +530,24 @@ class EnhancedWorkflowExecutor {
           }
         }
         
-        // Check condition to determine if loop should continue
+        // CRITICAL: Check step result first - if failed or succeeded, stop immediately (one iteration per job)
+        if (lastResult && (lastResult.result === 'failure' || lastResult.result === 'success')) {
+          const resultStatus = lastResult.result;
+          console.log(`[EnhancedWorkflowExecutor] Step execution result is '${resultStatus}' - stopping loop immediately (one iteration per job)`);
+          shouldContinue = false;
+          break;
+        }
+        
+        // CRITICAL: Check step result first - if failed or succeeded, stop immediately (one iteration per job)
+        if (lastResult && (lastResult.result === 'failure' || lastResult.result === 'success')) {
+          const resultStatus = lastResult.result;
+          console.log(`[EnhancedWorkflowExecutor] Step execution result is '${resultStatus}' - stopping loop immediately (one iteration per job)`);
+          shouldContinue = false;
+          break;
+        }
+        
+        // CRITICAL: Check status first - if failed, stop immediately regardless of condition
+        let currentStatus = null;
         if (conditionPath && conditionType === 'ai-response') {
           // Refetch workflow to get latest results after step execution
           const latestWorkflow = await this.getWorkflow(workflowId);
@@ -546,9 +564,19 @@ class EnhancedWorkflowExecutor {
             
             if (verifyStep && latestWorkflow.results?.[verifyStep.id]) {
               const verifyResult = latestWorkflow.results[verifyStep.id];
+              const verifyResponse = verifyResult.openai_response || verifyResult;
+              
+              // Check status first - if failure or success, stop immediately (one iteration per job)
+              currentStatus = verifyResponse.status || verifyResponse.completion_status;
+              if (currentStatus === 'failure' || currentStatus === 'failed' || currentStatus === 'success') {
+                console.log(`[EnhancedWorkflowExecutor] Status is '${currentStatus}' - stopping loop immediately (one iteration per job)`);
+                shouldContinue = false;
+                break;
+              }
+              
               // Get the value from the verification response
               const fieldPath = pathParts.slice(1).join('.'); // e.g., 'is_complete'
-              const conditionValueFromResult = this.getPathValue(verifyResult.openai_response || verifyResult, fieldPath);
+              const conditionValueFromResult = this.getPathValue(verifyResponse, fieldPath);
               
               // Check if condition matches - continue while condition is true (e.g., is_complete === false)
               shouldContinue = conditionValueFromResult === conditionValue;
@@ -560,13 +588,33 @@ class EnhancedWorkflowExecutor {
             }
           } else {
             // Simple path - check directly in result
+            const resultResponse = lastResult?.openai_response || lastResult;
+            
+            // Check status first - if failure or success, stop immediately (one iteration per job)
+            currentStatus = resultResponse?.status || resultResponse?.completion_status;
+            if (currentStatus === 'failure' || currentStatus === 'failed' || currentStatus === 'success') {
+              console.log(`[EnhancedWorkflowExecutor] Status is '${currentStatus}' - stopping loop immediately (one iteration per job)`);
+              shouldContinue = false;
+              break;
+            }
+            
             const conditionValueFromResult = this.getPathValue(lastResult, conditionPath);
             shouldContinue = conditionValueFromResult === conditionValue;
             console.log(`[EnhancedWorkflowExecutor] Condition check: ${conditionPath} = ${conditionValueFromResult} (expected: ${conditionValue}) -> continue: ${shouldContinue}`);
           }
         } else {
-          // No condition - continue until max iterations
-          shouldContinue = true;
+          // No condition - check status from lastResult if available
+          const resultResponse = lastResult?.openai_response || lastResult;
+          currentStatus = resultResponse?.status || resultResponse?.completion_status;
+          if (currentStatus === 'failure' || currentStatus === 'failed' || currentStatus === 'success') {
+            console.log(`[EnhancedWorkflowExecutor] Status is '${currentStatus}' - stopping loop immediately (one iteration per job)`);
+            shouldContinue = false;
+            break;
+          }
+          // No condition and no clear status - stop after first iteration (one per job)
+          console.log(`[EnhancedWorkflowExecutor] No condition and no clear status - stopping after first iteration (one per job)`);
+          shouldContinue = false;
+          break;
         }
       } else {
         // No iteration step defined, break immediately

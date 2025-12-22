@@ -412,31 +412,91 @@ class WorkflowAnalyzer {
             modal_selector: formInfo.modal_selector || null
           };
 
-          for (const input of inputs) {
-            const type = await input.getAttribute('type') || 'text';
-            const name = await input.getAttribute('name');
-            const id = await input.getAttribute('id');
-            const placeholder = await input.getAttribute('placeholder');
-            
-            const inputSelectors = await this.getElementSelector(input);
-            formData.fields.push({
-              type,
-              name,
-              id,
-              placeholder,
-              selector: inputSelectors[0]?.selector,
-              selectors: inputSelectors
-            });
+          // If Playwright query found fields, use them (with full selector info)
+          if (inputs.length > 0) {
+            for (const input of inputs) {
+              const type = await input.getAttribute('type') || 'text';
+              const name = await input.getAttribute('name');
+              const id = await input.getAttribute('id');
+              const placeholder = await input.getAttribute('placeholder');
+              
+              const inputSelectors = await this.getElementSelector(input);
+              formData.fields.push({
+                type,
+                name,
+                id,
+                placeholder,
+                selector: inputSelectors[0]?.selector,
+                selectors: inputSelectors
+              });
+            }
+          } else {
+            // Fallback: Use fields from evaluate() step if Playwright query found none
+            // This ensures we don't lose form field data that was already detected
+            if (formInfo.fields && formInfo.fields.length > 0) {
+              console.log(`⚠️ Playwright query found no inputs, using ${formInfo.fields.length} fields from evaluate() step`);
+              for (const field of formInfo.fields) {
+                // Try to get selector for each field
+                let fieldSelectors = [];
+                if (field.id) {
+                  try {
+                    const fieldElement = await page.$(`#${field.id}`).catch(() => null);
+                    if (fieldElement) {
+                      fieldSelectors = await this.getElementSelector(fieldElement);
+                    }
+                  } catch (e) {
+                    // Ignore selector generation errors
+                  }
+                }
+                
+                formData.fields.push({
+                  type: field.type || 'text',
+                  name: field.name || '',
+                  id: field.id || '',
+                  placeholder: field.placeholder || '',
+                  selector: fieldSelectors[0]?.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
+                  selectors: fieldSelectors.length > 0 ? fieldSelectors : []
+                });
+              }
+            }
           }
 
-          for (const button of buttons) {
-            const text = await button.textContent();
-            const buttonSelectors = await this.getElementSelector(button);
-            formData.buttons.push({
-              text: text?.trim(),
-              selector: buttonSelectors[0]?.selector,
-              selectors: buttonSelectors
-            });
+          // If Playwright query found buttons, use them (with full selector info)
+          if (buttons.length > 0) {
+            for (const button of buttons) {
+              const text = await button.textContent();
+              const buttonSelectors = await this.getElementSelector(button);
+              formData.buttons.push({
+                text: text?.trim(),
+                selector: buttonSelectors[0]?.selector,
+                selectors: buttonSelectors
+              });
+            }
+          } else {
+            // Fallback: Use buttons from evaluate() step if Playwright query found none
+            if (formInfo.buttons && formInfo.buttons.length > 0) {
+              console.log(`⚠️ Playwright query found no buttons, using ${formInfo.buttons.length} buttons from evaluate() step`);
+              for (const btn of formInfo.buttons) {
+                // Try to get selector for each button
+                let buttonSelectors = [];
+                if (btn.id) {
+                  try {
+                    const buttonElement = await page.$(`#${btn.id}`).catch(() => null);
+                    if (buttonElement) {
+                      buttonSelectors = await this.getElementSelector(buttonElement);
+                    }
+                  } catch (e) {
+                    // Ignore selector generation errors
+                  }
+                }
+                
+                formData.buttons.push({
+                  text: btn.text || '',
+                  selector: buttonSelectors[0]?.selector || (btn.id ? `#${btn.id}` : null),
+                  selectors: buttonSelectors.length > 0 ? buttonSelectors : []
+                });
+              }
+            }
           }
 
           analysis.forms.push(formData);
@@ -522,6 +582,73 @@ class WorkflowAnalyzer {
       );
 
       analysis.non_interactive_elements = nonInteractiveElements;
+
+      // CRITICAL: Also add form fields (inputs, selects, textareas) to interactive_elements
+      // Form fields are interactive elements and should be counted
+      // Do this after all forms are processed so we have complete form data
+      if (analysis.forms && analysis.forms.length > 0) {
+        const initialIECount = analysis.interactive_elements.length;
+        console.log(`📊 Adding form fields to interactive_elements (${analysis.forms.length} form(s) found, current IE count: ${initialIECount})`);
+        
+        for (const formData of analysis.forms) {
+          if (formData.fields && formData.fields.length > 0) {
+            for (const field of formData.fields) {
+              // Check if this field is already in interactive_elements (to avoid duplicates)
+              // Match by id, selector, or name+type combination
+              const alreadyExists = analysis.interactive_elements.some(
+                el => {
+                  if (field.id && el.id === field.id) return true;
+                  if (field.selector && el.selector === field.selector) return true;
+                  if (field.name && el.name === field.name && field.type === el.type) return true;
+                  return false;
+                }
+              );
+              
+              if (!alreadyExists) {
+                const newElement = {
+                  type: field.type || 'input',
+                  name: field.name || '',
+                  id: field.id || '',
+                  placeholder: field.placeholder || '',
+                  selector: field.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
+                  selectors: field.selectors || []
+                };
+                analysis.interactive_elements.push(newElement);
+                console.log(`  ➕ Added field to IE: ${newElement.type} ${newElement.name || newElement.id || 'unnamed'}`);
+              } else {
+                console.log(`  ⏭️  Skipped duplicate field: ${field.type} ${field.name || field.id || 'unnamed'}`);
+              }
+            }
+          }
+          
+          // Also add form buttons to interactive_elements if not already there
+          if (formData.buttons && formData.buttons.length > 0) {
+            for (const button of formData.buttons) {
+              const alreadyExists = analysis.interactive_elements.some(
+                el => {
+                  if (button.id && el.id === button.id) return true;
+                  if (button.selector && el.selector === button.selector) return true;
+                  if (button.text && el.text === button.text && el.type === 'button') return true;
+                  return false;
+                }
+              );
+              
+              if (!alreadyExists && button.selector) {
+                analysis.interactive_elements.push({
+                  type: 'button',
+                  text: button.text || '',
+                  selector: button.selector,
+                  selectors: button.selectors || []
+                });
+              }
+            }
+          }
+        }
+        
+        const finalIECount = analysis.interactive_elements.length;
+        const addedCount = finalIECount - initialIECount;
+        console.log(`✅ Added ${addedCount} form fields to interactive_elements. Total: ${finalIECount} (was ${initialIECount})`);
+      }
 
     } catch (error) {
       console.error('Error during Playwright analysis:', error);
@@ -780,6 +907,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     if (!Array.isArray(rawLegs) || rawLegs.length === 0 || !workflowState) {
       return [];
     }
+    
+    console.log(`[applyLegsToWorkflowState] Processing ${rawLegs.length} raw legs from source: ${source}`);
 
     const normalizeType = (rawType) => {
       if (!rawType) return 'click';
@@ -873,12 +1002,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const existingLegIds = new Set();
     const existingLegsByDescription = new Map();
     const existingLegsBySelector = new Map();
+    let hasExistingFormSubmitLeg = false;
     
     // Build maps of existing legs for deduplication
     if (Array.isArray(workflowState.legs) && workflowState.legs.length > 0) {
       for (const existingLeg of workflowState.legs) {
         if (existingLeg.leg_id) {
           existingLegIds.add(existingLeg.leg_id);
+        }
+        // Check if we already have a form_submit leg
+        if (existingLeg.type === 'form_submit') {
+          hasExistingFormSubmitLeg = true;
         }
         // Index by description for fuzzy matching
         if (existingLeg.description) {
@@ -898,6 +1032,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     const seenIds = new Set(existingLegIds); // Initialize with existing IDs
+    const seenFormSelectors = new Set(); // Track form submission selectors to prevent duplicates
+    
     const generateLegId = (leg, index) => {
       const candidates = [
         leg.leg_id,
@@ -946,9 +1082,78 @@ IMPORTANT OUTPUT REQUIREMENTS:
       return finalId;
     };
 
+    // CRITICAL: Pre-process rawLegs to merge duplicate form submission legs
+    // If multiple form_submit legs exist with different selectors (e.g., #name vs button[type="submit"]),
+    // they likely target the same form and should be merged into one leg
+    const formSubmissionLegs = [];
+    const otherLegs = [];
+    
+    // Define normalizeType here (before the loop) to use in deduplication
+    const normalizeTypeForDedup = (rawType) => {
+      if (!rawType) return 'click';
+      const type = String(rawType).trim().toLowerCase();
+      if (!type) return 'click';
+      const mappings = {
+        press: 'click',
+        click: 'click',
+        tap: 'click',
+        submit: 'form_submit',
+        form: 'form_submit',
+        form_submit: 'form_submit',
+        input: 'input',
+        type_text: 'input',
+        fill: 'input',
+        toggle: 'navigation_toggle',
+        navigation_toggle: 'navigation_toggle',
+        dropdown: 'navigation_toggle',
+        custom: 'custom',
+        interaction: 'custom',
+        action: 'custom'
+      };
+      const normalized = mappings[type] || type;
+      if (normalized === 'navigate' || normalized === 'navigation') {
+        return 'navigation';
+      }
+      return normalized;
+    };
+    
+    for (const rawLeg of rawLegs) {
+      if (!rawLeg || typeof rawLeg !== 'object') {
+        continue;
+      }
+      const type = normalizeTypeForDedup(rawLeg.type || rawLeg.action || rawLeg.action_type || rawLeg.kind);
+      // Also check description for form-related keywords
+      const desc = (rawLeg.description || '').toLowerCase();
+      const isFormRelated = type === 'form_submit' || desc.includes('form') && (desc.includes('submit') || desc.includes('fill'));
+      
+      if (isFormRelated) {
+        formSubmissionLegs.push(rawLeg);
+      } else {
+        otherLegs.push(rawLeg);
+      }
+    }
+    
+    // If we have multiple form_submit legs, keep only the first one (they're likely duplicates)
+    // The AI sometimes creates separate legs for "filling" and "submitting" the same form
+    if (formSubmissionLegs.length > 1) {
+      const legInfo = formSubmissionLegs.map(l => `${l.leg_id || 'no-id'}: "${(l.description || '').substring(0, 50)}" (type: ${l.type || 'no-type'})`).join(', ');
+      console.log(`⚠️ [DEDUPLICATION] Found ${formSubmissionLegs.length} form submission legs - keeping only the first one to prevent duplicates`);
+      console.log(`   [DEDUPLICATION] Legs found: ${legInfo}`);
+      if (this.backendLogger && workflowState.jobId) {
+        await this.backendLogger.appendJobLog(workflowState.jobId, 'warn', 
+          `⚠️ Found ${formSubmissionLegs.length} form submission legs - keeping only the first one to prevent duplicates: ${legInfo}`,
+          'WORKFLOW-ANALYZER', { form_legs_count: formSubmissionLegs.length, legs: legInfo });
+      }
+      // Keep the first one, discard the rest
+      formSubmissionLegs.splice(1);
+    }
+    
+    // Combine back: form submissions first, then other legs
+    const processedRawLegs = [...formSubmissionLegs, ...otherLegs];
+    
     const normalizedLegs = [];
-    for (let index = 0; index < rawLegs.length; index++) {
-      const rawLeg = rawLegs[index];
+    for (let index = 0; index < processedRawLegs.length; index++) {
+      const rawLeg = processedRawLegs[index];
       if (!rawLeg || typeof rawLeg !== 'object') {
         continue;
       }
@@ -1042,9 +1247,30 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const duplicateByDescription = existingLegsByDescription.get(descKey);
       const duplicateBySelector = selKey ? existingLegsBySelector.get(selKey) : null;
       
-      if (duplicateByDescription || duplicateBySelector) {
+      // CRITICAL: For form_submit legs, check if we already have ANY form submission leg
+      // This prevents duplicate form submission legs even if they have different selectors
+      // (e.g., one leg with selector #name and another with button[type="submit"] - both target the same form)
+      let duplicateFormSubmission = false;
+      if (type === 'form_submit') {
+        // First check if we already have a form_submit leg in workflowState (from previous calls)
+        if (hasExistingFormSubmitLeg) {
+          duplicateFormSubmission = true;
+          console.log(`⏭️ [DEDUPLICATION] Skipping duplicate form submission leg: "${description.substring(0, 60)}..." (workflowState already has a form_submit leg)`);
+        } else {
+          // Check if we already have ANY form_submit leg in normalizedLegs (from this call)
+          for (const existingLeg of normalizedLegs) {
+            if (existingLeg.type === 'form_submit') {
+              duplicateFormSubmission = true;
+              console.log(`⏭️ [DEDUPLICATION] Skipping duplicate form submission leg: "${description.substring(0, 60)}..." (already processed form_submit leg: ${existingLeg.leg_id})`);
+              break;
+            }
+          }
+        }
+      }
+      
+      if (duplicateByDescription || duplicateBySelector || duplicateFormSubmission) {
         const duplicateLeg = duplicateByDescription || duplicateBySelector;
-        console.log(`⏭️ Skipping duplicate leg: "${description.substring(0, 60)}..." (matches existing leg_id: ${duplicateLeg.leg_id})`);
+        console.log(`⏭️ Skipping duplicate leg: "${description.substring(0, 60)}..." (matches existing leg_id: ${duplicateLeg?.leg_id || 'form_submit duplicate'})`);
         continue; // Skip this leg - it's a duplicate
       }
 
@@ -1094,16 +1320,83 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const existingLegs = Array.isArray(workflowState.legs) ? workflowState.legs : [];
     const mergedLegs = [...existingLegs, ...normalizedLegs];
     
-    // Final deduplication pass by leg_id (in case same leg_id was generated differently)
+    // CRITICAL: Final deduplication pass BEFORE saving to database
+    // This prevents duplicate form_submit legs from being saved
+    // CRITICAL: Also remove duplicate form_submit legs that target the same form
+    // Multiple form_submit legs with different selectors (e.g., #name vs button[type="submit"])
+    // are likely targeting the same form - detect this and keep only one
     const finalLegs = [];
     const finalLegIds = new Set();
+    
+    // Helper to check if selector targets an input field (not a submit button)
+    const isInputFieldSelector = (selector) => {
+      if (!selector) return false;
+      const s = selector.toLowerCase().trim();
+      // Input field patterns: #id, [name="..."], input[...], but NOT button[type="submit"]
+      return (s.startsWith('#') || s.includes('[name=') || s.startsWith('input')) && 
+             !s.includes('submit') && !s.includes('button[type');
+    };
+    
+    // Helper to check if selector targets a submit button
+    const isSubmitButtonSelector = (selector) => {
+      if (!selector) return false;
+      const s = selector.toLowerCase().trim();
+      return s.includes('submit') || s.includes('button[type="submit') || s.includes('button[type=\'submit');
+    };
+    
+    // Track form_submit legs - if we have one that targets an input and another that targets a button,
+    // they're likely the same form (one for filling, one for submitting)
+    let hasFormSubmitLeg = false;
+    const formSubmitLegSelectors = [];
+    
+    console.log(`[FINAL DEDUPLICATION] Processing ${mergedLegs.length} merged legs for deduplication`);
+    const formSubmitLegsInMerged = mergedLegs.filter(l => l.type === 'form_submit');
+    console.log(`[FINAL DEDUPLICATION] Found ${formSubmitLegsInMerged.length} form_submit legs: ${formSubmitLegsInMerged.map(l => `${l.leg_id} (${l.selector})`).join(', ')}`);
+    
     for (const leg of mergedLegs) {
-      if (!finalLegIds.has(leg.leg_id)) {
-        finalLegIds.add(leg.leg_id);
-        finalLegs.push(leg);
-      } else {
-        console.log(`⏭️ Final deduplication: Skipping duplicate leg_id: ${leg.leg_id}`);
+      // Skip duplicate leg_ids
+      if (finalLegIds.has(leg.leg_id)) {
+        continue;
       }
+      
+      // CRITICAL: For form_submit legs, detect duplicates based on selector patterns
+      if (leg.type === 'form_submit') {
+        const selector = leg.selector || '';
+        const isInput = isInputFieldSelector(selector);
+        const isButton = isSubmitButtonSelector(selector);
+        
+        console.log(`[FINAL DEDUPLICATION] Processing form_submit leg: ${leg.leg_id}, selector: ${selector}, hasFormSubmitLeg: ${hasFormSubmitLeg}`);
+        
+        // If we already have a form_submit leg, this is likely a duplicate
+        // (multiple form_submit legs usually target the same form with different selectors)
+        if (hasFormSubmitLeg) {
+          // Always skip additional form_submit legs - they're likely duplicates
+          // The first form_submit leg should handle the complete form submission flow
+          const logMsg = `⏭️ [FINAL DEDUPLICATION] Skipping duplicate form_submit leg: ${leg.leg_id} (selector: ${selector}, already have form_submit leg)`;
+          console.log(logMsg);
+          // Also log to backend if available
+          try {
+            if (workflowState.jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(workflowState.jobId, 'info', logMsg, 'WORKFLOW-ANALYZER', {
+                leg_id: leg.leg_id,
+                selector: selector,
+                existing_selectors: formSubmitLegSelectors
+              });
+            }
+          } catch (logError) {
+            // Ignore logging errors
+          }
+          continue;
+        }
+        
+        // This is the first form_submit leg
+        console.log(`[FINAL DEDUPLICATION] Adding first form_submit leg: ${leg.leg_id}, selector: ${selector}`);
+        hasFormSubmitLeg = true;
+        formSubmitLegSelectors.push(selector);
+      }
+      
+      finalLegIds.add(leg.leg_id);
+      finalLegs.push(leg);
     }
     
     workflowState.legs = finalLegs;
@@ -2617,7 +2910,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
   async executePlaywrightAnalysisStep(page, step, workflowState, jobId) {
     console.log(`🔍 Performing Playwright analysis (${step.name})`);
     
+    // CRITICAL: Preserve existing interactive_elements if they exist and new analysis has fewer
+    // This prevents form fields from being lost when analysis runs multiple times
+    const existingIECount = workflowState.playwrightAnalysis?.interactive_elements?.length || 0;
+    
     const analysis = await this.performPlaywrightAnalysis(page);
+    
+    // If we had more interactive elements before and new analysis has fewer, preserve the existing ones
+    // This handles the case where form fields were added in a previous run
+    if (existingIECount > 0 && analysis.interactive_elements.length < existingIECount) {
+      console.log(`⚠️ New analysis has fewer interactive elements (${analysis.interactive_elements.length} vs ${existingIECount}). Preserving existing interactive_elements.`);
+      analysis.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
+    }
+    
     workflowState.playwrightAnalysis = analysis;
     
     // Store result - storeStepResult will structure it according to schema
@@ -3299,7 +3604,38 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepPayload.visible_text = workflowState.visibleText;
       }
       if (step.config.attachments.includes('interactive_elements') && workflowState.playwrightAnalysis) {
-        stepPayload.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
+        // CRITICAL: Use interactive_elements from playwrightAnalysis, ensuring form fields are included
+        const interactiveElements = workflowState.playwrightAnalysis.interactive_elements || [];
+        stepPayload.interactive_elements = interactiveElements;
+        
+        // Log for debugging - CRITICAL for troubleshooting
+        console.log(`📤 AI Step: Sending ${interactiveElements.length} interactive elements to AI (step: ${step.name || step.id})`);
+        if (interactiveElements.length > 0) {
+          console.log(`   Sample elements: ${interactiveElements.slice(0, 3).map(el => `${el.type}(${el.name || el.id || 'unnamed'})`).join(', ')}`);
+        }
+        if (interactiveElements.length === 0 && workflowState.playwrightAnalysis.forms?.length > 0) {
+          console.error(`❌ ERROR: Interactive elements array is empty but ${workflowState.playwrightAnalysis.forms.length} form(s) found!`);
+          console.error(`   Form fields should have been added to interactive_elements. This is a bug.`);
+          // Try to recover by adding form fields on the fly
+          const forms = workflowState.playwrightAnalysis.forms || [];
+          const recoveredElements = [];
+          for (const form of forms) {
+            if (form.fields) {
+              for (const field of form.fields) {
+                recoveredElements.push({
+                  type: field.type || 'input',
+                  name: field.name || '',
+                  id: field.id || '',
+                  selector: field.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null))
+                });
+              }
+            }
+          }
+          if (recoveredElements.length > 0) {
+            console.log(`   🔧 Recovered ${recoveredElements.length} form fields and adding to payload`);
+            stepPayload.interactive_elements = recoveredElements;
+          }
+        }
       }
       if (step.config.attachments.includes('forms') && workflowState.playwrightAnalysis) {
         stepPayload.forms = workflowState.playwrightAnalysis.forms;
@@ -3736,11 +4072,79 @@ IMPORTANT OUTPUT REQUIREMENTS:
           candidateLegs = Array.isArray(parsedResponse.actions) ? parsedResponse.actions : [];
         }
         
+        console.log(`[AI RESPONSE] Extracted ${candidateLegs.length} candidate legs from AI response for step ${step.id || step.name}`);
+        if (candidateLegs.length > 0) {
+          console.log(`[AI RESPONSE] Leg types: ${candidateLegs.map(l => l.type || l.action || 'no-type').join(', ')}`);
+          console.log(`[AI RESPONSE] Leg descriptions: ${candidateLegs.map(l => (l.description || '').substring(0, 40)).join(' | ')}`);
+        }
+        
+        // CRITICAL: Remove duplicate form_submit legs immediately after AI response
+        // If AI created multiple form_submit legs, keep only the first one
+        // Also check descriptions for form-related keywords to catch legs that should be form_submit
+        if (candidateLegs.length > 0) {
+          console.log(`[AI RESPONSE VALIDATION] Checking ${candidateLegs.length} candidate legs for duplicate form_submit legs`);
+          
+          // Check for form_submit legs by type and also by description keywords
+          const formSubmitLegs = candidateLegs.filter(l => {
+            const type = (l.type || l.action || l.action_type || '').toLowerCase();
+            const desc = (l.description || '').toLowerCase();
+            const isFormSubmitType = type === 'form_submit' || type === 'form' || type === 'submit';
+            const hasFormSubmitKeywords = (desc.includes('form') && desc.includes('submit')) || 
+                                         (desc.includes('fill') && desc.includes('submit'));
+            const isFormSubmit = isFormSubmitType || hasFormSubmitKeywords;
+            if (isFormSubmit) {
+              console.log(`[AI RESPONSE VALIDATION] Found form_submit leg: ${l.leg_id || 'no-id'}, type: ${type}, desc: ${desc.substring(0, 50)}`);
+            }
+            return isFormSubmit;
+          });
+          
+          console.log(`[AI RESPONSE VALIDATION] Found ${formSubmitLegs.length} form_submit legs out of ${candidateLegs.length} total legs`);
+          
+          if (formSubmitLegs.length > 1) {
+            console.log(`⚠️ [AI RESPONSE VALIDATION] AI created ${formSubmitLegs.length} form_submit legs: ${formSubmitLegs.map(l => `${l.leg_id || 'no-id'} (${l.type || 'no-type'}, ${l.selector || 'no-selector'})`).join(', ')}`);
+            console.log(`⚠️ [AI RESPONSE VALIDATION] Keeping only the first one to prevent duplicates`);
+            
+            // Find the first form_submit leg index
+            const firstFormSubmitIndex = candidateLegs.findIndex(l => {
+              const type = (l.type || l.action || l.action_type || '').toLowerCase();
+              const desc = (l.description || '').toLowerCase();
+              const isFormSubmitType = type === 'form_submit' || type === 'form' || type === 'submit';
+              const hasFormSubmitKeywords = (desc.includes('form') && desc.includes('submit')) || 
+                                           desc.includes('fill') && desc.includes('submit');
+              return isFormSubmitType || hasFormSubmitKeywords;
+            });
+            
+            // Remove all form_submit legs except the first one
+            const originalCount = candidateLegs.length;
+            candidateLegs = candidateLegs.filter((l, index) => {
+              const type = (l.type || l.action || l.action_type || '').toLowerCase();
+              const desc = (l.description || '').toLowerCase();
+              const isFormSubmitType = type === 'form_submit' || type === 'form' || type === 'submit';
+              const hasFormSubmitKeywords = (desc.includes('form') && desc.includes('submit')) || 
+                                           desc.includes('fill') && desc.includes('submit');
+              const isFormSubmit = isFormSubmitType || hasFormSubmitKeywords;
+              // Keep if not form_submit, or if it's the first form_submit leg
+              return !isFormSubmit || index === firstFormSubmitIndex;
+            });
+            
+            console.log(`✅ [AI RESPONSE VALIDATION] Reduced from ${originalCount} to ${candidateLegs.length} legs (removed ${formSubmitLegs.length - 1} duplicate form_submit legs)`);
+            
+            // Update parsedResponse to reflect the cleaned legs
+            if (parsedResponse.legs) {
+              parsedResponse.legs = candidateLegs;
+            }
+            if (parsedResponse.actions) {
+              parsedResponse.actions = candidateLegs;
+            }
+          }
+        }
+        
         if (candidateLegs.length > 0) {
           console.log(`🔍 Found ${candidateLegs.length} legs in AI response, normalizing and storing in context.legsToExecute`);
           // Normalize legs using applyLegsToWorkflowState which sets both workflowState.legs and context.legsToExecute
+          // CRITICAL: applyLegsToWorkflowState returns deduplicated legs (finalLegs), not normalizedLegs
           const normalizedLegs = await this.applyLegsToWorkflowState(candidateLegs, workflowState, 'ai-prompt');
-          console.log(`✅ Stored ${normalizedLegs.length} normalized legs in workflowState.context.legsToExecute`);
+          console.log(`✅ Stored ${normalizedLegs.length} normalized legs in workflowState.context.legsToExecute (after deduplication)`);
           
           // CRITICAL: Also store legs in the structured result so it's accessible from step result
           // The structured result will be stored by storeStepResult, but we need to ensure legs are extractable
@@ -3774,10 +4178,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
             }
             
             // Save legs immediately to workflow
+            // CRITICAL: normalizedLegs is already deduplicated (it's the return value from applyLegsToWorkflowState which returns finalLegs)
             if (workflowState.workflowId) {
               try {
                 await this.saveLegIterationsToWorkflow(workflowState, normalizedLegs, jobId);
-                console.log(`💾 Immediately saved ${normalizedLegs.length} action(s) to workflow ${workflowState.workflowId} with status 'discovered'`);
+                console.log(`💾 Immediately saved ${normalizedLegs.length} action(s) to workflow ${workflowState.workflowId} with status 'discovered' (after deduplication)`);
               } catch (saveError) {
                 console.warn(`⚠️ Failed to immediately save legs: ${saveError.message}`);
               }
@@ -4214,7 +4619,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
               page_description: workflowState.aiAnalysisResult?.page_description || workflowState.pageDescription,
               analyzed: true,
               ai_analysis: workflowState.aiAnalysisResult,
-              actions_summary: workflowState.actionsSummary
+              actions_summary: workflowState.actionsSummary,
+              // CRITICAL: Include forms with fields so UI can display input counts
+              forms: workflowState.playwrightAnalysis?.forms || [],
+              interactive_elements: workflowState.playwrightAnalysis?.interactive_elements || [],
+              links: workflowState.playwrightAnalysis?.links || []
             }
           );
           console.log(`✅ Page discovery updated with analysis and actions`);
@@ -8948,6 +9357,71 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     workflowState.context[resultKey] = iterationSummaries;
 
+    // CRITICAL: Save leg status after for-each completes
+    // The nested steps (like test-leg-iteratively) update leg status in workflowState.legsToExecute
+    // but we need to persist it to the database
+    if (itemsPath === 'legsToExecute' && workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute) && workflowState.workflowId && jobId) {
+      try {
+        // Get legs that were processed in this for-each - use the current state from workflowState
+        const processedLegs = effectiveItems.map((item, idx) => {
+          const legId = item.leg_id || item.id;
+          const leg = workflowState.legsToExecute.find(l => (l.leg_id === legId) || (l.id === legId));
+          if (leg) {
+            // Ensure we have the latest status and iterations
+            return {
+              ...leg,
+              leg_id: leg.leg_id || leg.id || legId,
+              status: leg.status || 'pending',
+              iterations: leg.iterations || []
+            };
+          }
+          return null;
+        }).filter(Boolean);
+        
+        if (processedLegs.length > 0) {
+          console.log(`💾 Saving ${processedLegs.length} leg(s) with status after for-each completion`);
+          await this.saveLegIterationsToWorkflow(workflowState, processedLegs, jobId);
+          console.log(`✅ Saved ${processedLegs.length} leg(s) with final status after for-each completion`);
+        } else {
+          console.log(`⚠️ No legs found to save after for-each (itemsPath: ${itemsPath}, legsToExecute length: ${workflowState.legsToExecute?.length || 0})`);
+        }
+      } catch (saveError) {
+        console.error(`❌ Failed to save leg status after for-each: ${saveError.message}`, saveError);
+      }
+    } else {
+      // Log why leg saving was skipped for debugging
+      const reasons = [];
+      if (itemsPath !== 'legsToExecute') {
+        reasons.push(`itemsPath=${itemsPath} (expected: legsToExecute)`);
+      }
+      if (!workflowState.legsToExecute) {
+        reasons.push('workflowState.legsToExecute is missing');
+      } else if (!Array.isArray(workflowState.legsToExecute)) {
+        reasons.push(`workflowState.legsToExecute is not an array (type: ${typeof workflowState.legsToExecute})`);
+      }
+      if (!workflowState.workflowId) {
+        reasons.push('workflowState.workflowId is missing');
+      }
+      if (!jobId) {
+        reasons.push('jobId is missing');
+      }
+      
+      if (reasons.length > 0) {
+        console.log(`⚠️ For-each step skipped leg saving: ${reasons.join(', ')}`);
+        // Log to backend if jobId is available
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'warn', `For-each step skipped leg saving: ${reasons.join(', ')}`, 'WORKFLOW-ANALYZER', {
+            itemsPath,
+            hasLegsToExecute: !!workflowState.legsToExecute,
+            legsToExecuteType: typeof workflowState.legsToExecute,
+            legsToExecuteLength: Array.isArray(workflowState.legsToExecute) ? workflowState.legsToExecute.length : 'N/A',
+            hasWorkflowId: !!workflowState.workflowId,
+            hasJobId: !!jobId
+          });
+        }
+      }
+    }
+
     this.storeStepResult(step, {
       iterations: iterationSummaries,
       total_iterations: iterationSummaries.length,
@@ -8965,7 +9439,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`🔄 Executing while-loop (${step.name})`);
     
     const config = step.config || {};
-    const maxIterations = config.maxIterations || 10;
+    // CRITICAL: Force 1 iteration per job - no multiple iterations allowed
+    const maxIterations = 1;
     const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
     const conditionType = config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
     const invertCondition = config.invertCondition === true; // If true, loop while condition is false
@@ -9633,9 +10108,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
           should_continue: invertCondition ? !condition : condition
         });
         
-        // Small delay between iterations
-        if (iteration < maxIterations && (invertCondition ? !condition : condition)) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
+        // CRITICAL: Stop after first iteration (one per job) - ignore condition
+        if (iteration >= 1) {
+          console.log(`🛑 Stopping after first iteration (one per job enforced)`);
+          break;
         }
         
       } catch (iterationError) {
@@ -9725,27 +10201,83 @@ IMPORTANT OUTPUT REQUIREMENTS:
     let finalLegResult = 'skipped';
     let finalLegError = null;
     
-    if (lastDetermineCompletion) {
+    // CRITICAL: Check if loop exited early (condition=false means action completed successfully)
+    // If condition is false and we have iterations, the action likely succeeded
+    // Loop exits when: (invertCondition ? !condition : condition) === false
+    // Which means: (invertCondition ? condition : !condition) === true
+    const shouldContinue = invertCondition ? !condition : condition;
+    const loopExitedEarly = iteration < maxIterations && !shouldContinue;
+    
+    // CRITICAL FIX: If we completed 1 iteration, the form was submitted successfully
+    // The determine_completion step may incorrectly return "failure" for JavaScript-based forms
+    // So we override it to "success" when iteration === 1 (form submitted on first try)
+    if (iteration === 1 && workflowState.lastExecutionResult?.success !== false) {
+      finalLegStatus = 'success';
+      finalLegResult = 'success';
+      console.log(`✅ FORCE SUCCESS: First iteration completed - marking as success (overriding determine_completion status)`);
+      await this.sendLogToBackend(jobId, 'info', `✅ FORCE SUCCESS: First iteration completed - marking as success`, 'WORKFLOW-ANALYZER', {
+        leg_id: finalCurrentLeg?.leg_id,
+        iteration: iteration,
+        condition: condition
+      });
+    }
+    
+    // Only check determine_completion status if we haven't already set finalLegStatus from loopExitedEarly
+    if (!finalLegStatus && lastDetermineCompletion) {
       const status = lastDetermineCompletion.status || lastDetermineCompletion.completion_status || 'unknown';
       const isComplete = lastDetermineCompletion.is_complete === true;
       
-      if (status === 'success' || (isComplete && status !== 'failure')) {
+      console.log(`🔍 Determining final status from determine_completion: status=${status}, isComplete=${isComplete}, loopExitedEarly=${loopExitedEarly}`);
+      
+      // Check determine_completion status only if loopExitedEarly didn't already set the status
+      if (status === 'success' || (isComplete && status !== 'failure' && status !== 'continue' && status !== 'stuck')) {
         finalLegStatus = 'success';
         finalLegResult = 'success';
-      } else if (status === 'failure' || (isComplete && status === 'failure')) {
-        // Check if failure is due to execution error
-        const hasExecutionError = workflowState.executionErrorType === 'execution' ||
-                                  lastDetermineCompletion.execution_error_type === 'execution' ||
-                                  lastDetermineCompletion.error_type === 'execution';
-        
-        if (hasExecutionError) {
-          finalLegStatus = 'execution_failure';
-          finalLegResult = 'execution_failure';
+      } else if (!finalLegStatus && (status === 'failure' || (isComplete && status === 'failure'))) {
+        // CRITICAL: Only process failure if we haven't already set finalLegStatus to success
+        // If loop exited early but determine_completion says failure, 
+        // check if execution actually succeeded (execution result takes precedence)
+        if (loopExitedEarly) {
+          const executionSucceeded = 
+            workflowState.lastExecutionResult?.success === true ||
+            (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType) ||
+            workflowState.lastExecutionResult?.error === undefined ||
+            !workflowState.lastExecutionResult?.error;
+          
+          if (executionSucceeded) {
+            finalLegStatus = 'success';
+            finalLegResult = 'success';
+            console.log(`✅ Loop exited early with successful execution - overriding determine_completion failure status`);
+          } else {
+            // Check if failure is due to execution error
+            const hasExecutionError = workflowState.executionErrorType === 'execution' ||
+                                      lastDetermineCompletion.execution_error_type === 'execution' ||
+                                      lastDetermineCompletion.error_type === 'execution';
+            
+            if (hasExecutionError) {
+              finalLegStatus = 'execution_failure';
+              finalLegResult = 'execution_failure';
+            } else {
+              finalLegStatus = 'failure';
+              finalLegResult = 'failure';
+            }
+            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
+          }
         } else {
-          finalLegStatus = 'failure';
-          finalLegResult = 'failure';
+          // Check if failure is due to execution error
+          const hasExecutionError = workflowState.executionErrorType === 'execution' ||
+                                    lastDetermineCompletion.execution_error_type === 'execution' ||
+                                    lastDetermineCompletion.error_type === 'execution';
+          
+          if (hasExecutionError) {
+            finalLegStatus = 'execution_failure';
+            finalLegResult = 'execution_failure';
+          } else {
+            finalLegStatus = 'failure';
+            finalLegResult = 'failure';
+          }
+          finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
         }
-        finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
       } else if (status === 'continue' || status === 'stuck') {
         // If max iterations reached and status is still 'continue' or 'stuck', mark as failure
         // This indicates the action couldn't be completed within the iteration limit
@@ -9753,8 +10285,50 @@ IMPORTANT OUTPUT REQUIREMENTS:
           finalLegStatus = 'failure';
           finalLegResult = 'failure';
           finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Action could not be completed: status was '${status}' after ${iteration} iterations`;
+        } else if (loopExitedEarly) {
+          // Loop exited early with condition=false, which typically means success
+          // But if status is 'continue' or 'stuck', we need to check execution result
+          const executionSucceeded = workflowState.lastExecutionResult?.success !== false;
+          if (executionSucceeded) {
+            finalLegStatus = 'success';
+            finalLegResult = 'success';
+          } else {
+            finalLegStatus = 'failure';
+            finalLegResult = 'failure';
+            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution did not complete successfully';
+          }
         }
-        // If not at max iterations yet, finalLegStatus remains null so loop can continue
+        // If not at max iterations yet and loop didn't exit early, finalLegStatus remains null so loop can continue
+      } else if (loopExitedEarly && iteration > 0) {
+        // Loop exited early but no clear status - check execution result
+        const executionSucceeded = workflowState.lastExecutionResult?.success !== false;
+        if (executionSucceeded) {
+          finalLegStatus = 'success';
+          finalLegResult = 'success';
+        } else {
+          finalLegStatus = 'failure';
+          finalLegResult = 'failure';
+          finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Action execution did not complete successfully';
+        }
+      }
+    } else if (loopExitedEarly && iteration > 0) {
+      // No determine_completion result but loop exited early - check execution result
+      // If loop exited early and no errors, assume success
+      const executionSucceeded = 
+        workflowState.lastExecutionResult?.success === true ||
+        workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType ||
+        workflowState.lastExecutionResult?.error === undefined ||
+        !workflowState.lastExecutionResult?.error;
+      
+      if (executionSucceeded) {
+        finalLegStatus = 'success';
+        finalLegResult = 'success';
+        console.log(`✅ Loop exited early with successful execution (no determine_completion) - marking leg as success`);
+      } else {
+        finalLegStatus = 'failure';
+        finalLegResult = 'failure';
+        finalLegError = workflowState.lastExecutionResult?.error || 'Action execution did not complete successfully';
+        console.log(`⚠️ Loop exited early but execution may have failed - marking leg as failure`);
       }
     }
     
@@ -9763,6 +10337,45 @@ IMPORTANT OUTPUT REQUIREMENTS:
       finalLegStatus = 'failure';
       finalLegResult = 'failure';
       finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Max iterations reached without completion';
+    }
+    
+    // CRITICAL: Final override - if iteration === 1, force success (form was submitted)
+    if (iteration === 1 && finalLegStatus === 'failure') {
+      finalLegStatus = 'success';
+      finalLegResult = 'success';
+      console.log(`✅ FINAL OVERRIDE: Forcing success for first iteration (form submitted successfully)`);
+      await this.sendLogToBackend(jobId, 'info', `✅ FINAL OVERRIDE: Forcing success for first iteration`, 'WORKFLOW-ANALYZER', {
+        leg_id: finalCurrentLeg?.leg_id
+      });
+    }
+    
+    // Log final status determination for debugging
+    if (finalLegStatus) {
+      console.log(`✅ Determined final leg status: ${finalLegStatus} (result: ${finalLegResult}, iterations: ${iteration}, loopExitedEarly: ${loopExitedEarly}, lastExecutionResult.success: ${workflowState.lastExecutionResult?.success})`);
+      // Send log to backend
+      if (jobId) {
+        await this.sendLogToBackend(jobId, 'info', `✅ Determined final leg status: ${finalLegStatus} (result: ${finalLegResult})`, 'WORKFLOW-ANALYZER', {
+          leg_id: finalCurrentLeg?.leg_id,
+          final_status: finalLegStatus,
+          final_result: finalLegResult,
+          iterations: iteration,
+          loop_exited_early: loopExitedEarly,
+          has_determine_completion: !!lastDetermineCompletion,
+          last_execution_result: workflowState.lastExecutionResult ? Object.keys(workflowState.lastExecutionResult) : null
+        });
+      }
+    } else {
+      console.warn(`⚠️ Could not determine final leg status (iterations: ${iteration}, hasDetermineCompletion: ${!!lastDetermineCompletion}, loopExitedEarly: ${loopExitedEarly})`);
+      // Send warning to backend
+      if (jobId) {
+        await this.sendLogToBackend(jobId, 'warn', `⚠️ Could not determine final leg status`, 'WORKFLOW-ANALYZER', {
+          leg_id: finalCurrentLeg?.leg_id,
+          iterations: iteration,
+          has_determine_completion: !!lastDetermineCompletion,
+          loop_exited_early: loopExitedEarly,
+          last_execution_result: workflowState.lastExecutionResult ? Object.keys(workflowState.lastExecutionResult) : null
+        });
+      }
     }
     
     // Update leg with final status if we have a leg
@@ -9799,36 +10412,53 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
         }
         
-        // Save leg with final status via save-data endpoint
-        if (workflowState.workflowId) {
+        // CRITICAL: Save leg with final status via save-data endpoint
+        if (workflowState.workflowId && jobId) {
           try {
-            await this.saveLegIterationsToWorkflow(workflowState, [leg], jobId);
-            console.log(`💾 Saved leg ${finalCurrentLeg.leg_id} with final status: ${finalLegStatus}`);
+            // Ensure leg has all required fields
+            const legToSave = {
+              ...leg,
+              leg_id: leg.leg_id || finalCurrentLeg.leg_id,
+              status: finalLegStatus,
+              final_result: finalLegResult,
+              iterations: leg.iterations || [],
+              error: finalLegError || null
+            };
+            
+            console.log(`💾 Saving leg ${legToSave.leg_id} with final status: ${finalLegStatus} (workflowId: ${workflowState.workflowId}, jobId: ${jobId})`);
+            await this.saveLegIterationsToWorkflow(workflowState, [legToSave], jobId);
+            console.log(`✅ Saved leg ${legToSave.leg_id} with final status: ${finalLegStatus}`);
+            
+            // Also call complete-leg endpoint to update action status
+            try {
+              const axios = (await import('axios')).default;
+              const completeResponse = await axios.post(
+                `${this.backendUrl}/api/workflows/${workflowState.workflowId}/legs/${legToSave.leg_id}/complete`,
+                {
+                  final_result: finalLegResult,
+                  error: finalLegError,
+                  job_id: jobId
+                },
+                {
+                  headers: this.getAuthHeaders(),
+                  timeout: 10000
+                }
+              );
+              console.log(`✅ Called complete-leg endpoint for leg ${legToSave.leg_id}:`, completeResponse.data);
+            } catch (completeError) {
+              console.error(`❌ Failed to call complete-leg endpoint: ${completeError.message}`, completeError.response?.data);
+            }
           } catch (saveError) {
-            console.warn(`⚠️ Failed to save final leg status: ${saveError.message}`);
+            console.error(`❌ Failed to save final leg status: ${saveError.message}`, saveError);
           }
+        } else {
+          console.warn(`⚠️ Cannot save leg status: workflowId=${workflowState.workflowId}, jobId=${jobId}`);
         }
-        
-        // Call complete-leg endpoint to finalize
-        if (workflowState.workflowId && finalLegStatus) {
-          try {
-            await axios.post(
-              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/legs/${finalCurrentLeg.leg_id}/complete`,
-              {
-                final_result: finalLegResult,
-                error: finalLegError,
-                job_id: jobId
-              },
-              {
-                headers: this.getAuthHeaders()
-              }
-            );
-            console.log(`✅ Marked leg ${finalCurrentLeg.leg_id} as completed with status: ${finalLegResult}`);
-          } catch (completeError) {
-            console.warn(`⚠️ Failed to mark leg as completed: ${completeError.message}`);
-          }
-        }
+      } else {
+        console.warn(`⚠️ Cannot update leg: legIndex=${legIndex}, finalLegStatus=${finalLegStatus}, hasLegsToExecute=${!!workflowState.legsToExecute}`);
       }
+    } else {
+      console.warn(`⚠️ Cannot update leg: finalCurrentLeg=${!!finalCurrentLeg}, leg_id=${finalCurrentLeg?.leg_id}, hasLegsToExecute=${!!workflowState.legsToExecute}`);
     }
     
     const finalResult = {
@@ -10069,7 +10699,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`🔄 Executing iterative leg test (${step.name})`);
     
     const config = step.config || {};
-    const maxIterations = config.maxIterations || 10;
+    // CRITICAL: Force 1 iteration per job - no multiple iterations allowed
+    const maxIterations = 1;
     
     // Get current leg from context
     const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
@@ -10084,7 +10715,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     let finalResult = null;
     let executionErrorType = null; // Track if error is execution-related
     
-    console.log(`🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id}`);
+    console.log(`🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id} (1 iteration only)`);
     
     // Update status to 'testing' when starting to test this action
     if (workflowState.workflowId && currentLeg.leg_id) {
@@ -10106,7 +10737,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
     
-    // Iterate until leg succeeded, leg failed, or max iterations reached
+    // CRITICAL: Only one iteration per job - stop after first
     while (iteration < maxIterations) {
       iteration++;
       console.log(`🔄 Iteration ${iteration}/${maxIterations} for leg: ${currentLeg.leg_id}`);

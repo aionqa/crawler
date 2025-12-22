@@ -14,9 +14,10 @@ import { promisify } from 'util';
 const execFileAsync = promisify(execFile);
 
 class VideoRecorder {
-  constructor(backendUrl, runnerId) {
+  constructor(backendUrl, runnerId, runnerToken = null) {
     this.backendUrl = backendUrl;
     this.runnerId = runnerId;
+    this.runnerToken = runnerToken || process.env.RUNNER_TOKEN || null;
     this.activeRecordings = new Map(); // jobId -> recording info
   }
 
@@ -137,11 +138,16 @@ class VideoRecorder {
   async uploadVideo(jobId, videoPath, fileSize, duration, startedAt) {
     try {
       // Request presigned URL from backend
+      const headers = {};
+      if (this.runnerToken) {
+        headers['Authorization'] = `Bearer ${this.runnerToken}`;
+      }
       const response = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
         type: 'video',
         jobId: jobId,
         contentType: 'video/webm'
       }, {
+        headers,
         timeout: 10000
       });
 
@@ -172,6 +178,11 @@ class VideoRecorder {
       const backendVideoUrl = `${publicBackendUrl}/stream-video?key=${encodeURIComponent(key)}`;
       
       // Notify backend about the video with backend proxy URL
+      // Use runner token for authentication
+      // Reuse headers object from above
+      if (this.runnerToken) {
+        headers['Authorization'] = `Bearer ${this.runnerToken}`;
+      }
       await axios.post(`${this.backendUrl}/api/jobs/${jobId}/video`, {
         video_key: key,
         video_url: backendVideoUrl, // Use backend proxy URL for external access
@@ -183,6 +194,7 @@ class VideoRecorder {
         fps: 5, // Approximate FPS from streaming
         started_at: startedAt instanceof Date ? startedAt.toISOString() : startedAt
       }, {
+        headers,
         timeout: 10000
       });
 
@@ -376,7 +388,12 @@ class VideoRecorder {
    */
   async registerSegment(jobId, segmentPayload) {
     try {
+      const headers = {};
+      if (this.runnerToken) {
+        headers['Authorization'] = `Bearer ${this.runnerToken}`;
+      }
       await axios.post(`${this.backendUrl}/api/jobs/${jobId}/video-segment`, segmentPayload, {
+        headers,
         timeout: 10000
       });
     } catch (error) {
