@@ -47,7 +47,7 @@ console.log(`🤖 Runner Type: ${RUNNER_TYPE} (${RUNNER_TYPE === 'service-manage
 const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID);
 
 // Initialize video recorder for full recording
-const videoRecorder = new VideoRecorder(BACKEND_URL, RUNNER_ID);
+const videoRecorder = new VideoRecorder(BACKEND_URL, RUNNER_ID, RUNNER_TOKEN);
 
 console.log(`🚀 Starting runner ${RUNNER_ID}`);
 console.log(`🔗 Backend URL: ${BACKEND_URL}`);

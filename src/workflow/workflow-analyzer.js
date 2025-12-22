@@ -412,31 +412,91 @@ class WorkflowAnalyzer {
             modal_selector: formInfo.modal_selector || null
           };
 
-          for (const input of inputs) {
-            const type = await input.getAttribute('type') || 'text';
-            const name = await input.getAttribute('name');
-            const id = await input.getAttribute('id');
-            const placeholder = await input.getAttribute('placeholder');
-            
-            const inputSelectors = await this.getElementSelector(input);
-            formData.fields.push({
-              type,
-              name,
-              id,
-              placeholder,
-              selector: inputSelectors[0]?.selector,
-              selectors: inputSelectors
-            });
+          // If Playwright query found fields, use them (with full selector info)
+          if (inputs.length > 0) {
+            for (const input of inputs) {
+              const type = await input.getAttribute('type') || 'text';
+              const name = await input.getAttribute('name');
+              const id = await input.getAttribute('id');
+              const placeholder = await input.getAttribute('placeholder');
+              
+              const inputSelectors = await this.getElementSelector(input);
+              formData.fields.push({
+                type,
+                name,
+                id,
+                placeholder,
+                selector: inputSelectors[0]?.selector,
+                selectors: inputSelectors
+              });
+            }
+          } else {
+            // Fallback: Use fields from evaluate() step if Playwright query found none
+            // This ensures we don't lose form field data that was already detected
+            if (formInfo.fields && formInfo.fields.length > 0) {
+              console.log(`⚠️ Playwright query found no inputs, using ${formInfo.fields.length} fields from evaluate() step`);
+              for (const field of formInfo.fields) {
+                // Try to get selector for each field
+                let fieldSelectors = [];
+                if (field.id) {
+                  try {
+                    const fieldElement = await page.$(`#${field.id}`).catch(() => null);
+                    if (fieldElement) {
+                      fieldSelectors = await this.getElementSelector(fieldElement);
+                    }
+                  } catch (e) {
+                    // Ignore selector generation errors
+                  }
+                }
+                
+                formData.fields.push({
+                  type: field.type || 'text',
+                  name: field.name || '',
+                  id: field.id || '',
+                  placeholder: field.placeholder || '',
+                  selector: fieldSelectors[0]?.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
+                  selectors: fieldSelectors.length > 0 ? fieldSelectors : []
+                });
+              }
+            }
           }
 
-          for (const button of buttons) {
-            const text = await button.textContent();
-            const buttonSelectors = await this.getElementSelector(button);
-            formData.buttons.push({
-              text: text?.trim(),
-              selector: buttonSelectors[0]?.selector,
-              selectors: buttonSelectors
-            });
+          // If Playwright query found buttons, use them (with full selector info)
+          if (buttons.length > 0) {
+            for (const button of buttons) {
+              const text = await button.textContent();
+              const buttonSelectors = await this.getElementSelector(button);
+              formData.buttons.push({
+                text: text?.trim(),
+                selector: buttonSelectors[0]?.selector,
+                selectors: buttonSelectors
+              });
+            }
+          } else {
+            // Fallback: Use buttons from evaluate() step if Playwright query found none
+            if (formInfo.buttons && formInfo.buttons.length > 0) {
+              console.log(`⚠️ Playwright query found no buttons, using ${formInfo.buttons.length} buttons from evaluate() step`);
+              for (const btn of formInfo.buttons) {
+                // Try to get selector for each button
+                let buttonSelectors = [];
+                if (btn.id) {
+                  try {
+                    const buttonElement = await page.$(`#${btn.id}`).catch(() => null);
+                    if (buttonElement) {
+                      buttonSelectors = await this.getElementSelector(buttonElement);
+                    }
+                  } catch (e) {
+                    // Ignore selector generation errors
+                  }
+                }
+                
+                formData.buttons.push({
+                  text: btn.text || '',
+                  selector: buttonSelectors[0]?.selector || (btn.id ? `#${btn.id}` : null),
+                  selectors: buttonSelectors.length > 0 ? buttonSelectors : []
+                });
+              }
+            }
           }
 
           analysis.forms.push(formData);
@@ -498,6 +558,62 @@ class WorkflowAnalyzer {
         });
       }
 
+      // CRITICAL: Also add form fields (inputs, selects, textareas) to interactive_elements
+      // Form fields are interactive elements and should be counted
+      // NOTE: This runs BEFORE non-interactive elements extraction, but forms are already processed
+      // Form fields will be added again after non-interactive elements (see later in code)
+      // This is a fallback to ensure they're added even if something goes wrong later
+      if (analysis.forms && analysis.forms.length > 0) {
+        const initialIECount = analysis.interactive_elements.length;
+        for (const formData of analysis.forms) {
+          if (formData.fields && formData.fields.length > 0) {
+            for (const field of formData.fields) {
+              const alreadyExists = analysis.interactive_elements.some(
+                el => {
+                  if (field.id && el.id === field.id) return true;
+                  if (field.selector && el.selector === field.selector) return true;
+                  if (field.name && el.name === field.name && field.type === el.type) return true;
+                  return false;
+                }
+              );
+              
+              if (!alreadyExists) {
+                analysis.interactive_elements.push({
+                  type: field.type || 'input',
+                  name: field.name || '',
+                  id: field.id || '',
+                  placeholder: field.placeholder || '',
+                  selector: field.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
+                  selectors: field.selectors || []
+                });
+              }
+            }
+          }
+          
+          if (formData.buttons && formData.buttons.length > 0) {
+            for (const button of formData.buttons) {
+              const alreadyExists = analysis.interactive_elements.some(
+                el => {
+                  if (button.id && el.id === button.id) return true;
+                  if (button.selector && el.selector === button.selector) return true;
+                  if (button.text && el.text === button.text && el.type === 'button') return true;
+                  return false;
+                }
+              );
+              
+              if (!alreadyExists && button.selector) {
+                analysis.interactive_elements.push({
+                  type: 'button',
+                  text: button.text || '',
+                  selector: button.selector,
+                  selectors: button.selectors || []
+                });
+              }
+            }
+          }
+        }
+      }
+
       // Extract non-interactive elements (informational content, headings, labels)
       const nonInteractiveElements = await page.$$eval(
         'p, h1, h2, h3, h4, h5, h6, span, div, label',
@@ -522,6 +638,70 @@ class WorkflowAnalyzer {
       );
 
       analysis.non_interactive_elements = nonInteractiveElements;
+
+      // CRITICAL: Also add form fields (inputs, selects, textareas) to interactive_elements
+      // Form fields are interactive elements and should be counted
+      // Do this AFTER all forms are processed and AFTER non-interactive elements so we have complete data
+      if (analysis.forms && analysis.forms.length > 0) {
+        const initialIECount = analysis.interactive_elements.length;
+        console.log(`📊 Adding form fields to interactive_elements (${analysis.forms.length} form(s) found, current IE count: ${initialIECount})`);
+        
+        for (const formData of analysis.forms) {
+          if (formData.fields && formData.fields.length > 0) {
+            for (const field of formData.fields) {
+              // Check if this field is already in interactive_elements (to avoid duplicates)
+              const alreadyExists = analysis.interactive_elements.some(
+                el => {
+                  if (field.id && el.id === field.id) return true;
+                  if (field.selector && el.selector === field.selector) return true;
+                  if (field.name && el.name === field.name && field.type === el.type) return true;
+                  return false;
+                }
+              );
+              
+              if (!alreadyExists) {
+                const newElement = {
+                  type: field.type || 'input',
+                  name: field.name || '',
+                  id: field.id || '',
+                  placeholder: field.placeholder || '',
+                  selector: field.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
+                  selectors: field.selectors || []
+                };
+                analysis.interactive_elements.push(newElement);
+                console.log(`  ➕ Added field to IE: ${newElement.type} ${newElement.name || newElement.id || 'unnamed'}`);
+              }
+            }
+          }
+          
+          // Also add form buttons to interactive_elements if not already there
+          if (formData.buttons && formData.buttons.length > 0) {
+            for (const button of formData.buttons) {
+              const alreadyExists = analysis.interactive_elements.some(
+                el => {
+                  if (button.id && el.id === button.id) return true;
+                  if (button.selector && el.selector === button.selector) return true;
+                  if (button.text && el.text === button.text && el.type === 'button') return true;
+                  return false;
+                }
+              );
+              
+              if (!alreadyExists && button.selector) {
+                analysis.interactive_elements.push({
+                  type: 'button',
+                  text: button.text || '',
+                  selector: button.selector,
+                  selectors: button.selectors || []
+                });
+              }
+            }
+          }
+        }
+        
+        const finalIECount = analysis.interactive_elements.length;
+        const addedCount = finalIECount - initialIECount;
+        console.log(`✅ Added ${addedCount} form fields to interactive_elements. Total: ${finalIECount} (was ${initialIECount})`);
+      }
 
     } catch (error) {
       console.error('Error during Playwright analysis:', error);
@@ -8854,7 +9034,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`🔄 Executing while-loop (${step.name})`);
     
     const config = step.config || {};
-    const maxIterations = config.maxIterations || 10;
+    // CRITICAL: Force 1 iteration per job - no multiple iterations allowed
+    const maxIterations = 1;
     const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
     const conditionType = config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
     const invertCondition = config.invertCondition === true; // If true, loop while condition is false
@@ -9523,8 +9704,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         });
         
         // Small delay between iterations
-        if (iteration < maxIterations && (invertCondition ? !condition : condition)) {
-          await new Promise(resolve => setTimeout(resolve, 1000));
+        // CRITICAL: Stop after first iteration (one per job) - ignore condition
+        if (iteration >= 1) {
+          console.log(`🛑 Stopping after first iteration (one per job enforced)`);
+          break;
         }
         
       } catch (iterationError) {
@@ -9958,7 +10141,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`🔄 Executing iterative leg test (${step.name})`);
     
     const config = step.config || {};
-    const maxIterations = config.maxIterations || 10;
+    // CRITICAL: Force 1 iteration per job - no multiple iterations allowed
+    const maxIterations = 1;
     
     // Get current leg from context
     const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
@@ -9973,7 +10157,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     let finalResult = null;
     let executionErrorType = null; // Track if error is execution-related
     
-    console.log(`🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id}`);
+    console.log(`🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id} (1 iteration only)`);
     
     // Update status to 'testing' when starting to test this action
     if (workflowState.workflowId && currentLeg.leg_id) {
@@ -9995,7 +10179,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
     
-    // Iterate until leg succeeded, leg failed, or max iterations reached
+    // CRITICAL: Only one iteration per job - stop after first
     while (iteration < maxIterations) {
       iteration++;
       console.log(`🔄 Iteration ${iteration}/${maxIterations} for leg: ${currentLeg.leg_id}`);

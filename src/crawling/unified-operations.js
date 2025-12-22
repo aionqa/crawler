@@ -2222,28 +2222,7 @@ const modeHandlers = {
                       });
                     }
                     
-                    // Verify we reached 80% threshold
-                    try {
-                      const actionsResponse = await axios.get(`${backendUrl}/api/actions?job_id=${jobId}`, {
-                        timeout: 5000
-                      });
-                      const allActions = Array.isArray(actionsResponse.data) ? actionsResponse.data : [];
-                      const totalActions = allActions.length;
-                      const completedActions = allActions.filter(a => 
-                        a.status === 'completed' || a.status === 'failed'
-                      ).length;
-                      
-                      if (totalActions > 0) {
-                        const analyzedPercentage = (completedActions / totalActions) * 100;
-                        await sendLog(jobId, 'info', `📊 Action analysis: ${analyzedPercentage.toFixed(1)}% (${completedActions}/${totalActions})`);
-                        
-                        if (analyzedPercentage < 80) {
-                          await sendLog(jobId, 'warn', `⚠️ Action analysis below 80% threshold. Consider executing more legs.`);
-                        }
-                      }
-                    } catch (statsError) {
-                      console.warn(`Failed to verify action analysis percentage: ${statsError.message}`);
-                    }
+                    // Note: Action analysis percentage is only logged in test logs, not job logs
                   } catch (execError) {
                     // Fallback to executing all legs if threshold logic fails
                     console.warn(`Failed to execute with threshold logic: ${execError.message}, falling back to all legs`);
