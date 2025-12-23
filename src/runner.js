@@ -20,7 +20,6 @@ const RUNNER_TOKEN = process.env.RUNNER_TOKEN; // GitHub Actions-style runner to
 const RUNNER_TYPE = process.env.RUNNER_TYPE || 'user-managed'; // 'service-managed' or 'user-managed'
 const TASK_MODE = process.env.TASK_MODE || 'polling'; // 'single-job' or 'polling'
 const JOB_ID = process.env.JOB_ID; // Job ID when in single-job mode
-const JOB_DATA = process.env.JOB_DATA; // Job data JSON when in single-job mode
 const MAX_SITEMAP_SCAN_DEPTH = 5;
 const MAX_SITEMAP_SCAN_CHILD_SITEMAPS = 25;
 const MAX_SITEMAP_SCAN_ENTRIES = 5000;
@@ -1122,17 +1121,31 @@ process.on('SIGTERM', shutdown);
 
 /**
  * Execute a single job and exit (for ECS task-per-job mode)
+ * Fetches job data from backend API to avoid ECS container overrides length limit
  */
 async function executeSingleJob() {
   console.log(`🎯 Running in single-job mode`);
   
-  if (!JOB_ID || !JOB_DATA) {
-    console.error(`❌ JOB_ID and JOB_DATA are required in single-job mode`);
+  if (!JOB_ID) {
+    console.error(`❌ JOB_ID is required in single-job mode`);
     process.exit(1);
   }
   
   try {
-    const jobData = JSON.parse(JOB_DATA);
+    // Fetch job data from backend API instead of environment variable
+    // This avoids ECS container overrides 8192 character limit
+    console.log(`📥 Fetching job data from backend API for job ${JOB_ID}`);
+    const response = await axios.get(`${BACKEND_URL}/api/jobs/${JOB_ID}`, {
+      headers: getAuthHeaders(),
+      timeout: 10000
+    });
+    
+    if (!response.data) {
+      console.error(`❌ Job ${JOB_ID} not found in backend`);
+      process.exit(1);
+    }
+    
+    const jobData = response.data;
     
     // CRITICAL: Get job type from database if available (passed via environment)
     const dbJobType = process.env.JOB_TYPE || null;
@@ -1144,7 +1157,7 @@ async function executeSingleJob() {
       jobType: jobData.jobType || dbJobType || (jobData.type === 'login' ? 'login' : 'crawl') || 'crawl'
     };
     
-    console.log(`[DEBUG] Parsed job from JOB_DATA:`, {
+    console.log(`[DEBUG] Fetched job from API:`, {
       id: job.id,
       jobType: job.jobType,
       jobDataJobType: jobData.jobType,
@@ -1169,6 +1182,10 @@ async function executeSingleJob() {
     }
   } catch (error) {
     console.error(`❌ Fatal error executing job:`, error);
+    if (error.response) {
+      console.error(`   Status: ${error.response.status}`);
+      console.error(`   Response: ${JSON.stringify(error.response.data)}`);
+    }
     process.exit(1);
   }
 }
