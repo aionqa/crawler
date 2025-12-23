@@ -5402,9 +5402,11 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   
   await sendLog(jobId, 'info', `🚀 Starting WORKFLOW mode crawl process for ${url} (template: ${context.workflow_template_id})`, { mode, workflow_template_id: context.workflow_template_id });
   
-  // Check job status before starting
+  // Check job status before starting - accept 'running', 'pending', and 'queued'
+  // Only reject 'failed', 'cancelled', 'completed', and 'unknown' statuses
   const jobStatus = await checkJobStatus(jobId, context.runner_token);
-  if (jobStatus !== 'running') {
+  const validStatuses = ['running', 'pending', 'queued'];
+  if (!validStatuses.includes(jobStatus)) {
     await sendLog(jobId, 'warn', `⚠️ Job status is ${jobStatus}, stopping crawl execution`, { mode, jobStatus });
     throw new Error(`Job status is ${jobStatus}, cannot start crawl`);
   }
