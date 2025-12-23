@@ -608,30 +608,69 @@ async function recordPageVideo(page, jobId, pageUrl, action) {
     let frameWidth = null;
     let frameHeight = null;
     
+    // Frame comparison for intelligent skipping (Requirement 6: skip 90% of frames with no changes)
+    let lastFrameHash = null;
+    let skippedFramesCount = 0;
+    let lastKeptFrameIndex = -1;
+    const frameHashes = new Map(); // Store hashes for comparison
+    
+    // Simple hash function for frame comparison (using first/last bytes and size)
+    const getFrameHash = (buffer) => {
+      if (buffer.length < 100) return null;
+      // Use first 100 bytes, last 100 bytes, and size as hash
+      const start = buffer.slice(0, 100).toString('hex');
+      const end = buffer.slice(-100).toString('hex');
+      return `${buffer.length}_${start.substring(0, 20)}_${end.substring(0, 20)}`;
+    };
+    
     // Listen for screencast frames
     cdpSession.on('Page.screencastFrame', async ({ data, metadata, sessionId }) => {
       try {
-        const frameIndex = frames.length;
-        const framePath = path.join(framesDir, `frame_${String(frameIndex).padStart(6, '0')}.jpg`);
+        const frameBuffer = Buffer.from(data, 'base64');
+        const frameHash = getFrameHash(frameBuffer);
         const frameTimestamp = Date.now() - recordingStartTime;
         
         // Capture actual frame dimensions from first frame
-        if (frameIndex === 0 && metadata) {
+        if (frames.length === 0 && metadata) {
           frameWidth = metadata.deviceWidth || metadata.pageScaleFactor * metadata.viewportWidth || 1920;
           frameHeight = metadata.deviceHeight || metadata.pageScaleFactor * metadata.viewportHeight || 1080;
           await sendLog(jobId, 'debug', `📐 Video dimensions: ${frameWidth}x${frameHeight}`, { page_url: pageUrl });
         }
         
-        // Save frame as JPEG
-        const frameBuffer = Buffer.from(data, 'base64');
+        // Compare with last frame (Requirement 6: skip 90% of frames with no changes)
+        const isSimilar = lastFrameHash && frameHash === lastFrameHash;
+        const shouldSkip = isSimilar && (frames.length - lastKeptFrameIndex) < 10; // Keep 1 every 10 similar frames
+        
+        if (shouldSkip) {
+          skippedFramesCount++;
+          // Acknowledge frame but don't save it
+          await cdpSession.send('Page.screencastFrameAck', { sessionId });
+          return;
+        }
+        
+        // Frame has changed or we need to keep this one - save it
+        const frameIndex = frames.length;
+        const framePath = path.join(framesDir, `frame_${String(frameIndex).padStart(6, '0')}.jpg`);
+        
+        // If we skipped frames, mark this frame as having skipped frames before it
+        if (skippedFramesCount > 0) {
+          // We'll add text overlay during encoding
+        }
+        
         fs.writeFileSync(framePath, frameBuffer);
         
         frames.push({ 
           path: framePath, 
           metadata, 
           sessionId,
-          timestamp: frameTimestamp // milliseconds since recording start
+          timestamp: frameTimestamp,
+          skippedBefore: skippedFramesCount, // Track how many frames were skipped before this one
+          isSimilar: isSimilar
         });
+        
+        lastFrameHash = frameHash;
+        lastKeptFrameIndex = frameIndex;
+        skippedFramesCount = 0; // Reset counter
         
         // Acknowledge frame receipt
         await cdpSession.send('Page.screencastFrameAck', { sessionId });
@@ -685,12 +724,20 @@ async function recordPageVideo(page, jobId, pageUrl, action) {
         const nextFrame = frames[i + 1];
         
         // Calculate how long this frame should be shown (in seconds)
+        // If frames were skipped before this one, extend duration to represent skipped time
         let duration;
         if (nextFrame) {
           duration = (nextFrame.timestamp - frame.timestamp) / 1000;
         } else {
           // Last frame - show for 1 second
           duration = 1.0;
+        }
+        
+        // If frames were skipped, add time to represent the skipped period
+        if (frame.skippedBefore > 0) {
+          // Estimate skipped time (assuming ~30fps, each skipped frame is ~0.033s)
+          const estimatedSkippedTime = (frame.skippedBefore * 0.033);
+          duration += estimatedSkippedTime;
         }
         
         // Minimum frame duration of 0.5 seconds for visibility
@@ -708,32 +755,99 @@ async function recordPageVideo(page, jobId, pageUrl, action) {
       fs.writeFileSync(concatFile, concatContent.join('\n'));
       
       // Use ffmpeg concat demuxer to preserve timing
-      await new Promise((resolve, reject) => {
-        const ffmpegCmd = ffmpeg()
-          .input(concatFile)
-          .inputOptions(['-f concat', '-safe 0'])
-          .videoCodec('libx264')
-          .outputOptions([
-            '-pix_fmt yuv420p',
-            '-crf 28',
-            '-preset faster',
-            '-vsync vfr' // Variable framerate to preserve timing
-          ]);
+        // Add text overlay for frames with skipped content (Requirement 6: informative video)
+        // Create a subtitle file for frames that had skipped content
+        const totalSkipped = frames.reduce((sum, f) => sum + (f.skippedBefore || 0), 0);
+        let subtitleFile = null;
         
-        // If we detected frame dimensions, scale video to match
-        if (frameWidth && frameHeight) {
-          // Ensure dimensions are even (required for h264)
-          const evenWidth = Math.floor(frameWidth / 2) * 2;
-          const evenHeight = Math.floor(frameHeight / 2) * 2;
-          ffmpegCmd.size(`${evenWidth}x${evenHeight}`);
+        if (totalSkipped > 0) {
+          // Create SRT subtitle file for frames with skipped content
+          subtitleFile = path.join(framesDir, 'skipped_frames.srt');
+          const subtitleLines = [];
+          let subtitleIndex = 1;
+          let currentTime = 0;
+          
+          for (let i = 0; i < frames.length; i++) {
+            const frame = frames[i];
+            const nextFrame = frames[i + 1];
+            
+            if (frame.skippedBefore > 0) {
+              // Calculate timing for this frame
+              const startTime = currentTime;
+              const duration = nextFrame 
+                ? ((nextFrame.timestamp - frame.timestamp) / 1000) + (frame.skippedBefore * 0.033)
+                : 1.0;
+              const endTime = startTime + duration;
+              
+              // Format time for SRT (HH:MM:SS,mmm)
+              const formatTime = (seconds) => {
+                const hours = Math.floor(seconds / 3600);
+                const minutes = Math.floor((seconds % 3600) / 60);
+                const secs = Math.floor(seconds % 60);
+                const millis = Math.floor((seconds % 60 - secs) * 1000);
+                return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(millis).padStart(3, '0')}`;
+              };
+              
+              subtitleLines.push(`${subtitleIndex}`);
+              subtitleLines.push(`${formatTime(startTime)} --> ${formatTime(endTime)}`);
+              subtitleLines.push(`No visible changes detected (${frame.skippedBefore} frames skipped)`);
+              subtitleLines.push('');
+              subtitleIndex++;
+            }
+            
+            // Update current time
+            if (nextFrame) {
+              currentTime += ((nextFrame.timestamp - frame.timestamp) / 1000) + ((frame.skippedBefore || 0) * 0.033);
+            } else {
+              currentTime += 1.0;
+            }
+          }
+          
+          fs.writeFileSync(subtitleFile, subtitleLines.join('\n'));
         }
         
-        ffmpegCmd
-          .output(videoPath)
-          .on('end', () => resolve())
-          .on('error', (err) => reject(err))
-          .run();
-      });
+        await new Promise((resolve, reject) => {
+          const ffmpegCmd = ffmpeg()
+            .input(concatFile)
+            .inputOptions(['-f concat', '-safe 0'])
+            .videoCodec('libx264')
+            .outputOptions([
+              '-pix_fmt yuv420p',
+              '-crf 28',
+              '-preset faster',
+              '-vsync vfr' // Variable framerate to preserve timing
+            ]);
+          
+          // If we detected frame dimensions, scale video to match
+          if (frameWidth && frameHeight) {
+            // Ensure dimensions are even (required for h264)
+            const evenWidth = Math.floor(frameWidth / 2) * 2;
+            const evenHeight = Math.floor(frameHeight / 2) * 2;
+            ffmpegCmd.size(`${evenWidth}x${evenHeight}`);
+          }
+          
+          // Burn subtitles into video if we have skipped frames (Requirement 6)
+          if (subtitleFile && fs.existsSync(subtitleFile)) {
+            ffmpegCmd
+              .input(subtitleFile)
+              .inputOptions(['-f srt'])
+              .videoFilters([
+                {
+                  filter: 'subtitles',
+                  options: {
+                    filename: subtitleFile,
+                    force_style: 'FontSize=24,PrimaryColour=&H00FFFF,OutlineColour=&H000000,Outline=2'
+                  }
+                }
+              ]);
+          }
+          
+          ffmpegCmd
+            .output(videoPath)
+            .on('end', () => resolve())
+            .on('error', (err) => reject(err))
+            .run();
+        });
       
       // Check if video file was created
       if (fs.existsSync(videoPath)) {
