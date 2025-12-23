@@ -64,6 +64,31 @@ export async function executeScreenshotStep(page, step, workflowState, jobId, pa
       uploaded = true;
       console.log(`✅ Screenshot uploaded to MinIO: ${returnedUrl}`);
 
+      // Register screenshot in database (Requirement 5: screenshots collected on each stage)
+      try {
+        await axios.post(`${workflowAnalyzer.backendUrl}/api/upload/register-screenshot`, {
+          jobId: jobId,
+          objectName: key,
+          url: returnedUrl,
+          metadata: {
+            action: step.name || 'screenshot',
+            step: step.id || step.name,
+            analysisType: 'workflow',
+            pageUrl: await page.url().catch(() => null),
+            pageTitle: await page.title().catch(() => null),
+            size: screenshot.length,
+            resolution: 'full_hd'
+          }
+        }, {
+          timeout: 10000,
+          headers: workflowAnalyzer.getAuthHeaders()
+        });
+        console.log(`✅ Screenshot registered in database`);
+      } catch (registerError) {
+        console.warn(`⚠️ Failed to register screenshot in database: ${registerError.message}`);
+        // Don't fail the step if registration fails
+      }
+
       if (pageId) {
         await axios.post(`${workflowAnalyzer.backendUrl}/api/pages/${pageId}/screenshot`, {
           fileId: workflowState.screenshotFileId,
@@ -156,6 +181,7 @@ export async function executeScreenshotStep(page, step, workflowState, jobId, pa
     screenshotAttachments
   );
 }
+
 
 
 
