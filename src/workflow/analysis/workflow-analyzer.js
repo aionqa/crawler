@@ -903,12 +903,104 @@ IMPORTANT OUTPUT REQUIREMENTS:
 - Do NOT include duplicate actions or simple navigation links unless the navigation triggers a meaningful state change or workflow step.`;
   }
 
+  /**
+   * Convert legs to journeys (one leg = one journey with one action)
+   * For backwards compatibility, also converts journeys to legs format
+   */
+  convertLegsToJourneys(legs) {
+    if (!Array.isArray(legs)) return [];
+    
+    const journeys = [];
+    for (const leg of legs) {
+      // If it's already a journey, use it
+      if (leg.journey_id && leg.actions && Array.isArray(leg.actions)) {
+        journeys.push(leg);
+        continue;
+      }
+      
+      // Convert leg to journey with one action
+      const journey = {
+        journey_id: leg.journey_id || leg.leg_id || `journey_${leg.leg_id || Math.random().toString(36).substr(2, 9)}`,
+        description: leg.description || '',
+        priority: leg.priority || 'medium',
+        confidence: leg.confidence || 0,
+        expected_outcome: leg.expected_outcome || '',
+        test_instructions: leg.test_instructions || '',
+        status: leg.status || 'pending',
+        final_result: leg.final_result || null,
+        completed_at: leg.completed_at || null,
+        iterations: Array.isArray(leg.iterations) ? leg.iterations : [],
+        actions: [{
+          action_id: leg.action_id || `action_${leg.leg_id || '1'}`,
+          type: leg.type || 'click',
+          selector: leg.selector || '',
+          description: leg.description || '',
+          order: 0,
+          element_info: leg.element_info || {}
+        }],
+        // Keep original leg_id for backwards compatibility
+        leg_id: leg.leg_id,
+        element_info: leg.element_info || {}
+      };
+      journeys.push(journey);
+    }
+    return journeys;
+  }
+
+  /**
+   * Convert journeys to legs (for backwards compatibility)
+   */
+  convertJourneysToLegs(journeys) {
+    if (!Array.isArray(journeys)) return [];
+    
+    const legs = [];
+    for (const journey of journeys) {
+      // If it's already a leg, use it
+      if (journey.leg_id && !journey.actions) {
+        legs.push(journey);
+        continue;
+      }
+      
+      // Convert journey to leg (use first action as primary)
+      const firstAction = journey.actions && journey.actions.length > 0 ? journey.actions[0] : null;
+      const leg = {
+        leg_id: journey.leg_id || journey.journey_id,
+        description: journey.description || '',
+        type: firstAction?.type || 'click',
+        selector: firstAction?.selector || '',
+        expected_outcome: journey.expected_outcome || '',
+        test_instructions: journey.test_instructions || '',
+        priority: journey.priority || 'medium',
+        confidence: journey.confidence || 0,
+        status: journey.status || 'pending',
+        final_result: journey.final_result || null,
+        completed_at: journey.completed_at || null,
+        iterations: Array.isArray(journey.iterations) ? journey.iterations : [],
+        element_info: firstAction?.element_info || journey.element_info || {},
+        // Keep journey_id for reference
+        journey_id: journey.journey_id
+      };
+      legs.push(leg);
+    }
+    return legs;
+  }
+
   async applyLegsToWorkflowState(rawLegs, workflowState, source = 'page-summary') {
     if (!Array.isArray(rawLegs) || rawLegs.length === 0 || !workflowState) {
       return [];
     }
     
-    console.log(`[applyLegsToWorkflowState] Processing ${rawLegs.length} raw legs from source: ${source}`);
+    console.log(`[applyLegsToWorkflowState] Processing ${rawLegs.length} raw legs/journeys from source: ${source}`);
+    
+    // Check if we received journeys from AI (new format)
+    const hasJourneys = rawLegs.some(item => item.journey_id && item.actions);
+    let processedItems = rawLegs;
+    
+    if (hasJourneys) {
+      console.log(`✅ Received journeys format from AI, processing ${rawLegs.length} journeys`);
+      // Convert journeys to legs for internal processing (backwards compatibility)
+      processedItems = this.convertJourneysToLegs(rawLegs);
+    }
 
     const normalizeType = (rawType) => {
       if (!rawType) return 'click';
@@ -1405,24 +1497,33 @@ IMPORTANT OUTPUT REQUIREMENTS:
     workflowState.legResults = new Array(finalLegs.length).fill(null);
     workflowState.actionsSummary = this.buildActionsSummary(finalLegs);
 
-    // Ensure context has legsToExecute for for-each step
+    // Convert legs to journeys (new format)
+    const journeys = this.convertLegsToJourneys(finalLegs);
+    workflowState.journeys = journeys;
+    workflowState.journeysToExecute = journeys;
+
+    // Ensure context has legsToExecute for for-each step (backwards compatibility)
     if (!workflowState.context) {
       workflowState.context = {};
     }
     workflowState.context.legsToExecute = finalLegs;
+    workflowState.context.journeysToExecute = journeys;
 
     // Save to variable pool for easy access and visibility
     this.initializeVariablePool(workflowState);
-    // Save legsToExecute to page namespace (default)
+    // Save legsToExecute to page namespace (default) - backwards compatibility
     this.saveVariable(workflowState, 'legsToExecute', normalizedLegs, 'page', null);
-    // Also save as 'legs' for backward compatibility
     this.saveVariable(workflowState, 'legs', normalizedLegs, 'page', null);
+    // Save journeys (new format)
+    this.saveVariable(workflowState, 'journeysToExecute', journeys, 'page', null);
+    this.saveVariable(workflowState, 'journeys', journeys, 'page', null);
 
     workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
     if (!workflowState.aiAnalysisResult.page_description && workflowState.pageDescription) {
       workflowState.aiAnalysisResult.page_description = workflowState.pageDescription;
     }
-    workflowState.aiAnalysisResult.legs = finalLegs;
+    workflowState.aiAnalysisResult.legs = finalLegs; // Keep for backwards compatibility
+    workflowState.aiAnalysisResult.journeys = journeys; // New format
     workflowState.aiAnalysisResult.source = source;
 
     const newLegsCount = normalizedLegs.length;
