@@ -1181,11 +1181,60 @@ async function executeSingleJob() {
       process.exit(1);
     }
   } catch (error) {
-    console.error(`❌ Fatal error executing job:`, error);
+    console.error(`❌ Fatal error executing job:`, error.message);
+    
+    // Detailed error logging
     if (error.response) {
-      console.error(`   Status: ${error.response.status}`);
+      console.error(`   HTTP Status: ${error.response.status}`);
       console.error(`   Response: ${JSON.stringify(error.response.data)}`);
+      
+      if (error.response.status === 404) {
+        console.error(`   ❌ Job ${JOB_ID} not found in backend`);
+        console.error(`   This could mean:`);
+        console.error(`   - Job was not created in runner_jobs collection`);
+        console.error(`   - Job ID is incorrect`);
+        console.error(`   - Backend API endpoint /api/jobs/:id is not working correctly`);
+      } else if (error.response.status === 401) {
+        console.error(`   ❌ Authentication failed`);
+        console.error(`   RUNNER_TOKEN: ${RUNNER_TOKEN ? 'Set (length: ' + RUNNER_TOKEN.length + ')' : 'NOT SET'}`);
+        console.error(`   BACKEND_URL: ${BACKEND_URL}`);
+        console.error(`   Fix: Ensure RUNNER_TOKEN is set correctly in environment`);
+      } else if (error.response.status === 500) {
+        console.error(`   ❌ Backend server error`);
+        console.error(`   The backend encountered an error while fetching job data`);
+      }
+    } else if (error.request) {
+      console.error(`   ❌ Network error - could not reach backend`);
+      console.error(`   BACKEND_URL: ${BACKEND_URL}`);
+      console.error(`   Error: ${error.message}`);
+      console.error(`   Fix: Check network connectivity and BACKEND_URL configuration`);
+    } else {
+      console.error(`   ❌ Error: ${error.message}`);
+      console.error(`   Stack: ${error.stack}`);
     }
+    
+    // Try to report the error to backend before exiting
+    try {
+      await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+        jobId: JOB_ID,
+        level: 'error',
+        message: `❌ Failed to fetch job data from API: ${error.message}`,
+        component: 'RUNNER',
+        metadata: {
+          error_type: error.response ? 'http_error' : 'network_error',
+          status_code: error.response?.status,
+          backend_url: BACKEND_URL,
+          has_runner_token: !!RUNNER_TOKEN
+        }
+      }, {
+        headers: getAuthHeaders(),
+        timeout: 5000
+      });
+    } catch (logError) {
+      // Silent fail - backend might not be reachable
+      console.warn(`   ⚠️  Could not log error to backend: ${logError.message}`);
+    }
+    
     process.exit(1);
   }
 }
