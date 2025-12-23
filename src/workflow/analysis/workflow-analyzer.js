@@ -9972,6 +9972,30 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 }
               }
               
+              // CRITICAL: Also try to resolve the conditionPath directly using resolvePathValue
+              // This handles nested paths like "execute_workflow_legs::0::determine_completion.status"
+              if (!determineStepResult && conditionPath) {
+                try {
+                  const resolvedValue = this.resolvePathValue(workflowState, conditionPath, 'results');
+                  if (resolvedValue !== undefined && resolvedValue !== null) {
+                    // If we got a value, extract the determine_completion result from the path
+                    // For path like "execute_workflow_legs::0::determine_completion.status", 
+                    // we need to get "execute_workflow_legs::0::determine_completion" result
+                    const pathParts = conditionPath.split('.');
+                    if (pathParts.length > 1) {
+                      const stepPath = pathParts.slice(0, -1).join('.'); // Remove last part (status)
+                      const stepResult = this.resolvePathValue(workflowState, stepPath, 'results');
+                      if (stepResult && typeof stepResult === 'object') {
+                        determineStepResult = stepResult;
+                        console.log(`✅ Found determine_completion result via resolvePathValue for path "${stepPath}"`);
+                      }
+                    }
+                  }
+                } catch (error) {
+                  console.warn(`⚠️ Error resolving path "${conditionPath}":`, error.message);
+                }
+              }
+              
               // Fallback to lastExecutionResult
               if (!determineStepResult) {
                 determineStepResult = workflowState.lastExecutionResult || {};
