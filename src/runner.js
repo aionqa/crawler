@@ -231,14 +231,27 @@ async function executeJob(job) {
   console.log(`📍 URL: ${jobUrl}`);
   console.log(`[DEBUG] Job object at start:`, JSON.stringify(job, null, 2));
 
-  // Check job status before starting - accept 'pending', 'running', and 'queued'
-  const initialStatus = await checkJobStatus(job.id);
-  if (initialStatus !== 'running' && initialStatus !== 'pending' && initialStatus !== 'queued') {
+  // Check job status before starting - accept 'pending', 'running', 'queued', and 'unknown'
+  // 'unknown' can happen if job was just created and not yet in database (timing issue)
+  // Retry a few times with delay to handle race conditions
+  let initialStatus = await checkJobStatus(job.id);
+  let retries = 0;
+  const maxRetries = 3;
+  
+  while (initialStatus === 'unknown' && retries < maxRetries) {
+    console.log(`⏳ Job ${job.id} status is 'unknown', retrying in 2 seconds... (attempt ${retries + 1}/${maxRetries})`);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    initialStatus = await checkJobStatus(job.id);
+    retries++;
+  }
+  
+  const validStatuses = ['running', 'pending', 'queued'];
+  if (!validStatuses.includes(initialStatus) && initialStatus !== 'unknown') {
     console.log(`⚠️  Job ${job.id} status is ${initialStatus}, skipping execution`);
     // Report to backend to release the assignment
     try {
       await axios.post(`${BACKEND_URL}/api/runner/jobs/${job.id}/skip`, {
-        reason: `Job status is ${initialStatus}, expected 'pending', 'running', or 'queued'`,
+        reason: `Job status is ${initialStatus}, expected 'pending', 'running', 'queued', or 'unknown'`,
         runner_id: RUNNER_ID
       }, {
         headers: getAuthHeaders()
@@ -248,6 +261,11 @@ async function executeJob(job) {
       console.error(`❌ Error reporting skipped job:`, error.message);
     }
     return false;
+  }
+  
+  // If still unknown after retries, log warning but proceed (job might be newly created)
+  if (initialStatus === 'unknown') {
+    console.log(`⚠️  Job ${job.id} status is still 'unknown' after ${maxRetries} retries, proceeding anyway (job may be newly created)`);
   }
 
   try {
