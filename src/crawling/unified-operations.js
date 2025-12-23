@@ -5402,13 +5402,30 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   
   await sendLog(jobId, 'info', `🚀 Starting WORKFLOW mode crawl process for ${url} (template: ${context.workflow_template_id})`, { mode, workflow_template_id: context.workflow_template_id });
   
-  // Check job status before starting - accept 'running', 'pending', and 'queued'
-  // Only reject 'failed', 'cancelled', 'completed', and 'unknown' statuses
-  const jobStatus = await checkJobStatus(jobId, context.runner_token);
+  // Check job status before starting - accept 'running', 'pending', 'queued', and 'unknown'
+  // 'unknown' can happen if job was just created (race condition) - retry a few times
+  let jobStatus = await checkJobStatus(jobId, context.runner_token);
+  let retries = 0;
+  const maxRetries = 3;
+  
+  while (jobStatus === 'unknown' && retries < maxRetries) {
+    await sendLog(jobId, 'info', `⏳ Job status is 'unknown', retrying in 2 seconds... (attempt ${retries + 1}/${maxRetries})`, { mode });
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    jobStatus = await checkJobStatus(jobId, context.runner_token);
+    retries++;
+  }
+  
   const validStatuses = ['running', 'pending', 'queued'];
-  if (!validStatuses.includes(jobStatus)) {
+  const invalidStatuses = ['failed', 'cancelled', 'completed'];
+  
+  if (invalidStatuses.includes(jobStatus)) {
     await sendLog(jobId, 'warn', `⚠️ Job status is ${jobStatus}, stopping crawl execution`, { mode, jobStatus });
     throw new Error(`Job status is ${jobStatus}, cannot start crawl`);
+  }
+  
+  // If still unknown after retries, log warning but proceed (job may be newly created)
+  if (jobStatus === 'unknown') {
+    await sendLog(jobId, 'warn', `⚠️ Job status is still 'unknown' after ${maxRetries} retries, proceeding anyway (job may be newly created)`, { mode });
   }
   
   try {
