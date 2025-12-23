@@ -227,17 +227,18 @@ async function executeJob(job) {
   let streamInterval = null;
   
   console.log(`\n🎯 Executing ${job.jobType} job ${job.id}`);
-  console.log(`📍 URL: ${job.url}`);
+  const jobUrl = job.url || job.start_url || job.context?.start_url || 'undefined';
+  console.log(`📍 URL: ${jobUrl}`);
   console.log(`[DEBUG] Job object at start:`, JSON.stringify(job, null, 2));
 
-  // Check job status before starting - accept both 'pending' and 'running'
+  // Check job status before starting - accept 'pending', 'running', and 'queued'
   const initialStatus = await checkJobStatus(job.id);
-  if (initialStatus !== 'running' && initialStatus !== 'pending') {
+  if (initialStatus !== 'running' && initialStatus !== 'pending' && initialStatus !== 'queued') {
     console.log(`⚠️  Job ${job.id} status is ${initialStatus}, skipping execution`);
     // Report to backend to release the assignment
     try {
       await axios.post(`${BACKEND_URL}/api/runner/jobs/${job.id}/skip`, {
-        reason: `Job status is ${initialStatus}, expected 'pending' or 'running'`,
+        reason: `Job status is ${initialStatus}, expected 'pending', 'running', or 'queued'`,
         runner_id: RUNNER_ID
       }, {
         headers: getAuthHeaders()
@@ -250,7 +251,7 @@ async function executeJob(job) {
   }
 
   try {
-    // Update job status from 'pending' to 'running' when runner picks it up
+    // Update job status from 'pending'/'queued' to 'running' when runner picks it up
     try {
       await fetch(`${BACKEND_URL}/jobs/${job.id}/status`, {
         method: 'PUT',
@@ -260,7 +261,7 @@ async function executeJob(job) {
         },
         body: JSON.stringify({ status: 'running' })
       });
-      console.log(`🔄 Updated job ${job.id} status to 'running'`);
+      console.log(`🔄 Updated job ${job.id} status from '${initialStatus}' to 'running'`);
     } catch (statusError) {
       console.warn(`⚠️  Failed to update job status: ${statusError.message}`);
     }
