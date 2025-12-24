@@ -2317,10 +2317,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     // Execute each step in sequence
-    for (let i = startStepIndex; i < this.workflowTemplate.steps.length; i++) {
+    // CRITICAL: Store steps length at start to prevent issues if steps array is modified
+    const totalSteps = this.workflowTemplate.steps.length;
+    console.log(`🔒 Starting step execution loop: ${totalSteps} steps, starting from index ${startStepIndex}`);
+    
+    for (let i = startStepIndex; i < totalSteps; i++) {
       const step = this.workflowTemplate.steps[i];
+      console.log(`🔒 Loop iteration: i=${i}, step.name=${step.name}, step.id=${step.id || 'no-id'}`);
       console.log(`═══════════════════════════════════════════════════════`);
-      console.log(`🔄 EXECUTING STEP ${i + 1}/${this.workflowTemplate.steps.length}: ${step.name}`);
+      console.log(`🔄 EXECUTING STEP ${i + 1}/${totalSteps}: ${step.name}`);
       console.log(`Type: ${step.type}`);
       console.log(`═══════════════════════════════════════════════════════`);
       
