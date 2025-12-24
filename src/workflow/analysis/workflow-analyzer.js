@@ -149,36 +149,51 @@ class WorkflowAnalyzer {
       console.warn(`⚠️ No job_id provided - workflows/actions/pages may not be linked to job`);
     }
     
-    const initialUrl = page.url();
-    console.log(`═══════════════════════════════════════════════════════`);
-    console.log(`📄 VAR_DUMP: analyzePage called`);
-    console.log(`📄 VAR_DUMP: initialUrl=${initialUrl}`);
-    console.log(`📄 VAR_DUMP: jobId=${jobId}, effectiveJobId=${effectiveJobId}`);
-    console.log(`📄 VAR_DUMP: pageId=${pageId}, projectId=${projectId}`);
-    console.log(`📄 VAR_DUMP: context.page_url=${this.context?.page_url}`);
-    console.log(`📄 VAR_DUMP: context.credentials=${JSON.stringify({username: this.context?.credentials?.username || this.context?.username || 'MISSING', password: this.context?.credentials?.password || this.context?.password ? '***' : 'MISSING'})}`);
-    console.log(`Analyzing page: ${initialUrl} (job_id: ${effectiveJobId || 'none'})`);
-
-    // Load workflow template - MANDATORY
-    await this.loadWorkflowTemplate();
-
-    // Validate workflow template has steps
-    if (!this.workflowTemplate || !this.workflowTemplate.steps || this.workflowTemplate.steps.length === 0) {
-      throw new Error(`Workflow template "${this.context.workflow_template_id}" has no steps defined. All analysis must be defined in workflow template steps.`);
+    // CRITICAL: Prevent duplicate analyzePage calls for the same page
+    const analyzeKey = `${effectiveJobId}_${pageId || 'no-page'}_${this.context.workflow_template_id}`;
+    if (!this._analyzePageInProgress) {
+      this._analyzePageInProgress = new Set();
     }
-
-    // DEFAULT: All jobs are "crawl" jobs by default (test everything, discover pages, queue links)
-    // The configuration step can change this to "login" (authenticate only, no crawling)
-    // We don't check here - configuration step will set jobType if needed
-    // Default behavior is crawl, so we don't need to set anything here
     
-    console.log(`🎯 Executing workflow template: "${this.workflowTemplate.name}"`);
-    console.log(`📋 Workflow template has ${this.workflowTemplate.steps.length} steps to execute`);
-
-    // Execute workflow template steps ONLY
+    if (this._analyzePageInProgress.has(analyzeKey)) {
+      const errorMsg = `⚠️ CRITICAL: analyzePage already in progress for ${analyzeKey} - DUPLICATE CALL DETECTED!`;
+      console.error(errorMsg);
+      console.error(`⚠️ Stack trace:`, new Error().stack);
+      throw new Error(`analyzePage already in progress for this job/page/template combination. This indicates a bug - analyzePage should not be called twice.`);
+    }
+    
+    this._analyzePageInProgress.add(analyzeKey);
+    console.log(`🔒 analyzePage guard set for key: ${analyzeKey} (jobId: ${effectiveJobId}, pageId: ${pageId || 'none'}, templateId: ${this.context.workflow_template_id})`);
+    
     try {
+      const initialUrl = page.url();
+      console.log(`═══════════════════════════════════════════════════════`);
+      console.log(`📄 VAR_DUMP: analyzePage called`);
+      console.log(`📄 VAR_DUMP: initialUrl=${initialUrl}`);
+      console.log(`📄 VAR_DUMP: jobId=${jobId}, effectiveJobId=${effectiveJobId}`);
+      console.log(`📄 VAR_DUMP: pageId=${pageId}, projectId=${projectId}`);
+      console.log(`📄 VAR_DUMP: context.page_url=${this.context?.page_url}`);
+      console.log(`📄 VAR_DUMP: context.credentials=${JSON.stringify({username: this.context?.credentials?.username || this.context?.username || 'MISSING', password: this.context?.credentials?.password || this.context?.password ? '***' : 'MISSING'})}`);
+      console.log(`Analyzing page: ${initialUrl} (job_id: ${effectiveJobId || 'none'})`);
+
+      // Load workflow template - MANDATORY
+      await this.loadWorkflowTemplate();
+
+      // Validate workflow template has steps
+      if (!this.workflowTemplate || !this.workflowTemplate.steps || this.workflowTemplate.steps.length === 0) {
+        throw new Error(`Workflow template "${this.context.workflow_template_id}" has no steps defined. All analysis must be defined in workflow template steps.`);
+      }
+
+      // DEFAULT: All jobs are "crawl" jobs by default (test everything, discover pages, queue links)
+      // The configuration step can change this to "login" (authenticate only, no crawling)
+      // We don't check here - configuration step will set jobType if needed
+      // Default behavior is crawl, so we don't need to set anything here
+      
+      console.log(`🎯 Executing workflow template: "${this.workflowTemplate.name}"`);
+      console.log(`📋 Workflow template has ${this.workflowTemplate.steps.length} steps to execute`);
+
+      // Execute workflow template steps ONLY
       // Use jobId from parameter or fallback to context (backend always provides job_id in context)
-      const effectiveJobId = jobId || this.context.job_id;
       const results = await this.executeWorkflowSteps(page, effectiveJobId, pageId, projectId);
       console.log(`✅ Workflow template steps completed successfully`);
       
@@ -186,6 +201,11 @@ class WorkflowAnalyzer {
     } catch (stepError) {
       console.error(`❌ Workflow template execution failed:`, stepError);
       throw new Error(`Workflow execution failed: ${stepError.message}`);
+    } finally {
+      // Clean up analyzePage guard
+      if (this._analyzePageInProgress) {
+        this._analyzePageInProgress.delete(analyzeKey);
+      }
     }
   }
 
