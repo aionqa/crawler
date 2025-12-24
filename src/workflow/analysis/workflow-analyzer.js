@@ -5150,6 +5150,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       saveContentData,
       saveAccessibilityData,
       legs: saveLegs ? legs : [],
+      journeys: saveLegs && journeys.length > 0 ? journeys : [], // CRITICAL: Send journeys if available (new format)
       interactiveElements: saveInteractiveElements ? interactiveElements : [],
       nonInteractiveElements: saveNonInteractiveElements ? nonInteractiveElements : [],
       links: saveLinks ? links : [],
