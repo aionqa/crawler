@@ -2085,7 +2085,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
         jobId: jobId,
         level: 'info',
-        message: `🔧 [${step.type.toUpperCase()}] Executing step: "${step.name || step.type}"`,
+        message: `🔧 Executing step: "${step.name || step.type}"`,
         component: 'WORKFLOW-STEP',
         metadata: logData
       }, {
@@ -2171,9 +2171,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.warn(`⚠️ No job_id available - workflows/actions/pages may not be linked to job`);
     }
     
-    console.log(`═══════════════════════════════════════════════════════`);
-    console.log(`🔄 EXECUTING WORKFLOW TEMPLATE STEPS (job_id: ${effectiveJobId || 'none'})`);
-    console.log(`═══════════════════════════════════════════════════════`);
+    // CRITICAL: Prevent duplicate execution - track if workflow is already executing
+    const executionKey = `${effectiveJobId}_${pageId || 'no-page'}_${this.context.workflow_template_id}`;
+    if (this._executionInProgress && this._executionInProgress.has(executionKey)) {
+      console.warn(`⚠️ Workflow execution already in progress for ${executionKey} - skipping duplicate call`);
+      throw new Error(`Workflow execution already in progress for this job/page/template combination. This indicates a bug - workflow should not be executed twice.`);
+    }
+    
+    // Initialize execution tracking if needed
+    if (!this._executionInProgress) {
+      this._executionInProgress = new Set();
+    }
+    this._executionInProgress.add(executionKey);
+    
+    try {
+      console.log(`═══════════════════════════════════════════════════════`);
+      console.log(`🔄 EXECUTING WORKFLOW TEMPLATE STEPS (job_id: ${effectiveJobId || 'none'})`);
+      console.log(`═══════════════════════════════════════════════════════`);
     
     const resolvedOptions = {
       ...(this.context?.options || {})
@@ -2811,6 +2825,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`✅ Returning workflow results with step results:`, Object.keys(result.results || {}));
     
     return result;
+    } finally {
+      // Clean up execution tracking
+      if (this._executionInProgress) {
+        this._executionInProgress.delete(executionKey);
+      }
+    }
   }
 
   /**
