@@ -2172,10 +2172,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     // CRITICAL: Prevent duplicate execution - track if workflow is already executing
-    const executionKey = `${effectiveJobId}_${pageId || 'no-page'}_${this.context.workflow_template_id}`;
+    // Use only jobId and templateId for the key (pageId may change during execution)
+    const executionKey = `${effectiveJobId}_${this.context.workflow_template_id}`;
     if (this._executionInProgress && this._executionInProgress.has(executionKey)) {
       console.warn(`⚠️ Workflow execution already in progress for ${executionKey} - skipping duplicate call`);
-      throw new Error(`Workflow execution already in progress for this job/page/template combination. This indicates a bug - workflow should not be executed twice.`);
+      console.warn(`⚠️ Stack trace:`, new Error().stack);
+      throw new Error(`Workflow execution already in progress for this job/template combination. This indicates a bug - workflow should not be executed twice.`);
     }
     
     // Initialize execution tracking if needed
@@ -2183,6 +2185,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       this._executionInProgress = new Set();
     }
     this._executionInProgress.add(executionKey);
+    console.log(`🔒 Execution guard set for key: ${executionKey}`);
     
     try {
       console.log(`═══════════════════════════════════════════════════════`);
