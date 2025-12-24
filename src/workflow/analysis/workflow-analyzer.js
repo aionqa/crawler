@@ -2174,18 +2174,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // CRITICAL: Prevent duplicate execution - track if workflow is already executing
     // Use only jobId and templateId for the key (pageId may change during execution)
     const executionKey = `${effectiveJobId}_${this.context.workflow_template_id}`;
-    if (this._executionInProgress && this._executionInProgress.has(executionKey)) {
-      console.warn(`⚠️ Workflow execution already in progress for ${executionKey} - skipping duplicate call`);
-      console.warn(`⚠️ Stack trace:`, new Error().stack);
-      throw new Error(`Workflow execution already in progress for this job/template combination. This indicates a bug - workflow should not be executed twice.`);
-    }
     
     // Initialize execution tracking if needed
     if (!this._executionInProgress) {
       this._executionInProgress = new Set();
     }
+    
+    if (this._executionInProgress.has(executionKey)) {
+      const errorMsg = `⚠️ CRITICAL: Workflow execution already in progress for ${executionKey} - DUPLICATE CALL DETECTED!`;
+      console.error(errorMsg);
+      console.error(`⚠️ Stack trace:`, new Error().stack);
+      await this.sendLogToBackend(effectiveJobId, 'error', errorMsg, 'WORKFLOW-ANALYZER', {
+        execution_key: executionKey,
+        stack_trace: new Error().stack
+      });
+      throw new Error(`Workflow execution already in progress for this job/template combination. This indicates a bug - workflow should not be executed twice.`);
+    }
+    
     this._executionInProgress.add(executionKey);
-    console.log(`🔒 Execution guard set for key: ${executionKey}`);
+    console.log(`🔒 Execution guard set for key: ${executionKey} (jobId: ${effectiveJobId}, templateId: ${this.context.workflow_template_id})`);
     
     try {
       console.log(`═══════════════════════════════════════════════════════`);
