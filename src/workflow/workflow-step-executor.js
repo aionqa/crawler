@@ -553,40 +553,6 @@ export class WorkflowStepExecutor {
     }
   }
 
-  /**
-   * Execute Create Workflow Step
-   */
-  async executeCreateWorkflowStep(jobId, stepId, parameters, context) {
-    const startTime = Date.now();
-    console.log(`[WorkflowStepExecutor] Executing create workflow step for job ${jobId}`);
-    
-    try {
-      // This step creates a workflow document in the backend
-      const workflowData = {
-        page_id: context.pageId,
-        project_id: context.projectId,
-        url: context.pageUrl,
-        page_description: context.pageDescription || '',
-        playwright_analysis: context.playwrightAnalysis || {},
-        ai_analysis: context.aiAnalysis || null,
-        legs: context.legs || [],
-        status: 'pending'
-      };
-      
-      // Send to backend to create workflow
-      const response = await axios.post(`${this.backendUrl}/api/workflows`, workflowData);
-      
-      return {
-        workflowId: response.data._id,
-        workflowUrl: `${this.backendUrl}/workflows/${response.data._id}`,
-        legsCount: workflowData.legs.length,
-        executionTime: Date.now() - startTime
-      };
-    } catch (error) {
-      console.error(`[WorkflowStepExecutor] Create workflow step failed:`, error);
-      throw error;
-    }
-  }
 
   /**
    * Execute Update Workflow Step

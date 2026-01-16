@@ -98,7 +98,6 @@ class WorkflowAnalyzer {
       'sitemap-exploration': 240000, // 4 minutes - Sitemap exploration
       'unlighthouse': 300000,       // 5 minutes - Performance audit
       'save-data': 120000,          // 2 minutes - Data saving
-      'create-workflow': 120000,    // 2 minutes
       'update-workflow': 120000,    // 2 minutes
       'hardcoded-workflow-analysis': 120000, // 2 minutes
     };
@@ -114,7 +113,7 @@ class WorkflowAnalyzer {
     const capabilities = {
       hasSteps: stepList.length > 0,
       usesPlaywrightAnalysis: hasStep('playwright-analysis', 'workflow-analysis', 'hardcoded-workflow-analysis', 'page-discovery'),
-      usesAIModel: hasStep('ai-request', 'ai-prompt', 'page-description', 'workflow-analysis', 'hardcoded-workflow-analysis', 'create-workflow', 'update-workflow'),
+      usesAIModel: hasStep('ai-request', 'ai-prompt', 'page-description', 'workflow-analysis', 'hardcoded-workflow-analysis', 'update-workflow'),
       usesLinkDiscovery: hasStep('page-discovery'),
       usesPerformanceAudit: hasStep('unlighthouse'),
       usesScreenshotStep: hasStep('screenshot'),
@@ -1325,28 +1324,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     return finalLegs;
   }
 
-  createFallbackPageDescription(stats = {}, workflowState = {}) {
-    const title = workflowState.pageTitle || workflowState.pageUrl || 'Page';
-    const url = workflowState.pageUrl || '';
-    const summaryParts = [];
-
-    if (typeof stats.forms === 'number') summaryParts.push(`${stats.forms} form${stats.forms === 1 ? '' : 's'}`);
-    if (typeof stats.links === 'number') summaryParts.push(`${stats.links} link${stats.links === 1 ? '' : 's'}`);
-    if (typeof stats.interactive === 'number') summaryParts.push(`${stats.interactive} interactive element${stats.interactive === 1 ? '' : 's'}`);
-
-    const shortDescription = summaryParts.length
-      ? `${title} (${summaryParts.join(', ')})`
-      : title;
-
-    const fullDescription = `Automatically generated summary for ${url || 'the current page'}. The crawler detected ${summaryParts.join(', ') || 'no significant interactive elements'} during Playwright analysis.`;
-
-    return {
-      short_description: shortDescription,
-      full_description: fullDescription,
-      purpose: 'auto-generated summary from crawler analysis',
-      conversation_context: 'Generated without AI prompt execution'
-    };
-  }
 
   /**
    * Get a reliable selector for an element
@@ -2161,10 +2138,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
           // Deterministic, hardcoded analysis for specific domains (e.g., Practical Test Automation)
           case 'hardcoded-workflow-analysis':
             await this.executeHardcodedWorkflowAnalysisStep(page, step, workflowState, effectiveJobId);
-            break;
-            
-          case 'create-workflow':
-            await this.executeCreateWorkflowStep(step, workflowState, pageId, projectId, effectiveJobId);
             break;
             
           case 'update-workflow':
@@ -3263,36 +3236,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
       );
       
     } catch (error) {
-      console.warn(`Failed to generate page description: ${error.message}`);
-      workflowState.pageDescription = {
-        short_description: `Page: ${workflowState.pageTitle}`,
-        full_description: `Analysis of ${workflowState.pageUrl}`,
-        purpose: 'Information page',
-        conversation_context: 'Analyzing page structure and content'
-      };
-
-      workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
-      workflowState.aiAnalysisResult.page_description = workflowState.pageDescription;
-
-      this.storeStepResult(step, {
-        description: workflowState.pageDescription,
-        visible_text_length: workflowState.visibleText?.length || 0,
-        attachments: step.config?.attachments || [],
-        fallback: true,
-        error: error.message
-      }, workflowState);
-
+      console.error(`❌ Failed to generate page description: ${error.message}`);
+      console.error(`❌ Error stack:`, error.stack);
+      
       await this.logStepOutcome(
         step,
         jobId,
-        `📝 [PAGE-DESCRIPTION] Fallback description generated due to error`,
+        `❌ [PAGE-DESCRIPTION] Failed to generate page description: ${error.message}`,
         {
           error: error.message,
-          fallback: true,
-          short_description: workflowState.pageDescription.short_description
+          error_stack: error.stack,
+          step_id: step.id,
+          step_name: step.name,
+          step_type: step.type
         },
-        'warn'
+        'error'
       );
+      
+      // CRITICAL: No fallbacks - throw the error
+      throw new Error(`Page description generation failed: ${error.message}`);
     }
   }
 
@@ -3387,6 +3349,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
     if (workflowState.currentLegIndex !== undefined && workflowState.currentLegIndex !== null) {
       stepPayload.current_leg_index = workflowState.currentLegIndex;
     }
+
+    // Add current journey context (for journey-based templates)
+    if (workflowState.currentJourney || workflowState.currentItem) {
+      const currentJourney = workflowState.currentJourney || workflowState.currentItem;
+      stepPayload.currentJourney = currentJourney;
+      stepPayload.current_journey = currentJourney;
+    }
     
     // Add execution history
     if (workflowState.executionHistory && Array.isArray(workflowState.executionHistory) && workflowState.executionHistory.length > 0) {
@@ -3471,6 +3440,182 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     if (workflowState.screenshotUrl) {
       stepPayload.screenshot_url = workflowState.screenshotUrl;
+    }
+    
+    // CRITICAL: Automatically collect requested attachments if not already in workflowState
+    // This allows AI Prompt steps to collect data on-demand without requiring separate steps
+    const requestedAttachments = Array.isArray(step.config?.attachments) ? step.config.attachments : [];
+    
+    if (requestedAttachments.length > 0) {
+      console.log(`📦 [AI-PROMPT] Collecting ${requestedAttachments.length} attachment(s) for step "${step.name || step.id}"`);
+      
+      // Collect visible_text if requested and not already available
+      if (requestedAttachments.includes('visible_text') && !workflowState.visibleText) {
+        console.log(`📝 [AI-PROMPT] Collecting visible_text...`);
+        try {
+          workflowState.visibleText = await page.evaluate(() => {
+            const walker = document.createTreeWalker(
+              document.body,
+              NodeFilter.SHOW_TEXT,
+              {
+                acceptNode: function(node) {
+                  const parent = node.parentElement;
+                  if (!parent) return NodeFilter.FILTER_REJECT;
+                  const style = window.getComputedStyle(parent);
+                  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                    return NodeFilter.FILTER_REJECT;
+                  }
+                  const text = node.textContent?.trim();
+                  if (!text || text.length < 2) return NodeFilter.FILTER_REJECT;
+                  return NodeFilter.FILTER_ACCEPT;
+                }
+              }
+            );
+            
+            const textNodes = [];
+            let node;
+            while (node = walker.nextNode()) {
+              textNodes.push(node.textContent.trim());
+            }
+            
+            return textNodes.join(' ').replace(/\s+/g, ' ').trim().substring(0, 2000);
+          });
+          
+          const textLength = workflowState.visibleText?.length || 0;
+          console.log(`✅ [AI-PROMPT] Collected visible_text (${textLength} characters)`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `📝 [AI-PROMPT] Collected visible_text (${textLength} characters)`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'visible_text',
+              text_length: textLength
+            });
+          }
+        } catch (error) {
+          console.error(`❌ [AI-PROMPT] Failed to collect visible_text: ${error.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', `❌ [AI-PROMPT] Failed to collect visible_text: ${error.message}`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'visible_text',
+              error: error.message
+            });
+          }
+        }
+      }
+      
+      // Collect playwright_analysis if requested (needed for interactive_elements and playwright_analysis)
+      const needsPlaywrightAnalysis = requestedAttachments.includes('interactive_elements') || 
+                                      requestedAttachments.includes('playwright_analysis');
+      
+      if (needsPlaywrightAnalysis && !workflowState.playwrightAnalysis) {
+        console.log(`🔍 [AI-PROMPT] Collecting playwright_analysis...`);
+        try {
+          await this.executePlaywrightAnalysisStep(page, {
+            id: `${step.id}_auto_playwright_analysis`,
+            name: `Auto Playwright Analysis (for ${step.name || step.id})`,
+            type: 'playwright-analysis',
+            config: { 
+              collectForms: true, 
+              collectLinks: true, 
+              collectInteractiveElements: true 
+            }
+          }, workflowState, jobId);
+          
+          const analysis = workflowState.playwrightAnalysis || {};
+          const formsCount = analysis.forms?.length || 0;
+          const linksCount = analysis.links?.length || 0;
+          const interactiveCount = analysis.interactive_elements?.length || 0;
+          
+          console.log(`✅ [AI-PROMPT] Collected playwright_analysis (${formsCount} forms, ${linksCount} links, ${interactiveCount} interactive elements)`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [AI-PROMPT] Collected playwright_analysis (${formsCount} forms, ${linksCount} links, ${interactiveCount} interactive elements)`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'playwright_analysis',
+              forms_count: formsCount,
+              links_count: linksCount,
+              interactive_elements_count: interactiveCount
+            });
+          }
+        } catch (error) {
+          console.error(`❌ [AI-PROMPT] Failed to collect playwright_analysis: ${error.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', `❌ [AI-PROMPT] Failed to collect playwright_analysis: ${error.message}`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'playwright_analysis',
+              error: error.message
+            });
+          }
+        }
+      }
+      
+      // Collect screenshot if requested and not already available
+      if (requestedAttachments.includes('screenshot') && !workflowState.screenshotBase64) {
+        console.log(`📸 [AI-PROMPT] Collecting screenshot...`);
+        try {
+          await this.executeScreenshotStep(page, {
+            id: `${step.id}_auto_screenshot`,
+            name: `Auto Screenshot (for ${step.name || step.id})`,
+            type: 'screenshot',
+            config: { 
+              fullPage: true, 
+              quality: 90,
+              upload: true
+            }
+          }, workflowState, jobId, workflowState.pageId);
+          
+          const screenshotSize = workflowState.screenshotBase64 ? Buffer.from(workflowState.screenshotBase64, 'base64').length : 0;
+          console.log(`✅ [AI-PROMPT] Collected screenshot (${screenshotSize} bytes)`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `📸 [AI-PROMPT] Collected screenshot (${screenshotSize} bytes)`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'screenshot',
+              size_bytes: screenshotSize,
+              screenshot_url: workflowState.screenshotUrl || null
+            });
+          }
+        } catch (error) {
+          console.error(`❌ [AI-PROMPT] Failed to collect screenshot: ${error.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', `❌ [AI-PROMPT] Failed to collect screenshot: ${error.message}`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'screenshot',
+              error: error.message
+            });
+          }
+        }
+      }
+      
+      // Collect page_description if requested and not already available
+      if (requestedAttachments.includes('page_description') && !workflowState.pageDescription) {
+        console.log(`📝 [AI-PROMPT] Collecting page_description...`);
+        try {
+          // Use a minimal page description step that doesn't require attachments
+          await this.executePageDescriptionStep(page, {
+            id: `${step.id}_auto_page_description`,
+            name: `Auto Page Description (for ${step.name || step.id})`,
+            type: 'page-description',
+            config: {
+              template: step.config?.page_description_template || 'Describe this page in detail, including its purpose, main content, and interactive elements.',
+              attachments: [] // Don't request attachments in the page description step itself
+            }
+          }, workflowState, jobId);
+          
+          const description = workflowState.pageDescription?.short_description || 
+                             workflowState.pageDescription?.description || 
+                             'Page description generated';
+          const descLength = description.length;
+          console.log(`✅ [AI-PROMPT] Collected page_description (${descLength} characters)`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `📝 [AI-PROMPT] Collected page_description (${descLength} characters): ${description.substring(0, 100)}...`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'page_description',
+              description_length: descLength
+            });
+          }
+        } catch (error) {
+          console.error(`❌ [AI-PROMPT] Failed to collect page_description: ${error.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', `❌ [AI-PROMPT] Failed to collect page_description: ${error.message}`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'page_description',
+              error: error.message
+            });
+          }
+        }
+      }
+      
+      console.log(`✅ [AI-PROMPT] Finished collecting attachments for step "${step.name || step.id}"`);
     }
     
     // Add additional data based on step attachments (these are explicitly requested)
@@ -4272,58 +4417,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
   }
 
-  /**
-   * Execute create workflow step
-   */
-  async executeCreateWorkflowStep(step, workflowState, pageId, projectId, jobId) {
-    console.log(`📝 Creating workflow document (${step.name})`);
-    
-    try {
-      const workflow = await this.createWorkflow(pageId, projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
-      workflowState.workflowId = workflow._id;
-      console.log(`✅ Created workflow: ${workflow._id}${jobId ? ` (linked to job ${jobId})` : ''}`);
-
-      // CRITICAL: Automatically discover page immediately when workflow is created
-      // This ensures pages appear in the UI as soon as they're analyzed
-      try {
-        await this.updatePageDiscovery(
-          jobId,
-          pageId,
-          projectId,
-          workflowState.pageUrl,
-          {
-            title: workflowState.pageTitle,
-            workflow_id: workflow._id,
-            analyzed: false // Will be marked as analyzed after AI analysis completes
-          }
-        );
-        console.log(`✅ Page discovered immediately after workflow creation`);
-      } catch (discoveryError) {
-        console.warn(`⚠️ Failed to discover page immediately: ${discoveryError.message}`);
-        // Don't fail the workflow if page discovery fails
-      }
-
-      this.storeStepResult(step, {
-        workflowId: workflow._id,
-        pageId,
-        projectId
-      }, workflowState);
-
-      await this.logStepOutcome(
-        step,
-        jobId,
-        `📝 [CREATE-WORKFLOW] Created workflow ${workflow._id}`,
-        {
-          workflow_id: workflow._id,
-          page_id: pageId,
-          project_id: projectId
-        }
-      );
-    } catch (error) {
-      console.error(`❌ Failed to create workflow: ${error.message}`);
-      throw error;
-    }
-  }
 
   /**
    * Execute update workflow step
@@ -4514,10 +4607,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       discoveryData.actions_summary = actionsSummary;
     }
 
-    if (!discoveryData.page_description) {
-      const fallbackDescription = this.createFallbackPageDescription(stats, workflowState);
-      discoveryData.page_description = fallbackDescription;
-      workflowState.pageDescription = fallbackDescription;
+    // CRITICAL: No fallbacks - page_description must be set by the AI prompt step
+    if (includeDescription && !discoveryData.page_description) {
+      throw new Error('Page description is required but was not generated. Ensure the AI prompt step for page description executed successfully.');
     }
     
     const jobIdentifier = workflowState.jobId || jobId;
@@ -8861,7 +8953,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.log(`🔍 Result: ${Array.isArray(items) ? `array with ${items.length} items` : `not found (${typeof items})`}`);
       
       if (!Array.isArray(items)) {
-        throw new Error(`for-each step expected "legsToExecute" in variable pool (page namespace), but it was not found. The AI step must store legs there before this step executes.`);
+        const fallbackItems =
+          workflowState.legsToExecute ||
+          workflowState.journeysToExecute ||
+          workflowState.context?.legsToExecute ||
+          workflowState.context?.journeysToExecute ||
+          null;
+
+        if (Array.isArray(fallbackItems)) {
+          items = fallbackItems;
+          console.warn(`⚠️ For-each step: "legsToExecute" missing in variable pool; using fallback items from workflowState/context (${items.length} items).`);
+        } else {
+          throw new Error(`for-each step expected "legsToExecute" in variable pool (page namespace), but it was not found. The AI step must store legs there before this step executes.`);
+        }
       }
     } else {
       // For other paths, use resolvePathValue
@@ -8910,7 +9014,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const item = effectiveItems[idx];
       workflowState[itemVariable] = item;
       workflowState[indexVariable] = idx;
-
+      
       console.log(`🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
       
       // Report progress: current iteration
@@ -9307,6 +9411,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         // Evaluate condition after nested steps
+        let conditionValue = undefined;
         if (conditionType === 'code' && config.conditionCode) {
           // Clean the code before execution
           let cleanedCode = this.cleanScript(config.conditionCode);
@@ -9326,7 +9431,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         } else if (conditionType === 'ai-response' || conditionType === 'path') {
           // Get condition from workflowState path (check multiple locations)
           // Try multiple path variants: with hyphen, with underscore, with slug
-          let conditionValue = undefined;
           const pathVariants = [];
           
           // CRITICAL: Validate conditionPath is provided
@@ -10672,9 +10776,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         break;
       case 'workflow-analysis':
         await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId, stepContext);
-        break;
-      case 'create-workflow':
-        await this.executeCreateWorkflowStep(step, workflowState, workflowState.pageId, workflowState.projectId, jobId);
         break;
       case 'update-workflow':
         await this.executeUpdateWorkflowStep(step, workflowState, jobId);

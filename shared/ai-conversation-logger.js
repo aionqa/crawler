@@ -250,10 +250,12 @@ export class AIConversationLogger {
       }
     ];
 
-    if (payload?.screenshot_base64) {
+    // CRITICAL: Check both screenshot_base64 and screenshot (workflow analyzer uses screenshot)
+    const screenshotData = payload?.screenshot_base64 || payload?.screenshot;
+    if (screenshotData) {
       userContent.push({
         type: 'input_image',
-        image_url: `data:image/png;base64,${payload.screenshot_base64}`,
+        image_url: `data:image/png;base64,${screenshotData}`,
         detail: 'high'
       });
     }
