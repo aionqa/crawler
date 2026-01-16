@@ -558,6 +558,24 @@ async function executeCrawlJob(job, streamInterval) {
   const url = job.url || job.start_url || null;
   const rawContext = job.context || {};
   const jobOptions = job.options || {};
+  const projectId = rawContext.project_id || job.project_id || null;
+
+  if (!rawContext.project_id && projectId) {
+    rawContext.project_id = projectId;
+  }
+
+  if (!rawContext.llm_config && projectId) {
+    try {
+      const llmResponse = await axios.get(`${BACKEND_URL}/api/projects/${projectId}/llm-config`, {
+        headers: getAuthHeaders(),
+        timeout: 10000
+      });
+      rawContext.llm_config = llmResponse.data;
+      console.log(`[DEBUG] ✅ Loaded LLM config for project ${projectId} via backend`);
+    } catch (error) {
+      console.warn(`⚠️  Failed to load LLM config for project ${projectId}: ${error.message}`);
+    }
+  }
   
   // CRITICAL: Get cookies from context first (from credentials/login_job), then fall back to job.cookies
   const cookies = rawContext?.cookies || job.cookies || [];
