@@ -4253,22 +4253,102 @@ IMPORTANT OUTPUT REQUIREMENTS:
             interactiveElements: workflowState.playwrightAnalysis?.interactive_elements || workflowState.interactive_elements || []
           };
           const formsCount = Array.isArray(interactiveGroups.forms) ? interactiveGroups.forms.length : 0;
-          const interactiveElementsCount = Array.isArray(interactiveGroups.interactiveElements) ? interactiveGroups.interactiveElements.length : 0;
+          const interactiveElements = Array.isArray(interactiveGroups.interactiveElements)
+            ? interactiveGroups.interactiveElements
+            : [];
+          const significantInteractiveElements = interactiveElements.filter((element) => {
+            const elementType = String(element.element_type || element.type || '').toLowerCase();
+            if (!elementType) {
+              return true;
+            }
+            return !['input', 'select', 'textarea', 'checkbox', 'radio'].includes(elementType);
+          });
+          const interactiveElementsCount = significantInteractiveElements.length;
           const journeysCount = journeys.length;
           
-          console.log(`📊 [VALIDATION] Found ${formsCount} form(s), ${interactiveElementsCount} interactive element(s), ${journeysCount} journey(s)`);
+          console.log(`📊 [VALIDATION] Found ${formsCount} form(s), ${interactiveElementsCount} significant interactive element(s), ${journeysCount} journey(s)`);
           
           // Warn if no journeys but elements exist (AI might have missed something)
           if (journeysCount === 0 && (formsCount > 0 || interactiveElementsCount > 0)) {
-            console.warn(`⚠️ [VALIDATION] No journeys generated but ${formsCount} form(s) and ${interactiveElementsCount} interactive element(s) exist on the page`);
+            console.warn(`⚠️ [VALIDATION] No journeys generated but ${formsCount} form(s) and ${interactiveElementsCount} significant interactive element(s) exist on the page`);
           }
           
           // Validate journey count matches forms + significant interactive elements
           // AI must follow the rule: ONE FORM/INTERACTIVE ELEMENT = ONE JOURNEY
           if (journeysCount !== (formsCount + interactiveElementsCount)) {
-            console.warn(`⚠️ [VALIDATION] Generated ${journeysCount} journey(s) but expected ${formsCount + interactiveElementsCount} (${formsCount} form(s) + ${interactiveElementsCount} interactive element(s)). AI must follow the rule: EXACTLY ONE JOURNEY PER FORM/INTERACTIVE ELEMENT.`);
+            console.warn(`⚠️ [VALIDATION] Generated ${journeysCount} journey(s) but expected ${formsCount + interactiveElementsCount} (${formsCount} form(s) + ${interactiveElementsCount} significant interactive element(s)). AI must follow the rule: EXACTLY ONE JOURNEY PER FORM/INTERACTIVE ELEMENT.`);
           }
           
+          // Deduplicate journeys by mapping them back to unique interactive elements
+          if (journeys.length > 1) {
+            const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const extractSelectorText = (selector) => {
+              if (!selector || typeof selector !== 'string') {
+                return '';
+              }
+              const trimmed = selector.trim();
+              if (!trimmed.startsWith('text=')) {
+                return '';
+              }
+              let text = trimmed.slice(5).trim();
+              if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+                text = text.slice(1, -1);
+              }
+              return text;
+            };
+
+            const selectorKeyMap = new Map();
+            const textKeyMap = new Map();
+            significantInteractiveElements.forEach((element, index) => {
+              const elementId = element?.id || element?.element_id || '';
+              const selector = element?.selector || '';
+              const text = normalizeText(element?.text || element?.innerText || element?.label || '');
+              const existingTextKey = text ? textKeyMap.get(text) : null;
+              const key = existingTextKey || (elementId
+                ? `id:${elementId}`
+                : selector
+                  ? `selector:${selector}`
+                  : text
+                    ? `text:${text}`
+                    : `index:${index}`);
+              if (selector && !selectorKeyMap.has(selector)) {
+                selectorKeyMap.set(selector, key);
+              }
+              if (text && !textKeyMap.has(text)) {
+                textKeyMap.set(text, key);
+              }
+            });
+
+            const seenJourneyKeys = new Set();
+            const dedupedJourneys = [];
+            for (const journey of journeys) {
+              const journeyId = journey?.journey_id || '';
+              const actionSelector = journey?.actions?.[0]?.selector || '';
+              const selectorKey = selectorKeyMap.get(actionSelector);
+              const selectorText = extractSelectorText(actionSelector);
+              const textKey = selectorText ? textKeyMap.get(normalizeText(selectorText)) : null;
+              const actionText = normalizeText(journey?.actions?.[0]?.element_info?.text || journey?.interactive_element?.text || '');
+              const actionTextKey = actionText ? textKeyMap.get(actionText) : null;
+
+              const dedupeKey = selectorKey ||
+                textKey ||
+                actionTextKey ||
+                (actionSelector ? `selector:${actionSelector}` : (journeyId ? `id:${journeyId}` : `index:${dedupedJourneys.length}`));
+
+              if (seenJourneyKeys.has(dedupeKey)) {
+                console.warn(`⚠️ [JOURNEYS-DEDUP] Dropping duplicate journey ${journeyId || '(no-id)'} for key ${dedupeKey}`);
+                continue;
+              }
+              seenJourneyKeys.add(dedupeKey);
+              dedupedJourneys.push(journey);
+            }
+
+            if (dedupedJourneys.length !== journeys.length) {
+              console.warn(`⚠️ [JOURNEYS-DEDUP] Deduped journeys from ${journeys.length} to ${dedupedJourneys.length}`);
+              journeys = dedupedJourneys;
+            }
+          }
+
           // CRITICAL: Store journeys in workflowState IMMEDIATELY after extraction
           // This ensures journeys are available even if the step times out later
           // Only update workflowState.journeys if we have journeys to avoid overwriting with empty array
@@ -4295,7 +4375,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             // Empty journeys array - log warning but don't overwrite existing journeys
             console.warn(`⚠️ [JOURNEYS] AI returned empty journeys array. Keeping existing journeys in workflowState to avoid data loss.`);
             if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI returned empty journeys array but ${formsCount} form(s) and ${interactiveElementsCount} interactive element(s) exist on page. Keeping existing journeys.`, 'WORKFLOW-ANALYZER', {
+              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI returned empty journeys array but ${formsCount} form(s) and ${interactiveElementsCount} significant interactive element(s) exist on page. Keeping existing journeys.`, 'WORKFLOW-ANALYZER', {
                 forms_count: formsCount,
                 interactive_elements_count: interactiveElementsCount,
                 existing_journeys_count: workflowState.journeys?.length || 0
@@ -8150,33 +8230,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // Playwright scripts must execute in Node.js context, not browser context
       // The 'page' object is available in Node.js, not in browser
       // Create an async function that has access to the page object and credentials
-      const inputCredentials = workflowState.inputCredentials || this.context?.credentials || null;
-      
-      // CRITICAL: Log credentials being passed to script execution
-      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - inputCredentials check`);
-      console.log(`📄 VAR_DUMP: inputCredentials=${inputCredentials ? 'EXISTS' : 'NULL'}`);
-      if (inputCredentials) {
-        console.log(`📄 VAR_DUMP: inputCredentials.username=${inputCredentials.username || 'MISSING'}`);
-        console.log(`📄 VAR_DUMP: inputCredentials.password=${inputCredentials.password ? '***' : 'MISSING'}`);
-        console.log(`🔑 Passing credentials to script: username=${inputCredentials.username || 'MISSING'}, password=${inputCredentials.password ? '***' : 'MISSING'}`);
-        if (!inputCredentials.username || !inputCredentials.password) {
-          console.warn(`⚠️ WARNING: Credentials incomplete! username=${!!inputCredentials.username}, password=${!!inputCredentials.password}`);
-        }
-      } else {
-        console.error(`❌ ERROR: No credentials available for script execution!`);
-        console.error(`workflowState.inputCredentials:`, workflowState.inputCredentials);
-        console.error(`this.context.credentials:`, this.context?.credentials);
-      }
-      
-      // CRITICAL: Verify script uses credentials
       const scriptUsesCredentials = code.includes('input_credentials') || 
                                    code.includes('input_credentials.username') ||
                                    code.includes('input_credentials.password');
-      console.log(`📄 VAR_DUMP: scriptUsesCredentials=${scriptUsesCredentials}`);
-      if (!scriptUsesCredentials && inputCredentials) {
-        console.error(`❌ ERROR: Generated script does NOT use input_credentials!`);
-        console.error(`Script preview: ${code.substring(0, 500)}`);
-      }
       
       // DEFAULT: Allow navigation (crawl jobs can navigate to test everything)
       // Only restrict navigation if this is explicitly configured as a login job
@@ -8187,6 +8243,32 @@ IMPORTANT OUTPUT REQUIREMENTS:
                         workflowState?.variablePool?.job?.isLoginJob === true ||
                         workflowState?.variablePool?.job?.jobType === 'login' ||
                         workflowState?.variablePool?.job?.preventNavigation === true;
+
+      const inputCredentials = workflowState.inputCredentials || this.context?.credentials || null;
+      
+      // CRITICAL: Log credentials being passed to script execution
+      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - inputCredentials check`);
+      console.log(`📄 VAR_DUMP: inputCredentials=${inputCredentials ? 'EXISTS' : 'NULL'}`);
+      console.log(`📄 VAR_DUMP: scriptUsesCredentials=${scriptUsesCredentials}`);
+      if (inputCredentials) {
+        console.log(`📄 VAR_DUMP: inputCredentials.username=${inputCredentials.username || 'MISSING'}`);
+        console.log(`📄 VAR_DUMP: inputCredentials.password=${inputCredentials.password ? '***' : 'MISSING'}`);
+        console.log(`🔑 Passing credentials to script: username=${inputCredentials.username || 'MISSING'}, password=${inputCredentials.password ? '***' : 'MISSING'}`);
+        if (!inputCredentials.username || !inputCredentials.password) {
+          console.warn(`⚠️ WARNING: Credentials incomplete! username=${!!inputCredentials.username}, password=${!!inputCredentials.password}`);
+        }
+      } else if (isLoginJob || scriptUsesCredentials) {
+        console.error(`❌ ERROR: No credentials available for script execution!`);
+        console.error(`workflowState.inputCredentials:`, workflowState.inputCredentials);
+        console.error(`this.context.credentials:`, this.context?.credentials);
+      } else {
+        console.log(`ℹ️ No credentials provided for this script (non-login crawl step).`);
+      }
+      
+      if (isLoginJob && !scriptUsesCredentials) {
+        console.error(`❌ ERROR: Generated login script does NOT use input_credentials!`);
+        console.error(`Script preview: ${code.substring(0, 500)}`);
+      }
       
       if (isLoginJob) {
         // Check for forbidden navigation patterns
@@ -8317,7 +8399,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         wrapper.press = wrapMethod('press', pageObj.press.bind(pageObj));
         wrapper.goto = wrapMethod('goto', pageObj.goto.bind(pageObj));
         wrapper.waitForTimeout = wrapMethod('waitForTimeout', pageObj.waitForTimeout.bind(pageObj));
-        wrapper.waitFor = wrapMethod('waitFor', pageObj.waitFor.bind(pageObj));
+        if (pageObj.waitFor) {
+          wrapper.waitFor = wrapMethod('waitFor', pageObj.waitFor.bind(pageObj));
+        }
         wrapper.waitForLoadState = wrapMethod('waitForLoadState', pageObj.waitForLoadState.bind(pageObj));
         wrapper.waitForSelector = wrapMethod('waitForSelector', pageObj.waitForSelector.bind(pageObj));
         wrapper.selectOption = wrapMethod('selectOption', pageObj.selectOption.bind(pageObj));
@@ -8325,7 +8409,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         wrapper.uncheck = wrapMethod('uncheck', pageObj.uncheck.bind(pageObj));
         wrapper.hover = wrapMethod('hover', pageObj.hover.bind(pageObj));
         wrapper.focus = wrapMethod('focus', pageObj.focus.bind(pageObj));
-        wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
+        if (pageObj.blur) {
+          wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
+        }
         
         // Wrap locator method to also intercept methods on locators
         const originalLocator = pageObj.locator.bind(pageObj);
@@ -10894,10 +10980,29 @@ IMPORTANT OUTPUT REQUIREMENTS:
               
               // Map status based on expected_outcome_verified (primary source)
               let finalJustificationStatus = justificationStatus;
-              if (expectedOutcomeVerified === true) {
+              if (justificationStatus === 'pending') {
+                finalJustificationStatus = 'pending';
+              } else if (expectedOutcomeVerified === true) {
                 finalJustificationStatus = 'success';
               } else if (expectedOutcomeVerified === false) {
                 finalJustificationStatus = 'failure';
+              }
+
+              // CRITICAL: Ensure justify_journey status reflects final status so while-loop condition can exit
+              const justifyStepKeys = ['justify-journey', 'justify_journey', 'justifyJourney'];
+              for (const key of justifyStepKeys) {
+                const stepResult = workflowState.variablePool?.steps?.[key]?.result;
+                if (stepResult && typeof stepResult === 'object') {
+                  stepResult.status = finalJustificationStatus;
+                }
+                const resultContainer = workflowState.results?.[key];
+                if (resultContainer?.result && typeof resultContainer.result === 'object') {
+                  resultContainer.result.status = finalJustificationStatus;
+                }
+                const directStep = workflowState[key];
+                if (directStep?.result && typeof directStep.result === 'object') {
+                  directStep.result.status = finalJustificationStatus;
+                }
               }
               
               // Update journey with justification data
@@ -11834,7 +11939,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
             
             // Map status based on expected_outcome_verified (primary source)
             let finalJustificationStatus = justificationStatus;
-            if (expectedOutcomeVerified === true) {
+            if (justificationStatus === 'pending') {
+              finalJustificationStatus = 'pending';
+            } else if (expectedOutcomeVerified === true) {
               finalJustificationStatus = 'success';
             } else if (expectedOutcomeVerified === false) {
               finalJustificationStatus = 'failure';
