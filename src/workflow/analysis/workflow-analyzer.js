@@ -98,7 +98,6 @@ class WorkflowAnalyzer {
       'sitemap-exploration': 240000, // 4 minutes - Sitemap exploration
       'unlighthouse': 300000,       // 5 minutes - Performance audit
       'save-data': 120000,          // 2 minutes - Data saving
-      'create-workflow': 120000,    // 2 minutes
       'update-workflow': 120000,    // 2 minutes
       'hardcoded-workflow-analysis': 120000, // 2 minutes
     };
@@ -114,7 +113,7 @@ class WorkflowAnalyzer {
     const capabilities = {
       hasSteps: stepList.length > 0,
       usesPlaywrightAnalysis: hasStep('playwright-analysis', 'workflow-analysis', 'hardcoded-workflow-analysis', 'page-discovery'),
-      usesAIModel: hasStep('ai-request', 'ai-prompt', 'page-description', 'workflow-analysis', 'hardcoded-workflow-analysis', 'create-workflow', 'update-workflow'),
+      usesAIModel: hasStep('ai-request', 'ai-prompt', 'page-description', 'workflow-analysis', 'hardcoded-workflow-analysis', 'update-workflow'),
       usesLinkDiscovery: hasStep('page-discovery'),
       usesPerformanceAudit: hasStep('unlighthouse'),
       usesScreenshotStep: hasStep('screenshot'),
@@ -1110,41 +1109,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
       return null;
     };
 
-    // CRITICAL: Track existing leg IDs from workflowState to prevent duplicates across multiple calls
+    // Track existing leg IDs from workflowState to prevent duplicates across multiple calls
     const existingLegIds = new Set();
-    const existingLegsByDescription = new Map();
-    const existingLegsBySelector = new Map();
-    let hasExistingFormSubmitLeg = false;
     
-    // Build maps of existing legs for deduplication
+    // Build set of existing leg IDs
     if (Array.isArray(workflowState.legs) && workflowState.legs.length > 0) {
       for (const existingLeg of workflowState.legs) {
         if (existingLeg.leg_id) {
           existingLegIds.add(existingLeg.leg_id);
         }
-        // Check if we already have a form_submit leg
-        if (existingLeg.type === 'form_submit') {
-          hasExistingFormSubmitLeg = true;
-        }
-        // Index by description for fuzzy matching
-        if (existingLeg.description) {
-          const descKey = existingLeg.description.trim().toLowerCase().substring(0, 100);
-          if (!existingLegsByDescription.has(descKey)) {
-            existingLegsByDescription.set(descKey, existingLeg);
-          }
-        }
-        // Index by selector for exact matching
-        if (existingLeg.selector) {
-          const selKey = existingLeg.selector.trim();
-          if (!existingLegsBySelector.has(selKey)) {
-            existingLegsBySelector.set(selKey, existingLeg);
-          }
-        }
       }
     }
     
     const seenIds = new Set(existingLegIds); // Initialize with existing IDs
-    const seenFormSelectors = new Set(); // Track form submission selectors to prevent duplicates
     
     const generateLegId = (leg, index) => {
       const candidates = [
@@ -1194,78 +1171,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       return finalId;
     };
 
-    // CRITICAL: Pre-process rawLegs to merge duplicate form submission legs
-    // If multiple form_submit legs exist with different selectors (e.g., #name vs button[type="submit"]),
-    // they likely target the same form and should be merged into one leg
-    const formSubmissionLegs = [];
-    const otherLegs = [];
-    
-    // Define normalizeType here (before the loop) to use in deduplication
-    const normalizeTypeForDedup = (rawType) => {
-      if (!rawType) return 'click';
-      const type = String(rawType).trim().toLowerCase();
-      if (!type) return 'click';
-      const mappings = {
-        press: 'click',
-        click: 'click',
-        tap: 'click',
-        submit: 'form_submit',
-        form: 'form_submit',
-        form_submit: 'form_submit',
-        input: 'input',
-        type_text: 'input',
-        fill: 'input',
-        toggle: 'navigation_toggle',
-        navigation_toggle: 'navigation_toggle',
-        dropdown: 'navigation_toggle',
-        custom: 'custom',
-        interaction: 'custom',
-        action: 'custom'
-      };
-      const normalized = mappings[type] || type;
-      if (normalized === 'navigate' || normalized === 'navigation') {
-        return 'navigation';
-      }
-      return normalized;
-    };
-    
-    for (const rawLeg of rawLegs) {
-      if (!rawLeg || typeof rawLeg !== 'object') {
-        continue;
-      }
-      const type = normalizeTypeForDedup(rawLeg.type || rawLeg.action || rawLeg.action_type || rawLeg.kind);
-      // Also check description for form-related keywords
-      const desc = (rawLeg.description || '').toLowerCase();
-      const isFormRelated = type === 'form_submit' || desc.includes('form') && (desc.includes('submit') || desc.includes('fill'));
-      
-      if (isFormRelated) {
-        formSubmissionLegs.push(rawLeg);
-      } else {
-        otherLegs.push(rawLeg);
-      }
-    }
-    
-    // If we have multiple form_submit legs, keep only the first one (they're likely duplicates)
-    // The AI sometimes creates separate legs for "filling" and "submitting" the same form
-    if (formSubmissionLegs.length > 1) {
-      const legInfo = formSubmissionLegs.map(l => `${l.leg_id || 'no-id'}: "${(l.description || '').substring(0, 50)}" (type: ${l.type || 'no-type'})`).join(', ');
-      console.log(`⚠️ [DEDUPLICATION] Found ${formSubmissionLegs.length} form submission legs - keeping only the first one to prevent duplicates`);
-      console.log(`   [DEDUPLICATION] Legs found: ${legInfo}`);
-      if (this.backendLogger && workflowState.jobId) {
-        await this.backendLogger.appendJobLog(workflowState.jobId, 'warn', 
-          `⚠️ Found ${formSubmissionLegs.length} form submission legs - keeping only the first one to prevent duplicates: ${legInfo}`,
-          'WORKFLOW-ANALYZER', { form_legs_count: formSubmissionLegs.length, legs: legInfo });
-      }
-      // Keep the first one, discard the rest
-      formSubmissionLegs.splice(1);
-    }
-    
-    // Combine back: form submissions first, then other legs
-    const processedRawLegs = [...formSubmissionLegs, ...otherLegs];
-    
     const normalizedLegs = [];
-    for (let index = 0; index < processedRawLegs.length; index++) {
-      const rawLeg = processedRawLegs[index];
+    for (let index = 0; index < rawLegs.length; index++) {
+      const rawLeg = rawLegs[index];
       if (!rawLeg || typeof rawLeg !== 'object') {
         continue;
       }
@@ -1351,40 +1259,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
 
-      // CRITICAL: Check for duplicates against existing legs before adding
-      const descKey = String(description).trim().toLowerCase().substring(0, 100);
-      const selKey = (selector || finalSelector || '').trim();
-      
-      // Check if a leg with the same description or selector already exists
-      const duplicateByDescription = existingLegsByDescription.get(descKey);
-      const duplicateBySelector = selKey ? existingLegsBySelector.get(selKey) : null;
-      
-      // CRITICAL: For form_submit legs, check if we already have ANY form submission leg
-      // This prevents duplicate form submission legs even if they have different selectors
-      // (e.g., one leg with selector #name and another with button[type="submit"] - both target the same form)
-      let duplicateFormSubmission = false;
-      if (type === 'form_submit') {
-        // First check if we already have a form_submit leg in workflowState (from previous calls)
-        if (hasExistingFormSubmitLeg) {
-          duplicateFormSubmission = true;
-          console.log(`⏭️ [DEDUPLICATION] Skipping duplicate form submission leg: "${description.substring(0, 60)}..." (workflowState already has a form_submit leg)`);
-        } else {
-          // Check if we already have ANY form_submit leg in normalizedLegs (from this call)
-          for (const existingLeg of normalizedLegs) {
-            if (existingLeg.type === 'form_submit') {
-              duplicateFormSubmission = true;
-              console.log(`⏭️ [DEDUPLICATION] Skipping duplicate form submission leg: "${description.substring(0, 60)}..." (already processed form_submit leg: ${existingLeg.leg_id})`);
-              break;
-            }
-          }
-        }
+      // Check for duplicate leg_id only
+      if (seenIds.has(legId)) {
+        console.warn(`⚠️ Duplicate leg_id detected: "${legId}". AI should not generate duplicate leg_ids.`);
+        continue;
       }
-      
-      if (duplicateByDescription || duplicateBySelector || duplicateFormSubmission) {
-        const duplicateLeg = duplicateByDescription || duplicateBySelector;
-        console.log(`⏭️ Skipping duplicate leg: "${description.substring(0, 60)}..." (matches existing leg_id: ${duplicateLeg?.leg_id || 'form_submit duplicate'})`);
-        continue; // Skip this leg - it's a duplicate
-      }
+      seenIds.add(legId);
 
       const normalizedLeg = {
         ...rawLeg,
@@ -1412,14 +1292,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
 
       normalizedLegs.push(normalizedLeg);
-      
-      // Update tracking maps for this batch
-      if (normalizedLeg.description) {
-        existingLegsByDescription.set(descKey, normalizedLeg);
-      }
-      if (normalizedLeg.selector) {
-        existingLegsBySelector.set(selKey, normalizedLeg);
-      }
     }
 
     if (normalizedLegs.length === 0) {
@@ -1427,92 +1299,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
       return [];
     }
 
-    // CRITICAL: Merge with existing legs instead of replacing
+    // Merge with existing legs instead of replacing
     // This ensures legs from previous analysis steps are preserved
     const existingLegs = Array.isArray(workflowState.legs) ? workflowState.legs : [];
     const mergedLegs = [...existingLegs, ...normalizedLegs];
     
-    // CRITICAL: Final deduplication pass BEFORE saving to database
-    // This prevents duplicate form_submit legs from being saved
-    // CRITICAL: Also remove duplicate form_submit legs that target the same form
-    // Multiple form_submit legs with different selectors (e.g., #name vs button[type="submit"])
-    // are likely targeting the same form - detect this and keep only one
+    // Remove duplicates by leg_id only
     const finalLegs = [];
     const finalLegIds = new Set();
-    
-    // Helper to check if selector targets an input field (not a submit button)
-    const isInputFieldSelector = (selector) => {
-      if (!selector) return false;
-      const s = selector.toLowerCase().trim();
-      // Input field patterns: #id, [name="..."], input[...], but NOT button[type="submit"]
-      return (s.startsWith('#') || s.includes('[name=') || s.startsWith('input')) && 
-             !s.includes('submit') && !s.includes('button[type');
-    };
-    
-    // Helper to check if selector targets a submit button
-    const isSubmitButtonSelector = (selector) => {
-      if (!selector) return false;
-      const s = selector.toLowerCase().trim();
-      return s.includes('submit') || s.includes('button[type="submit') || s.includes('button[type=\'submit');
-    };
-    
-    // Track form_submit legs - if we have one that targets an input and another that targets a button,
-    // they're likely the same form (one for filling, one for submitting)
-    let hasFormSubmitLeg = false;
-    const formSubmitLegSelectors = [];
-    
-    console.log(`[FINAL DEDUPLICATION] Processing ${mergedLegs.length} merged legs for deduplication`);
-    const formSubmitLegsInMerged = mergedLegs.filter(l => l.type === 'form_submit');
-    console.log(`[FINAL DEDUPLICATION] Found ${formSubmitLegsInMerged.length} form_submit legs: ${formSubmitLegsInMerged.map(l => `${l.leg_id} (${l.selector})`).join(', ')}`);
-    
     for (const leg of mergedLegs) {
-      // Skip duplicate leg_ids
-      if (finalLegIds.has(leg.leg_id)) {
-        continue;
+      if (!finalLegIds.has(leg.leg_id)) {
+        finalLegIds.add(leg.leg_id);
+        finalLegs.push(leg);
       }
-      
-      // CRITICAL: For form_submit legs, detect duplicates based on selector patterns
-      if (leg.type === 'form_submit') {
-        const selector = leg.selector || '';
-        const isInput = isInputFieldSelector(selector);
-        const isButton = isSubmitButtonSelector(selector);
-        
-        console.log(`[FINAL DEDUPLICATION] Processing form_submit leg: ${leg.leg_id}, selector: ${selector}, hasFormSubmitLeg: ${hasFormSubmitLeg}`);
-        
-        // If we already have a form_submit leg, this is likely a duplicate
-        // (multiple form_submit legs usually target the same form with different selectors)
-        if (hasFormSubmitLeg) {
-          // Always skip additional form_submit legs - they're likely duplicates
-          // The first form_submit leg should handle the complete form submission flow
-          const logMsg = `⏭️ [FINAL DEDUPLICATION] Skipping duplicate form_submit leg: ${leg.leg_id} (selector: ${selector}, already have form_submit leg)`;
-          console.log(logMsg);
-          // Also log to backend if available
-          try {
-            if (workflowState.jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(workflowState.jobId, 'info', logMsg, 'WORKFLOW-ANALYZER', {
-                leg_id: leg.leg_id,
-                selector: selector,
-                existing_selectors: formSubmitLegSelectors
-              });
-            }
-          } catch (logError) {
-            // Ignore logging errors
-          }
-          continue;
-        }
-        
-        // This is the first form_submit leg
-        console.log(`[FINAL DEDUPLICATION] Adding first form_submit leg: ${leg.leg_id}, selector: ${selector}`);
-        hasFormSubmitLeg = true;
-        formSubmitLegSelectors.push(selector);
-      }
-      
-      finalLegIds.add(leg.leg_id);
-      finalLegs.push(leg);
     }
     
     workflowState.legs = finalLegs;
-    workflowState.legsToExecute = finalLegs; // CRITICAL: Use merged legs (deduplicated)
+    workflowState.legsToExecute = finalLegs;
     workflowState.legsSource = source;
     workflowState.legResults = new Array(finalLegs.length).fill(null);
     workflowState.actionsSummary = this.buildActionsSummary(finalLegs);
@@ -1559,28 +1362,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     return finalLegs;
   }
 
-  createFallbackPageDescription(stats = {}, workflowState = {}) {
-    const title = workflowState.pageTitle || workflowState.pageUrl || 'Page';
-    const url = workflowState.pageUrl || '';
-    const summaryParts = [];
-
-    if (typeof stats.forms === 'number') summaryParts.push(`${stats.forms} form${stats.forms === 1 ? '' : 's'}`);
-    if (typeof stats.links === 'number') summaryParts.push(`${stats.links} link${stats.links === 1 ? '' : 's'}`);
-    if (typeof stats.interactive === 'number') summaryParts.push(`${stats.interactive} interactive element${stats.interactive === 1 ? '' : 's'}`);
-
-    const shortDescription = summaryParts.length
-      ? `${title} (${summaryParts.join(', ')})`
-      : title;
-
-    const fullDescription = `Automatically generated summary for ${url || 'the current page'}. The crawler detected ${summaryParts.join(', ') || 'no significant interactive elements'} during Playwright analysis.`;
-
-    return {
-      short_description: shortDescription,
-      full_description: fullDescription,
-      purpose: 'auto-generated summary from crawler analysis',
-      conversation_context: 'Generated without AI prompt execution'
-    };
-  }
 
   /**
    * Get a reliable selector for an element
@@ -2426,10 +2207,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executeHardcodedWorkflowAnalysisStep(page, step, workflowState, effectiveJobId);
             break;
             
-          case 'create-workflow':
-            await this.executeCreateWorkflowStep(step, workflowState, pageId, projectId, effectiveJobId);
-            break;
-            
           case 'update-workflow':
             await this.executeUpdateWorkflowStep(step, workflowState, effectiveJobId);
             break;
@@ -3180,6 +2957,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
   async executePageDescriptionStep(page, step, workflowState, jobId, stepContext = null) {
     console.log(`📝 Generating page description (${step.name})`);
     
+    // Define formsCount early so it's available throughout the function
+    const formsCount = workflowState.playwrightAnalysis?.forms?.length || 0;
+    
     // Get page title and content if not already collected
     if (!workflowState.pageTitle) {
       workflowState.pageTitle = await page.title();
@@ -3282,6 +3062,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const links = workflowState.playwrightAnalysis.links.slice(0, 40);
       descriptionPayload.links = links;
       descriptionPayload.links_json = JSON.stringify(links, null, 2);
+    }
+
+    if (attachments.includes('screenshot') && workflowState.screenshotBase64) {
+      descriptionPayload.screenshot_base64 = workflowState.screenshotBase64;
+      descriptionPayload.screenshot = workflowState.screenshotBase64;
     }
     
     // Always include full playwright_analysis if requested in attachments (for {{playwright_analysis}} template variable)
@@ -3459,7 +3244,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       } else {
         // No candidate legs at all - log warning if forms/interactive elements exist
-        const formsCount = workflowState.playwrightAnalysis?.forms?.length || 0;
+        // formsCount already defined at function start
         const interactiveCount = workflowState.playwrightAnalysis?.interactive_elements?.length || 0;
         if (formsCount > 0 || interactiveCount > 0) {
           console.log(`⚠️ WARNING: Page has ${formsCount} form(s) and ${interactiveCount} interactive element(s), but AI did not generate any legs`);
@@ -3544,36 +3329,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
       );
       
     } catch (error) {
-      console.warn(`Failed to generate page description: ${error.message}`);
-      workflowState.pageDescription = {
-        short_description: `Page: ${workflowState.pageTitle}`,
-        full_description: `Analysis of ${workflowState.pageUrl}`,
-        purpose: 'Information page',
-        conversation_context: 'Analyzing page structure and content'
-      };
-
-      workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
-      workflowState.aiAnalysisResult.page_description = workflowState.pageDescription;
-
-      this.storeStepResult(step, {
-        description: workflowState.pageDescription,
-        visible_text_length: workflowState.visibleText?.length || 0,
-        attachments: step.config?.attachments || [],
-        fallback: true,
-        error: error.message
-      }, workflowState);
-
+      console.error(`❌ Failed to generate page description: ${error.message}`);
+      console.error(`❌ Error stack:`, error.stack);
+      
       await this.logStepOutcome(
         step,
         jobId,
-        `📝 [PAGE-DESCRIPTION] Fallback description generated due to error`,
+        `❌ [PAGE-DESCRIPTION] Failed to generate page description: ${error.message}`,
         {
           error: error.message,
-          fallback: true,
-          short_description: workflowState.pageDescription.short_description
+          error_stack: error.stack,
+          step_id: step.id,
+          step_name: step.name,
+          step_type: step.type
         },
-        'warn'
+        'error'
       );
+      
+      // CRITICAL: No fallbacks - throw the error
+      throw new Error(`Page description generation failed: ${error.message}`);
     }
   }
 
@@ -3658,7 +3432,33 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     if (workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute) && workflowState.legsToExecute.length > 0) {
       stepPayload.legs_to_execute = workflowState.legsToExecute;
+      stepPayload.legsToExecute = workflowState.legsToExecute; // CRITICAL: Add camelCase version for template variable resolution
       stepPayload.pending_legs = workflowState.legsToExecute.length;
+    }
+    
+    // CRITICAL: Also add journeysToExecute as legsToExecute if journeys exist but legsToExecute doesn't
+    // This ensures the "Justify Journeys" step receives the journeys data
+    if ((!workflowState.legsToExecute || workflowState.legsToExecute.length === 0) && 
+        workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0) {
+      // Convert journeys to legs format for template compatibility
+      const journeysAsLegs = workflowState.journeysToExecute.map(journey => ({
+        leg_id: journey.journey_id,
+        description: journey.description,
+        test_instructions: journey.test_instructions,
+        expected_outcome: journey.expected_outcome,
+        actions: journey.actions || [],
+        journey_id: journey.journey_id // Preserve journey_id for reference
+      }));
+      stepPayload.legs_to_execute = journeysAsLegs;
+      stepPayload.legsToExecute = journeysAsLegs; // CRITICAL: Add camelCase version for template variable resolution
+      stepPayload.pending_legs = journeysAsLegs.length;
+      console.log(`🔄 [JUSTIFY-JOURNEYS] Converted ${workflowState.journeysToExecute.length} journey(s) to legs format for template`);
+    }
+    
+    // Add journeysToExecute directly if available (for reference)
+    if (workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0) {
+      stepPayload.journeysToExecute = workflowState.journeysToExecute;
+      stepPayload.journeys_to_execute = workflowState.journeysToExecute;
     }
     
     // Add current leg context
@@ -3667,6 +3467,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     if (workflowState.currentLegIndex !== undefined && workflowState.currentLegIndex !== null) {
       stepPayload.current_leg_index = workflowState.currentLegIndex;
+    }
+
+    // Add current journey context (for journey-based templates)
+    if (workflowState.currentJourney || workflowState.currentItem) {
+      const currentJourney = workflowState.currentJourney || workflowState.currentItem;
+      stepPayload.currentJourney = currentJourney;
+      stepPayload.current_journey = currentJourney;
     }
     
     // Add execution history
@@ -3747,11 +3554,189 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     // Add screenshot information if available
+    // CRITICAL: Use screenshot_base64 (not screenshot) to match what AI conversation logger expects
     if (workflowState.screenshotBase64) {
-      stepPayload.screenshot = workflowState.screenshotBase64;
+      stepPayload.screenshot_base64 = workflowState.screenshotBase64;
+      stepPayload.screenshot = workflowState.screenshotBase64; // Also keep for backward compatibility
     }
     if (workflowState.screenshotUrl) {
       stepPayload.screenshot_url = workflowState.screenshotUrl;
+    }
+    
+    // CRITICAL: Automatically collect requested attachments if not already in workflowState
+    // This allows AI Prompt steps to collect data on-demand without requiring separate steps
+    const requestedAttachments = Array.isArray(step.config?.attachments) ? step.config.attachments : [];
+    
+    if (requestedAttachments.length > 0) {
+      console.log(`📦 [AI-PROMPT] Collecting ${requestedAttachments.length} attachment(s) for step "${step.name || step.id}"`);
+      
+      // Collect visible_text if requested and not already available
+      if (requestedAttachments.includes('visible_text') && !workflowState.visibleText) {
+        console.log(`📝 [AI-PROMPT] Collecting visible_text...`);
+        try {
+          workflowState.visibleText = await page.evaluate(() => {
+            const walker = document.createTreeWalker(
+              document.body,
+              NodeFilter.SHOW_TEXT,
+              {
+                acceptNode: function(node) {
+                  const parent = node.parentElement;
+                  if (!parent) return NodeFilter.FILTER_REJECT;
+                  const style = window.getComputedStyle(parent);
+                  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+                    return NodeFilter.FILTER_REJECT;
+                  }
+                  const text = node.textContent?.trim();
+                  if (!text || text.length < 2) return NodeFilter.FILTER_REJECT;
+                  return NodeFilter.FILTER_ACCEPT;
+                }
+              }
+            );
+            
+            const textNodes = [];
+            let node;
+            while (node = walker.nextNode()) {
+              textNodes.push(node.textContent.trim());
+            }
+            
+            return textNodes.join(' ').replace(/\s+/g, ' ').trim().substring(0, 2000);
+          });
+          
+          const textLength = workflowState.visibleText?.length || 0;
+          console.log(`✅ [AI-PROMPT] Collected visible_text (${textLength} characters)`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `📝 [AI-PROMPT] Collected visible_text (${textLength} characters)`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'visible_text',
+              text_length: textLength
+            });
+          }
+        } catch (error) {
+          console.error(`❌ [AI-PROMPT] Failed to collect visible_text: ${error.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', `❌ [AI-PROMPT] Failed to collect visible_text: ${error.message}`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'visible_text',
+              error: error.message
+            });
+          }
+        }
+      }
+      
+      // Collect playwright_analysis if requested (needed for interactive_elements and playwright_analysis)
+      const needsPlaywrightAnalysis = requestedAttachments.includes('interactive_elements') || 
+                                      requestedAttachments.includes('playwright_analysis');
+      
+      if (needsPlaywrightAnalysis && !workflowState.playwrightAnalysis) {
+        console.log(`🔍 [AI-PROMPT] Collecting playwright_analysis...`);
+        try {
+          await this.executePlaywrightAnalysisStep(page, {
+            id: `${step.id}_auto_playwright_analysis`,
+            name: `Auto Playwright Analysis (for ${step.name || step.id})`,
+            type: 'playwright-analysis',
+            config: { 
+              collectForms: true, 
+              collectLinks: true, 
+              collectInteractiveElements: true 
+            }
+          }, workflowState, jobId);
+          
+          const analysis = workflowState.playwrightAnalysis || {};
+          const formsCount = analysis.forms?.length || 0;
+          const linksCount = analysis.links?.length || 0;
+          const interactiveCount = analysis.interactive_elements?.length || 0;
+          
+          console.log(`✅ [AI-PROMPT] Collected playwright_analysis (${formsCount} forms, ${linksCount} links, ${interactiveCount} interactive elements)`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [AI-PROMPT] Collected playwright_analysis (${formsCount} forms, ${linksCount} links, ${interactiveCount} interactive elements)`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'playwright_analysis',
+              forms_count: formsCount,
+              links_count: linksCount,
+              interactive_elements_count: interactiveCount
+            });
+          }
+        } catch (error) {
+          console.error(`❌ [AI-PROMPT] Failed to collect playwright_analysis: ${error.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', `❌ [AI-PROMPT] Failed to collect playwright_analysis: ${error.message}`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'playwright_analysis',
+              error: error.message
+            });
+          }
+        }
+      }
+      
+      // Collect screenshot if requested and not already available
+      if (requestedAttachments.includes('screenshot') && !workflowState.screenshotBase64) {
+        console.log(`📸 [AI-PROMPT] Collecting screenshot...`);
+        try {
+          await this.executeScreenshotStep(page, {
+            id: `${step.id}_auto_screenshot`,
+            name: `Auto Screenshot (for ${step.name || step.id})`,
+            type: 'screenshot',
+            config: { 
+              fullPage: true, 
+              quality: 90,
+              upload: true
+            }
+          }, workflowState, jobId, workflowState.pageId);
+          
+          const screenshotSize = workflowState.screenshotBase64 ? Buffer.from(workflowState.screenshotBase64, 'base64').length : 0;
+          console.log(`✅ [AI-PROMPT] Collected screenshot (${screenshotSize} bytes)`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `📸 [AI-PROMPT] Collected screenshot (${screenshotSize} bytes)`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'screenshot',
+              size_bytes: screenshotSize,
+              screenshot_url: workflowState.screenshotUrl || null
+            });
+          }
+        } catch (error) {
+          console.error(`❌ [AI-PROMPT] Failed to collect screenshot: ${error.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', `❌ [AI-PROMPT] Failed to collect screenshot: ${error.message}`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'screenshot',
+              error: error.message
+            });
+          }
+        }
+      }
+      
+      // Collect page_description if requested and not already available
+      if (requestedAttachments.includes('page_description') && !workflowState.pageDescription) {
+        console.log(`📝 [AI-PROMPT] Collecting page_description...`);
+        try {
+          // Use a page description step with visual/context attachments for accuracy
+          await this.executePageDescriptionStep(page, {
+            id: `${step.id}_auto_page_description`,
+            name: `Auto Page Description (for ${step.name || step.id})`,
+            type: 'page-description',
+            config: {
+              template: step.config?.page_description_template || 'Describe this page in detail, including its purpose, main content, and interactive elements.',
+              attachments: ['visible_text', 'interactive_elements', 'screenshot']
+            }
+          }, workflowState, jobId);
+          
+          const description = workflowState.pageDescription?.short_description || 
+                             workflowState.pageDescription?.description || 
+                             'Page description generated';
+          const descLength = description.length;
+          console.log(`✅ [AI-PROMPT] Collected page_description (${descLength} characters)`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `📝 [AI-PROMPT] Collected page_description (${descLength} characters): ${description.substring(0, 100)}...`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'page_description',
+              description_length: descLength
+            });
+          }
+        } catch (error) {
+          console.error(`❌ [AI-PROMPT] Failed to collect page_description: ${error.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', `❌ [AI-PROMPT] Failed to collect page_description: ${error.message}`, 'WORKFLOW-ANALYZER', {
+              attachment_type: 'page_description',
+              error: error.message
+            });
+          }
+        }
+      }
+      
+      console.log(`✅ [AI-PROMPT] Finished collecting attachments for step "${step.name || step.id}"`);
     }
     
     // Add additional data based on step attachments (these are explicitly requested)
@@ -3803,7 +3788,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepPayload.login_strategy = workflowState.loginStrategy;
       }
       if (step.config.attachments.includes('screenshot') && workflowState.screenshotBase64) {
-        stepPayload.screenshot = workflowState.screenshotBase64;
+        stepPayload.screenshot_base64 = workflowState.screenshotBase64;
+        stepPayload.screenshot = workflowState.screenshotBase64; // Also keep for backward compatibility
       }
       // CRITICAL: Always include input_credentials if requested in attachments (for login script generation)
       // Strict validation - must not contain "MISSING" placeholder values
@@ -3844,6 +3830,28 @@ IMPORTANT OUTPUT REQUIREMENTS:
         } else {
           console.log(`ℹ️ Credentials invalid but not required (crawl job) - skipping`);
         }
+      }
+    }
+
+    if (workflowState.lastDialogMessage) {
+      stepPayload.last_dialog_message = workflowState.lastDialogMessage;
+    }
+    
+    // DEBUG: Log legsToExecute data for "Justify Journeys" step
+    if (step.id === 'justify_journeys' || step.name?.includes('Justify Journeys')) {
+      console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] Step: ${step.id || step.name}`);
+      console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] workflowState.legsToExecute: ${workflowState.legsToExecute?.length || 0} items`);
+      console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] workflowState.journeysToExecute: ${workflowState.journeysToExecute?.length || 0} items`);
+      console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] stepPayload.legsToExecute: ${stepPayload.legsToExecute?.length || 0} items`);
+      console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] stepPayload.legs_to_execute: ${stepPayload.legs_to_execute?.length || 0} items`);
+      if (stepPayload.legsToExecute && stepPayload.legsToExecute.length > 0) {
+        console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] First leg/journey sample:`, JSON.stringify(stepPayload.legsToExecute[0], null, 2).substring(0, 500));
+      }
+      if (workflowState.context?.legsToExecute) {
+        console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] workflowState.context.legsToExecute: ${workflowState.context.legsToExecute.length} items`);
+      }
+      if (workflowState.context?.journeysToExecute) {
+        console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] workflowState.context.journeysToExecute: ${workflowState.context.journeysToExecute.length} items`);
       }
     }
     
@@ -3896,6 +3904,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       
       // Use embedded template from step config (required - no fallback to database)
+      // CRITICAL: The user_message_template already includes the schema format in the prompt text
+      // We pass response_schema for validation but don't need response_schema_description
+      // because the template explicitly describes the expected JSON structure
       const promptConfig = {
         user_message_template: finalTemplate,
         system_message: systemMessage,
@@ -4218,9 +4229,260 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // This ensures Execute Workflow Legs can find legsToExecute at context.legsToExecute
       if (parsedResponse && typeof parsedResponse === 'object') {
         let candidateLegs = [];
+        let journeys = [];
         
+        // Check if response has journeys (new format from simplified template)
+        console.log(`🔍 [JOURNEYS-EXTRACT] Checking parsedResponse for journeys: has journeys=${!!parsedResponse.journeys}, isArray=${Array.isArray(parsedResponse.journeys)}, type=${typeof parsedResponse.journeys}`);
+        if (parsedResponse.journeys && Array.isArray(parsedResponse.journeys)) {
+          journeys = parsedResponse.journeys;
+          console.log(`✅ [JOURNEYS-EXTRACT] Found ${journeys.length} journeys in response`);
+          console.log(`🔍 [JOURNEYS-EXTRACT] Response keys: ${Object.keys(parsedResponse).join(', ')}`);
+          if (journeys.length > 0) {
+            console.log(`🔍 [JOURNEYS-EXTRACT] Journey IDs: ${journeys.map(j => j.journey_id || 'no-id').join(', ')}`);
+          }
+          if (journeys.length === 0) {
+            console.warn(`⚠️ [AI RESPONSE] Journeys array is EMPTY. Full response structure:`, JSON.stringify(parsedResponse, null, 2).substring(0, 2000));
+            // CRITICAL: Even if empty, we need to store it in parsedResponse so processVariableOutputs can access it
+            // This ensures the variableOutputs can see the empty array and log appropriately
+          }
+          
+          // VALIDATION: Log journey count for debugging (no strict enforcement since journeys can be for forms OR interactive elements)
+          // Get all interactive groups (forms and interactive elements)
+          const interactiveGroups = {
+            forms: workflowState.playwrightAnalysis?.forms || workflowState.forms || [],
+            interactiveElements: workflowState.playwrightAnalysis?.interactive_elements || workflowState.interactive_elements || []
+          };
+          const formsCount = Array.isArray(interactiveGroups.forms) ? interactiveGroups.forms.length : 0;
+          const interactiveElementsCount = Array.isArray(interactiveGroups.interactiveElements) ? interactiveGroups.interactiveElements.length : 0;
+          const journeysCount = journeys.length;
+          
+          console.log(`📊 [VALIDATION] Found ${formsCount} form(s), ${interactiveElementsCount} interactive element(s), ${journeysCount} journey(s)`);
+          
+          // Warn if no journeys but elements exist (AI might have missed something)
+          if (journeysCount === 0 && (formsCount > 0 || interactiveElementsCount > 0)) {
+            console.warn(`⚠️ [VALIDATION] No journeys generated but ${formsCount} form(s) and ${interactiveElementsCount} interactive element(s) exist on the page`);
+          }
+          
+          // Validate journey count matches forms + significant interactive elements
+          // AI must follow the rule: ONE FORM/INTERACTIVE ELEMENT = ONE JOURNEY
+          if (journeysCount !== (formsCount + interactiveElementsCount)) {
+            console.warn(`⚠️ [VALIDATION] Generated ${journeysCount} journey(s) but expected ${formsCount + interactiveElementsCount} (${formsCount} form(s) + ${interactiveElementsCount} interactive element(s)). AI must follow the rule: EXACTLY ONE JOURNEY PER FORM/INTERACTIVE ELEMENT.`);
+          }
+          
+          // CRITICAL: Store journeys in workflowState IMMEDIATELY after extraction
+          // This ensures journeys are available even if the step times out later
+          // Only update workflowState.journeys if we have journeys to avoid overwriting with empty array
+          if (journeys.length > 0) {
+            workflowState.journeys = journeys;
+            workflowState.journeysToExecute = journeys;
+            if (!workflowState.context) {
+              workflowState.context = {};
+            }
+            workflowState.context.journeysToExecute = journeys;
+            
+            // CRITICAL: Also save to variable pool immediately so for-each step can find it
+            this.initializeVariablePool(workflowState);
+            this.saveVariable(workflowState, 'journeysToExecute', journeys, 'page', step);
+            
+            // Also store in aiAnalysisResult for compatibility
+            if (!workflowState.aiAnalysisResult) {
+              workflowState.aiAnalysisResult = {};
+            }
+            workflowState.aiAnalysisResult.journeys = journeys;
+            
+            console.log(`✅ [JOURNEYS-STATE] Immediately stored ${journeys.length} journey(s) in workflowState.journeysToExecute and variable pool`);
+          } else {
+            // Empty journeys array - log warning but don't overwrite existing journeys
+            console.warn(`⚠️ [JOURNEYS] AI returned empty journeys array. Keeping existing journeys in workflowState to avoid data loss.`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI returned empty journeys array but ${formsCount} form(s) and ${interactiveElementsCount} interactive element(s) exist on page. Keeping existing journeys.`, 'WORKFLOW-ANALYZER', {
+                forms_count: formsCount,
+                interactive_elements_count: interactiveElementsCount,
+                existing_journeys_count: workflowState.journeys?.length || 0
+              });
+            }
+          }
+          
+          // Convert journeys to legs format (extract actions from each journey)
+          // CRITICAL: Ensure journey_id is stable and based on element selector/id for status updates
+          
+          for (let journeyIndex = 0; journeyIndex < journeys.length; journeyIndex++) {
+            const journey = journeys[journeyIndex];
+            
+            // CRITICAL: Ensure every journey has an actions array, even if empty
+            if (!journey.actions || !Array.isArray(journey.actions)) {
+              console.warn(`⚠️ [JOURNEY] Journey ${journey.journey_id || journeyIndex} missing actions array, creating empty array`);
+              journey.actions = [];
+            }
+            
+            // If journey has actions, process it
+            if (journey.actions.length > 0) {
+              // CRITICAL: Generate stable journey_id from element selector/id if not already stable
+              let stableJourneyId = journey.journey_id;
+              
+              // Try to match journey to a form or interactive element
+              // Check if journey_id already follows our pattern (form_*, button_*, element_*)
+              const isAlreadyStable = stableJourneyId && (
+                stableJourneyId.startsWith('form_') || 
+                stableJourneyId.startsWith('button_') || 
+                stableJourneyId.startsWith('element_')
+              );
+              
+              if (!isAlreadyStable) {
+                // Try to find matching interactive group (form or interactive element)
+                const firstActionSelector = journey.actions[0]?.selector || '';
+                let matchingInteractiveGroup = null;
+                let groupType = null; // 'form' or 'interactiveElement'
+                
+                // Try to match by selector to a form first
+                for (const form of interactiveGroups.forms) {
+                  if (form.selector && firstActionSelector.includes(form.selector.replace(/[#\.\[\]]/g, ''))) {
+                    matchingInteractiveGroup = form;
+                    groupType = 'form';
+                    break;
+                  }
+                }
+                
+                // Try to match by selector to an interactive element if no form match
+                if (!matchingInteractiveGroup) {
+                  for (const element of interactiveGroups.interactiveElements) {
+                    if (element.selector && firstActionSelector === element.selector) {
+                      matchingInteractiveGroup = element;
+                      groupType = 'interactiveElement';
+                      break;
+                    }
+                  }
+                }
+                
+                // Generate stable ID based on group type
+                if (matchingInteractiveGroup && groupType === 'form') {
+                  const formId = matchingInteractiveGroup.id || '';
+                  const formSelector = matchingInteractiveGroup.selector || '';
+                  const formAction = matchingInteractiveGroup.action || '';
+                  
+                  if (formId) {
+                    stableJourneyId = `form_${formId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+                  } else if (formSelector) {
+                    const selectorMatch = formSelector.match(/(?:action=['\"]([^'\"]+)['\"]|id=['\"]([^'\"]+)['\"]|#([a-zA-Z0-9_-]+)|form\[([^\]]+)\])/);
+                    if (selectorMatch) {
+                      const extracted = selectorMatch[1] || selectorMatch[2] || selectorMatch[3] || selectorMatch[4];
+                      stableJourneyId = `form_${extracted.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 30)}`;
+                    } else {
+                      stableJourneyId = `form_${journeyIndex}`;
+                    }
+                  } else if (formAction) {
+                    const actionPath = formAction.split('/').pop().split('?')[0];
+                    stableJourneyId = `form_${actionPath.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+                  } else {
+                    stableJourneyId = `form_${journeyIndex}`;
+                  }
+                } else if (matchingInteractiveGroup && groupType === 'interactiveElement') {
+                  const elementId = matchingInteractiveGroup.id || '';
+                  const elementText = (matchingInteractiveGroup.text || '').toLowerCase().replace(/[^a-zA-Z0-9]/g, '-').substring(0, 30);
+                  const elementSelector = matchingInteractiveGroup.selector || '';
+                  
+                  if (elementId) {
+                    stableJourneyId = `button_${elementId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+                  } else if (elementText) {
+                    stableJourneyId = `button_${elementText}`;
+                  } else if (elementSelector) {
+                    const selectorId = elementSelector.replace(/[#\.\[\]='\"]/g, '_').substring(0, 30);
+                    stableJourneyId = `element_${selectorId}`;
+                  } else {
+                    stableJourneyId = `element_${journeyIndex}`;
+                  }
+                } else {
+                  // Fallback: use existing journey_id if it exists, otherwise generate generic
+                  stableJourneyId = stableJourneyId || `journey_${journeyIndex}`;
+                }
+                
+                console.log(`🔧 [JOURNEY-ID] Correcting journey_id from "${journey.journey_id}" to "${stableJourneyId}" for journey at index ${journeyIndex}`);
+                journey.journey_id = stableJourneyId; // Update in original journey object too
+              }
+              
+              // Match each action to an interactive element from interactive_elements array
+              // This creates the nested structure: page -> journey -> action -> interactive element
+              const actionsWithElements = journey.actions.map(action => {
+                // Try to find matching interactive element by selector, id, or text
+                let matchingElement = null;
+                
+                if (action.selector) {
+                  // Try exact selector match first
+                  matchingElement = interactiveGroups.interactiveElements.find(el => 
+                    el.selector === action.selector || 
+                    el.id === action.selector.replace(/^#/, '') ||
+                    (el.text && action.description && el.text.toLowerCase().includes(action.description.toLowerCase().substring(0, 20)))
+                  );
+                  
+                  // Try partial selector match if exact match fails
+                  if (!matchingElement && action.selector.includes('#')) {
+                    const selectorId = action.selector.replace(/^#/, '');
+                    matchingElement = interactiveGroups.interactiveElements.find(el => 
+                      el.id === selectorId || 
+                      (el.selector && el.selector.includes(selectorId))
+                    );
+                  }
+                }
+                
+                // If still no match, try by description text
+                if (!matchingElement && action.description) {
+                  const actionText = action.description.toLowerCase();
+                  matchingElement = interactiveGroups.interactiveElements.find(el => 
+                    el.text && el.text.toLowerCase().includes(actionText.substring(0, 30))
+                  );
+                }
+                
+                // Add interactive_element reference to action
+                if (matchingElement) {
+                  action.interactive_element = {
+                    id: matchingElement.id || null,
+                    selector: matchingElement.selector || null,
+                    text: matchingElement.text || null,
+                    type: matchingElement.type || null,
+                    name: matchingElement.name || null,
+                    role: matchingElement.role || null
+                  };
+                }
+                
+                return action;
+              });
+              
+              // Create a leg from the journey (use first action as primary, or create a combined leg)
+              const journeyLeg = {
+                leg_id: stableJourneyId, // Use stable journey_id as leg_id
+                description: journey.description || journey.test_instructions || 'Journey from AI analysis',
+                type: journey.actions[0]?.type || 'custom',
+                selector: journey.actions[0]?.selector || '',
+                test_instructions: journey.test_instructions || journey.description,
+                expected_outcome: journey.expected_outcome,
+                actions: actionsWithElements, // Store all actions with interactive_element references
+                journey_id: stableJourneyId, // Store stable journey_id
+                priority: journey.priority,
+                confidence: journey.confidence
+              };
+              candidateLegs.push(journeyLeg);
+            } else {
+              // Journey has no actions - create a minimal leg with journey info
+              console.warn(`⚠️ [JOURNEY] Journey ${journey.journey_id || journeyIndex} has no actions, creating minimal leg`);
+              const minimalLeg = {
+                leg_id: journey.journey_id || `journey_${journeyIndex}`,
+                description: journey.description || journey.test_instructions || 'Journey from AI analysis',
+                type: 'custom',
+                selector: '',
+                test_instructions: journey.test_instructions || journey.description || '',
+                expected_outcome: journey.expected_outcome || '',
+                actions: [], // Empty actions array - will be populated during execution
+                journey_id: journey.journey_id || `journey_${journeyIndex}`,
+                priority: journey.priority || 'medium',
+                confidence: journey.confidence || 0
+              };
+              candidateLegs.push(minimalLeg);
+            }
+          }
+          console.log(`[AI RESPONSE] Converted ${journeys.length} journeys to ${candidateLegs.length} legs`);
+        }
         // Check if response has nested page_summary structure
-        if (parsedResponse.page_summary && parsedResponse.legs) {
+        else if (parsedResponse.page_summary && parsedResponse.legs) {
           candidateLegs = Array.isArray(parsedResponse.legs) ? parsedResponse.legs : [];
         } else if (parsedResponse.legs) {
           candidateLegs = Array.isArray(parsedResponse.legs) ? parsedResponse.legs : [];
@@ -4234,65 +4496,56 @@ IMPORTANT OUTPUT REQUIREMENTS:
           console.log(`[AI RESPONSE] Leg descriptions: ${candidateLegs.map(l => (l.description || '').substring(0, 40)).join(' | ')}`);
         }
         
-        // CRITICAL: Remove duplicate form_submit legs immediately after AI response
-        // If AI created multiple form_submit legs, keep only the first one
-        // Also check descriptions for form-related keywords to catch legs that should be form_submit
-        if (candidateLegs.length > 0) {
-          console.log(`[AI RESPONSE VALIDATION] Checking ${candidateLegs.length} candidate legs for duplicate form_submit legs`);
+        
+        // CRITICAL: Save journeys IMMEDIATELY and INDEPENDENTLY of legs processing
+        // Journeys must be saved even if legs conversion fails or legs are empty
+        console.log(`🔍 [JOURNEYS-SAVE] Checking journeys: length=${journeys.length}, isArray=${Array.isArray(journeys)}`);
+        if (journeys.length > 0) {
+          console.log(`🔍 [JOURNEYS-SAVE] Found ${journeys.length} journey(s) to save. Journey IDs: ${journeys.map(j => j.journey_id || 'no-id').join(', ')}`);
           
-          // Check for form_submit legs by type and also by description keywords
-          const formSubmitLegs = candidateLegs.filter(l => {
-            const type = (l.type || l.action || l.action_type || '').toLowerCase();
-            const desc = (l.description || '').toLowerCase();
-            const isFormSubmitType = type === 'form_submit' || type === 'form' || type === 'submit';
-            const hasFormSubmitKeywords = (desc.includes('form') && desc.includes('submit')) || 
-                                         (desc.includes('fill') && desc.includes('submit'));
-            const isFormSubmit = isFormSubmitType || hasFormSubmitKeywords;
-            if (isFormSubmit) {
-              console.log(`[AI RESPONSE VALIDATION] Found form_submit leg: ${l.leg_id || 'no-id'}, type: ${type}, desc: ${desc.substring(0, 50)}`);
-            }
-            return isFormSubmit;
-          });
-          
-          console.log(`[AI RESPONSE VALIDATION] Found ${formSubmitLegs.length} form_submit legs out of ${candidateLegs.length} total legs`);
-          
-          if (formSubmitLegs.length > 1) {
-            console.log(`⚠️ [AI RESPONSE VALIDATION] AI created ${formSubmitLegs.length} form_submit legs: ${formSubmitLegs.map(l => `${l.leg_id || 'no-id'} (${l.type || 'no-type'}, ${l.selector || 'no-selector'})`).join(', ')}`);
-            console.log(`⚠️ [AI RESPONSE VALIDATION] Keeping only the first one to prevent duplicates`);
-            
-            // Find the first form_submit leg index
-            const firstFormSubmitIndex = candidateLegs.findIndex(l => {
-              const type = (l.type || l.action || l.action_type || '').toLowerCase();
-              const desc = (l.description || '').toLowerCase();
-              const isFormSubmitType = type === 'form_submit' || type === 'form' || type === 'submit';
-              const hasFormSubmitKeywords = (desc.includes('form') && desc.includes('submit')) || 
-                                           desc.includes('fill') && desc.includes('submit');
-              return isFormSubmitType || hasFormSubmitKeywords;
-            });
-            
-            // Remove all form_submit legs except the first one
-            const originalCount = candidateLegs.length;
-            candidateLegs = candidateLegs.filter((l, index) => {
-              const type = (l.type || l.action || l.action_type || '').toLowerCase();
-              const desc = (l.description || '').toLowerCase();
-              const isFormSubmitType = type === 'form_submit' || type === 'form' || type === 'submit';
-              const hasFormSubmitKeywords = (desc.includes('form') && desc.includes('submit')) || 
-                                           desc.includes('fill') && desc.includes('submit');
-              const isFormSubmit = isFormSubmitType || hasFormSubmitKeywords;
-              // Keep if not form_submit, or if it's the first form_submit leg
-              return !isFormSubmit || index === firstFormSubmitIndex;
-            });
-            
-            console.log(`✅ [AI RESPONSE VALIDATION] Reduced from ${originalCount} to ${candidateLegs.length} legs (removed ${formSubmitLegs.length - 1} duplicate form_submit legs)`);
-            
-            // Update parsedResponse to reflect the cleaned legs
-            if (parsedResponse.legs) {
-              parsedResponse.legs = candidateLegs;
-            }
-            if (parsedResponse.actions) {
-              parsedResponse.actions = candidateLegs;
+          // Ensure workflow_id exists - create if needed
+          if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
+            try {
+              const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
+              workflowState.workflowId = workflow._id;
+              console.log(`✅ Auto-created workflow: ${workflow._id} (ai-prompt step for journeys)`);
+            } catch (createError) {
+              console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
             }
           }
+          
+          if (workflowState.workflowId) {
+            try {
+              const payload = {
+                saveLegs: true, // CRITICAL: Must be true for backend to process journeys (backend checks: if (saveLegs && journeys.length > 0))
+                journeys: journeys,
+                job_id: jobId
+              };
+              
+              console.log(`🔍 [JOURNEYS-SAVE] Sending POST to ${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data with ${journeys.length} journey(s)`);
+              console.log(`🔍 [JOURNEYS-SAVE] Payload: saveLegs=${payload.saveLegs}, journeys.length=${payload.journeys.length}, job_id=${payload.job_id}`);
+              
+              const response = await axios.post(
+                `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+                payload,
+                {
+                  headers: this.getAuthHeaders()
+                }
+              );
+              
+              console.log(`💾 [JOURNEYS-SAVE] ✅ Successfully saved ${journeys.length} journey(s) to workflow ${workflowState.workflowId}. Response status: ${response.status}`);
+            } catch (journeySaveError) {
+              console.error(`❌ [JOURNEYS-SAVE] Failed to save journeys: ${journeySaveError.message}`);
+              if (journeySaveError.response) {
+                console.error(`❌ [JOURNEYS-SAVE] Response status: ${journeySaveError.response.status}, data:`, JSON.stringify(journeySaveError.response.data).substring(0, 500));
+              }
+              console.error(`❌ [JOURNEYS-SAVE] Stack:`, journeySaveError.stack);
+            }
+          } else {
+            console.log(`⏳ [JOURNEYS-SAVE] Journeys collected but workflowId not yet available (pageId=${workflowState.pageId}, projectId=${workflowState.projectId}) - will save when workflow is created`);
+          }
+        } else {
+          console.log(`⚠️ [JOURNEYS-SAVE] No journeys to save (journeys.length=${journeys.length}). This is OK if AI didn't return journeys.`);
         }
         
         if (candidateLegs.length > 0) {
@@ -4322,7 +4575,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
               }
             });
             
-            // Ensure workflow_id exists - create if needed
+            // Ensure workflow_id exists - create if needed (may already exist from journeys save above)
             if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
               try {
                 const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
@@ -4461,6 +4714,46 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.log(`✅ AI prompt completed: ${logPreview}...`);
     } catch (aiError) {
       console.error(`❌ AI prompt failed: ${aiError.message}`);
+      
+      // CRITICAL: Even if AI call fails/times out, ensure journeys are saved if they were extracted
+      // Check if journeys were extracted before the error occurred
+      if (workflowState.journeys && Array.isArray(workflowState.journeys) && workflowState.journeys.length > 0) {
+        console.log(`⚠️ [JOURNEYS-TIMEOUT] AI step failed but ${workflowState.journeys.length} journey(s) were already extracted. Ensuring they're saved.`);
+        
+        // Ensure journeysToExecute is set
+        if (!workflowState.journeysToExecute) {
+          workflowState.journeysToExecute = workflowState.journeys;
+        }
+        
+        // Ensure variable pool has journeysToExecute
+        this.initializeVariablePool(workflowState);
+        this.saveVariable(workflowState, 'journeysToExecute', workflowState.journeys, 'page', step);
+        
+        // Try to save journeys to backend if workflowId exists
+        if (workflowState.workflowId) {
+          try {
+            const payload = {
+              saveLegs: true,
+              journeys: workflowState.journeys,
+              job_id: jobId
+            };
+            
+            await axios.post(
+              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+              payload,
+              {
+                headers: this.getAuthHeaders(),
+                timeout: 10000 // 10 second timeout for save operation
+              }
+            );
+            
+            console.log(`✅ [JOURNEYS-TIMEOUT] Saved ${workflowState.journeys.length} journey(s) despite AI step failure`);
+          } catch (saveError) {
+            console.warn(`⚠️ [JOURNEYS-TIMEOUT] Failed to save journeys after timeout: ${saveError.message}`);
+          }
+        }
+      }
+      
       throw aiError;
     }
   }
@@ -4658,58 +4951,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
   }
 
-  /**
-   * Execute create workflow step
-   */
-  async executeCreateWorkflowStep(step, workflowState, pageId, projectId, jobId) {
-    console.log(`📝 Creating workflow document (${step.name})`);
-    
-    try {
-      const workflow = await this.createWorkflow(pageId, projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
-      workflowState.workflowId = workflow._id;
-      console.log(`✅ Created workflow: ${workflow._id}${jobId ? ` (linked to job ${jobId})` : ''}`);
-
-      // CRITICAL: Automatically discover page immediately when workflow is created
-      // This ensures pages appear in the UI as soon as they're analyzed
-      try {
-        await this.updatePageDiscovery(
-          jobId,
-          pageId,
-          projectId,
-          workflowState.pageUrl,
-          {
-            title: workflowState.pageTitle,
-            workflow_id: workflow._id,
-            analyzed: false // Will be marked as analyzed after AI analysis completes
-          }
-        );
-        console.log(`✅ Page discovered immediately after workflow creation`);
-      } catch (discoveryError) {
-        console.warn(`⚠️ Failed to discover page immediately: ${discoveryError.message}`);
-        // Don't fail the workflow if page discovery fails
-      }
-
-      this.storeStepResult(step, {
-        workflowId: workflow._id,
-        pageId,
-        projectId
-      }, workflowState);
-
-      await this.logStepOutcome(
-        step,
-        jobId,
-        `📝 [CREATE-WORKFLOW] Created workflow ${workflow._id}`,
-        {
-          workflow_id: workflow._id,
-          page_id: pageId,
-          project_id: projectId
-        }
-      );
-    } catch (error) {
-      console.error(`❌ Failed to create workflow: ${error.message}`);
-      throw error;
-    }
-  }
 
   /**
    * Execute update workflow step
@@ -4904,10 +5145,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       discoveryData.actions_summary = actionsSummary;
     }
 
-    if (!discoveryData.page_description) {
-      const fallbackDescription = this.createFallbackPageDescription(stats, workflowState);
-      discoveryData.page_description = fallbackDescription;
-      workflowState.pageDescription = fallbackDescription;
+    // CRITICAL: No fallbacks - page_description must be set by the AI prompt step
+    if (includeDescription && !discoveryData.page_description) {
+      throw new Error('Page description is required but was not generated. Ensure the AI prompt step for page description executed successfully.');
     }
     
     const jobIdentifier = workflowState.jobId || jobId;
@@ -5102,6 +5342,198 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // legsToExecute is set by AI steps and contains the latest discovered actions
     let legs = workflowState.legsToExecute || workflowState.context?.legsToExecute || workflowState.legs || [];
     
+    // Get journeys from workflowState (new format from AI analysis)
+    let journeys = workflowState.journeys || 
+                   workflowState.journeysToExecute || 
+                   workflowState.context?.journeysToExecute ||
+                   workflowState.aiAnalysisResult?.journeys ||
+                   [];
+    
+    // Get journey justifications dynamically - no hardcoded step IDs
+    // Check variablePool first (set by variableOutputs) - this is the primary location
+    // This is AI-driven: any step that outputs journeyJustifications will populate this
+    let journeyJustifications = null;
+    
+    if (workflowState.variablePool?.page?.journeyJustifications?.value) {
+      journeyJustifications = workflowState.variablePool.page.journeyJustifications.value;
+      console.log(`💾 Found journey justifications in variablePool.page.journeyJustifications`);
+    }
+    // Check all stepResults dynamically (no hardcoded step IDs)
+    else if (workflowState.stepResults) {
+      for (const [stepKey, stepResult] of Object.entries(workflowState.stepResults)) {
+        if (stepResult?.result?.journey_justifications) {
+          journeyJustifications = stepResult.result.journey_justifications;
+          console.log(`💾 Found journey justifications in stepResults.${stepKey}.result`);
+          break;
+        }
+      }
+    }
+    // Check variablePool steps dynamically
+    if (!journeyJustifications && workflowState.variablePool?.steps) {
+      for (const [stepKey, stepData] of Object.entries(workflowState.variablePool.steps)) {
+        // CRITICAL: structuredResult wraps values in { value: ..., namespace: ... }
+        // So we need to check both the direct path and the .value path
+        let foundJustifications = null;
+        
+        // Check direct path first (if not structured)
+        if (stepData?.result?.journey_justifications) {
+          if (stepData.result.journey_justifications.value !== undefined) {
+            // Structured format: { value: [...], namespace: '...' }
+            foundJustifications = stepData.result.journey_justifications.value;
+          } else if (Array.isArray(stepData.result.journey_justifications)) {
+            // Direct array (not structured)
+            foundJustifications = stepData.result.journey_justifications;
+          }
+        }
+        
+        console.log(`🔍 [SAVE-DATA] Checking variablePool.steps.${stepKey}:`, {
+          hasResult: !!stepData?.result,
+          resultKeys: stepData?.result ? Object.keys(stepData.result) : [],
+          hasJourneyJustifications: !!stepData?.result?.journey_justifications,
+          hasValue: !!stepData?.result?.journey_justifications?.value,
+          journeyJustificationsType: typeof stepData?.result?.journey_justifications,
+          journeyJustificationsIsArray: Array.isArray(stepData?.result?.journey_justifications),
+          journeyJustificationsValueType: typeof stepData?.result?.journey_justifications?.value,
+          journeyJustificationsValueIsArray: Array.isArray(stepData?.result?.journey_justifications?.value),
+          foundJustifications: foundJustifications !== null,
+          foundJustificationsLength: Array.isArray(foundJustifications) ? foundJustifications.length : 'N/A'
+        });
+        
+        if (foundJustifications && Array.isArray(foundJustifications)) {
+          journeyJustifications = foundJustifications;
+          console.log(`💾 Found journey justifications in variablePool.steps.${stepKey}.result:`, {
+            type: typeof journeyJustifications,
+            isArray: Array.isArray(journeyJustifications),
+            length: journeyJustifications.length,
+            value: JSON.stringify(journeyJustifications).substring(0, 200)
+          });
+          break;
+        }
+      }
+    }
+    // Check workflowState dynamically (look for any step result with journey_justifications)
+    if (!journeyJustifications && workflowState.results) {
+      for (const [stepKey, stepResult] of Object.entries(workflowState.results)) {
+        if (stepResult?.result?.journey_justifications) {
+          journeyJustifications = stepResult.result.journey_justifications;
+          console.log(`💾 Found journey justifications in workflowState.results.${stepKey}.result`);
+          break;
+        }
+      }
+    }
+    // Check direct workflowState (set by variableOutputs)
+    if (!journeyJustifications && workflowState.journeyJustifications) {
+      journeyJustifications = workflowState.journeyJustifications;
+      console.log(`💾 Found journey justifications in workflowState.journeyJustifications`);
+    }
+    // Check context (set by variableOutputs)
+    if (!journeyJustifications && workflowState.context?.journeyJustifications) {
+      journeyJustifications = workflowState.context.journeyJustifications;
+      console.log(`💾 Found journey justifications in workflowState.context.journeyJustifications`);
+    }
+    
+    console.log(`🔍 [SAVE-DATA] Final journeyJustifications check:`, {
+      isNull: journeyJustifications === null,
+      isUndefined: journeyJustifications === undefined,
+      isArray: Array.isArray(journeyJustifications),
+      type: typeof journeyJustifications,
+      length: Array.isArray(journeyJustifications) ? journeyJustifications.length : 'N/A',
+      value: journeyJustifications ? JSON.stringify(journeyJustifications).substring(0, 300) : 'null/undefined'
+    });
+    
+    if (!journeyJustifications || !Array.isArray(journeyJustifications)) {
+      journeyJustifications = [];
+      console.log(`⚠️ [SAVE-DATA] No journey justifications found - will save journeys without justifications`);
+      console.log(`⚠️ [SAVE-DATA] Debug: workflowState keys:`, Object.keys(workflowState).join(', '));
+      console.log(`⚠️ [SAVE-DATA] Debug: variablePool.page keys:`, workflowState.variablePool?.page ? Object.keys(workflowState.variablePool.page).join(', ') : 'N/A');
+      console.log(`⚠️ [SAVE-DATA] Debug: variablePool.steps keys:`, workflowState.variablePool?.steps ? Object.keys(workflowState.variablePool.steps).join(', ') : 'N/A');
+      console.log(`⚠️ [SAVE-DATA] Debug: stepResults keys:`, workflowState.stepResults ? Object.keys(workflowState.stepResults).join(', ') : 'N/A');
+    } else {
+      console.log(`✅ [SAVE-DATA] Found ${journeyJustifications.length} journey justifications for save-data step`);
+      journeyJustifications.forEach((j, i) => {
+        console.log(`  Justification ${i+1}: journey_id=${j.journey_id}, status=${j.status}, reason=${j.reason ? j.reason.substring(0, 50) + '...' : 'NO REASON'}`);
+      });
+    }
+    
+    // Apply justifications to journeys
+    if (Array.isArray(journeyJustifications) && journeyJustifications.length > 0) {
+      console.log(`💾 Applying ${journeyJustifications.length} journey justifications to journeys`);
+      const justificationMap = new Map();
+      journeyJustifications.forEach(j => {
+        if (j.journey_id) {
+          justificationMap.set(j.journey_id, j);
+        }
+      });
+      
+      // Apply justifications to journeys and create iterations
+      journeys = journeys.map(journey => {
+        const justification = justificationMap.get(journey.journey_id);
+        if (justification) {
+          // Create an iteration for the journey with the justification
+          const journeyIteration = {
+            iteration_number: (journey.iterations?.length || 0) + 1,
+            timestamp: new Date(),
+            screenshot_before: null,
+            screenshot_after: null,
+            html_sent: null,
+            html_after: null,
+            script_executed: null,
+            openai_request: null,
+            openai_response: {
+              status: justification.status,
+              reason: justification.reason,
+              what_happened: justification.verification_details,
+              expected_outcome_verified: justification.expected_outcome_verified
+            },
+            result: justification.status === 'success' ? 'success' : (justification.status === 'failure' ? 'failure' : 'incomplete'),
+            status: justification.status,
+            reason: justification.reason,
+            what_happened: justification.verification_details,
+            page_url_before: workflowState.pageUrl || null,
+            page_url_after: workflowState.pageUrl || null,
+            job_id: jobId
+          };
+          
+          // Add iteration to journey's iterations array
+          const existingIterations = journey.iterations || [];
+          
+          console.log(`✅ [SAVE-DATA] Created iteration for journey ${journey.journey_id} with reason: ${justification.reason ? justification.reason.substring(0, 80) + '...' : 'NO REASON'}`);
+          
+          // CRITICAL: Map status based on expected_outcome_verified (primary source)
+          // If expected_outcome_verified is true, status should be 'success'
+          // This ensures green status on the journeys page
+          let finalStatus = justification.status;
+          if (justification.expected_outcome_verified === true) {
+            finalStatus = 'success';
+          } else if (justification.expected_outcome_verified === false) {
+            finalStatus = 'failure';
+          }
+          // Otherwise keep the AI's status (pending, etc.)
+          
+          return {
+            ...journey,
+            ai_justification: justification.reason,
+            justification_status: finalStatus,
+            expected_outcome_verified: justification.expected_outcome_verified,
+            verification_details: justification.verification_details,
+            iterations: [...existingIterations, journeyIteration]
+          };
+        }
+        return journey;
+      });
+      
+      // Also update journeys in workflowState so they're saved with justifications and iterations
+      workflowState.journeys = journeys;
+      if (!workflowState.context) {
+        workflowState.context = {};
+      }
+      workflowState.context.journeysToExecute = journeys;
+      
+      console.log(`✅ [SAVE-DATA] Updated ${journeys.length} journeys with justifications and iterations`);
+    } else {
+      console.log(`⚠️ [SAVE-DATA] No journey justifications to apply (journeyJustifications.length=${journeyJustifications?.length || 0}, journeys.length=${journeys.length})`);
+    }
+    
     // CRITICAL: Filter out legs that have already been analyzed in this job
     // Once an action is collected/analyzed in a job, it should not be analyzed again
     if (saveLegs && legs.length > 0 && jobId) {
@@ -5216,7 +5648,26 @@ IMPORTANT OUTPUT REQUIREMENTS:
       job_id: jobId
     };
     
+    // Debug: Log journey iterations being sent
+    if (journeys.length > 0) {
+      console.log(`💾 [SAVE-DATA] Sending ${journeys.length} journeys to backend (workflowId: ${workflowState.workflowId})`);
+      journeys.forEach((j, i) => {
+        console.log(`  Journey ${i+1} (${j.journey_id}): ai_justification=${j.ai_justification ? 'YES (' + j.ai_justification.substring(0, 80) + '...)' : 'NO'}, justification_status=${j.justification_status || 'N/A'}, expected_outcome_verified=${j.expected_outcome_verified}, iterations=${j.iterations?.length || 0}`);
+        if (j.iterations && j.iterations.length > 0) {
+          j.iterations.forEach((iter, idx) => {
+            console.log(`    Iter ${idx+1}: reason=${iter.reason ? 'YES (' + iter.reason.substring(0, 50) + '...)' : 'NO'}, status=${iter.status || 'N/A'}`);
+          });
+        }
+      });
+    }
+    
     try {
+      if (!workflowState.workflowId) {
+        console.error(`❌ [SAVE-DATA] Cannot save data: workflowId is missing`);
+        throw new Error('workflowId is required to save data');
+      }
+      
+      console.log(`💾 [SAVE-DATA] POSTing to ${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data with ${journeys.length} journeys`);
       const response = await axios.post(
         `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
         payload,
@@ -5225,6 +5676,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       );
       
+      console.log(`✅ [SAVE-DATA] Backend responded with status ${response.status}`);
       const results = response.data?.results || {};
       
       console.log(`✅ Saved data:`, {
@@ -5236,6 +5688,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         content: results.content,
         accessibility: results.accessibility
       });
+      
+      // CRITICAL: Journey iterations are now created when applying justifications to journeys above
+      // This ensures AI justification appears in action details via journey.iterations
+      // No need to create leg iterations separately - journeys are saved with iterations in the save-data step
       
       this.storeStepResult(step, {
         success: true,
@@ -5456,6 +5912,20 @@ IMPORTANT OUTPUT REQUIREMENTS:
     this.initializeVariablePool(workflowState);
     workflowState.variablePool.steps[slug] = {
       result: structuredResult,
+      stepName: step.name,
+      stepType: step.type,
+      stepId: step.id
+    };
+    
+    // CRITICAL: Also store raw result in stepResults for processVariableOutputs to access
+    // This ensures that even empty arrays (like empty journeys) are accessible
+    if (!workflowState.stepResults) {
+      workflowState.stepResults = {};
+    }
+    const stepId = step.id || step.slug || slug;
+    workflowState.stepResults[stepId] = {
+      result: result, // Store raw result (not structured) so processVariableOutputs can access original structure
+      structuredResult: structuredResult, // Also store structured for reference
       stepName: step.name,
       stepType: step.type,
       stepId: step.id
@@ -5886,7 +6356,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
 
       // Resolve the value from sourcePath
+      // CRITICAL: stepResult is structured (has .value wrapper), so check both structured and raw
       let value = this.getNestedValue(stepResult, output.sourcePath);
+      if (value === undefined && stepResult[output.sourcePath]?.value !== undefined) {
+        // Try accessing via .value wrapper (structured format)
+        value = stepResult[output.sourcePath].value;
+      }
+      if (value === undefined) {
+        // Try from raw parsedResponse (stored in stepResults by step ID)
+        const stepId = step.id || step.slug;
+        if (workflowState.stepResults?.[stepId]?.result) {
+          value = this.getNestedValue(workflowState.stepResults[stepId].result, output.sourcePath);
+        }
+      }
       if (value === undefined) {
         // Try from workflowState
         value = this.getNestedValue(workflowState, output.sourcePath);
@@ -5894,6 +6376,27 @@ IMPORTANT OUTPUT REQUIREMENTS:
       if (value === undefined) {
         // Try from context
         value = this.getNestedValue(workflowState.context || {}, output.sourcePath);
+      }
+      // Also try from the raw result stored by step ID
+      if (value === undefined && step.id && workflowState[step.id]?.result) {
+        const rawResult = workflowState[step.id].result;
+        // If it's structured, unwrap it
+        if (rawResult[output.sourcePath]?.value !== undefined) {
+          value = rawResult[output.sourcePath].value;
+        } else {
+          value = this.getNestedValue(rawResult, output.sourcePath);
+        }
+      }
+      // CRITICAL: For journeys, also check if it's stored directly in parsedResponse from executeAIPromptStep
+      // This handles the case where journeys array exists but is empty (empty arrays are valid!)
+      if (value === undefined && output.sourcePath === 'journeys' && step.id) {
+        // Try to get from the step's stored result in stepResults
+        const stepId = step.id || step.slug;
+        const stepResult = workflowState.stepResults?.[stepId]?.result;
+        if (stepResult && stepResult.journeys !== undefined) {
+          value = stepResult.journeys;
+          console.log(`🔍 Found journeys in stepResults[${stepId}].result: ${Array.isArray(value) ? value.length : 'not array'} items`);
+        }
       }
 
       if (value !== undefined) {
@@ -6325,38 +6828,90 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     const actions = [];
     const lines = script.split('\n');
+    const inputSelectors = new Set();
+    const loggedInputSelectors = new Set();
+    const inputMethods = new Set(['fill', 'type', 'press', 'selectOption', 'check', 'uncheck']);
+
+    const normalizeSelectorKey = (selectorKey) => {
+      if (!selectorKey) return null;
+      const cleaned = selectorKey.replace(/^[#.]+/, '').trim();
+      const normalized = cleaned.replace(/(Handle|Sel|Selector|Input|Field|Locator)$/i, '').trim() || cleaned;
+      if (normalized === 'msg') return 'message';
+      if (normalized === 'cat') return 'category';
+      return normalized;
+    };
+
+    const extractQuerySelector = (lineText) => {
+      const match = lineText.match(/document\.querySelector\(([^)]+)\)/i);
+      if (!match) return null;
+      const rawSelector = match[1].trim();
+      const selector = rawSelector.replace(/^['"`]|['"`]$/g, '').trim();
+      return selector || null;
+    };
+
+    const extractActionMethodAndSelector = (lineText) => {
+      const match = lineText.match(/\b([A-Za-z_$][\w$]*)\.(click|fill|type|press|selectOption|check|uncheck)\s*\(([^,]+)?/i);
+      if (!match) return { target: null, method: null, selector: null, normalizedSelector: null };
+      const target = match[1] || null;
+      const method = match[2]?.toLowerCase() || null;
+      const rawSelector = match[3] ? match[3].trim() : null;
+
+      if (target && target !== 'page' && target !== 'element') {
+        const selector = normalizeSelectorKey(target);
+        return { target, method, selector, normalizedSelector: selector };
+      }
+      if (!rawSelector) return { method, selector: null };
+      const selector = rawSelector.replace(/^['"`]|['"`]$/g, '').trim();
+      const normalizedSelector = normalizeSelectorKey(selector || null);
+      return { target, method, selector: selector || null, normalizedSelector };
+    };
     
-    // Common Playwright action patterns - more comprehensive
-    // CRITICAL: Match patterns even if they span multiple lines or are in different formats
+    // Common Playwright user-action patterns (exclude waits, screenshots, and navigation)
+    // CRITICAL: Only count direct user interactions (inputs/selects/clicks)
     const actionPatterns = [
       // Standard await patterns
-      /await\s+page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur|evaluate|setContent|setViewportSize|setExtraHTTPHeaders)/i,
-      /await\s+page\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur|waitFor|textContent|innerText|innerHTML|getAttribute|isVisible|isEnabled|isChecked)/i,
-      /await\s+page\.mouse\.(move|click|down|up|wheel)/i,
-      /await\s+page\.keyboard\.(press|type|down|up|insertText|sendCharacter)/i,
-      /await\s+element\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur)/i,
+      /await\s+page\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /await\s+page\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /await\s+element\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /await\s+[A-Za-z_$][\w$]*\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
       // Without await (some scripts don't use await)
-      /page\.(click|fill|type|press|selectOption|check|uncheck|goto|waitForTimeout|waitFor|screenshot|hover|focus|blur|evaluate|setContent|setViewportSize)/i,
-      /page\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck|screenshot|hover|focus|blur|waitFor)/i,
-      /page\.mouse\.(move|click|down|up|wheel)/i,
-      /page\.keyboard\.(press|type|down|up|insertText|sendCharacter)/i,
-      // Additional patterns for common operations
-      /await\s+page\.waitForSelector\(/i,
-      /await\s+page\.waitForLoadState\(/i,
-      /await\s+page\.waitForNavigation\(/i,
-      /await\s+page\.waitForResponse\(/i,
-      /await\s+page\.waitForRequest\(/i,
-      /page\.waitForSelector\(/i,
-      /page\.waitForLoadState\(/i,
-      /page\.waitForNavigation\(/i,
-      // Locator patterns (more flexible)
-      /await\s+page\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\(/i,
-      /page\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\(/i,
+      /page\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /page\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /[A-Za-z_$][\w$]*\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      // Locator patterns with action chaining
+      /await\s+page\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /page\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      // DOM selector actions in evaluate blocks
+      /document\.querySelector\(/i,
     ];
     
     // Track if we're inside the IIFE body (skip the wrapper lines)
     let insideIIFE = false;
     let braceDepth = 0;
+
+    // Pre-scan: identify selectors that are used for input actions (fill/type/select)
+    let lastFocusSelector = null;
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      const { target, method, normalizedSelector } = extractActionMethodAndSelector(line);
+      if (method === 'click' && normalizedSelector) {
+        lastFocusSelector = normalizedSelector;
+      }
+      if (method && inputMethods.has(method) && normalizedSelector) {
+        inputSelectors.add(normalizedSelector);
+      }
+      if (target && target.toLowerCase() === 'keyboard' && method === 'type' && lastFocusSelector) {
+        inputSelectors.add(lastFocusSelector);
+      }
+      const querySelector = extractQuerySelector(line);
+      if (querySelector) {
+        const normalizedSelector = normalizeSelectorKey(querySelector);
+        if (normalizedSelector) {
+          inputSelectors.add(normalizedSelector);
+        }
+      }
+    }
     
     for (let i = 0; i < lines.length; i++) {
       let line = lines[i].trim();
@@ -6442,6 +6997,63 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       
       if (matchedPattern) {
+        if (line.match(/waitFor(Function|Selector|Timeout|LoadState|Navigation|Response|Request)\s*\(/i)) {
+          continue;
+        }
+        // Ignore non-submit keypresses (keep Enter/Return only)
+        if (/\.keyboard\.press\(\s*['"]([^'"]+)['"]\s*\)/i.test(line)) {
+          const keyMatch = line.match(/\.keyboard\.press\(\s*['"]([^'"]+)['"]\s*\)/i);
+          const key = keyMatch ? keyMatch[1] : '';
+          if (!['Enter', 'Return'].includes(key)) {
+            continue;
+          }
+        }
+        // Ignore clicks that only focus form fields (inputs/textarea/select)
+        if (/\.click\(\s*['"]([^'"]+)['"]\s*\)/i.test(line)) {
+          const clickMatch = line.match(/\.click\(\s*['"]([^'"]+)['"]\s*\)/i);
+          const selector = clickMatch ? clickMatch[1] : '';
+          if (/(input|textarea|select)/i.test(selector)) {
+            continue;
+          }
+        }
+
+        const { target, method, normalizedSelector } = extractActionMethodAndSelector(line);
+        let effectiveSelector = normalizedSelector;
+        let effectiveMethod = method;
+
+        const querySelector = extractQuerySelector(line);
+        if (querySelector && !effectiveMethod) {
+          if (querySelector.toLowerCase().includes('simpleform')) {
+            // Skip form existence checks; they are not user actions.
+            continue;
+          }
+          effectiveMethod = 'selectOption';
+          effectiveSelector = normalizeSelectorKey(querySelector);
+        }
+
+        if (effectiveMethod === 'click' && effectiveSelector) {
+          lastFocusSelector = normalizedSelector;
+        }
+        if (target && target.toLowerCase() === 'keyboard' && effectiveMethod === 'type' && lastFocusSelector) {
+          effectiveSelector = lastFocusSelector;
+        }
+
+        if (effectiveMethod === 'click' && effectiveSelector && inputSelectors.has(effectiveSelector)) {
+          // Skip clicks that are part of input field focus when an input action exists.
+          continue;
+        }
+        if (effectiveMethod === 'fill' && /,\s*['"]\s*['"]\s*\)/i.test(line)) {
+          // Skip empty clears; we only want one input action per field.
+          continue;
+        }
+        if (effectiveMethod && inputMethods.has(effectiveMethod) && effectiveSelector) {
+          if (loggedInputSelectors.has(effectiveSelector)) {
+            // Skip repeated input actions for the same selector.
+            continue;
+          }
+          loggedInputSelectors.add(effectiveSelector);
+        }
+
         // Clean up the action line for display
         let displayLine = line;
         
@@ -6466,7 +7078,57 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
     
-    return actions;
+    const selectOptionSelectors = new Set();
+    const selectOptionTokens = new Set();
+    for (const actionLine of actions) {
+      const { method, normalizedSelector } = extractActionMethodAndSelector(actionLine);
+      if (method === 'selectOption' && normalizedSelector) {
+        selectOptionSelectors.add(normalizedSelector);
+      }
+      const tokenMatch = actionLine.match(/selectOption\(([^,]+)/i);
+      if (tokenMatch && tokenMatch[1]) {
+        selectOptionTokens.add(tokenMatch[1].trim());
+      }
+    }
+
+    const filteredActions = [];
+    const seenSelectOptionSelectors = new Set();
+    const seenSelectOptionTokens = new Set();
+    for (const actionLine of actions) {
+      const { method, normalizedSelector } = extractActionMethodAndSelector(actionLine);
+      if (method === 'selectOption' && normalizedSelector) {
+        if (seenSelectOptionSelectors.has(normalizedSelector)) {
+          continue;
+        }
+        seenSelectOptionSelectors.add(normalizedSelector);
+      }
+      const tokenMatch = actionLine.match(/selectOption\(([^,]+)/i);
+      if (tokenMatch && tokenMatch[1]) {
+        const token = tokenMatch[1].trim();
+        if (seenSelectOptionTokens.has(token)) {
+          continue;
+        }
+        seenSelectOptionTokens.add(token);
+      }
+      if (method === 'click' && normalizedSelector && selectOptionSelectors.has(normalizedSelector)) {
+        continue;
+      }
+      if (method === 'click' && selectOptionTokens.size > 0) {
+        let clickMatchesSelect = false;
+        for (const token of selectOptionTokens) {
+          if (actionLine.includes(token)) {
+            clickMatchesSelect = true;
+            break;
+          }
+        }
+        if (clickMatchesSelect) {
+          continue;
+        }
+      }
+      filteredActions.push(actionLine);
+    }
+
+    return filteredActions;
   }
 
   cleanScript(script) {
@@ -7562,7 +8224,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       
       // Wrap page object to intercept ALL Playwright method calls and log execution
-      const createPageWrapperWithScreenshot = (pageObj, jobId, backendUrl, getAuthHeaders, stepInfo = null) => {
+      const createPageWrapperWithScreenshot = (pageObj, jobId, backendUrl, getAuthHeaders, stepInfo = null, recordAction = null) => {
         console.log(`🔧 Creating page wrapper for jobId: ${jobId}`);
         const wrapper = {};
         
@@ -7592,7 +8254,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
               actionDisplay = `${methodName}()`;
             }
             
-            console.log(`📝 Logging action: [executing] await page.${actionDisplay}`);
+            const actionLine = `await page.${actionDisplay}`;
+            console.log(`📝 Logging action: [executing] ${actionLine}`);
+            if (recordAction) {
+              recordAction(actionLine);
+            }
             
             const metadata = {
               action_type: 'playwright_method',
@@ -7824,12 +8490,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
         console.log(`📄 VAR_DUMP: jobId=${jobId}, backendUrl=${this.backendUrl}`);
         
         // Wrap page object to intercept ALL method calls
+        const executedActionLines = [];
+        const recordAction = (actionLine) => {
+          executedActionLines.push(actionLine);
+        };
         let wrappedPage;
         try {
           console.log(`🔧 About to create page wrapper...`);
           // Pass step info for logging context
           const stepInfo = step ? { id: step.id, name: step.name } : null;
-          wrappedPage = createPageWrapperWithScreenshot(pageObj, jobId, this.backendUrl, () => this.getAuthHeaders(), stepInfo);
+          wrappedPage = createPageWrapperWithScreenshot(pageObj, jobId, this.backendUrl, () => this.getAuthHeaders(), stepInfo, recordAction);
           console.log(`✅ Page wrapper created successfully`);
         } catch (wrapperError) {
           console.error(`❌ Failed to create page wrapper: ${wrapperError.message}`, wrapperError);
@@ -7853,9 +8523,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
         const result = await fn(wrappedPage, credentials);
         console.log(`✅ Script execution completed, result.success=${result?.success}`);
         console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
+        workflowState.lastExecutedActionLines = executedActionLines;
         return result;
       };
       
+      // Capture dialog messages triggered during script execution
+      let dialogMessage = null;
+      const dialogHandler = async (dialog) => {
+        dialogMessage = dialog.message();
+        try {
+          await dialog.accept();
+        } catch (dialogError) {
+          console.warn(`⚠️ Failed to accept dialog: ${dialogError.message}`);
+        }
+      };
+      page.on('dialog', dialogHandler);
+
       // Wrap script execution with timeout
       const executionStartTime = Date.now();
       const result = await Promise.race([
@@ -7864,6 +8547,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
           setTimeout(() => reject(new Error(`Code execution timed out after ${timeout}ms`)), timeout)
         )
       ]);
+      
+      page.off('dialog', dialogHandler);
+      workflowState.lastDialogMessage = dialogMessage;
       
       const executionTime = Date.now() - executionStartTime;
       
@@ -9345,20 +10031,45 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState.variablePool.cycle[cycleIndex] = {};
     }
 
-    // STRICT: For "legsToExecute" with sourceType "context", read ONLY from variable pool (page namespace)
+    // STRICT: For "journeysToExecute" or "legsToExecute" with sourceType "context", read ONLY from variable pool (page namespace)
     // This is where the AI step stores it, and we expect it there - no fallbacks
     let items;
-    if (itemsPath === 'legsToExecute' && sourceType === 'context') {
+    if ((itemsPath === 'journeysToExecute' || itemsPath === 'legsToExecute') && sourceType === 'context') {
       // Initialize variable pool if needed
       this.initializeVariablePool(workflowState);
       // Read directly from variable pool (page namespace) - exact location where AI step stores it
-      items = this.readVariable(workflowState, 'legsToExecute', 'page');
+      // Prefer journeysToExecute (new format), fallback to legsToExecute (backwards compatibility)
+      items = this.readVariable(workflowState, 'journeysToExecute', 'page') || this.readVariable(workflowState, 'legsToExecute', 'page');
       
-      console.log(`🔍 For-each step: Reading "legsToExecute" from variable pool (page namespace)`);
+      console.log(`🔍 For-each step: Reading "${itemsPath}" from variable pool (page namespace)`);
       console.log(`🔍 Result: ${Array.isArray(items) ? `array with ${items.length} items` : `not found (${typeof items})`}`);
       
       if (!Array.isArray(items)) {
-        throw new Error(`for-each step expected "legsToExecute" in variable pool (page namespace), but it was not found. The AI step must store legs there before this step executes.`);
+        // Fallback to workflowState/context if variable pool isn't populated yet
+        const fallbackItems =
+          workflowState.journeysToExecute ||
+          workflowState.legsToExecute ||
+          workflowState.journeys ||
+          workflowState.context?.journeysToExecute ||
+          workflowState.context?.journeys ||
+          null;
+
+        if (Array.isArray(fallbackItems)) {
+          items = fallbackItems;
+          console.warn(`⚠️ For-each step: "${itemsPath}" missing in variable pool; using fallback items from workflowState/context (${items.length} items).`);
+        } else {
+          throw new Error(`for-each step expected "${itemsPath}" in variable pool (page namespace), but it was not found. The AI step must store journeys there before this step executes.`);
+        }
+      }
+      
+      // CRITICAL: Set workflowState.journeysToExecute so while-loop can access it
+      // The while-loop checks workflowState.journeysToExecute, not the variable pool
+      if (itemsPath === 'journeysToExecute') {
+        workflowState.journeysToExecute = items;
+        console.log(`✅ For-each step: Set workflowState.journeysToExecute with ${items.length} journey(s)`);
+      } else if (itemsPath === 'legsToExecute') {
+        workflowState.legsToExecute = items;
+        console.log(`✅ For-each step: Set workflowState.legsToExecute with ${items.length} leg(s)`);
       }
     } else {
       // For other paths, use resolvePathValue
@@ -9407,7 +10118,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const item = effectiveItems[idx];
       workflowState[itemVariable] = item;
       workflowState[indexVariable] = idx;
-
+      
+      // CRITICAL: Also set currentJourney if itemVariable is currentJourney or if item has journey_id
+      // This ensures while-loop can find the journey in journeysToExecute
+      if (itemVariable === 'currentJourney' || item.journey_id) {
+        workflowState.currentJourney = item;
+      }
       console.log(`🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
       
       // Report progress: current iteration
@@ -9545,37 +10261,62 @@ IMPORTANT OUTPUT REQUIREMENTS:
       } catch (saveError) {
         console.error(`❌ Failed to save leg status after for-each: ${saveError.message}`, saveError);
       }
-    } else {
-      // Log why leg saving was skipped for debugging
-      const reasons = [];
-      if (itemsPath !== 'legsToExecute') {
-        reasons.push(`itemsPath=${itemsPath} (expected: legsToExecute)`);
-      }
-      if (!workflowState.legsToExecute) {
-        reasons.push('workflowState.legsToExecute is missing');
-      } else if (!Array.isArray(workflowState.legsToExecute)) {
-        reasons.push(`workflowState.legsToExecute is not an array (type: ${typeof workflowState.legsToExecute})`);
-      }
-      if (!workflowState.workflowId) {
-        reasons.push('workflowState.workflowId is missing');
-      }
-      if (!jobId) {
-        reasons.push('jobId is missing');
-      }
-      
-      if (reasons.length > 0) {
-        console.log(`⚠️ For-each step skipped leg saving: ${reasons.join(', ')}`);
-        // Log to backend if jobId is available
-        if (jobId && this.backendLogger) {
-          await this.backendLogger.appendJobLog(jobId, 'warn', `For-each step skipped leg saving: ${reasons.join(', ')}`, 'WORKFLOW-ANALYZER', {
-            itemsPath,
-            hasLegsToExecute: !!workflowState.legsToExecute,
-            legsToExecuteType: typeof workflowState.legsToExecute,
-            legsToExecuteLength: Array.isArray(workflowState.legsToExecute) ? workflowState.legsToExecute.length : 'N/A',
-            hasWorkflowId: !!workflowState.workflowId,
-            hasJobId: !!jobId
-          });
+    } else if (itemsPath === 'journeysToExecute' && workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.workflowId && jobId) {
+      // CRITICAL: Save journey status after for-each completes (for simplified workflow)
+      // The nested steps (like test-journey-iteratively) update journey status in workflowState.journeysToExecute
+      // but we need to persist it to the database
+      try {
+        // Get journeys that were processed in this for-each - use the current state from workflowState
+        const processedJourneys = effectiveItems.map((item, idx) => {
+          const journeyId = item.journey_id || item.id;
+          // CRITICAL: Get the journey from journeysToExecute (which was updated by while-loop)
+          const journey = workflowState.journeysToExecute.find(j => (j.journey_id === journeyId) || (j.id === journeyId));
+          if (journey) {
+            // Get the final status from the while-loop result if available
+            const iterationSummary = iterationSummaries[idx];
+            const whileLoopResult = iterationSummary?.stepResults?.find(sr => sr.stepId?.includes('test_journey_iteratively') || sr.stepId?.includes('test-journey-iteratively'));
+            const finalStatus = whileLoopResult?.result?.finalLegStatus || journey.justification_status || journey.status || 'discovered';
+            
+            // CRITICAL: Use iterations from journey (which was updated by while-loop with all iterations)
+            // The while-loop saves iterations to journey.iterations, so use that directly
+            const journeyIterations = journey.iterations || [];
+            console.log(`💾 [FOR-EACH] Journey ${journeyId} has ${journeyIterations.length} iteration(s) from while-loop`);
+            
+            // Ensure we have the latest status and iterations
+            return {
+              ...journey,
+              journey_id: journey.journey_id || journey.id || journeyId,
+              justification_status: finalStatus,
+              status: finalStatus,
+              iterations: journeyIterations // Use iterations from journey (updated by while-loop)
+            };
+          }
+          return null;
+        }).filter(Boolean);
+        
+        if (processedJourneys.length > 0) {
+          console.log(`💾 Saving ${processedJourneys.length} journey(s) with status after for-each completion`);
+          
+          const payload = {
+            saveLegs: false,
+            journeys: processedJourneys,
+            job_id: jobId
+          };
+          
+          const response = await axios.post(
+            `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+            payload,
+            {
+              headers: this.getAuthHeaders()
+            }
+          );
+          
+          console.log(`✅ Saved ${processedJourneys.length} journey(s) with final status after for-each completion`);
+        } else {
+          console.log(`⚠️ No journeys found to save after for-each (itemsPath: ${itemsPath}, journeysToExecute length: ${workflowState.journeysToExecute?.length || 0})`);
         }
+      } catch (saveError) {
+        console.error(`❌ Failed to save journey status after for-each: ${saveError.message}`, saveError);
       }
     }
 
@@ -9596,8 +10337,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`🔄 Executing while-loop (${step.name})`);
     
     const config = step.config || {};
-    // CRITICAL: Force 1 iteration per job - no multiple iterations allowed
-    const maxIterations = 1;
+    // Allow maxIterations from template config (for multi-step wizards within same journey)
+    // The rule "1 job = 1 attempt per leg" applies to retrying the same leg, not to iterating through steps within a journey
+    const maxIterations = config.maxIterations || 5;
     const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
     const conditionType = config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
     const invertCondition = config.invertCondition === true; // If true, loop while condition is false
@@ -9636,10 +10378,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     const loopState = workflowState.loopState[step.id];
+    const unwrapStructuredValue = (value) => (
+      value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, 'value')
+        ? value.value
+        : value
+    );
     
     // Update status to 'analyzing' when starting while-loop (first iteration only)
     // This indicates page analysis/testing is about to begin
-    const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
+    const currentLeg = workflowState.currentJourney || workflowState.currentItem || workflowState.currentLeg || {};
     if (iteration === 0 && workflowState.workflowId && currentLeg?.leg_id) {
       try {
         await this.updateLegStatus(workflowState.workflowId, currentLeg.leg_id, 'analyzing', jobId);
@@ -9655,6 +10402,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
       loopState.currentIteration = iteration;
       // Also set workflowState.currentIteration for use by other steps
       workflowState.currentIteration = iteration;
+
+      // Reset cached page context so each iteration uses fresh data
+      workflowState.visibleText = null;
+      workflowState.playwrightAnalysis = null;
+      workflowState.pageDescription = null;
+      workflowState.screenshotBase64 = null;
+      workflowState.screenshotUrl = null;
+      workflowState.screenshotFileId = null;
       
       // Update status to 'testing' when starting iteration (first iteration only)
       if (iteration === 1 && workflowState.workflowId && currentLeg?.leg_id) {
@@ -9868,7 +10623,561 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
         }
         
+        // CRITICAL: Ensure journeysToExecute is set from variable pool if not already set
+        // The for-each step should have set it, but ensure it's available for while-loop
+        if (!workflowState.journeysToExecute || !Array.isArray(workflowState.journeysToExecute) || workflowState.journeysToExecute.length === 0) {
+          const journeysFromPool = this.readVariable(workflowState, 'journeysToExecute', 'page');
+          if (Array.isArray(journeysFromPool) && journeysFromPool.length > 0) {
+            workflowState.journeysToExecute = journeysFromPool;
+            console.log(`🔧 [WHILE-LOOP-ITERATION-${iteration}] Set journeysToExecute from variable pool (${journeysFromPool.length} journey(s))`);
+          }
+        }
+        
+        // CRITICAL: Save iteration BEFORE condition check (so it's saved even if loop exits)
+        // This ensures iterations are saved even if the condition is false and loop exits
+        // Move the iteration save code here (before condition evaluation)
+        try {
+          // Get step result for iteration save (from justify_journey or determine_completion)
+          let stepResultForSave = null;
+          if (conditionPath) {
+            const pathSegments = conditionPath.split('.');
+            const stepId = pathSegments[0];
+            const stepIdVariants = [stepId, stepId.replace(/-/g, '_'), stepId.replace(/_/g, '-')];
+            const slug = 'justify-journey';
+            const slugVariants = [slug, slug.replace(/-/g, '_')];
+            
+            for (const slugVariant of slugVariants) {
+              const stepData = workflowState.variablePool?.steps?.[slugVariant] ||
+                             workflowState[slugVariant] ||
+                             workflowState.results?.[slugVariant] ||
+                             null;
+              if (stepData) {
+                let rawResult = stepData.result || 
+                            stepData.openai_response || 
+                            (stepData.result?.openai_response) ||
+                            (typeof stepData === 'object' && !stepData.result && !stepData.openai_response ? stepData : null);
+                
+                // CRITICAL: Unwrap structured result if needed (wrapped in { value: ..., namespace: ... })
+                if (rawResult && typeof rawResult === 'object' && 'value' in rawResult && 'namespace' in rawResult) {
+                  stepResultForSave = rawResult.value;
+                } else {
+                  stepResultForSave = rawResult;
+                }
+                
+                if (stepResultForSave) {
+                  console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Found stepResultForSave by slug "${slugVariant}"`);
+                  break;
+                }
+              }
+            }
+            
+            if (!stepResultForSave) {
+              for (const variant of stepIdVariants) {
+                const stepData = workflowState[variant] ||
+                                workflowState.results?.[variant] ||
+                                workflowState.variablePool?.steps?.[variant] ||
+                                null;
+                if (stepData) {
+                  let rawResult = stepData.result || 
+                              stepData.openai_response || 
+                              (stepData.result?.openai_response) ||
+                              (typeof stepData === 'object' && !stepData.result && !stepData.openai_response ? stepData : null);
+                  
+                  // CRITICAL: Unwrap structured result if needed (wrapped in { value: ..., namespace: ... })
+                  if (rawResult && typeof rawResult === 'object' && 'value' in rawResult && 'namespace' in rawResult) {
+                    stepResultForSave = rawResult.value;
+                  } else {
+                    stepResultForSave = rawResult;
+                  }
+                  
+                  if (stepResultForSave) {
+                    console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Found stepResultForSave by variant "${variant}"`);
+                    break;
+                  }
+                }
+              }
+            }
+          }
+          
+          if (!stepResultForSave) {
+            const determineData = workflowState.determine_completion || 
+                                 workflowState.results?.determine_completion ||
+                                 {};
+            let rawResult = determineData.result || 
+                        determineData.openai_response || 
+                        (determineData.result?.openai_response) ||
+                        determineData ||
+                        {};
+            
+            // CRITICAL: Unwrap structured result if needed (wrapped in { value: ..., namespace: ... })
+            if (rawResult && typeof rawResult === 'object' && 'value' in rawResult && 'namespace' in rawResult) {
+              stepResultForSave = rawResult.value;
+            } else {
+              stepResultForSave = rawResult;
+            }
+            
+            if (stepResultForSave && Object.keys(stepResultForSave).length > 0) {
+              console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Found stepResultForSave from determine_completion fallback`);
+            }
+          }
+          
+          console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: stepResultForSave extracted:`, {
+            exists: !!stepResultForSave,
+            type: stepResultForSave ? typeof stepResultForSave : 'null',
+            keys: stepResultForSave && typeof stepResultForSave === 'object' ? Object.keys(stepResultForSave).join(', ') : 'N/A',
+            hasStatus: !!(stepResultForSave?.status),
+            hasReason: !!(stepResultForSave?.reason)
+          });
+          
+          // Now save iteration (copy the save logic from line 10738+)
+          const currentItem = workflowState.currentJourney || workflowState.currentItem || workflowState.currentLeg || {};
+          const status = stepResultForSave.status || stepResultForSave.completion_status || 'unknown';
+          const isSuccess = status === 'success';
+          const isFailure = status === 'failure';
+          
+          const hasJourneysToExecute = workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0;
+          const hasJourneys = workflowState.journeys && Array.isArray(workflowState.journeys) && workflowState.journeys.length > 0;
+          const isJourneyContext = hasJourneysToExecute || hasJourneys;
+          
+          console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: hasJourneysToExecute=${hasJourneysToExecute}, hasJourneys=${hasJourneys}, isJourneyContext=${isJourneyContext}`);
+          console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: journeysToExecute.length=${workflowState.journeysToExecute?.length || 0}, journeys.length=${workflowState.journeys?.length || 0}`);
+          
+          if (!workflowState.journeysToExecute && hasJourneys) {
+            workflowState.journeysToExecute = workflowState.journeys;
+            console.log(`🔧 [WHILE-LOOP-ITERATION-${iteration}] Set journeysToExecute from journeys (${workflowState.journeys.length} journey(s))`);
+          }
+          
+          if (isJourneyContext) {
+            console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] isJourneyContext is TRUE - saving iteration BEFORE condition check`);
+            const journeyId = currentItem.journey_id || currentItem.id;
+            let journey = null;
+            let journeyIndex = workflowState.journeysToExecute.findIndex(j => 
+              (j.journey_id === journeyId) || (j.id === journeyId) ||
+              (j.journey_id === currentItem.journey_id) || (j.id === currentItem.id)
+            );
+            
+            if (journeyIndex >= 0) {
+              journey = workflowState.journeysToExecute[journeyIndex];
+            } else if (currentItem && (currentItem.journey_id || currentItem.actions)) {
+              journey = currentItem;
+              journeyIndex = workflowState.journeysToExecute.findIndex(j => j === currentItem);
+              if (journeyIndex < 0) {
+                workflowState.journeysToExecute.push(currentItem);
+                journeyIndex = workflowState.journeysToExecute.length - 1;
+              }
+            }
+            
+            if (journey) {
+              console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Found journey ${journeyId} in journeysToExecute`);
+              if (!Array.isArray(journey.iterations)) {
+                journey.iterations = [];
+              }
+              
+              // Extract justification data from justify_journey step result
+              // CRITICAL: Get the actual justify_journey step result from workflowState
+              let justificationReason = '';
+              let justificationStatus = status;
+              let expectedOutcomeVerified = undefined;
+              let verificationDetails = null;
+              
+              // Find justify_journey step result - try multiple sources including stepResultForSave
+              const justifyStepId = 'justify_journey';
+              const justifyStepSlug = 'justify-journey';
+              
+              // CRITICAL: stepResultForSave is already extracted above (line 10357-10378) and contains the justify_journey result
+              // Use it FIRST, then check other sources
+              let justifyStepData = stepResultForSave ||
+                                   workflowState.variablePool?.steps?.[justifyStepSlug] ||
+                                   workflowState[justifyStepSlug] ||
+                                   workflowState[justifyStepId] ||
+                                   workflowState.results?.[justifyStepId] ||
+                                   workflowState.currentStepResult ||
+                                   workflowState.lastExecutionResult?.step_result ||
+                                   null;
+              
+              console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG (PATH-1): justifyStepData sources:`, {
+                stepResultForSave: !!stepResultForSave,
+                currentStepResult: !!workflowState.currentStepResult,
+                lastExecutionResult_step_result: !!workflowState.lastExecutionResult?.step_result,
+                variablePool_steps: !!workflowState.variablePool?.steps?.[justifyStepSlug],
+                workflowState_justifyStepId: !!workflowState[justifyStepId],
+                workflowState_results: !!workflowState.results?.[justifyStepId],
+                workflowState_justifyStepSlug: !!workflowState[justifyStepSlug],
+                finalJustifyStepData: !!justifyStepData,
+                isStructured: justifyStepData && typeof justifyStepData === 'object' && 'value' in justifyStepData && 'namespace' in justifyStepData
+              });
+              
+              if (justifyStepData) {
+                // CRITICAL: stepResultForSave is already unwrapped, so it might be the final result directly
+                // If it's structured, unwrap it; otherwise use it directly
+                let unwrappedJustifyData = justifyStepData;
+                if (justifyStepData && typeof justifyStepData === 'object' && 'value' in justifyStepData && 'namespace' in justifyStepData) {
+                  console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG (PATH-1): Unwrapping structured justifyStepData`);
+                  unwrappedJustifyData = justifyStepData.value;
+                }
+                
+                // CRITICAL: stepResultForSave is already the result from stepData.result, so it might be the final AI response
+                // Check if it already has reason/status (it's the final result), or if it needs further unwrapping
+                let justifyResult = null;
+                if (unwrappedJustifyData && typeof unwrappedJustifyData === 'object') {
+                  // If it has reason/status directly, it's the final result
+                  if ('reason' in unwrappedJustifyData || 'status' in unwrappedJustifyData || 'expected_outcome_verified' in unwrappedJustifyData) {
+                    justifyResult = unwrappedJustifyData;
+                  } else {
+                    // Otherwise, try to get it from nested result/openai_response
+                    justifyResult = unwrappedJustifyData?.result || 
+                                   unwrappedJustifyData?.openai_response || 
+                                   (unwrappedJustifyData?.result?.openai_response) ||
+                                   unwrappedJustifyData;
+                  }
+                } else {
+                  justifyResult = unwrappedJustifyData;
+                }
+                
+                console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG (PATH-1): justifyResult:`, {
+                  exists: !!justifyResult,
+                  type: justifyResult ? typeof justifyResult : 'null',
+                  keys: justifyResult && typeof justifyResult === 'object' ? Object.keys(justifyResult).join(', ') : 'N/A',
+                  hasReason: !!(justifyResult?.reason),
+                  reasonType: justifyResult?.reason ? typeof justifyResult.reason : 'N/A',
+                  reasonValue: justifyResult?.reason ? (typeof justifyResult.reason === 'string' ? justifyResult.reason.substring(0, 100) : JSON.stringify(justifyResult.reason).substring(0, 100)) : 'N/A',
+                  hasVerificationDetails: !!(justifyResult?.verification_details),
+                  hasAiJustification: !!(justifyResult?.ai_justification),
+                  hasStatus: !!(justifyResult?.status),
+                  fullJustifyResult: JSON.stringify(justifyResult).substring(0, 500)
+                });
+                
+                // CRITICAL: Extract reason/justification - handle structured format { value: ..., namespace: ... }
+                // The result is structured: { reason: { value: "text", namespace: "step" }, status: { value: "pending", namespace: "step" }, ... }
+                const extractValue = (obj) => {
+                  if (!obj) return null;
+                  if (typeof obj === 'string') return obj;
+                  if (typeof obj === 'object' && 'value' in obj) return obj.value;
+                  return obj.toString ? obj.toString() : JSON.stringify(obj);
+                };
+                
+                // Try reason first (primary source)
+                if (justifyResult?.reason) {
+                  justificationReason = extractValue(justifyResult.reason);
+                } else if (justifyResult?.verification_details) {
+                  justificationReason = extractValue(justifyResult.verification_details);
+                } else if (justifyResult?.ai_justification) {
+                  justificationReason = extractValue(justifyResult.ai_justification);
+                } else if (unwrappedJustifyData?.reason) {
+                  justificationReason = extractValue(unwrappedJustifyData.reason);
+                } else if (unwrappedJustifyData?.verification_details) {
+                  justificationReason = extractValue(unwrappedJustifyData.verification_details);
+                }
+                
+                // Extract status - handle structured format
+                const statusValue = extractValue(justifyResult?.status) || extractValue(justifyResult?.completion_status) || 
+                                   extractValue(unwrappedJustifyData?.status) || extractValue(unwrappedJustifyData?.completion_status) ||
+                                   status;
+                justificationStatus = typeof statusValue === 'string' ? statusValue : (statusValue?.toString ? statusValue.toString() : status);
+                
+                // Extract expected_outcome_verified - handle structured format
+                const expectedOutcomeValue = extractValue(justifyResult?.expected_outcome_verified) || 
+                                           extractValue(unwrappedJustifyData?.expected_outcome_verified);
+                expectedOutcomeVerified = expectedOutcomeValue !== null && expectedOutcomeValue !== undefined ? 
+                                         (typeof expectedOutcomeValue === 'boolean' ? expectedOutcomeValue : expectedOutcomeValue === 'true' || expectedOutcomeValue === true) : 
+                                         undefined;
+                
+                // Extract verification_details - handle structured format
+                verificationDetails = extractValue(justifyResult?.verification_details) || extractValue(unwrappedJustifyData?.verification_details) || null;
+                
+                console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG (PATH-1): Extracted:`, {
+                  justificationReason: justificationReason ? `${justificationReason.length} chars` : 'EMPTY',
+                  justificationStatus: justificationStatus || 'N/A',
+                  expectedOutcomeVerified: expectedOutcomeVerified !== undefined ? expectedOutcomeVerified : 'undefined'
+                });
+              }
+              
+              // Map status based on expected_outcome_verified (primary source)
+              let finalJustificationStatus = justificationStatus;
+              if (expectedOutcomeVerified === true) {
+                finalJustificationStatus = 'success';
+              } else if (expectedOutcomeVerified === false) {
+                finalJustificationStatus = 'failure';
+              }
+              
+              // Update journey with justification data
+              journey.justification_status = finalJustificationStatus;
+              journey.ai_justification = justificationReason;
+              if (expectedOutcomeVerified !== undefined) {
+                journey.expected_outcome_verified = expectedOutcomeVerified;
+              }
+              if (verificationDetails) {
+                journey.verification_details = verificationDetails;
+              }
+              
+              console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Extracted justification: status=${finalJustificationStatus}, reason=${justificationReason ? justificationReason.substring(0, 100) + '...' : 'N/A'}`);
+              
+              // CRITICAL: Extract actions for THIS iteration ONLY (one group per step/page)
+              // Actions should come from the executed script for this iteration, NOT from journey.actions (which contains all actions)
+              let iterationActions = [];
+              
+              // Get the executed script for this iteration
+              const executedScript = workflowState.legScriptToExecute || workflowState.journeyScriptToExecute || '';
+              const executedActionLines = Array.isArray(workflowState.lastExecutedActionLines)
+                ? workflowState.lastExecutedActionLines
+                : [];
+              
+              if (executedActionLines.length > 0) {
+                const parsedActions = this.parseScriptActions(executedActionLines.join('\n'));
+                iterationActions = parsedActions.map((actionLine, idx) => ({
+                  type: 'script_action',
+                  description: actionLine,
+                  action: actionLine,
+                  selector: null,
+                  order: idx + 1,
+                  iteration_number: iteration
+                }));
+                console.log(`🎯 [WHILE-LOOP-ITERATION-${iteration}] Collected ${iterationActions.length} executed action(s) from wrapper for this iteration`);
+              } else if (executedScript && typeof executedScript === 'string' && executedScript.trim().length > 0) {
+                // Parse actions from the executed script for this iteration
+                // This ensures each iteration only has actions from its own step/page
+                try {
+                  const parsedActions = this.parseScriptActions(executedScript);
+                  iterationActions = parsedActions.map((actionLine, idx) => ({
+                    type: 'script_action',
+                    description: actionLine,
+                    action: actionLine,
+                    selector: null,
+                    order: idx + 1,
+                    iteration_number: iteration
+                  }));
+                  console.log(`🎯 [WHILE-LOOP-ITERATION-${iteration}] Parsed ${iterationActions.length} action(s) from executed script for this iteration`);
+                } catch (parseError) {
+                  console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Failed to parse actions from script: ${parseError.message}`);
+                }
+              } else {
+                console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] No executed script found for this iteration`);
+              }
+              
+              console.log(`🎯 [WHILE-LOOP-ITERATION-${iteration}] Collected ${iterationActions.length} action(s) for iteration ${iteration} (one group per step/page)`);
+              
+              // Get the script from generate_journey_script step result (if not already found)
+              // The script is stored in workflowState[step.id].result.playwright_script or workflowState.variablePool.steps[slug].result.playwright_script
+              if (!executedScript || executedScript.trim().length === 0) {
+                const generateScriptStepId = 'generate_journey_script';
+                const generateScriptSlug = 'generate-journey-script';
+                
+                // Try to get script from step result
+                const scriptStepData = workflowState.variablePool?.steps?.[generateScriptSlug] ||
+                                      workflowState[generateScriptStepId] ||
+                                      workflowState.results?.[generateScriptStepId] ||
+                                      workflowState.variablePool?.steps?.[generateScriptStepId] ||
+                                      null;
+                
+                if (scriptStepData) {
+                  const scriptResult = scriptStepData.result || scriptStepData;
+                  if (scriptResult?.playwright_script) {
+                    executedScript = scriptResult.playwright_script;
+                    console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Found playwright_script from generate_journey_script step: ${executedScript.length} chars`);
+                  }
+                }
+              }
+              
+              // Capture page details for this iteration
+              let pageTitleBefore = '';
+              let pageTitleAfter = '';
+              let pageUrlBefore = workflowState.urlBeforeAction || '';
+              let pageUrlAfter = '';
+              
+              try {
+                pageUrlAfter = page.url();
+                pageTitleAfter = await page.title();
+              } catch (pageError) {
+                console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Could not get page URL/title: ${pageError.message}`);
+              }
+              
+              // Get page title before from workflowState if available
+              if (workflowState.titleBeforeAction) {
+                pageTitleBefore = workflowState.titleBeforeAction;
+              } else {
+                // Try to get from lastExecutionResult
+                pageTitleBefore = workflowState.lastExecutionResult?.page_title_before || '';
+              }
+              
+              // Get steps executed in this iteration (from nested steps that were just executed)
+              const stepsExecuted = [];
+              
+              // Collect all nested steps that were executed in this iteration
+              // Steps are stored by storeStepResult in: workflowState[step.id], workflowState.results[step.id], workflowState.variablePool.steps[slug]
+              for (let nestedIdx = 0; nestedIdx < nestedSteps.length; nestedIdx++) {
+                const nestedStep = nestedSteps[nestedIdx];
+                const stepId = nestedStep.id;
+                const stepSlug = nestedStep.slug || this.generateSlug(nestedStep.name || 'step');
+                
+                // Try to get step result from multiple locations
+                let stepResult = null;
+                const stepData = workflowState.variablePool?.steps?.[stepSlug] ||
+                                workflowState[stepId] ||
+                                workflowState.results?.[stepId] ||
+                                workflowState[stepSlug] ||
+                                null;
+                
+                if (stepData) {
+                  stepResult = stepData.result || 
+                              stepData.openai_response || 
+                              (stepData.result?.openai_response) ||
+                              (typeof stepData === 'object' && !stepData.result && !stepData.openai_response ? stepData : null);
+                }
+                
+                // Only add step if we have a result
+                if (stepResult) {
+                  stepsExecuted.push({
+                    step_id: stepId,
+                    step_name: nestedStep.name || stepId,
+                    step_type: nestedStep.type || 'unknown',
+                    step_index: nestedIdx,
+                    result: stepResult
+                  });
+                }
+              }
+              
+              console.log(`📋 [WHILE-LOOP-ITERATION-${iteration}] Collected ${stepsExecuted.length} step(s) for iteration: ${stepsExecuted.map(s => s.step_id).join(', ')}`);
+
+              const screenshotBefore = unwrapStructuredValue(
+                workflowState[`screenshot_before`]?.result?.screenshot_file_id ||
+                workflowState[`screenshot-before-action`]?.result?.screenshot_file_id ||
+                null
+              );
+              const screenshotAfter = unwrapStructuredValue(
+                workflowState[`screenshot_after`]?.result?.screenshot_file_id ||
+                workflowState[`screenshot-after-action`]?.result?.screenshot_file_id ||
+                null
+              );
+
+              const iterationData = {
+                iteration_number: iteration,
+                attempt_number: iteration,
+                result: isSuccess ? 'success' : (isFailure ? 'failure' : 'in_progress'),
+                status: status,
+                completion_status: finalJustificationStatus || status,
+                is_complete: isSuccess || isFailure,
+                reason: justificationReason,
+                error: isFailure ? (justificationReason || 'Journey execution failed') : null,
+                timestamp: new Date().toISOString(),
+                
+                // Page details for this iteration
+                page: {
+                  url_before: pageUrlBefore,
+                  url_after: pageUrlAfter,
+                  title_before: pageTitleBefore,
+                  title_after: pageTitleAfter,
+                  url_changed: pageUrlBefore !== pageUrlAfter,
+                  title_changed: pageTitleBefore !== pageTitleAfter
+                },
+                
+                // Screenshots for this iteration
+                screenshots: {
+                  before: screenshotBefore,
+                  after: screenshotAfter
+                },
+                
+                // Script executed in this iteration
+                script: {
+                  executed: executedScript,
+                  length: executedScript.length
+                },
+                
+                // Actions executed in this iteration
+                actions: iterationActions,
+                actions_count: iterationActions.length,
+                
+                // Steps executed in this iteration
+                steps: stepsExecuted,
+                steps_count: stepsExecuted.length,
+                
+                // Execution result
+                execution_result: workflowState.lastExecutionResult || {},
+                
+                // Additional details
+                details: {
+                  justification_status: finalJustificationStatus,
+                  expected_outcome_verified: expectedOutcomeVerified,
+                  verification_details: verificationDetails,
+                  ai_justification: justificationReason
+                },
+                
+                // Backward compatibility fields (for existing code that expects flat structure)
+                script_executed: executedScript,
+                page_url_before: pageUrlBefore,
+                page_url_after: pageUrlAfter,
+                screenshot_before: screenshotBefore,
+                screenshot_after: screenshotAfter
+              };
+              
+              const existingIterationIndex = journey.iterations.findIndex(iter => iter.iteration_number === iteration);
+              const isNewIteration = existingIterationIndex < 0;
+              
+              console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Adding iteration data: iteration_number=${iterationData.iteration_number}, status=${iterationData.status}, actions_count=${iterationData.actions?.length || 0}`);
+              
+              if (existingIterationIndex >= 0) {
+                journey.iterations[existingIterationIndex] = iterationData;
+                console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Updated existing iteration at index ${existingIterationIndex}`);
+              } else {
+                journey.iterations.push(iterationData);
+                console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Added new iteration. Journey now has ${journey.iterations.length} iteration(s)`);
+              }
+              
+              // Update journey group when new iteration is discovered
+              if (isNewIteration) {
+                const totalIterations = journey.iterations.length;
+                if (totalIterations > 1) {
+                  journey.group = `Multi-step journey (${totalIterations} steps)`;
+                } else if (totalIterations === 1) {
+                  journey.group = 'Single-step journey';
+                }
+              }
+              
+              // Save immediately
+              if (workflowState.workflowId) {
+                try {
+                  // CRITICAL: Ensure journey has all justification fields before saving
+                  const journeyToSave = {
+                    ...journey,
+                    ai_justification: journey.ai_justification || null,
+                    justification_status: journey.justification_status || null,
+                    expected_outcome_verified: journey.expected_outcome_verified !== undefined ? journey.expected_outcome_verified : undefined,
+                    verification_details: journey.verification_details || null
+                  };
+                  
+                  const payload = {
+                    saveLegs: false,
+                    journeys: [journeyToSave],
+                    job_id: jobId
+                  };
+                  console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Saving journey ${journeyId} with ${journey.iterations.length} iteration(s) BEFORE condition check`);
+                  console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Journey being saved has ai_justification: ${journeyToSave.ai_justification ? `YES (${journeyToSave.ai_justification.length} chars)` : 'NO'}, justification_status: ${journeyToSave.justification_status || 'N/A'}`);
+                  console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Journey payload keys: ${Object.keys(journeyToSave).join(', ')}`);
+                  await axios.post(
+                    `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+                    payload,
+                    { headers: this.getAuthHeaders() }
+                  );
+                  console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] ✅ Successfully saved iteration ${iteration} for journey ${journeyId} BEFORE condition check`);
+                } catch (saveError) {
+                  console.error(`❌ [WHILE-LOOP-ITERATION-${iteration}] Failed to save iteration: ${saveError.message}`);
+                }
+              }
+            } else {
+              console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Journey not found in journeysToExecute. journeyId=${journeyId}`);
+            }
+          } else {
+            console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] isJourneyContext is FALSE - skipping iteration save`);
+            console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] DEBUG: journeysToExecute=${!!workflowState.journeysToExecute}, isArray=${Array.isArray(workflowState.journeysToExecute)}, length=${workflowState.journeysToExecute?.length || 0}`);
+            console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] DEBUG: journeys=${!!workflowState.journeys}, isArray=${Array.isArray(workflowState.journeys)}, length=${workflowState.journeys?.length || 0}`);
+            console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] DEBUG: currentItem=${!!currentItem}, currentItem.journey_id=${currentItem.journey_id || 'N/A'}`);
+          }
+        } catch (saveIterError) {
+          console.error(`❌ [WHILE-LOOP-ITERATION-${iteration}] Error saving iteration: ${saveIterError.message}`);
+          console.error(`❌ [WHILE-LOOP-ITERATION-${iteration}] Error stack:`, saveIterError.stack);
+        }
+        
         // Evaluate condition after nested steps
+        let conditionValue = undefined;
         if (conditionType === 'code' && config.conditionCode) {
           // Clean the code before execution
           let cleanedCode = this.cleanScript(config.conditionCode);
@@ -9888,7 +11197,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         } else if (conditionType === 'ai-response' || conditionType === 'path') {
           // Get condition from workflowState path (check multiple locations)
           // Try multiple path variants: with hyphen, with underscore, with slug
-          let conditionValue = undefined;
           const pathVariants = [];
           
           // CRITICAL: Validate conditionPath is provided
@@ -9974,6 +11282,44 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   conditionValue = current;
                   console.log(`✅ Found condition value via path "${variant}" in workflowState: ${conditionValue}`);
                   break;
+                }
+              }
+            }
+          }
+          
+          // CRITICAL: Also try to find justify_journey step result (for simplified workflow)
+          if (conditionValue === undefined || conditionValue === null && conditionPath && conditionPath.includes('justify_journey')) {
+            const justifyStepId = 'justify_journey';
+            const justifyStepSlug = 'justify-journey';
+            const stepIdVariants = [justifyStepId, justifyStepSlug, justifyStepId.replace(/_/g, '-'), justifyStepSlug.replace(/-/g, '_')];
+            
+            for (const variant of stepIdVariants) {
+              const stepData = workflowState.variablePool?.steps?.[variant] ||
+                              workflowState[variant] ||
+                              workflowState.results?.[variant] ||
+                              null;
+              
+              if (stepData) {
+                let rawResult = stepData.result || 
+                            stepData.openai_response || 
+                            (stepData.result?.openai_response) ||
+                            (typeof stepData === 'object' && !stepData.result && !stepData.openai_response ? stepData : null);
+                
+                // Unwrap structured result if needed
+                if (rawResult && typeof rawResult === 'object' && 'value' in rawResult && 'namespace' in rawResult) {
+                  rawResult = rawResult.value;
+                }
+                
+                if (rawResult && typeof rawResult === 'object') {
+                  // Extract status from justify_journey result
+                  const pathSegments = conditionPath.split('.');
+                  if (pathSegments.length > 1 && pathSegments[1] === 'status') {
+                    conditionValue = rawResult.status || rawResult.completion_status;
+                    if (conditionValue !== undefined) {
+                      console.log(`✅ Found justify_journey.status via variant "${variant}": ${conditionValue}`);
+                      break;
+                    }
+                  }
                 }
               }
             }
@@ -10140,10 +11486,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
           if (conditionValue !== undefined && conditionValue !== null) {
             // Support both new status field (success/failure/continue/stuck) and legacy is_complete
             if (typeof conditionValue === 'string') {
-              // New format: status field with 'success', 'failure', 'continue', 'stuck'
-              const expectedValue = config.conditionValue || 'continue';
+              // New format: status field with 'success', 'failure', 'continue', 'stuck', 'pending'
+              const expectedValue = config.conditionValue || 'pending';
               condition = conditionValue === expectedValue;
-              console.log(`🔍 Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
+              
+              // CRITICAL: For multi-step wizards, stop when status is "success"
+              // The condition should be false (exit loop) when status is "success"
+              if (conditionValue === 'success') {
+                condition = false; // Exit loop on success
+                console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Status is "success" - EXITING loop (condition=false)`);
+              } else {
+                console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
+              }
             } else {
               // Legacy format: boolean is_complete
               condition = conditionValue === true || conditionValue === 'true' || conditionValue === 1 || conditionValue === 'complete';
@@ -10170,16 +11524,135 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
         }
         
-        // Record iteration - include determine_completion from workflowState
+        // Get the step result from the condition path (e.g., justify_journey.result for simplified workflow, determine_completion.result for legacy)
+        let stepResult = null;
+        if (conditionPath) {
+          const pathSegments = conditionPath.split('.');
+          const stepId = pathSegments[0]; // e.g., "justify_journey" or "determine_completion"
+          
+          // Try to get step result from multiple locations
+          // Note: storeStepResult stores by slug (e.g., "justify-journey"), not just step ID
+          const stepIdVariants = [stepId, stepId.replace(/-/g, '_'), stepId.replace(/_/g, '-')];
+          const slug = 'justify-journey'; // From template slug
+          const slugVariants = [slug, slug.replace(/-/g, '_')];
+          
+          // First try by slug (how storeStepResult stores it)
+          for (const slugVariant of slugVariants) {
+            // Check if result is nested in openai_response
+            const stepData = workflowState.variablePool?.steps?.[slugVariant] ||
+                           workflowState[slugVariant] ||
+                           workflowState.results?.[slugVariant] ||
+                           null;
+            
+            if (stepData) {
+              // Try result directly, then openai_response, then result.openai_response
+              let rawResult = stepData.result || 
+                          stepData.openai_response || 
+                          (stepData.result?.openai_response) ||
+                          (typeof stepData === 'object' && !stepData.result && !stepData.openai_response ? stepData : null);
+              
+              // CRITICAL: Unwrap structured result if needed (wrapped in { value: ..., namespace: ... })
+              if (rawResult && typeof rawResult === 'object' && 'value' in rawResult && 'namespace' in rawResult) {
+                stepResult = rawResult.value;
+              } else {
+                stepResult = rawResult;
+              }
+              
+              if (stepResult) {
+                console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Found step result by slug "${slugVariant}"`);
+                console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: stepResult from slug:`, {
+                  type: typeof stepResult,
+                  isStructured: stepResult && typeof stepResult === 'object' && 'value' in stepResult && 'namespace' in stepResult,
+                  keys: stepResult && typeof stepResult === 'object' ? Object.keys(stepResult).join(', ') : 'N/A'
+                });
+                break;
+              }
+            }
+          }
+          
+          // Then try by step ID variants
+          if (!stepResult) {
+            for (const variant of stepIdVariants) {
+              const stepData = workflowState[variant] ||
+                              workflowState.results?.[variant] ||
+                              workflowState.variablePool?.steps?.[variant] ||
+                              null;
+              
+              if (stepData) {
+                let rawResult = stepData.result || 
+                            stepData.openai_response || 
+                            (stepData.result?.openai_response) ||
+                            (typeof stepData === 'object' && !stepData.result && !stepData.openai_response ? stepData : null);
+                
+                // CRITICAL: Unwrap structured result if needed (wrapped in { value: ..., namespace: ... })
+                if (rawResult && typeof rawResult === 'object' && 'value' in rawResult && 'namespace' in rawResult) {
+                  stepResult = rawResult.value;
+                } else {
+                  stepResult = rawResult;
+                }
+                
+                if (stepResult) {
+                  console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Found step result by step ID variant "${variant}"`);
+                  console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: stepResult from variant:`, {
+                    type: typeof stepResult,
+                    isStructured: stepResult && typeof stepResult === 'object' && 'value' in stepResult && 'namespace' in stepResult,
+                    keys: stepResult && typeof stepResult === 'object' ? Object.keys(stepResult).join(', ') : 'N/A'
+                  });
+                  break;
+                }
+              }
+            }
+          }
+          
+          // Also check nested step IDs (for-each creates IDs like "execute_workflow_journeys::0::justify_journey")
+          if (!stepResult && workflowState.variablePool?.steps) {
+            for (const [stepKey, stepData] of Object.entries(workflowState.variablePool.steps)) {
+              if (stepKey.includes(stepId.replace(/-/g, '_').replace(/_/g, '-')) || stepKey.includes(slug)) {
+                let rawResult = stepData?.result || 
+                            stepData?.openai_response || 
+                            (stepData?.result?.openai_response) ||
+                            null;
+                
+                // CRITICAL: Unwrap structured result if needed (wrapped in { value: ..., namespace: ... })
+                if (rawResult && typeof rawResult === 'object' && 'value' in rawResult && 'namespace' in rawResult) {
+                  stepResult = rawResult.value;
+                } else {
+                  stepResult = rawResult;
+                }
+                
+                if (stepResult) {
+                  console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Found step result in nested step key "${stepKey}"`);
+                  console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: stepResult from nested key:`, {
+                    type: typeof stepResult,
+                    isStructured: stepResult && typeof stepResult === 'object' && 'value' in stepResult && 'namespace' in stepResult,
+                    keys: stepResult && typeof stepResult === 'object' ? Object.keys(stepResult).join(', ') : 'N/A'
+                  });
+                  break;
+                }
+              }
+            }
+          }
+        }
+        
+        // Fallback to determine_completion for legacy workflows
+        if (!stepResult) {
+          const determineData = workflowState.determine_completion || 
+                               workflowState.results?.determine_completion ||
+                               {};
+          stepResult = determineData.result || 
+                      determineData.openai_response || 
+                      (determineData.result?.openai_response) ||
+                      determineData ||
+                      {};
+        }
+        
+        // Record iteration - include step result from condition path
         const iterationState = {
           iteration,
           condition,
           timestamp: new Date().toISOString(),
           lastResult: workflowState.lastExecutionResult || {},
-          determine_completion: workflowState.determine_completion?.result || 
-                               workflowState.results?.determine_completion?.result ||
-                               workflowState.determine_completion ||
-                               null
+          step_result: stepResult
         };
         loopState.iterations.push(iterationState);
         
@@ -10187,24 +11660,399 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (!workflowState.lastExecutionResult) {
           workflowState.lastExecutionResult = {};
         }
-        workflowState.lastExecutionResult.determine_completion = iterationState.determine_completion || 
-                                                                workflowState.determine_completion;
+        workflowState.lastExecutionResult.step_result = stepResult;
         
-        console.log(`🔄 Iteration ${iteration} complete: condition=${condition} (inverted=${invertCondition}, should continue=${invertCondition ? !condition : condition})`);
+        // CRITICAL: Also store stepResult in workflowState for easy access in journey update code
+        workflowState.currentStepResult = stepResult;
         
-        // CRITICAL: Update leg with iteration result immediately so it can be saved by "Save Page Data" step
-        const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
-        const determineCompletionResult = iterationState.determine_completion || {};
-        const status = determineCompletionResult.status || determineCompletionResult.completion_status || 'unknown';
+        // CRITICAL: Log condition evaluation details
+        const conditionStatus = stepResult?.status || stepResult?.completion_status || 'unknown';
+        console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Iteration complete:`);
+        console.log(`   - condition=${condition}`);
+        console.log(`   - conditionStatus="${conditionStatus}"`);
+        console.log(`   - conditionValue="${conditionValue}"`);
+        console.log(`   - expectedValue="${config.conditionValue || 'pending'}"`);
+        console.log(`   - inverted=${invertCondition}`);
+        console.log(`   - should continue=${invertCondition ? !condition : condition}`);
+        console.log(`   - will ${(invertCondition ? !condition : condition) ? 'CONTINUE' : 'EXIT'} loop`);
+        
+        // CRITICAL: Update journey/leg with iteration result immediately so it can be saved
+        // Check multiple locations: currentJourney (from template), currentItem (default), currentLeg (legacy)
+        const currentItem = workflowState.currentJourney || workflowState.currentItem || workflowState.currentLeg || {};
+        
+        const status = stepResult.status || stepResult.completion_status || 'unknown';
         const isSuccess = status === 'success';
         const isFailure = status === 'failure';
         
-        if (currentLeg && currentLeg.leg_id && workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute)) {
+        // Check if we're working with journeys (simplified workflow) or legs (legacy workflow)
+        // CRITICAL: If journeysToExecute exists and is an array, we're in journey context
+        // This is the primary indicator - don't rely on currentItem having journey_id
+        // Also check workflowState.journeys (set by AI step) as fallback
+        const hasJourneysToExecute = workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0;
+        const hasJourneys = workflowState.journeys && Array.isArray(workflowState.journeys) && workflowState.journeys.length > 0;
+        const isJourneyContext = hasJourneysToExecute || hasJourneys;
+        const hasJourneyId = currentItem.journey_id || currentItem.id || (isJourneyContext && currentItem);
+        
+        // CRITICAL: If journeysToExecute doesn't exist but journeys does, use journeys
+        if (!workflowState.journeysToExecute && hasJourneys) {
+          workflowState.journeysToExecute = workflowState.journeys;
+          console.log(`🔧 [WHILE-LOOP-ITERATION-${iteration}] Set journeysToExecute from journeys (${workflowState.journeys.length} journey(s))`);
+        }
+        
+        console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Checking iteration save context:`, {
+          currentItem_journey_id: currentItem.journey_id || 'N/A',
+          currentItem_id: currentItem.id || 'N/A',
+          hasJourneyId,
+          isJourneyContext,
+          journeysToExecute_length: workflowState.journeysToExecute?.length || 0,
+          journeysToExecute_exists: !!workflowState.journeysToExecute,
+          journeysToExecute_isArray: Array.isArray(workflowState.journeysToExecute),
+          status,
+          iteration
+        });
+        
+        if (isJourneyContext) {
+          console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] isJourneyContext is TRUE - will save iterations`);
+          // Save iterations to journey
+          // CRITICAL: currentItem from for-each IS the journey itself when itemVariable is "currentJourney"
+          // So we can use it directly if it has journey_id or actions
+          const journeyId = currentItem.journey_id || currentItem.id;
+          
+          // Try to find journey in journeysToExecute
+          let journey = null;
+          let journeyIndex = workflowState.journeysToExecute.findIndex(j => 
+            (j.journey_id === journeyId) || (j.id === journeyId) ||
+            (j.journey_id === currentItem.journey_id) || (j.id === currentItem.id)
+          );
+          
+          if (journeyIndex >= 0) {
+            journey = workflowState.journeysToExecute[journeyIndex];
+          } else if (currentItem && (currentItem.journey_id || currentItem.actions)) {
+            // currentItem IS the journey - use it directly and add to journeysToExecute if needed
+            journey = currentItem;
+            journeyIndex = workflowState.journeysToExecute.findIndex(j => j === currentItem);
+            if (journeyIndex < 0) {
+              workflowState.journeysToExecute.push(currentItem);
+              journeyIndex = workflowState.journeysToExecute.length - 1;
+            }
+          }
+          
+          if (journey) {
+            console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Found journey ${journeyId} in journeysToExecute`);
+            if (!Array.isArray(journey.iterations)) {
+              journey.iterations = [];
+            }
+            
+            // CRITICAL: Extract justification_status and ai_justification from justify_journey step result
+            // The stepResult comes from justify_journey step and contains the justification data
+            // Ensure justificationReason is always a string
+            // CRITICAL: Get stepResult from multiple sources - it might be in workflowState.currentStepResult or iterationState
+            let stepResultToUse = stepResult || workflowState.currentStepResult || workflowState.lastExecutionResult?.step_result;
+            
+            console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: stepResult sources:`, {
+              stepResult: !!stepResult,
+              currentStepResult: !!workflowState.currentStepResult,
+              lastExecutionResult_step_result: !!workflowState.lastExecutionResult?.step_result,
+              stepResultToUse: !!stepResultToUse,
+              stepResultType: stepResultToUse ? typeof stepResultToUse : 'null',
+              stepResultKeys: stepResultToUse && typeof stepResultToUse === 'object' ? Object.keys(stepResultToUse).join(', ') : 'N/A'
+            });
+            
+            // CRITICAL: stepResult may be structured (wrapped in { value: ..., namespace: ... }), so unwrap it first
+            let unwrappedResult = stepResultToUse;
+            if (stepResultToUse && typeof stepResultToUse === 'object' && 'value' in stepResultToUse && 'namespace' in stepResultToUse) {
+              console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Unwrapping structured result`);
+              unwrappedResult = stepResultToUse.value;
+            }
+            
+            console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: unwrappedResult:`, {
+              exists: !!unwrappedResult,
+              type: unwrappedResult ? typeof unwrappedResult : 'null',
+              keys: unwrappedResult && typeof unwrappedResult === 'object' ? Object.keys(unwrappedResult).join(', ') : 'N/A',
+              hasOpenaiResponse: !!(unwrappedResult?.openai_response),
+              hasResult: !!(unwrappedResult?.result),
+              hasReason: !!(unwrappedResult?.reason),
+              hasStatus: !!(unwrappedResult?.status)
+            });
+            
+            // CRITICAL: Extract reason/justification - handle structured format { value: ..., namespace: ... }
+            // The result is structured: { reason: { value: "text", namespace: "step" }, status: { value: "pending", namespace: "step" }, ... }
+            const extractValue = (obj) => {
+              if (!obj) return null;
+              if (typeof obj === 'string') return obj;
+              if (typeof obj === 'object' && 'value' in obj) return obj.value;
+              return obj.toString ? obj.toString() : JSON.stringify(obj);
+            };
+            
+            // Check multiple possible locations for the AI response data
+            let justificationReason = '';
+            const aiResponse = unwrappedResult?.openai_response || unwrappedResult?.result || unwrappedResult;
+            
+            // Extract status and expected_outcome_verified FIRST before using in console.log
+            const statusValue = extractValue(aiResponse?.status) || extractValue(aiResponse?.completion_status) || 
+                               extractValue(unwrappedResult?.status) || extractValue(unwrappedResult?.completion_status) ||
+                               status;
+            let justificationStatus = typeof statusValue === 'string' ? statusValue : (statusValue?.toString ? statusValue.toString() : status);
+            const expectedOutcomeValue = extractValue(aiResponse?.expected_outcome_verified) || 
+                                       extractValue(unwrappedResult?.expected_outcome_verified);
+            let expectedOutcomeVerified = expectedOutcomeValue !== null && expectedOutcomeValue !== undefined ? 
+                                           (typeof expectedOutcomeValue === 'boolean' ? expectedOutcomeValue : expectedOutcomeValue === 'true' || expectedOutcomeValue === true) : 
+                                           undefined;
+            
+            // Try reason first (primary source) - handle structured format
+            if (aiResponse?.reason) {
+              justificationReason = extractValue(aiResponse.reason);
+            } else if (aiResponse?.verification_details) {
+              justificationReason = extractValue(aiResponse.verification_details);
+            } else if (aiResponse?.ai_justification) {
+              justificationReason = extractValue(aiResponse.ai_justification);
+            } else if (unwrappedResult?.reason) {
+              justificationReason = extractValue(unwrappedResult.reason);
+            } else if (unwrappedResult?.verification_details) {
+              justificationReason = extractValue(unwrappedResult.verification_details);
+            }
+            
+            console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Extracted justificationReason: ${justificationReason ? justificationReason.substring(0, 100) + '...' : 'EMPTY'}`);
+            console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Final extraction result:`, {
+              justificationReason: justificationReason ? `${justificationReason.length} chars` : 'EMPTY',
+              justificationStatus: justificationStatus || 'N/A',
+              expectedOutcomeVerified: expectedOutcomeVerified !== undefined ? expectedOutcomeVerified : 'undefined',
+              willSetOnJourney: !!journey
+            });
+            
+            // Debug logging - detailed extraction trace
+            console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Extracting justification from aiResponse:`, {
+              aiResponseExists: !!aiResponse,
+              aiResponseType: aiResponse ? typeof aiResponse : 'null',
+              aiResponseKeys: aiResponse && typeof aiResponse === 'object' ? Object.keys(aiResponse).join(', ') : 'N/A',
+              hasReason: !!(aiResponse?.reason),
+              hasVerificationDetails: !!(aiResponse?.verification_details),
+              hasAiJustification: !!(aiResponse?.ai_justification),
+              reasonType: aiResponse?.reason ? typeof aiResponse.reason : 'N/A',
+              reasonLength: aiResponse?.reason ? (typeof aiResponse.reason === 'string' ? aiResponse.reason.length : 'not string') : 'N/A'
+            });
+            
+            // Map status based on expected_outcome_verified (primary source)
+            let finalJustificationStatus = justificationStatus;
+            if (expectedOutcomeVerified === true) {
+              finalJustificationStatus = 'success';
+            } else if (expectedOutcomeVerified === false) {
+              finalJustificationStatus = 'failure';
+            }
+            
+            // Update journey with justification_status and ai_justification
+            journey.justification_status = finalJustificationStatus;
+            journey.ai_justification = justificationReason;
+            if (expectedOutcomeVerified !== undefined) {
+              journey.expected_outcome_verified = expectedOutcomeVerified;
+            }
+            if (unwrappedResult?.verification_details) {
+              journey.verification_details = typeof unwrappedResult.verification_details === 'string' ? unwrappedResult.verification_details : (unwrappedResult.verification_details.toString ? unwrappedResult.verification_details.toString() : JSON.stringify(unwrappedResult.verification_details));
+            }
+            
+            console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Journey updated with justification:`, {
+              journey_id: journey.journey_id,
+              ai_justification: journey.ai_justification ? `${journey.ai_justification.length} chars` : 'NULL',
+              justification_status: journey.justification_status || 'NULL',
+              expected_outcome_verified: journey.expected_outcome_verified !== undefined ? journey.expected_outcome_verified : 'undefined'
+            });
+            
+            // CRITICAL: Extract actions executed in this iteration from the script
+            // NO FALLBACKS - only assign actions that were actually executed in this iteration
+            // Parse the executed script to identify which actions were executed
+            let iterationActions = [];
+            const executedScript = workflowState.legScriptToExecute || workflowState.journeyScriptToExecute || '';
+            
+            if (executedScript && journey.actions && Array.isArray(journey.actions) && journey.actions.length > 0) {
+              // Filter out verification/check actions first
+              const interactiveActions = journey.actions.filter(action => {
+                const actionType = (action.type || '').toLowerCase();
+                return actionType !== 'verify' && actionType !== 'check';
+              });
+              
+              // Match actions to script execution by checking if action selectors/elements appear in the script
+              // For multi-step wizards, match actions based on current step visible in screenshot
+              iterationActions = interactiveActions.filter(action => {
+                // Check if action selector appears in the executed script
+                const selector = action.selector || action.element_selector || '';
+                const actionId = action.action_id || action.id || '';
+                const actionText = action.text || action.description || '';
+                
+                if (!selector && !actionId && !actionText) {
+                  return false; // No way to match this action
+                }
+                
+                // Check if selector appears in script (normalized)
+                const normalizedSelector = selector.replace(/['"]/g, '');
+                const scriptContainsSelector = selector && executedScript.includes(normalizedSelector);
+                
+                // Check if action_id appears in script
+                const scriptContainsActionId = actionId && executedScript.includes(actionId);
+                
+                // For multi-step: only include actions that match the current step
+                // This is a heuristic - ideally we'd track which step we're on
+                // For now, we'll include actions that appear in the script
+                return scriptContainsSelector || scriptContainsActionId;
+              });
+              
+              console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Matched ${iterationActions.length} actions from ${interactiveActions.length} interactive actions based on script execution`);
+            }
+            
+            const screenshotBefore = unwrapStructuredValue(
+              workflowState[`screenshot_before`]?.result?.screenshot_file_id ||
+              workflowState[`screenshot-before-action`]?.result?.screenshot_file_id ||
+              null
+            );
+            const screenshotAfter = unwrapStructuredValue(
+              workflowState[`screenshot_after`]?.result?.screenshot_file_id ||
+              workflowState[`screenshot-after-action`]?.result?.screenshot_file_id ||
+              null
+            );
+
+            const iterationData = {
+              iteration_number: iteration,
+              attempt_number: iteration,
+              result: isSuccess ? 'success' : (isFailure ? 'failure' : 'in_progress'),
+              status: status,
+              completion_status: (aiResponse?.completion_status || stepResult?.completion_status || status),
+              is_complete: isSuccess || isFailure,
+              reason: justificationReason,
+              error: isFailure ? (justificationReason || 'Journey execution failed') : null,
+              script_executed: (() => {
+                // Get script from generate_journey_script step result
+                const generateScriptStepId = 'generate_journey_script';
+                const generateScriptSlug = 'generate-journey-script';
+                const scriptStepData = workflowState.variablePool?.steps?.[generateScriptSlug] ||
+                                      workflowState[generateScriptStepId] ||
+                                      workflowState.results?.[generateScriptStepId] ||
+                                      workflowState.variablePool?.steps?.[generateScriptStepId] ||
+                                      null;
+                if (scriptStepData) {
+                  const scriptResult = scriptStepData.result || scriptStepData;
+                  if (scriptResult?.playwright_script) {
+                    return scriptResult.playwright_script;
+                  }
+                }
+                return workflowState.legScriptToExecute || '';
+              })(),
+              execution_result: workflowState.lastExecutionResult || {},
+              page_url_before: workflowState.urlBeforeAction || '',
+              page_url_after: page.url(),
+              screenshot_before: screenshotBefore,
+              screenshot_after: screenshotAfter,
+              timestamp: new Date().toISOString(),
+              actions: iterationActions // CRITICAL: Store filtered interactive actions for this iteration
+            };
+            
+            // Check if this iteration already exists (update) or add new
+            const existingIterationIndex = journey.iterations.findIndex(iter => iter.iteration_number === iteration);
+            const isNewIteration = existingIterationIndex < 0;
+            
+            console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Adding iteration data: iteration_number=${iterationData.iteration_number}, status=${iterationData.status}, actions_count=${iterationData.actions?.length || 0}, reason=${iterationData.reason ? iterationData.reason.substring(0, 50) + '...' : 'N/A'}`);
+            
+            if (existingIterationIndex >= 0) {
+              journey.iterations[existingIterationIndex] = iterationData;
+              console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Updated existing iteration at index ${existingIterationIndex}`);
+            } else {
+              journey.iterations.push(iterationData);
+              console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Added new iteration. Journey now has ${journey.iterations.length} iteration(s)`);
+            }
+            
+            // CRITICAL: Update journey group when new iteration is discovered
+            if (isNewIteration) {
+              // Update group based on iteration count (multi-step journey)
+              const totalIterations = journey.iterations.length;
+              if (totalIterations > 1) {
+                journey.group = `Multi-step journey (${totalIterations} steps)`;
+              } else if (totalIterations === 1) {
+                journey.group = 'Single-step journey';
+              }
+              
+              console.log(`📝 [WHILE-LOOP-ITERATION-${iteration}] Updated journey ${journeyId} group (${totalIterations} iteration(s))`);
+            }
+            
+            // Also update in workflowState.journeys if it exists
+            if (workflowState.journeys && Array.isArray(workflowState.journeys)) {
+              const journeysIndex = workflowState.journeys.findIndex(j => 
+                (j.journey_id === journeyId) || (j.id === journeyId)
+              );
+              if (journeysIndex >= 0) {
+                if (!Array.isArray(workflowState.journeys[journeysIndex].iterations)) {
+                  workflowState.journeys[journeysIndex].iterations = [];
+                }
+                // Update journey with justification fields
+                workflowState.journeys[journeysIndex].justification_status = finalJustificationStatus;
+                workflowState.journeys[journeysIndex].ai_justification = justificationReason;
+                if (expectedOutcomeVerified !== undefined) {
+                  workflowState.journeys[journeysIndex].expected_outcome_verified = expectedOutcomeVerified;
+                }
+                if (stepResult.verification_details) {
+                  workflowState.journeys[journeysIndex].verification_details = stepResult.verification_details;
+                }
+                
+                // CRITICAL: Also update description and group in workflowState.journeys
+                if (isNewIteration) {
+                  workflowState.journeys[journeysIndex].description = journey.description;
+                  workflowState.journeys[journeysIndex].test_instructions = journey.test_instructions;
+                  workflowState.journeys[journeysIndex].group = journey.group;
+                }
+                
+                const existingIterIndex = workflowState.journeys[journeysIndex].iterations.findIndex(iter => iter.iteration_number === iteration);
+                if (existingIterIndex >= 0) {
+                  workflowState.journeys[journeysIndex].iterations[existingIterIndex] = iterationData;
+                } else {
+                  workflowState.journeys[journeysIndex].iterations.push(iterationData);
+                }
+              }
+            }
+            
+            console.log(`✅ Updated journey ${journeyId} with iteration ${iteration} result: ${status}, justification_status: ${finalJustificationStatus}, ai_justification: ${justificationReason ? 'YES (' + justificationReason.substring(0, 50) + '...)' : 'NO'}`);
+            console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Journey ${journeyId} now has ${journey.iterations.length} iteration(s)`);
+            
+            // CRITICAL: Save journey iterations immediately to make results visible in UI right away
+            if (workflowState.workflowId) {
+              try {
+                const payload = {
+                  saveLegs: false,
+                  journeys: [journey],
+                  job_id: jobId
+                };
+                console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Saving journey ${journeyId} with ${journey.iterations.length} iteration(s) and justification_status=${finalJustificationStatus} to workflow ${workflowState.workflowId}`);
+                console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Journey object:`, JSON.stringify({
+                  journey_id: journey.journey_id,
+                  iterations_count: journey.iterations?.length || 0,
+                  iterations: journey.iterations?.map(i => ({
+                    iteration_number: i.iteration_number,
+                    status: i.status,
+                    actions_count: i.actions?.length || 0
+                  })) || []
+                }, null, 2));
+                await axios.post(
+                  `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+                  payload,
+                  { headers: this.getAuthHeaders() }
+                );
+                console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] ✅ Successfully saved iteration ${iteration} for journey ${journeyId} with justification_status=${finalJustificationStatus} to workflow`);
+              } catch (saveError) {
+                console.error(`❌ [WHILE-LOOP-ITERATION-${iteration}] Failed to immediately save journey iteration: ${saveError.message}`, saveError);
+              }
+            } else {
+              console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Cannot save journey iteration: workflowId is missing`);
+            }
+          } else {
+            console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Journey not found in journeysToExecute. journeyId=${journeyId}, journeysToExecute.length=${workflowState.journeysToExecute?.length || 0}`);
+          }
+        } else {
+          console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] isJourneyContext is FALSE - skipping iteration save. hasJourneyId=${hasJourneyId}, journeysToExecute exists=${!!workflowState.journeysToExecute}, isArray=${Array.isArray(workflowState.journeysToExecute)}`);
+        }
+        
+        if (currentItem.leg_id && workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute)) {
+          // Legacy: Save iterations to leg
           const legIndex = workflowState.legsToExecute.findIndex(l => 
-            (l.leg_id === currentLeg.leg_id) || 
-            (l.id === currentLeg.leg_id) ||
-            (l.leg_id === currentLeg.id) ||
-            (l.id === currentLeg.id)
+            (l.leg_id === currentItem.leg_id) || 
+            (l.id === currentItem.leg_id) ||
+            (l.leg_id === currentItem.id) ||
+            (l.id === currentItem.id)
           );
           
           if (legIndex >= 0) {
@@ -10243,10 +12091,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             // Also update in workflowState.legs if it exists
             if (workflowState.legs && Array.isArray(workflowState.legs)) {
               const legsIndex = workflowState.legs.findIndex(l => 
-                (l.leg_id === currentLeg.leg_id) || 
-                (l.id === currentLeg.leg_id) ||
-                (l.leg_id === currentLeg.id) ||
-                (l.id === currentLeg.id)
+                (l.leg_id === currentItem.leg_id) || 
+                (l.id === currentItem.leg_id) ||
+                (l.leg_id === currentItem.id) ||
+                (l.id === currentItem.id)
               );
               if (legsIndex >= 0) {
                 if (!Array.isArray(workflowState.legs[legsIndex].iterations)) {
@@ -10261,16 +12109,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
               }
             }
             
-            // Also update currentLeg for reference
-            currentLeg.iterations = leg.iterations;
+            // Also update currentItem for reference
+            currentItem.iterations = leg.iterations;
             
-            console.log(`✅ Updated leg ${currentLeg.leg_id} with iteration ${iteration} result: ${status}`);
+            console.log(`✅ Updated leg ${currentItem.leg_id} with iteration ${iteration} result: ${status}`);
             
             // CRITICAL: Save immediately to make results visible in UI right away
             if (workflowState.workflowId) {
               try {
                 await this.saveLegIterationsToWorkflow(workflowState, [leg], jobId);
-                console.log(`💾 Immediately saved iteration ${iteration} for leg ${currentLeg.leg_id} to workflow`);
+                console.log(`💾 Immediately saved iteration ${iteration} for leg ${currentItem.leg_id} to workflow`);
               } catch (saveError) {
                 console.warn(`⚠️ Failed to immediately save iteration: ${saveError.message}`);
               }
@@ -10288,12 +12136,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
           inverted: invertCondition,
           should_continue: invertCondition ? !condition : condition
         });
-        
-        // CRITICAL: Stop after first iteration (one per job) - ignore condition
-        if (iteration >= 1) {
-          console.log(`🛑 Stopping after first iteration (one per job enforced)`);
-          break;
-        }
         
       } catch (iterationError) {
         console.error(`❌ Iteration ${iteration} failed: ${iterationError.message}`);
@@ -10388,20 +12230,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Which means: (invertCondition ? condition : !condition) === true
     const shouldContinue = invertCondition ? !condition : condition;
     const loopExitedEarly = iteration < maxIterations && !shouldContinue;
-    
-    // CRITICAL FIX: If we completed 1 iteration, the form was submitted successfully
-    // The determine_completion step may incorrectly return "failure" for JavaScript-based forms
-    // So we override it to "success" when iteration === 1 (form submitted on first try)
-    if (iteration === 1 && workflowState.lastExecutionResult?.success !== false) {
-      finalLegStatus = 'success';
-      finalLegResult = 'success';
-      console.log(`✅ FORCE SUCCESS: First iteration completed - marking as success (overriding determine_completion status)`);
-      await this.sendLogToBackend(jobId, 'info', `✅ FORCE SUCCESS: First iteration completed - marking as success`, 'WORKFLOW-ANALYZER', {
-        leg_id: finalCurrentLeg?.leg_id,
-        iteration: iteration,
-        condition: condition
-      });
-    }
     
     // Only check determine_completion status if we haven't already set finalLegStatus from loopExitedEarly
     if (!finalLegStatus && lastDetermineCompletion) {
@@ -10520,16 +12348,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Max iterations reached without completion';
     }
     
-    // CRITICAL: Final override - if iteration === 1, force success (form was submitted)
-    if (iteration === 1 && finalLegStatus === 'failure') {
-      finalLegStatus = 'success';
-      finalLegResult = 'success';
-      console.log(`✅ FINAL OVERRIDE: Forcing success for first iteration (form submitted successfully)`);
-      await this.sendLogToBackend(jobId, 'info', `✅ FINAL OVERRIDE: Forcing success for first iteration`, 'WORKFLOW-ANALYZER', {
-        leg_id: finalCurrentLeg?.leg_id
-      });
-    }
-    
     // Log final status determination for debugging
     if (finalLegStatus) {
       console.log(`✅ Determined final leg status: ${finalLegStatus} (result: ${finalLegResult}, iterations: ${iteration}, loopExitedEarly: ${loopExitedEarly}, lastExecutionResult.success: ${workflowState.lastExecutionResult?.success})`);
@@ -10642,6 +12460,131 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.warn(`⚠️ Cannot update leg: finalCurrentLeg=${!!finalCurrentLeg}, leg_id=${finalCurrentLeg?.leg_id}, hasLegsToExecute=${!!workflowState.legsToExecute}`);
     }
     
+    // CRITICAL: Extract justification_status and ai_justification from the last justify_journey step result
+    // This is needed for journeys in simplified workflow
+    let finalJustificationStatus = finalLegStatus;
+    let finalAiJustification = '';
+    let finalExpectedOutcomeVerified = undefined;
+    
+    // Get the last iteration's step result (should contain justify_journey result)
+    if (loopState.iterations && loopState.iterations.length > 0) {
+      const lastIteration = loopState.iterations[loopState.iterations.length - 1];
+      const lastStepResult = lastIteration?.step_result;
+      
+      if (lastStepResult) {
+        // CRITICAL: Extract justification data from justify_journey step result - handle structured format
+        const extractValue = (obj) => {
+          if (!obj) return null;
+          if (typeof obj === 'string') return obj;
+          if (typeof obj === 'object' && 'value' in obj) return obj.value;
+          return obj.toString ? obj.toString() : JSON.stringify(obj);
+        };
+        
+        let justificationReason = '';
+        const reasonValue = extractValue(lastStepResult.reason) || extractValue(lastStepResult.verification_details) || extractValue(lastStepResult.ai_justification);
+        if (reasonValue) {
+          justificationReason = typeof reasonValue === 'string' ? reasonValue : (reasonValue.toString ? reasonValue.toString() : JSON.stringify(reasonValue));
+        }
+        
+        if (justificationReason) {
+          finalAiJustification = justificationReason;
+        }
+        
+        // Extract status - handle structured format
+        const statusValue = extractValue(lastStepResult.status) || extractValue(lastStepResult.completion_status) || finalLegStatus;
+        if (statusValue) {
+          finalJustificationStatus = typeof statusValue === 'string' ? statusValue : (statusValue.toString ? statusValue.toString() : finalLegStatus);
+        }
+        
+        // Extract expected_outcome_verified - handle structured format
+        const expectedOutcomeValue = extractValue(lastStepResult.expected_outcome_verified);
+        if (expectedOutcomeValue !== null && expectedOutcomeValue !== undefined) {
+          finalExpectedOutcomeVerified = typeof expectedOutcomeValue === 'boolean' ? expectedOutcomeValue : (expectedOutcomeValue === 'true' || expectedOutcomeValue === true);
+          // Map status based on expected_outcome_verified
+          if (finalExpectedOutcomeVerified === true) {
+            finalJustificationStatus = 'success';
+          } else if (finalExpectedOutcomeVerified === false) {
+            finalJustificationStatus = 'failure';
+          }
+        }
+      }
+    }
+    
+    // CRITICAL: Update journey with final justification_status and ai_justification after while-loop completes
+    // Check multiple locations: currentJourney (from template), currentItem (default), or find from journeysToExecute
+    const currentJourney = workflowState.currentJourney || workflowState.currentItem || null;
+    if (currentJourney && workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute)) {
+      const journeyId = currentJourney.journey_id || currentJourney.id;
+      const journeyIndex = workflowState.journeysToExecute.findIndex(j => 
+        (j.journey_id === journeyId) || (j.id === journeyId)
+      );
+      
+      if (journeyIndex >= 0) {
+        const journey = workflowState.journeysToExecute[journeyIndex];
+        // CRITICAL: Use journey's existing ai_justification if it was set during iterations (PATH-1)
+        // Only override if finalAiJustification exists and journey doesn't have one
+        if (!journey.ai_justification && finalAiJustification) {
+          journey.ai_justification = finalAiJustification;
+        } else if (journey.ai_justification && !finalAiJustification) {
+          // Journey has justification but finalAiJustification doesn't - use journey's value
+          finalAiJustification = journey.ai_justification;
+        }
+        journey.justification_status = finalJustificationStatus || journey.justification_status || 'discovered';
+        if (finalExpectedOutcomeVerified !== undefined) {
+          journey.expected_outcome_verified = finalExpectedOutcomeVerified;
+        }
+        
+        // Also update in workflowState.journeys if it exists
+        if (workflowState.journeys && Array.isArray(workflowState.journeys)) {
+          const journeysIndex = workflowState.journeys.findIndex(j => 
+            (j.journey_id === journeyId) || (j.id === journeyId)
+          );
+          if (journeysIndex >= 0) {
+            // CRITICAL: Use journey's existing ai_justification if it was set during iterations (PATH-1)
+            if (!workflowState.journeys[journeysIndex].ai_justification && finalAiJustification) {
+              workflowState.journeys[journeysIndex].ai_justification = finalAiJustification;
+            } else if (workflowState.journeys[journeysIndex].ai_justification && !finalAiJustification) {
+              // Journey has justification but finalAiJustification doesn't - use journey's value
+              finalAiJustification = workflowState.journeys[journeysIndex].ai_justification;
+            }
+            workflowState.journeys[journeysIndex].justification_status = finalJustificationStatus || workflowState.journeys[journeysIndex].justification_status || 'discovered';
+            if (finalExpectedOutcomeVerified !== undefined) {
+              workflowState.journeys[journeysIndex].expected_outcome_verified = finalExpectedOutcomeVerified;
+            }
+          }
+        }
+        
+        // Save journey with final justification immediately
+        if (workflowState.workflowId) {
+          try {
+            // CRITICAL: Ensure journey has all justification fields before saving
+            const journeyToSave = {
+              ...journey,
+              ai_justification: journey.ai_justification || finalAiJustification || null,
+              justification_status: journey.justification_status || finalJustificationStatus || null,
+              expected_outcome_verified: journey.expected_outcome_verified !== undefined ? journey.expected_outcome_verified : (finalExpectedOutcomeVerified !== undefined ? finalExpectedOutcomeVerified : undefined),
+              verification_details: journey.verification_details || null
+            };
+            
+            const payload = {
+              saveLegs: false,
+              journeys: [journeyToSave],
+              job_id: jobId
+            };
+            console.log(`💾 [WHILE-LOOP-COMPLETE] Saving journey ${journeyId} with final justification_status=${journeyToSave.justification_status || 'N/A'}, ai_justification=${journeyToSave.ai_justification ? `YES (${journeyToSave.ai_justification.length} chars)` : 'NO'} to workflow ${workflowState.workflowId}`);
+            await axios.post(
+              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+              payload,
+              { headers: this.getAuthHeaders() }
+            );
+            console.log(`💾 [WHILE-LOOP-COMPLETE] ✅ Successfully saved journey ${journeyId} with final justification after while-loop completion`);
+          } catch (saveError) {
+            console.error(`❌ [WHILE-LOOP-COMPLETE] Failed to save journey final justification: ${saveError.message}`, saveError);
+          }
+        }
+      }
+    }
+    
     const finalResult = {
       iterations: loopState.iterations || [],
       total_iterations: iteration,
@@ -10651,12 +12594,41 @@ IMPORTANT OUTPUT REQUIREMENTS:
       finalCondition: condition,
       loopHistory: loopState.iterations,
       determine_completion: lastDetermineCompletion, // Include in final result for extraction
-      finalLegStatus,
-      finalLegResult
+      finalLegStatus: finalJustificationStatus || finalLegStatus,
+      finalLegResult,
+      justification_status: finalJustificationStatus,
+      ai_justification: finalAiJustification
     };
     
     this.storeStepResult(step, finalResult, workflowState);
-    console.log(`✅ While-loop completed after ${iteration} iterations${finalLegStatus ? ` (final status: ${finalLegStatus})` : ''}`);
+    console.log(`✅ While-loop completed after ${iteration} iterations${finalJustificationStatus ? ` (final justification_status: ${finalJustificationStatus})` : (finalLegStatus ? ` (final status: ${finalLegStatus})` : '')}`);
+    
+    // CRITICAL: Final save of iterations at end of while-loop
+    // This ensures iterations are saved even if they weren't saved during individual iterations
+    if (workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0 && workflowState.workflowId) {
+      const currentItem = workflowState.currentJourney || workflowState.currentItem || {};
+      const journeyId = currentItem.journey_id || currentItem.id;
+      if (journeyId) {
+        const journey = workflowState.journeysToExecute.find(j => (j.journey_id === journeyId) || (j.id === journeyId));
+        if (journey && journey.iterations && journey.iterations.length > 0) {
+          try {
+            console.log(`💾 [WHILE-LOOP-FINAL] Saving ${journey.iterations.length} iteration(s) for journey ${journeyId} at end of while-loop`);
+            await axios.post(
+              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+              {
+                saveLegs: false,
+                journeys: [journey],
+                job_id: jobId
+              },
+              { headers: this.getAuthHeaders() }
+            );
+            console.log(`💾 [WHILE-LOOP-FINAL] ✅ Successfully saved ${journey.iterations.length} iteration(s) for journey ${journeyId}`);
+          } catch (saveError) {
+            console.error(`❌ [WHILE-LOOP-FINAL] Failed to save iterations: ${saveError.message}`);
+          }
+        }
+      }
+    }
     
     // Send log to backend for job history
     if (jobId) {
@@ -11411,9 +13383,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
         break;
       case 'workflow-analysis':
         await this.executeWorkflowAnalysisStep(page, step, workflowState, jobId, stepContext);
-        break;
-      case 'create-workflow':
-        await this.executeCreateWorkflowStep(step, workflowState, workflowState.pageId, workflowState.projectId, jobId);
         break;
       case 'update-workflow':
         await this.executeUpdateWorkflowStep(step, workflowState, jobId);

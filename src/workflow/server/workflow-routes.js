@@ -271,27 +271,6 @@ router.post('/execute-code-from-variable', async (req, res) => {
 
 // Workflow Management Steps
 
-/**
- * Create Workflow Step
- * POST /api/workflow/create-workflow
- */
-router.post('/create-workflow', async (req, res) => {
-  try {
-    const { jobId, stepId, parameters, context } = req.body;
-    
-    if (!jobId || !stepId) {
-      return res.status(400).json({
-        success: false,
-        error: { code: 'INVALID_PARAMETERS', message: 'jobId and stepId are required' }
-      });
-    }
-
-    const result = await workflowExecutor.executeCreateWorkflowStep(jobId, stepId, parameters, context);
-    
-    res.json({
-      success: true,
-      stepId,
-      jobId,
       result,
       error: null,
       executionTime: result.executionTime || 0
