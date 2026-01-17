@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import ActivityDetector from './activity-detector.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -28,17 +29,24 @@ class VideoRecorder {
    * @param {BrowserContext} context - Playwright browser context
    * @param {Page} page - Playwright page object
    */
-  startRecording(jobId, context, page) {
+  async startRecording(jobId, context, page) {
     console.log(`🎬 [VIDEO-RECORDER] Starting video recording for job ${jobId}`);
+
+    const startTime = Date.now();
+    
+    // Start activity detection
+    const activityDetector = new ActivityDetector(page, startTime);
+    await activityDetector.start();
 
     const recordingInfo = {
       jobId,
       context,
       page,
-      startTime: Date.now(),
+      startTime,
       startedAt: new Date(),
       videoPath: null, // Will be set when video is saved
-      segments: []
+      segments: [],
+      activityDetector
     };
 
     this.activeRecordings.set(jobId, recordingInfo);
@@ -83,31 +91,73 @@ class VideoRecorder {
       const videoPath = await video.path();
       console.log(`[VIDEO-RECORDER] Video saved to: ${videoPath}`);
 
+      // Stop activity detection
+      if (recording.activityDetector) {
+        await recording.activityDetector.stop();
+      }
+
       // Gather metadata
       const stats = await fs.promises.stat(videoPath);
-      const fileSizeInBytes = stats.size;
-      const fileSizeInMB = (fileSizeInBytes / (1024 * 1024)).toFixed(2);
-      const duration = Math.floor((Date.now() - recording.startTime) / 1000);
+      const originalFileSize = stats.size;
+      const originalDuration = Math.floor((Date.now() - recording.startTime) / 1000);
 
-      console.log(`[VIDEO-RECORDER] Video size: ${fileSizeInMB} MB (${fileSizeInBytes} bytes)`);
-      console.log(`[VIDEO-RECORDER] Video duration: ${duration} seconds`);
+      console.log(`[VIDEO-RECORDER] Original video size: ${(originalFileSize / (1024 * 1024)).toFixed(2)} MB`);
+      console.log(`[VIDEO-RECORDER] Original video duration: ${originalDuration} seconds`);
+
+      // Compress inactive periods if activity detector is available
+      let finalVideoPath = videoPath;
+      let finalFileSize = originalFileSize;
+      let finalDuration = originalDuration;
+      let inactiveMarkers = [];
+      
+      if (recording.activityDetector) {
+        try {
+          const compressionResult = await this.compressInactivePeriods(
+            jobId,
+            videoPath,
+            recording.activityDetector,
+            recording.startTime
+          );
+          finalVideoPath = compressionResult.path;
+          finalFileSize = compressionResult.size;
+          finalDuration = compressionResult.duration;
+          inactiveMarkers = compressionResult.inactiveMarkers;
+          
+          // Delete original if we created a compressed version
+          if (compressionResult.path !== videoPath) {
+            try {
+              await fs.promises.unlink(videoPath);
+              console.log(`[VIDEO-RECORDER] Deleted original uncompressed video`);
+            } catch (cleanupError) {
+              console.warn(`[VIDEO-RECORDER] Failed to cleanup original video:`, cleanupError.message);
+            }
+          }
+          
+          console.log(`[VIDEO-RECORDER] Compressed video size: ${(finalFileSize / (1024 * 1024)).toFixed(2)} MB`);
+          console.log(`[VIDEO-RECORDER] Compressed video duration: ${finalDuration} seconds`);
+          console.log(`[VIDEO-RECORDER] Compression ratio: ${(originalDuration / finalDuration).toFixed(2)}x`);
+        } catch (compressionError) {
+          console.error(`[VIDEO-RECORDER] Failed to compress video, using original:`, compressionError.message);
+          // Continue with original video
+        }
+      }
 
       // Upload to MinIO via backend
       const startedAt = recording.startedAt instanceof Date
         ? recording.startedAt
         : new Date(recording.startedAt || recording.startTime);
-      const uploadResult = await this.uploadVideo(jobId, videoPath, fileSizeInBytes, duration, startedAt);
+      const uploadResult = await this.uploadVideo(jobId, finalVideoPath, finalFileSize, finalDuration, startedAt, inactiveMarkers);
 
       // Process per-segment recordings if any
       try {
-        await this.processSegments(jobId, recording, videoPath, duration);
+        await this.processSegments(jobId, recording, finalVideoPath, finalDuration);
       } catch (segmentError) {
         console.warn(`[VIDEO-RECORDER] Failed to process video segments for job ${jobId}:`, segmentError.message);
       }
 
       // Clean up local file
       try {
-        await fs.promises.unlink(videoPath);
+        await fs.promises.unlink(finalVideoPath);
         console.log(`[VIDEO-RECORDER] Cleaned up local video file`);
       } catch (cleanupError) {
         console.warn(`[VIDEO-RECORDER] Failed to cleanup local file:`, cleanupError.message);
@@ -120,10 +170,11 @@ class VideoRecorder {
         success: true,
         videoUrl: uploadResult.url,
         videoKey: uploadResult.key,
-        duration,
-        sizeBytes: fileSizeInBytes,
-        sizeMB: fileSizeInMB,
-        startedAt: startedAt instanceof Date ? startedAt.toISOString() : startedAt
+        duration: finalDuration,
+        sizeBytes: finalFileSize,
+        sizeMB: (finalFileSize / (1024 * 1024)).toFixed(2),
+        startedAt: startedAt instanceof Date ? startedAt.toISOString() : startedAt,
+        inactiveMarkers: inactiveMarkers
       };
     } catch (error) {
       console.error(`[VIDEO-RECORDER] Error stopping recording for job ${jobId}:`, error.message);
@@ -133,9 +184,114 @@ class VideoRecorder {
   }
 
   /**
+   * Compress inactive periods in video using ffmpeg
+   */
+  async compressInactivePeriods(jobId, videoPath, activityDetector, recordingStartTime) {
+    const compressedPath = videoPath.replace('.webm', '_compressed.webm');
+    const timeline = activityDetector.getCompressedTimeline();
+    const inactiveMarkers = activityDetector.getInactiveMarkers();
+    
+    if (timeline.timeline.length === 0 || timeline.compressionRatio <= 1.1) {
+      // No meaningful compression possible
+      console.log(`[VIDEO-RECORDER] No compression needed (ratio: ${timeline.compressionRatio.toFixed(2)})`);
+      return {
+        path: videoPath,
+        size: (await fs.promises.stat(videoPath)).size,
+        duration: timeline.originalDuration / 1000,
+        inactiveMarkers: []
+      };
+    }
+    
+    console.log(`[VIDEO-RECORDER] Compressing video: ${timeline.timeline.length} segments, compression ratio: ${timeline.compressionRatio.toFixed(2)}x`);
+    
+    // Build ffmpeg filter complex to concatenate segments with time compression
+    const filterParts = [];
+    const inputs = [];
+    let inputIndex = 0;
+    
+    // Create segments file for concat
+    const segmentsFile = videoPath.replace('.webm', '_segments.txt');
+    const segmentsContent = [];
+    
+    for (const segment of timeline.timeline) {
+      const originalStart = (segment.originalStart - recordingStartTime) / 1000;
+      const originalDuration = segment.duration / 1000;
+      const displayDuration = (segment.displayEnd - segment.displayStart) / 1000;
+      
+      if (segment.type === 'active') {
+        // Active segments: use normally with speed=1.0
+        segmentsContent.push(`file '${videoPath}'\ninpoint ${originalStart.toFixed(3)}\noutpoint ${(originalStart + originalDuration).toFixed(3)}\n`);
+      } else {
+        // Inactive segments: speed up if compressed
+        if (segment.compressed && originalDuration > displayDuration) {
+          const speed = originalDuration / displayDuration;
+          // Use setpts filter to speed up
+          const tempSegment = videoPath.replace('.webm', `_segment_${inputIndex}.webm`);
+          
+          await execFileAsync('ffmpeg', [
+            '-y',
+            '-i', videoPath,
+            '-ss', originalStart.toFixed(3),
+            '-t', originalDuration.toFixed(3),
+            '-filter:v', `setpts=PTS/${speed.toFixed(3)}`,
+            '-an', // Remove audio for speed changes
+            tempSegment
+          ]);
+          
+          segmentsContent.push(`file '${tempSegment}'\n`);
+          inputs.push(tempSegment);
+        } else {
+          // Show in full if not compressed
+          segmentsContent.push(`file '${videoPath}'\ninpoint ${originalStart.toFixed(3)}\noutpoint ${(originalStart + originalDuration).toFixed(3)}\n`);
+        }
+      }
+    }
+    
+    // Write segments file
+    await fs.promises.writeFile(segmentsFile, segmentsContent.join(''));
+    
+    // Concatenate segments (re-encode to ensure compatibility when segments are modified)
+    // Use VP8 to match Playwright's default codec
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', segmentsFile,
+      '-c:v', 'libvpx',
+      '-quality', 'good',
+      '-speed', '0',
+      '-b:v', '1M',
+      '-maxrate', '1M',
+      '-bufsize', '2M',
+      compressedPath
+    ], {
+      timeout: 600000 // 10 minutes for large videos
+    });
+    
+    // Clean up temporary files
+    try {
+      await fs.promises.unlink(segmentsFile);
+      for (const tempFile of inputs) {
+        await fs.promises.unlink(tempFile).catch(() => {});
+      }
+    } catch (cleanupError) {
+      console.warn(`[VIDEO-RECORDER] Failed to cleanup temp files:`, cleanupError.message);
+    }
+    
+    const stats = await fs.promises.stat(compressedPath);
+    
+    return {
+      path: compressedPath,
+      size: stats.size,
+      duration: timeline.displayDuration / 1000,
+      inactiveMarkers
+    };
+  }
+
+  /**
    * Upload video to MinIO via backend presigned URL
    */
-  async uploadVideo(jobId, videoPath, fileSize, duration, startedAt) {
+  async uploadVideo(jobId, videoPath, fileSize, duration, startedAt, inactiveMarkers = []) {
     try {
       // Request presigned URL from backend
       const headers = {};
@@ -192,7 +348,8 @@ class VideoRecorder {
         codec: 'vp8',
         resolution: '1920x1080',
         fps: 5, // Approximate FPS from streaming
-        started_at: startedAt instanceof Date ? startedAt.toISOString() : startedAt
+        started_at: startedAt instanceof Date ? startedAt.toISOString() : startedAt,
+        inactive_markers: inactiveMarkers // Timeline markers for inactive periods
       }, {
         headers,
         timeout: 10000

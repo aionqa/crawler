@@ -980,13 +980,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
         continue;
       }
       
-      // Convert journey to leg (use first action as primary)
-      const firstAction = journey.actions && journey.actions.length > 0 ? journey.actions[0] : null;
+      // Convert journey to leg (prefer first non-verify action as primary)
+      const actions = Array.isArray(journey.actions) ? journey.actions : [];
+      const primaryAction = actions.find(action => {
+        const actionType = (action?.type || '').toLowerCase();
+        return actionType !== 'verify' && actionType !== 'check';
+      }) || actions[0] || null;
+      
       const leg = {
         leg_id: journey.leg_id || journey.journey_id,
         description: journey.description || '',
-        type: firstAction?.type || 'click',
-        selector: firstAction?.selector || '',
+        type: primaryAction?.type || 'click',
+        selector: primaryAction?.selector || '',
         expected_outcome: journey.expected_outcome || '',
         test_instructions: journey.test_instructions || '',
         priority: journey.priority || 'medium',
@@ -995,7 +1000,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         final_result: journey.final_result || null,
         completed_at: journey.completed_at || null,
         iterations: Array.isArray(journey.iterations) ? journey.iterations : [],
-        element_info: firstAction?.element_info || journey.element_info || {},
+        element_info: primaryAction?.element_info || journey.element_info || {},
         // Keep journey_id for reference
         journey_id: journey.journey_id
       };
@@ -1017,8 +1022,31 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     if (hasJourneys) {
       console.log(`✅ Received journeys format from AI, processing ${rawLegs.length} journeys`);
+      
+      const seenSelectors = new Set();
+      const dedupedJourneys = rawLegs.filter(journey => {
+        const actions = Array.isArray(journey.actions) ? journey.actions : [];
+        const primaryAction = actions.find(action => {
+          const actionType = (action?.type || '').toLowerCase();
+          return actionType !== 'verify' && actionType !== 'check';
+        }) || actions[0] || null;
+        
+        const selectorKey = (primaryAction?.selector || '').trim();
+        if (!selectorKey) {
+          return true;
+        }
+        
+        if (seenSelectors.has(selectorKey)) {
+          console.warn(`⚠️ Deduplicating journey "${journey.journey_id || journey.description || 'unknown'}" (duplicate selector: ${selectorKey})`);
+          return false;
+        }
+        
+        seenSelectors.add(selectorKey);
+        return true;
+      });
+      
       // Convert journeys to legs for internal processing (backwards compatibility)
-      processedItems = this.convertJourneysToLegs(rawLegs);
+      processedItems = this.convertJourneysToLegs(dedupedJourneys);
     }
 
     const normalizeType = (rawType) => {
@@ -10425,7 +10453,34 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const config = step.config || {};
     // Allow maxIterations from template config (for multi-step wizards within same journey)
     // The rule "1 job = 1 attempt per leg" applies to retrying the same leg, not to iterating through steps within a journey
-    const maxIterations = config.maxIterations || 5;
+    let maxIterations = config.maxIterations || 5;
+    const resolveStepCountFromText = (textValue) => {
+      if (!textValue || typeof textValue !== 'string') return null;
+      const match = textValue.match(/step\s*\d+\s*(?:of|\/)\s*(\d+)/i);
+      if (!match) return null;
+      const parsed = Number.parseInt(match[1], 10);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    };
+    
+    if (maxIterations > 1) {
+      let visibleText = workflowState.visibleText;
+      if (!visibleText && page && !page.isClosed()) {
+        try {
+          visibleText = await page.innerText('body');
+        } catch (error) {
+          console.warn(`⚠️ Failed to read visible text for step count detection: ${error.message}`);
+        }
+      }
+      
+      const detectedStepCount = resolveStepCountFromText(visibleText);
+      if (detectedStepCount) {
+        maxIterations = detectedStepCount;
+        console.log(`🔢 Detected step count from page text: ${detectedStepCount}`);
+      } else {
+        maxIterations = 1;
+        console.log(`🔢 No step indicator detected; limiting iterations to 1 for single-step journey`);
+      }
+    }
     const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
     const conditionType = config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
     const invertCondition = config.invertCondition === true; // If true, loop while condition is false

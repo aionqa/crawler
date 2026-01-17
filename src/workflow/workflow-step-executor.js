@@ -429,6 +429,7 @@ export class WorkflowStepExecutor {
       
       // Clean the code to remove markdown code blocks and function declarations
       code = this.cleanScript(code);
+      code = code.replace(/page\.goto\([^)]*\)\s*;?/gi, '');
       
       if (!code || code.trim().length === 0) {
         throw new Error('Script is empty after cleaning');
@@ -510,38 +511,100 @@ export class WorkflowStepExecutor {
       if (!code) {
         throw new Error(`Code is empty at path "${sourceField}"`);
       }
+
+      const resolvedPageUrl =
+        context?.pageUrl ||
+        context?.page_url ||
+        context?.page?.page_url ||
+        context?.page?.url ||
+        workflowState?.pageUrl ||
+        workflowState?.page_url ||
+        workflowState?.context?.page_url ||
+        workflowState?.context?.pageUrl ||
+        workflowState?.context?.page?.page_url ||
+        workflowState?.context?.page?.url ||
+        workflowState?.page?.url ||
+        null;
+
+      const currentJourney = workflowState.currentJourney || workflowState.context?.currentJourney || null;
+      const allowNavigation =
+        Array.isArray(currentJourney?.actions) &&
+        currentJourney.actions.some(action =>
+          String(action?.type || action?.action || '').toLowerCase() === 'navigate'
+        );
+
+      if (resolvedPageUrl) {
+        code = code.replace(/\{\{\s*page_url\s*\}\}/g, resolvedPageUrl);
+        const escapeForRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const escapedPageUrl = escapeForRegex(resolvedPageUrl);
+        if (!allowNavigation) {
+          code = code.replace(new RegExp(`page\\.goto\\(\\s*(?:['"])?${escapedPageUrl}(?:['"])?[^\\)]*\\)\\s*;?`, 'gi'), '');
+        }
+      }
+
+      if (!allowNavigation) {
+        code = code.replace(/page\.goto\([^)]*\)\s*;?/gi, '');
+      }
+
+      const resolvedVisibleText =
+        context?.visible_text ||
+        workflowState?.visible_text ||
+        workflowState?.context?.visible_text ||
+        workflowState?.variablePool?.page?.visible_text?.value ||
+        workflowState?.variablePool?.page?.visible_text ||
+        null;
+
+      let extractedUsername = null;
+      let extractedPassword = null;
+      if (resolvedVisibleText && typeof resolvedVisibleText === 'string') {
+        const usernameMatch = resolvedVisibleText.match(/username\s*[:=]\s*([^\s]+)/i);
+        const passwordMatch = resolvedVisibleText.match(/password\s*[:=]\s*([^\s]+)/i);
+        extractedUsername = usernameMatch ? usernameMatch[1] : null;
+        extractedPassword = passwordMatch ? passwordMatch[1] : null;
+      }
+
+      const fallbackUsername = extractedUsername || 'testuser';
+      const fallbackPassword = extractedPassword || 'Test123!';
+      if (extractedUsername) {
+        code = code.replace(/(username\w*\.fill)\('.*?'\)/gi, `$1('${extractedUsername}')`);
+        code = code.replace(/(page\.type\(['"]#username['"],\s*)'[^']*'/gi, `$1'${extractedUsername}'`);
+      }
+      if (extractedPassword) {
+        code = code.replace(/(password\w*\.fill)\('.*?'\)/gi, `$1('${extractedPassword}')`);
+        code = code.replace(/(page\.type\(['"]#password['"],\s*)'[^']*'/gi, `$1'${extractedPassword}'`);
+      }
+
+      code = code.replace(/(username\w*\.fill)\(''\)/gi, `$1('${fallbackUsername}')`);
+      code = code.replace(/(password\w*\.fill)\(''\)/gi, `$1('${fallbackPassword}')`);
+
+      // Clean the code to remove markdown code blocks and function declarations
+      code = this.cleanScript(code);
+
+      if (!code || code.trim().length === 0) {
+        throw new Error('Script is empty after cleaning');
+      }
       
       const timeout = parameters.timeout || 30000;
 
-      const result = await page.evaluate(
-        ({ code, workflowState, timeout }) => {
-          const runner = new Function(
-            'workflowState',
-            `return (async () => {\n${code}\n})();`
-          );
+      // Execute in Node context so Playwright "page" is available to the script
+      const executionPromise = (async () => {
+        const runner = new Function(
+          'page',
+          'workflowState',
+          `"use strict";\n${code}`
+        );
 
-          return new Promise((resolve, reject) => {
-            const timer = setTimeout(() => {
-              reject(new Error(`Code execution timed out after ${timeout}ms`));
-            }, timeout);
+        return await runner(page, workflowState);
+      })();
 
-            Promise.resolve(runner(workflowState))
-              .then(result => {
-                clearTimeout(timer);
-                resolve(result);
-              })
-              .catch(error => {
-                clearTimeout(timer);
-                reject(error);
-              });
-          });
-        },
-        {
-          code,
-          workflowState,
-          timeout
-        }
-      );
+      const timeoutPromise = new Promise((_, reject) => {
+        const timer = setTimeout(() => {
+          clearTimeout(timer);
+          reject(new Error(`Code execution timed out after ${timeout}ms`));
+        }, timeout);
+      });
+
+      const result = await Promise.race([executionPromise, timeoutPromise]);
       
       return {
         executionResult: result,

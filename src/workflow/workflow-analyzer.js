@@ -6245,8 +6245,68 @@ IMPORTANT OUTPUT REQUIREMENTS:
       throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}`);
     }
     
+    const resolvedPageUrl =
+      workflowState.pageUrl ||
+      workflowState.page_url ||
+      workflowState.context?.page_url ||
+      workflowState.context?.pageUrl ||
+      workflowState.context?.page?.page_url ||
+      workflowState.context?.page?.url ||
+      workflowState.page?.url ||
+      null;
+
+    const currentJourney = workflowState.currentJourney || workflowState.context?.currentJourney || null;
+    const allowNavigation =
+      Array.isArray(currentJourney?.actions) &&
+      currentJourney.actions.some(action =>
+        String(action?.type || action?.action || '').toLowerCase() === 'navigate'
+      );
+
+    if (resolvedPageUrl) {
+      code = code.replace(/\{\{\s*page_url\s*\}\}/g, resolvedPageUrl);
+      const escapeForRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapedPageUrl = escapeForRegex(resolvedPageUrl);
+      if (!allowNavigation) {
+        code = code.replace(new RegExp(`page\\.goto\\(\\s*(?:['"])?${escapedPageUrl}(?:['"])?[^\\)]*\\)\\s*;?`, 'gi'), '');
+      }
+    }
+
+    if (!allowNavigation) {
+      code = code.replace(/page\.goto\([^)]*\)\s*;?/gi, '');
+    }
+
+    const resolvedVisibleText =
+      workflowState.visible_text ||
+      workflowState.context?.visible_text ||
+      workflowState.variablePool?.page?.visible_text?.value ||
+      workflowState.variablePool?.page?.visible_text ||
+      null;
+
+    let extractedUsername = null;
+    let extractedPassword = null;
+    if (resolvedVisibleText && typeof resolvedVisibleText === 'string') {
+      const usernameMatch = resolvedVisibleText.match(/username\s*[:=]\s*([^\s]+)/i);
+      const passwordMatch = resolvedVisibleText.match(/password\s*[:=]\s*([^\s]+)/i);
+      extractedUsername = usernameMatch ? usernameMatch[1] : null;
+      extractedPassword = passwordMatch ? passwordMatch[1] : null;
+    }
+
+    const fallbackUsername = extractedUsername || 'testuser';
+    const fallbackPassword = extractedPassword || 'Test123!';
+    if (extractedUsername) {
+      code = code.replace(/(username\w*\.fill)\('.*?'\)/gi, `$1('${extractedUsername}')`);
+      code = code.replace(/(page\.type\(['"]#username['"],\s*)'[^']*'/gi, `$1'${extractedUsername}'`);
+    }
+    if (extractedPassword) {
+      code = code.replace(/(password\w*\.fill)\('.*?'\)/gi, `$1('${extractedPassword}')`);
+      code = code.replace(/(page\.type\(['"]#password['"],\s*)'[^']*'/gi, `$1'${extractedPassword}'`);
+    }
+    code = code.replace(/(username\w*\.fill)\(''\)/gi, `$1('${fallbackUsername}')`);
+    code = code.replace(/(password\w*\.fill)\(''\)/gi, `$1('${fallbackPassword}')`);
+
     // Clean the code to remove markdown code blocks and function declarations
     code = this.cleanScript(code);
+    code = code.replace(/page\.goto\([^)]*\)\s*;?/gi, '');
     const cleanedCodeLength = code?.length || 0;
     
     if (!code || code.trim().length === 0) {
@@ -6918,7 +6978,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const timeout = step.config?.timeout || 30000;
       
       // Capture URL before action
-      const urlBeforeAction = page.url();
+      let urlBeforeAction = page.url();
+      const resolvedPageUrl =
+        workflowState.pageUrl ||
+        workflowState.page_url ||
+        workflowState.context?.page_url ||
+        workflowState.context?.pageUrl ||
+        null;
+
+      if (resolvedPageUrl && urlBeforeAction !== resolvedPageUrl) {
+        console.log(`🔁 Navigating to start page before executing journey: ${resolvedPageUrl}`);
+        await page.goto(resolvedPageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => null);
+        urlBeforeAction = page.url();
+      }
+
       workflowState.urlBeforeAction = urlBeforeAction;
       console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - urlBeforeAction=${urlBeforeAction}`);
       console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - expectedLoginUrl=${workflowState.expectedLoginUrl}`);
@@ -6970,6 +7044,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       } catch (screenshotError) {
         console.warn(`⚠️ Failed to capture before screenshot: ${screenshotError.message}`);
+      }
+
+      const shouldPrefillSpecificCredentials =
+        resolvedVisibleText &&
+        typeof resolvedVisibleText === 'string' &&
+        resolvedVisibleText.toLowerCase().includes('specific credentials') &&
+        extractedUsername &&
+        extractedPassword;
+
+      if (shouldPrefillSpecificCredentials) {
+        try {
+          await page.fill('#username', extractedUsername);
+          await page.fill('#password', extractedPassword);
+          console.log(`🔐 Prefilled specific credentials into #username/#password`);
+        } catch (prefillError) {
+          console.warn(`⚠️ Failed to prefill specific credentials: ${prefillError.message}`);
+        }
       }
       
       // Upload script as downloadable file before execution
@@ -7430,6 +7521,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
           console.error(`❌ Failed to create page wrapper: ${wrapperError.message}`, wrapperError);
           // Fall back to original page object if wrapper creation fails
           wrappedPage = pageObj;
+        }
+
+        if (!allowNavigation && typeof wrappedPage.goto === 'function') {
+          const originalGoto = wrappedPage.goto.bind(wrappedPage);
+          wrappedPage.goto = async (...args) => {
+            console.warn(`⚠️ Blocked page.goto during journey execution`, args?.[0] || '');
+            return null;
+          };
+          wrappedPage._originalGoto = originalGoto;
         }
         
         // Verify wrapper is working - test that wrappedPage.click exists and is our wrapper
@@ -8976,6 +9076,45 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       if (!Array.isArray(items)) {
         throw new Error(`for-each step expected an array at path "${itemsPath}" (source: ${sourceType}), got: ${typeof items}`);
+      }
+    }
+
+    if ((itemsPath === 'journeysToExecute' || itemsPath === 'legsToExecute') && Array.isArray(items)) {
+      const seenJourneySignatures = new Set();
+      const originalCount = items.length;
+      const buildJourneySignature = (journey) => {
+        if (!journey || !Array.isArray(journey.actions)) return journey?.journey_id || 'unknown';
+        const actionable = journey.actions.filter(action => (action?.type || '').toLowerCase() !== 'verify');
+        const actionsToSign = actionable.length > 0 ? actionable : journey.actions;
+        return actionsToSign
+          .map(action => `${action?.type || 'unknown'}:${action?.selector || ''}`)
+          .join('|');
+      };
+
+      items = items.filter(journey => {
+        const signature = buildJourneySignature(journey);
+        if (seenJourneySignatures.has(signature)) {
+          return false;
+        }
+        seenJourneySignatures.add(signature);
+        return true;
+      });
+
+      if (items.length !== originalCount) {
+        console.warn(`⚠️ De-duplicated ${itemsPath} from ${originalCount} to ${items.length} based on action signatures.`);
+        if (itemsPath === 'journeysToExecute') {
+          workflowState.journeysToExecute = items;
+        } else if (itemsPath === 'legsToExecute') {
+          workflowState.legsToExecute = items;
+        }
+        if (!workflowState.context) {
+          workflowState.context = {};
+        }
+        if (itemsPath === 'journeysToExecute') {
+          workflowState.context.journeysToExecute = items;
+        } else if (itemsPath === 'legsToExecute') {
+          workflowState.context.legsToExecute = items;
+        }
       }
     }
 
