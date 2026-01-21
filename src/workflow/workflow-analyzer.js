@@ -4743,7 +4743,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   async saveLegIterationsToWorkflow(workflowState, legs, jobId) {
-    if (!Array.isArray(legs) || legs.length === 0 || !workflowState.workflowId) {
+    if (!Array.isArray(legs) || legs.length === 0 || !workflowState.pageId) {
       return null;
     }
 
@@ -4751,7 +4751,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const legsPayload = JSON.parse(JSON.stringify(legs));
 
       const response = await axios.post(
-        `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+        `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
         {
           saveLegs: true,
           saveInteractiveElements: false,
@@ -4783,8 +4783,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
   async executeSaveDataStep(page, step, workflowState, jobId) {
     console.log(`💾 Executing save-data step (${step.name})`);
     
-    if (!workflowState.workflowId) {
-      throw new Error('No workflow ID available for save-data step');
+    if (!workflowState.pageId) {
+      throw new Error('No page ID available for save-data step');
     }
     
     const config = step.config || {};
@@ -4874,7 +4874,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     try {
       const response = await axios.post(
-        `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+        `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
         payload,
         {
           headers: this.getAuthHeaders()
