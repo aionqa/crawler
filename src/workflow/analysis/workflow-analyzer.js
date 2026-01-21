@@ -1624,6 +1624,24 @@ IMPORTANT OUTPUT REQUIREMENTS:
         throw new Error('projectId is required to create workflow');
       }
       
+      // CRITICAL: First check if workflow already exists for this page
+      // This prevents recreating workflows that were deleted
+      try {
+        const existingWorkflowResponse = await axios.get(`${this.backendUrl}/api/workflows/by-page/${pageId}`, {
+          headers: this.getAuthHeaders()
+        });
+        
+        if (existingWorkflowResponse.data && existingWorkflowResponse.data._id) {
+          console.log(`✅ Workflow already exists for page ${pageId} (ID: ${existingWorkflowResponse.data._id}), returning existing workflow`);
+          return existingWorkflowResponse.data;
+        }
+      } catch (checkError) {
+        // 404 is expected if workflow doesn't exist - continue to create
+        if (checkError.response && checkError.response.status !== 404) {
+          console.warn(`⚠️ Error checking for existing workflow: ${checkError.message}`);
+        }
+      }
+      
       const workflowData = {
         page_id: pageId,
         project_id: projectId,
@@ -1662,6 +1680,108 @@ IMPORTANT OUTPUT REQUIREMENTS:
   /**
    * Ensure we have a pageId by discovering/upserting the page if missing.
    */
+  /**
+   * Clean journey objects to remove circular references before sending to backend
+   */
+  cleanJourneyForSave(journey) {
+    if (!journey || typeof journey !== 'object') {
+      return journey;
+    }
+    
+    const cleaned = {
+      journey_id: journey.journey_id,
+      description: journey.description,
+      test_instructions: journey.test_instructions,
+      expected_outcome: journey.expected_outcome,
+      priority: journey.priority,
+      confidence: journey.confidence,
+      status: journey.status,
+      justification_status: journey.justification_status,
+      final_result: journey.final_result,
+      expected_outcome_verified: journey.expected_outcome_verified,
+      verification_details: journey.verification_details,
+      ai_justification: journey.ai_justification,
+      completed_at: journey.completed_at ? (journey.completed_at instanceof Date ? journey.completed_at.toISOString() : journey.completed_at) : null,
+      updated_at: journey.updated_at ? (journey.updated_at instanceof Date ? journey.updated_at.toISOString() : journey.updated_at) : null,
+      actions: Array.isArray(journey.actions) ? journey.actions.map(action => {
+        if (!action || typeof action !== 'object') return action;
+        return {
+          action_id: action.action_id,
+          type: action.type,
+          description: action.description,
+          selector: action.selector,
+          test_instructions: action.test_instructions,
+          element_info: action.element_info && typeof action.element_info === 'object' ? {
+            id: action.element_info.id,
+            selector: action.element_info.selector,
+            text: action.element_info.text,
+            type: action.element_info.type,
+            name: action.element_info.name,
+            role: action.element_info.role
+          } : null,
+          interactive_element: action.interactive_element && typeof action.interactive_element === 'object' ? {
+            id: action.interactive_element.id,
+            selector: action.interactive_element.selector,
+            text: action.interactive_element.text,
+            type: action.interactive_element.type
+          } : null
+        };
+      }) : [],
+      iterations: Array.isArray(journey.iterations) ? journey.iterations.map(iter => {
+        if (!iter || typeof iter !== 'object') return iter;
+        const cleanedIter = {
+          iteration_number: iter.iteration_number,
+          status: iter.status,
+          timestamp: iter.timestamp ? (iter.timestamp instanceof Date ? iter.timestamp.toISOString() : iter.timestamp) : null,
+          screenshot_before: iter.screenshot_before,
+          screenshot_after: iter.screenshot_after
+        };
+        
+        // CRITICAL: Include actions in iterations (required for multistep wizards)
+        if (Array.isArray(iter.actions)) {
+          cleanedIter.actions = iter.actions.map(action => {
+            if (!action || typeof action !== 'object') return action;
+            return {
+              action_id: action.action_id,
+              type: action.type,
+              description: action.description,
+              selector: action.selector,
+              test_instructions: action.test_instructions,
+              element_info: action.element_info && typeof action.element_info === 'object' ? {
+                id: action.element_info.id,
+                selector: action.element_info.selector,
+                text: action.element_info.text,
+                type: action.element_info.type,
+                name: action.element_info.name,
+                role: action.element_info.role
+              } : null,
+              interactive_element: action.interactive_element && typeof action.interactive_element === 'object' ? {
+                id: action.interactive_element.id,
+                selector: action.interactive_element.selector,
+                text: action.interactive_element.text,
+                type: action.interactive_element.type
+              } : null
+            };
+          });
+        }
+        
+        // Clean result object if it exists
+        if (iter.result && typeof iter.result === 'object') {
+          cleanedIter.result = {
+            status: iter.result.status,
+            reason: iter.result.reason,
+            expected_outcome_verified: iter.result.expected_outcome_verified,
+            verification_details: iter.result.verification_details
+          };
+        }
+        
+        return cleanedIter;
+      }) : []
+    };
+    
+    return cleaned;
+  }
+
   async ensurePageId(workflowState, jobId) {
     if (workflowState.pageId && workflowState.projectId) {
       return workflowState.pageId;
@@ -1677,9 +1797,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         url: workflowState.pageUrl,
         title: workflowState.pageTitle,
         content: workflowState.htmlContent,
-        forms: workflowState.playwrightAnalysis?.forms,
-        links: workflowState.playwrightAnalysis?.links,
-        interactive_elements: workflowState.playwrightAnalysis?.interactiveElements || workflowState.playwrightAnalysis?.interactive_elements,
+        forms: workflowState.playwrightAnalysis?.forms || [],
+        links: workflowState.playwrightAnalysis?.links || [],
+        interactive_elements: workflowState.playwrightAnalysis?.interactiveElements || workflowState.playwrightAnalysis?.interactive_elements || [],
         analyzed: true
       };
 
@@ -2200,6 +2320,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             await this.executeScreenshotStep(page, step, workflowState, effectiveJobId, pageId);
             break;
             
+          case 'browser-config':
+            await this.executeBrowserConfigStep(page, step, workflowState, effectiveJobId);
+            break;
+            
           case 'playwright-analysis':
             await this.executePlaywrightAnalysisStep(page, step, workflowState, effectiveJobId);
             break;
@@ -2240,12 +2364,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
             break;
             
           case 'page-discovery':
-            await this.executePageDiscoveryStep(step, workflowState, effectiveJobId, pageId, projectId);
-            break;
-            
-          case 'save-data':
-            await this.executeSaveDataStep(page, step, workflowState, effectiveJobId);
-            break;
+            console.error(`❌ DEPRECATED: page-discovery step type has been removed. Each step must save its own data.`);
+            throw new Error('page-discovery step type has been removed. Each workflow step must save its own data when executed.');
             
           case 'save-page-data':
             await this.executeSavePageDataStep(page, step, workflowState, effectiveJobId);
@@ -2508,45 +2628,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`✅ ALL WORKFLOW STEPS COMPLETED`);
     console.log(`═══════════════════════════════════════════════════════`);
     
-    // CRITICAL: Ensure workflow_id is always set before returning (since create-workflow step was removed)
-    // Create workflow if it doesn't exist yet (needed for leg execution even if no legs were found)
+    // Workflows are only created when explicitly requested via a step or API call
+    // No automatic workflow creation - workflows must be explicitly created
     if (!workflowState.workflowId) {
-      // If pageId is missing but we have projectId, try to upsert/discover the page to obtain pageId
-      if (!workflowState.pageId && workflowState.projectId) {
-        await this.ensurePageId(workflowState, effectiveJobId);
-      }
-
-      if (workflowState.pageId && workflowState.projectId) {
-        try {
-          console.log(`🔧 Creating workflow at end of execution: pageId=${workflowState.pageId}, projectId=${workflowState.projectId}`);
-          const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, effectiveJobId);
-          workflowState.workflowId = workflow._id;
-          console.log(`✅ Auto-created workflow at end: ${workflow._id}`);
-          await this.sendLogToBackend(effectiveJobId, 'info', `✅ Auto-created workflow: ${workflow._id}`, 'WORKFLOW-ANALYZER', {
-            workflow_id: workflow._id,
-            page_id: workflowState.pageId,
-            project_id: workflowState.projectId
-          });
-        } catch (createError) {
-          console.error(`❌ Failed to auto-create workflow at end: ${createError.message}`);
-          console.error(`❌ Stack:`, createError.stack);
-          // Log error but don't fail - workflow_id will be null in result
-          await this.sendLogToBackend(effectiveJobId, 'error', `❌ Failed to create workflow: ${createError.message}`, 'WORKFLOW-ANALYZER', {
-            error: createError.message,
-            error_stack: createError.stack,
-            page_id: workflowState.pageId,
-            project_id: workflowState.projectId,
-            url: workflowState.pageUrl
-          });
-        }
-      } else {
-        console.warn(`⚠️ Cannot create workflow: missing pageId (${workflowState.pageId}) or projectId (${workflowState.projectId})`);
-        await this.sendLogToBackend(effectiveJobId, 'warn', `⚠️ Cannot create workflow: missing pageId or projectId`, 'WORKFLOW-ANALYZER', {
-          page_id: workflowState.pageId,
-          project_id: workflowState.projectId,
-          url: workflowState.pageUrl
-        });
-      }
+      console.log(`⚠️ No workflow_id set - workflows must be created explicitly via a step or API call`);
     } else {
       console.log(`✅ Workflow already exists: ${workflowState.workflowId}`);
     }
@@ -2594,11 +2679,147 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
     
+    // CRITICAL: Final save of journeys before workflow completes
+    // This ensures journeys are saved even if earlier save attempts failed
+    // Check multiple sources for journeys - "Execute Workflow Journeys" runs, so journeys must exist somewhere
+    let journeysToSave = workflowState.journeys || workflowState.journeysToExecute || null;
+    if (!journeysToSave || journeysToSave.length === 0) {
+      // Check variablePool for journeys extracted by variableOutputs
+      const journeysVar = this.readVariable(workflowState, 'journeysToExecute', 'page');
+      if (journeysVar && Array.isArray(journeysVar) && journeysVar.length > 0) {
+        journeysToSave = journeysVar;
+        console.log(`🔍 [WORKFLOW-COMPLETE] Found ${journeysVar.length} journey(s) in variablePool`);
+      }
+    }
+    if (!journeysToSave || journeysToSave.length === 0) {
+      // Check context for journeys
+      if (workflowState.context?.journeysToExecute && Array.isArray(workflowState.context.journeysToExecute) && workflowState.context.journeysToExecute.length > 0) {
+        journeysToSave = workflowState.context.journeysToExecute;
+        console.log(`🔍 [WORKFLOW-COMPLETE] Found ${journeysToSave.length} journey(s) in context`);
+      }
+    }
+    
+    // CRITICAL: Check stepResults for journeys (might be stored there by storeStepResult)
+    if (!journeysToSave || journeysToSave.length === 0) {
+      if (workflowState.stepResults) {
+        for (const [stepId, stepResult] of Object.entries(workflowState.stepResults)) {
+          if (stepResult?.result?.journeys && Array.isArray(stepResult.result.journeys) && stepResult.result.journeys.length > 0) {
+            journeysToSave = stepResult.result.journeys;
+            console.log(`🔍 [WORKFLOW-COMPLETE] Found ${journeysToSave.length} journey(s) in stepResults[${stepId}]`);
+            break;
+          }
+        }
+      }
+    }
+    
+    if (journeysToSave && Array.isArray(journeysToSave) && journeysToSave.length > 0) {
+      let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+      let projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+      
+      if (!pageIdToUse && projectIdToUse && workflowState.pageUrl) {
+        try {
+          pageIdToUse = await this.ensurePageId(workflowState, effectiveJobId);
+        } catch (pageError) {
+          console.warn(`⚠️ [JOURNEYS-FINAL] Failed to get pageId: ${pageError.message}`);
+        }
+      }
+      
+      if (pageIdToUse && projectIdToUse) {
+        try {
+          // First ensure page exists, create if it doesn't
+          let pageExists = false;
+          try {
+            await axios.get(`${this.backendUrl}/api/pages/${pageIdToUse}`, { headers: this.getAuthHeaders() });
+            pageExists = true;
+          } catch (checkError) {
+          if (checkError.response?.status === 404) {
+            console.log(`🔍 [JOURNEYS-FINAL] Page ${pageIdToUse} not found, creating it first`);
+            const newPageId = await this.ensurePageId(workflowState, effectiveJobId);
+            if (newPageId) {
+              pageIdToUse = newPageId;
+              workflowState.pageId = newPageId; // Update workflowState so subsequent calls use the correct ID
+              pageExists = true;
+              console.log(`✅ [JOURNEYS-FINAL] Created page with ID: ${pageIdToUse}`);
+            } else {
+              throw new Error('Failed to create page');
+            }
+          } else {
+            throw checkError;
+          }
+          }
+          
+          if (pageExists && pageIdToUse) {
+            // Check if journeys already exist (skip check if page was just created to avoid 404)
+            let existingJourneys = [];
+            let skipCheck = false;
+            try {
+              const pageCheckResponse = await axios.get(
+                `${this.backendUrl}/api/pages/${pageIdToUse}`,
+                { headers: this.getAuthHeaders() }
+              );
+              existingJourneys = pageCheckResponse.data?.journeys || [];
+            } catch (checkError) {
+              if (checkError.response?.status === 404) {
+                // Page was just created, might not be immediately available - skip duplicate check and save all journeys
+                console.log(`🔍 [JOURNEYS-FINAL] Page ${pageIdToUse} not yet available after creation, will save all journeys`);
+                skipCheck = true;
+              } else {
+                throw checkError;
+              }
+            }
+            
+            const existingJourneyIds = skipCheck ? new Set() : new Set(existingJourneys.map(j => j.journey_id));
+            const newJourneys = skipCheck ? journeysToSave : journeysToSave.filter(j => !existingJourneyIds.has(j.journey_id));
+            
+            if (newJourneys.length > 0) {
+              console.log(`🔍 [JOURNEYS-FINAL] Saving ${newJourneys.length} journey(s) at workflow completion${skipCheck ? ' (page just created)' : ` (${existingJourneys.length} already exist)`}`);
+              
+              // CRITICAL: Clean journeys to remove circular references before sending
+              const cleanedJourneys = newJourneys.map(j => this.cleanJourneyForSave(j));
+              
+              const payload = {
+                saveLegs: true,
+                journeys: cleanedJourneys,
+                job_id: effectiveJobId
+              };
+              
+              const response = await axios.post(
+                `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+                payload,
+                { headers: this.getAuthHeaders() }
+              );
+              
+              console.log(`✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) at workflow completion. Response status: ${response.status}`);
+              await this.sendLogToBackend(effectiveJobId, 'info', `✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) at workflow completion`, 'WORKFLOW-ANALYZER', {
+                journeys_count: newJourneys.length,
+                page_id: pageIdToUse,
+                response_status: response.status
+              });
+            } else {
+              console.log(`✅ [JOURNEYS-FINAL] All ${journeysToSave.length} journey(s) already exist on page`);
+            }
+          }
+        } catch (finalError) {
+          console.error(`❌ [JOURNEYS-FINAL] Failed to save journeys at workflow completion: ${finalError.message}`);
+          console.error(`❌ [JOURNEYS-FINAL] Error details:`, finalError.response?.data || finalError.message);
+          await this.sendLogToBackend(effectiveJobId, 'error', `❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`, 'WORKFLOW-ANALYZER', {
+            error: finalError.message,
+            status: finalError.response?.status,
+            error_data: finalError.response?.data
+          });
+        }
+      } else {
+        console.warn(`⚠️ [JOURNEYS-FINAL] Cannot save journeys at workflow completion: missing pageId (${pageIdToUse}) or projectId (${projectIdToUse})`);
+        console.warn(`⚠️ [JOURNEYS-FINAL] workflowState.pageId: ${workflowState.pageId}, context.page_id: ${this.context?.page_id}`);
+      }
+    }
+    
     // Send log to backend
     await this.sendLogToBackend(effectiveJobId, 'info', `✅ ALL WORKFLOW STEPS COMPLETED${workflowState.workflowId ? ` (workflow: ${workflowState.workflowId})` : ' (no workflow_id)'}`, 'WORKFLOW-ANALYZER', {
       total_steps: this.workflowTemplate.steps.length,
       workflow_id: workflowState.workflowId,
       legs_count: workflowState.legs?.length || 0,
+      journeys_count: workflowState.journeys?.length || 0,
       is_login_job: isLoginJob,
       login_success: isLoginJob ? (workflowState.loginSuccess || false) : undefined
     });
@@ -2648,16 +2869,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
     
-    // Final validation: ensure workflow_id is set
+    // Note: workflow_id is optional - workflows are only created when explicitly requested via a step or API call
+    // This is expected behavior, not an error
     if (!result.workflow_id) {
-      console.error(`❌ CRITICAL: workflow_id is still null after all attempts to create it!`);
-      console.error(`❌ State: pageId=${workflowState.pageId}, projectId=${workflowState.projectId}, legs=${workflowState.legs.length}`);
-      await this.sendLogToBackend(effectiveJobId, 'error', `❌ CRITICAL: workflow_id is null after execution`, 'WORKFLOW-ANALYZER', {
-        page_id: workflowState.pageId,
-        project_id: workflowState.projectId,
-        legs_count: workflowState.legs.length,
-        url: workflowState.pageUrl
-      });
+      console.log(`ℹ️ workflow_id is not set - workflows are only created when explicitly requested (this is expected)`);
     } else {
       console.log(`✅ Returning workflow results with workflow_id: ${result.workflow_id}`);
     }
@@ -2866,6 +3081,121 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   /**
+   * Execute browser-config step - Configures browser settings (viewport, user agent, mobile emulation, etc.)
+   */
+  async executeBrowserConfigStep(page, step, workflowState, jobId) {
+    console.log(`🌐 Executing browser-config step (${step.name || step.id})`);
+    
+    const config = step.config || {};
+    
+    try {
+      // Get browser configuration from step config
+      const browserConfig = {
+        viewport: config.viewport || { width: 1920, height: 1080 },
+        userAgent: config.userAgent || config.user_agent || null,
+        timeout: config.timeout || 30000,
+        isMobile: config.isMobile || config.is_mobile || false,
+        hasTouch: config.hasTouch || config.has_touch || false,
+        deviceScaleFactor: config.deviceScaleFactor || config.device_scale_factor || 1,
+        locale: config.locale || 'en-US',
+        timezoneId: config.timezoneId || config.timezone_id || 'America/New_York'
+      };
+      
+      // Apply viewport
+      if (browserConfig.viewport && browserConfig.viewport.width && browserConfig.viewport.height) {
+        await page.setViewportSize(browserConfig.viewport);
+        console.log(`🌐 Viewport set to ${browserConfig.viewport.width}x${browserConfig.viewport.height}`);
+        
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'info', 
+            `🌐 Viewport configured: ${browserConfig.viewport.width}x${browserConfig.viewport.height}`,
+            'WORKFLOW-ANALYZER',
+            { browserConfig: { viewport: browserConfig.viewport } }
+          );
+        }
+      }
+      
+      // Apply user agent via context and page evaluation
+      if (browserConfig.userAgent && browserConfig.userAgent.trim()) {
+        const context = page.context();
+        if (context) {
+          // Set via extra HTTP headers
+          await context.setExtraHTTPHeaders({
+            'User-Agent': browserConfig.userAgent
+          });
+          
+          // Override navigator.userAgent in page context
+          await page.evaluate((ua) => {
+            Object.defineProperty(navigator, 'userAgent', {
+              get: () => ua,
+              configurable: true
+            });
+          }, browserConfig.userAgent);
+          
+          console.log(`🌐 User agent set to: ${browserConfig.userAgent.substring(0, 50)}...`);
+          
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info',
+              `🌐 User agent configured: ${browserConfig.userAgent.substring(0, 80)}...`,
+              'WORKFLOW-ANALYZER',
+              { browserConfig: { userAgent: browserConfig.userAgent } }
+            );
+          }
+        }
+      }
+      
+      // Apply mobile emulation if needed
+      if (browserConfig.isMobile) {
+        const context = page.context();
+        if (context) {
+          // Add init script to set maxTouchPoints for mobile emulation
+          await context.addInitScript(() => {
+            Object.defineProperty(navigator, 'maxTouchPoints', {
+              get: () => 5,
+              configurable: true
+            });
+          });
+          console.log(`🌐 Mobile emulation enabled (maxTouchPoints: 5)`);
+          
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info',
+              `🌐 Mobile emulation enabled`,
+              'WORKFLOW-ANALYZER',
+              { browserConfig: { isMobile: true, hasTouch: browserConfig.hasTouch } }
+            );
+          }
+        }
+      }
+      
+      // Store config in workflow state for future reference
+      if (!workflowState.browserConfig) {
+        workflowState.browserConfig = {};
+      }
+      Object.assign(workflowState.browserConfig, browserConfig);
+      
+      // Log step outcome
+      await this.logStepOutcome(
+        step,
+        jobId,
+        `🌐 Browser configured: ${browserConfig.viewport.width}x${browserConfig.viewport.height}${browserConfig.isMobile ? ' (mobile)' : ''}${browserConfig.userAgent ? ' with custom UA' : ''}`,
+        { browserConfig }
+      );
+      
+      console.log(`✅ Browser configuration applied successfully`);
+    } catch (error) {
+      console.error(`❌ Browser config error: ${error.message}`);
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(jobId, 'error',
+          `❌ Browser configuration failed: ${error.message}`,
+          'WORKFLOW-ANALYZER',
+          { step_id: step.id, error: error.message, error_stack: error.stack }
+        );
+      }
+      throw error; // Re-throw to fail workflow if browser config is critical
+    }
+  }
+
+  /**
    * Execute Playwright analysis step
    */
   async executePlaywrightAnalysisStep(page, step, workflowState, jobId) {
@@ -2922,6 +3252,30 @@ IMPORTANT OUTPUT REQUIREMENTS:
       });
     } else {
       console.log(`⚠️ WARNING: No forms found in Playwright analysis for ${workflowState.pageUrl || 'unknown page'}`);
+    }
+    
+    // CRITICAL: Save data directly to DB - each step saves its own data
+    // This replaces the deprecated "save-data" step type
+    if (workflowState.pageId && workflowState.projectId) {
+      try {
+        await this.updatePageDiscovery(
+          jobId,
+          workflowState.pageId,
+          workflowState.projectId,
+          workflowState.pageUrl,
+          {
+            // Always save forms/interactive_elements - use Array.isArray to handle empty arrays correctly
+            forms: Array.isArray(analysis.forms) ? analysis.forms : [],
+            links: Array.isArray(analysis.links) ? analysis.links : [],
+            interactive_elements: Array.isArray(analysis.interactive_elements) ? analysis.interactive_elements : [],
+            non_interactive_elements: Array.isArray(analysis.non_interactive_elements) ? analysis.non_interactive_elements : []
+          }
+        );
+        console.log(`✅ Playwright analysis data saved directly to page: ${analysis.forms.length} forms, ${analysis.interactive_elements.length} interactive elements`);
+      } catch (saveError) {
+        console.warn(`⚠️ Failed to save playwright analysis data: ${saveError.message}`);
+        // Don't fail the workflow if save fails
+      }
     }
   }
 
@@ -3230,15 +3584,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
           
           console.log(`✅ Page summary included ${normalizedFromSummary.length} legs (legsToExecute set and saved to variable pool)`);
           
-          // CRITICAL: Ensure workflow_id is set if not already set (since create-workflow step was removed)
-          if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
-            try {
-              const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
-              workflowState.workflowId = workflow._id;
-              console.log(`✅ Auto-created workflow: ${workflow._id} (page-description step)`);
-            } catch (createError) {
-              console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
-              // Don't fail the step if workflow creation fails
+          // CRITICAL: Workflows must be created explicitly by the user, not auto-created
+          // If no workflow exists, log a warning and skip saving legs
+          if (normalizedFromSummary.length > 0) {
+            if (!workflowState.workflowId) {
+              console.warn(`⚠️ [PAGE-DESCRIPTION] No workflow_id available. Workflows must be created explicitly by the user. Skipping leg persistence.`);
+              console.warn(`⚠️ [PAGE-DESCRIPTION] To save legs, create a workflow first via the API or UI.`);
             }
           }
           
@@ -3383,6 +3734,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute AI prompt step
    */
   async executeAIPromptStep(page, step, workflowState, jobId, stepContext = null) {
+    // CRITICAL: Log function entry to verify it's being called
+    console.log(`🔍 [EXECUTE-AI-PROMPT-STEP] Function called for step ${step.id} (${step.name})`);
+    if (jobId && this.backendLogger) {
+      await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [EXECUTE-AI-PROMPT-STEP] Function called for step ${step.id}`, 'WORKFLOW-ANALYZER', {
+        step_id: step.id,
+        step_name: step.name,
+        step_type: step.type
+      });
+    }
     console.log(`🤖 Executing AI prompt (${step.name})`);
     
     // Prompt template MUST be embedded directly in step config, not fetched from database
@@ -3649,12 +4009,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
       
-      // Collect playwright_analysis if requested (needed for interactive_elements and playwright_analysis)
+      // AUTO-RUN: Collect playwright_analysis if requested in attachments but not yet available
+      // This allows workflows to use playwright_analysis in attachments without an explicit playwright-analysis step
+      // The simplified workflow uses this: it has "playwright_analysis" in attachments but no explicit step
       const needsPlaywrightAnalysis = requestedAttachments.includes('interactive_elements') || 
-                                      requestedAttachments.includes('playwright_analysis');
+                                      requestedAttachments.includes('playwright_analysis') ||
+                                      requestedAttachments.includes('forms');
       
       if (needsPlaywrightAnalysis && !workflowState.playwrightAnalysis) {
-        console.log(`🔍 [AI-PROMPT] Collecting playwright_analysis...`);
+        console.log(`🔍 [AI-PROMPT] Auto-collecting playwright_analysis (requested in attachments but no explicit step found)...`);
         try {
           await this.executePlaywrightAnalysisStep(page, {
             id: `${step.id}_auto_playwright_analysis`,
@@ -4050,6 +4413,42 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // Debug: Log what was returned
       console.log(`🔍 AI Response for step ${step.id} (${step.name}):`, JSON.stringify(parsedResponse, null, 2).substring(0, 1000));
       
+      // CRITICAL: Log journeys in response for debugging
+      if (parsedResponse && typeof parsedResponse === 'object') {
+        const hasJourneys = !!(parsedResponse.journeys || parsedResponse.page_summary?.journeys);
+        const journeysCount = parsedResponse.journeys?.length || parsedResponse.page_summary?.journeys?.length || 0;
+        const hasLegs = !!(parsedResponse.legs || parsedResponse.page_summary?.legs);
+        const legsCount = parsedResponse.legs?.length || parsedResponse.page_summary?.legs?.length || 0;
+        const hasActions = !!(parsedResponse.actions || parsedResponse.page_summary?.actions);
+        const actionsCount = parsedResponse.actions?.length || parsedResponse.page_summary?.actions?.length || 0;
+        
+        console.log(`🔍 [AI-RESPONSE] Step ${step.id}: hasJourneys=${hasJourneys}, journeysCount=${journeysCount}, hasLegs=${hasLegs}, legsCount=${legsCount}, hasActions=${hasActions}, actionsCount=${actionsCount}`);
+        console.log(`🔍 [AI-RESPONSE] Full response keys: ${Object.keys(parsedResponse).join(', ')}`);
+        if (parsedResponse.page_summary) {
+          console.log(`🔍 [AI-RESPONSE] page_summary keys: ${Object.keys(parsedResponse.page_summary).join(', ')}`);
+        }
+        
+        // CRITICAL: Log full response structure for debugging
+        const responsePreview = JSON.stringify(parsedResponse, null, 2).substring(0, 3000);
+        console.log(`🔍 [AI-RESPONSE] Full response preview:\n${responsePreview}`);
+        
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [AI-RESPONSE] Step ${step.id}: hasJourneys=${hasJourneys}, journeysCount=${journeysCount}, hasLegs=${hasLegs}, legsCount=${legsCount}`, 'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            has_journeys: hasJourneys,
+            journeys_count: journeysCount,
+            has_legs: hasLegs,
+            legs_count: legsCount,
+            has_actions: hasActions,
+            actions_count: actionsCount,
+            response_keys: Object.keys(parsedResponse),
+            has_page_summary: !!parsedResponse.page_summary,
+            page_summary_keys: parsedResponse.page_summary ? Object.keys(parsedResponse.page_summary).join(', ') : null,
+            response_preview: responsePreview
+          });
+        }
+      }
+      
       // Generate summary for AI request
       let summaryMessage = '';
       let summaryMetadata = {
@@ -4112,7 +4511,53 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         // Extract summary information based on response content
-        if (parsedResponse.legs && Array.isArray(parsedResponse.legs)) {
+        // CRITICAL: Log the actual response structure for debugging
+        console.log(`🔍 [AI-RESPONSE] Response keys: ${Object.keys(parsedResponse).join(', ')}`);
+        if (parsedResponse.page_summary) {
+          console.log(`🔍 [AI-RESPONSE] page_summary keys: ${Object.keys(parsedResponse.page_summary).join(', ')}`);
+          if (parsedResponse.page_summary.journeys) {
+            console.log(`🔍 [AI-RESPONSE] page_summary.journeys found: ${Array.isArray(parsedResponse.page_summary.journeys) ? parsedResponse.page_summary.journeys.length : 'not array'}`);
+          }
+        }
+        if (parsedResponse.journeys) {
+          console.log(`🔍 [AI-RESPONSE] parsedResponse.journeys found: ${Array.isArray(parsedResponse.journeys) ? parsedResponse.journeys.length : 'not array'}`);
+        }
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [AI-RESPONSE] Response structure: keys=${Object.keys(parsedResponse).join(', ')}`, 'WORKFLOW-ANALYZER', {
+            response_keys: Object.keys(parsedResponse),
+            has_journeys: !!parsedResponse.journeys,
+            journeys_is_array: Array.isArray(parsedResponse.journeys),
+            journeys_length: Array.isArray(parsedResponse.journeys) ? parsedResponse.journeys.length : 0,
+            has_page_summary: !!parsedResponse.page_summary,
+            has_page_summary_journeys: !!(parsedResponse.page_summary?.journeys),
+            page_summary_journeys_is_array: Array.isArray(parsedResponse.page_summary?.journeys),
+            page_summary_journeys_length: Array.isArray(parsedResponse.page_summary?.journeys) ? parsedResponse.page_summary.journeys.length : 0,
+            has_legs: !!parsedResponse.legs,
+            has_actions: !!parsedResponse.actions,
+            response_preview: JSON.stringify(parsedResponse).substring(0, 500)
+          });
+        }
+        
+        // CRITICAL: Check for journeys first (new format)
+        // Check both parsedResponse.journeys and parsedResponse.page_summary.journeys
+        const journeysInResponse = parsedResponse.journeys || parsedResponse.page_summary?.journeys || null;
+        if (journeysInResponse && Array.isArray(journeysInResponse)) {
+          const totalActions = journeysInResponse.reduce((sum, j) => sum + (Array.isArray(j.actions) ? j.actions.length : 0), 0);
+          summaryMessage = `📋 Found ${journeysInResponse.length} journey(s) with ${totalActions} action(s)`;
+          summaryMetadata.journeys_count = journeysInResponse.length;
+          summaryMetadata.total_actions_in_journeys = totalActions;
+          summaryMetadata.sample_journeys = journeysInResponse.slice(0, 3).map(j => ({
+            journey_id: j.journey_id,
+            actions_count: Array.isArray(j.actions) ? j.actions.length : 0
+          }));
+          console.log(`✅ [AI-RESPONSE] Found ${journeysInResponse.length} journey(s) with ${totalActions} action(s) in response`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `✅ [AI-RESPONSE] Found ${journeysInResponse.length} journey(s) with ${totalActions} action(s)`, 'WORKFLOW-ANALYZER', {
+              journeys_count: journeysInResponse.length,
+              total_actions: totalActions
+            });
+          }
+        } else if (parsedResponse.legs && Array.isArray(parsedResponse.legs)) {
           summaryMessage = `📋 Found ${parsedResponse.legs.length} action(s)`;
           summaryMetadata.legs_count = parsedResponse.legs.length;
           summaryMetadata.sample_legs = parsedResponse.legs.slice(0, 3).map(leg => leg.description || leg.leg_id || 'leg');
@@ -4260,13 +4705,50 @@ IMPORTANT OUTPUT REQUIREMENTS:
         let journeys = [];
         
         // Check if response has journeys (new format from simplified template)
+        // CRITICAL: Check both parsedResponse.journeys and parsedResponse.page_summary.journeys
         console.log(`🔍 [JOURNEYS-EXTRACT] Checking parsedResponse for journeys: has journeys=${!!parsedResponse.journeys}, isArray=${Array.isArray(parsedResponse.journeys)}, type=${typeof parsedResponse.journeys}`);
+        console.log(`🔍 [JOURNEYS-EXTRACT] Response keys: ${Object.keys(parsedResponse).join(', ')}`);
+        if (parsedResponse.page_summary) {
+          console.log(`🔍 [JOURNEYS-EXTRACT] page_summary keys: ${Object.keys(parsedResponse.page_summary).join(', ')}`);
+        }
+        
         if (parsedResponse.journeys && Array.isArray(parsedResponse.journeys)) {
           journeys = parsedResponse.journeys;
           console.log(`✅ [JOURNEYS-EXTRACT] Found ${journeys.length} journeys in response`);
+          console.log(`🔍 [JOURNEYS-EXTRACT] First journey preview:`, JSON.stringify(journeys[0], null, 2).substring(0, 500));
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-EXTRACT] Found ${journeys.length} journeys in response`, 'WORKFLOW-ANALYZER', {
+              journeys_count: journeys.length,
+              journey_ids: journeys.map(j => j.journey_id || 'no-id')
+            });
+          }
           console.log(`🔍 [JOURNEYS-EXTRACT] Response keys: ${Object.keys(parsedResponse).join(', ')}`);
           if (journeys.length > 0) {
             console.log(`🔍 [JOURNEYS-EXTRACT] Journey IDs: ${journeys.map(j => j.journey_id || 'no-id').join(', ')}`);
+            // CRITICAL: Validate that journeys have actions array
+            let totalActions = 0;
+            journeys.forEach((journey, idx) => {
+              const actionsCount = Array.isArray(journey.actions) ? journey.actions.length : 0;
+              totalActions += actionsCount;
+              if (actionsCount === 0) {
+                console.error(`❌ [JOURNEYS-EXTRACT] Journey ${journey.journey_id || idx} has NO actions array or empty actions! Journey keys: ${Object.keys(journey).join(', ')}`);
+                console.error(`❌ [JOURNEYS-EXTRACT] Journey ${journey.journey_id || idx} full object:`, JSON.stringify(journey, null, 2).substring(0, 1000));
+                if (jobId && this.backendLogger) {
+                  this.backendLogger.appendJobLog(jobId, 'error', `❌ [JOURNEYS-EXTRACT] Journey ${journey.journey_id || idx} has NO actions!`, 'WORKFLOW-ANALYZER', {
+                    journey_id: journey.journey_id || idx,
+                    journey_keys: Object.keys(journey).join(', ')
+                  });
+                }
+              } else {
+                console.log(`✅ [JOURNEYS-EXTRACT] Journey ${journey.journey_id || idx} has ${actionsCount} action(s)`);
+              }
+            });
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-EXTRACT] Total actions across ${journeys.length} journeys: ${totalActions}`, 'WORKFLOW-ANALYZER', {
+                journeys_count: journeys.length,
+                total_actions: totalActions
+              });
+            }
           }
           if (journeys.length === 0) {
             console.warn(`⚠️ [AI RESPONSE] Journeys array is EMPTY. Full response structure:`, JSON.stringify(parsedResponse, null, 2).substring(0, 2000));
@@ -4399,6 +4881,83 @@ IMPORTANT OUTPUT REQUIREMENTS:
             workflowState.aiAnalysisResult.journeys = journeys;
             
             console.log(`✅ [JOURNEYS-STATE] Immediately stored ${journeys.length} journey(s) in workflowState.journeysToExecute and variable pool`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-STATE] Stored ${journeys.length} journey(s) in workflowState`, 'WORKFLOW-ANALYZER', {
+                journeys_count: journeys.length,
+                journey_ids: journeys.map(j => j.journey_id || 'no-id'),
+                total_actions: journeys.reduce((sum, j) => sum + (Array.isArray(j.actions) ? j.actions.length : 0), 0)
+              });
+            }
+            
+            // CRITICAL: Save journeys to backend IMMEDIATELY after extraction
+            // Don't wait for later save attempts - save now while we have the data
+            let pageIdToSave = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+            let projectIdToSave = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+            
+            if (!pageIdToSave && projectIdToSave && workflowState.pageUrl) {
+              try {
+                pageIdToSave = await this.ensurePageId(workflowState, jobId);
+              } catch (pageError) {
+                console.warn(`⚠️ [JOURNEYS-IMMEDIATE] Failed to get pageId: ${pageError.message}`);
+              }
+            }
+            
+            if (pageIdToSave && projectIdToSave) {
+              try {
+                // First verify page exists, create if it doesn't
+                try {
+                  await axios.get(`${this.backendUrl}/api/pages/${pageIdToSave}`, { headers: this.getAuthHeaders() });
+                } catch (checkError) {
+                  if (checkError.response?.status === 404) {
+                    console.log(`🔍 [JOURNEYS-IMMEDIATE] Page ${pageIdToSave} not found, creating it first`);
+                    pageIdToSave = await this.ensurePageId(workflowState, jobId);
+                    if (!pageIdToSave) {
+                      throw new Error('Failed to create page');
+                    }
+                  } else {
+                    throw checkError;
+                  }
+                }
+                
+                // CRITICAL: Clean journeys to remove circular references before sending
+                const cleanedJourneys = journeys.map(j => this.cleanJourneyForSave(j));
+                
+                const payload = {
+                  saveLegs: true,
+                  journeys: cleanedJourneys,
+                  job_id: jobId
+                };
+                
+                console.log(`🔍 [JOURNEYS-IMMEDIATE] Saving ${journeys.length} journey(s) immediately after extraction to page ${pageIdToSave}`);
+                const response = await axios.post(
+                  `${this.backendUrl}/api/pages/${pageIdToSave}/save-analysis`,
+                  payload,
+                  { headers: this.getAuthHeaders() }
+                );
+                
+                console.log(`✅ [JOURNEYS-IMMEDIATE] Successfully saved ${journeys.length} journey(s) immediately. Response status: ${response.status}`);
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-IMMEDIATE] Saved ${journeys.length} journey(s) immediately after extraction`, 'WORKFLOW-ANALYZER', {
+                    journeys_count: journeys.length,
+                    page_id: pageIdToSave,
+                    response_status: response.status
+                  });
+                }
+              } catch (immediateError) {
+                console.error(`❌ [JOURNEYS-IMMEDIATE] Failed to save journeys immediately: ${immediateError.message}`);
+                console.error(`❌ [JOURNEYS-IMMEDIATE] Error details:`, immediateError.response?.data || immediateError.message);
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'error', `❌ [JOURNEYS-IMMEDIATE] Failed to save journeys: ${immediateError.message}`, 'WORKFLOW-ANALYZER', {
+                    error: immediateError.message,
+                    status: immediateError.response?.status,
+                    error_data: immediateError.response?.data
+                  });
+                }
+              }
+            } else {
+              console.warn(`⚠️ [JOURNEYS-IMMEDIATE] Cannot save journeys immediately: missing pageId (${pageIdToSave}) or projectId (${projectIdToSave})`);
+              console.warn(`⚠️ [JOURNEYS-IMMEDIATE] workflowState.pageId: ${workflowState.pageId}, context.page_id: ${this.context?.page_id}`);
+            }
           } else {
             // Empty journeys array - log warning but don't overwrite existing journeys
             console.warn(`⚠️ [JOURNEYS] AI returned empty journeys array. Keeping existing journeys in workflowState to avoid data loss.`);
@@ -4406,7 +4965,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
               await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI returned empty journeys array but ${formsCount} form(s) and ${interactiveElementsCount} significant interactive element(s) exist on page. Keeping existing journeys.`, 'WORKFLOW-ANALYZER', {
                 forms_count: formsCount,
                 interactive_elements_count: interactiveElementsCount,
-                existing_journeys_count: workflowState.journeys?.length || 0
+                existing_journeys_count: workflowState.journeys?.length || 0,
+                response_keys: Object.keys(parsedResponse).join(', '),
+                has_page_summary: !!parsedResponse.page_summary
               });
             }
           }
@@ -4598,6 +5159,76 @@ IMPORTANT OUTPUT REQUIREMENTS:
           candidateLegs = Array.isArray(parsedResponse.actions) ? parsedResponse.actions : [];
         }
         
+        // CRITICAL: If no journeys found but legs/actions exist, convert them to journeys
+        if (journeys.length === 0 && candidateLegs.length > 0) {
+          console.log(`🔍 [JOURNEYS-CONVERT] No journeys found but ${candidateLegs.length} leg(s)/action(s) found, converting to journeys`);
+          journeys = candidateLegs.map((leg, idx) => ({
+            journey_id: leg.journey_id || leg.leg_id || leg.action_id || `journey_${idx + 1}`,
+            description: leg.description || leg.action_description || 'Journey',
+            expected_outcome: leg.expected_outcome || leg.expected_result || 'Complete journey',
+            actions: Array.isArray(leg.actions) ? leg.actions : (leg.action ? [leg.action] : []),
+            priority: leg.priority || 'medium',
+            confidence: leg.confidence || 0.8
+          }));
+          console.log(`✅ [JOURNEYS-CONVERT] Converted ${candidateLegs.length} leg(s)/action(s) to ${journeys.length} journey(s)`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-CONVERT] Converted ${candidateLegs.length} leg(s)/action(s) to journeys`, 'WORKFLOW-ANALYZER', {
+              legs_count: candidateLegs.length,
+              journeys_count: journeys.length
+            });
+          }
+          
+          // CRITICAL: Store journeys in workflowState immediately after conversion
+          workflowState.journeys = journeys;
+          workflowState.journeysToExecute = journeys;
+          if (!workflowState.context) {
+            workflowState.context = {};
+          }
+          workflowState.context.journeysToExecute = journeys;
+          this.initializeVariablePool(workflowState);
+          this.saveVariable(workflowState, 'journeysToExecute', journeys, 'page', step);
+          
+          // Save journeys immediately after conversion
+          let pageIdToSave = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+          let projectIdToSave = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+          
+          if (!pageIdToSave && projectIdToSave && workflowState.pageUrl) {
+            try {
+              pageIdToSave = await this.ensurePageId(workflowState, jobId);
+            } catch (pageError) {
+              console.warn(`⚠️ [JOURNEYS-CONVERT] Failed to get pageId: ${pageError.message}`);
+            }
+          }
+          
+          if (pageIdToSave && projectIdToSave) {
+            try {
+              const payload = {
+                saveLegs: true,
+                journeys: journeys,
+                job_id: jobId
+              };
+              
+              console.log(`🔍 [JOURNEYS-CONVERT] Saving ${journeys.length} journey(s) after conversion to page ${pageIdToSave}`);
+              const response = await axios.post(
+                `${this.backendUrl}/api/pages/${pageIdToSave}/save-analysis`,
+                payload,
+                { headers: this.getAuthHeaders() }
+              );
+              
+              console.log(`✅ [JOURNEYS-CONVERT] Successfully saved ${journeys.length} journey(s) after conversion. Response status: ${response.status}`);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-CONVERT] Saved ${journeys.length} journey(s) after conversion`, 'WORKFLOW-ANALYZER', {
+                  journeys_count: journeys.length,
+                  page_id: pageIdToSave,
+                  response_status: response.status
+                });
+              }
+            } catch (convertError) {
+              console.error(`❌ [JOURNEYS-CONVERT] Failed to save journeys after conversion: ${convertError.message}`);
+            }
+          }
+        }
+        
         console.log(`[AI RESPONSE] Extracted ${candidateLegs.length} candidate legs from AI response for step ${step.id || step.name}`);
         if (candidateLegs.length > 0) {
           console.log(`[AI RESPONSE] Leg types: ${candidateLegs.map(l => l.type || l.action || 'no-type').join(', ')}`);
@@ -4608,52 +5239,182 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // CRITICAL: Save journeys IMMEDIATELY and INDEPENDENTLY of legs processing
         // Journeys must be saved even if legs conversion fails or legs are empty
         console.log(`🔍 [JOURNEYS-SAVE] Checking journeys: length=${journeys.length}, isArray=${Array.isArray(journeys)}`);
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [JOURNEYS-SAVE] Checking journeys: length=${journeys.length}`, 'WORKFLOW-ANALYZER', {
+            journeys_length: journeys.length,
+            is_array: Array.isArray(journeys)
+          });
+        }
         if (journeys.length > 0) {
           console.log(`🔍 [JOURNEYS-SAVE] Found ${journeys.length} journey(s) to save. Journey IDs: ${journeys.map(j => j.journey_id || 'no-id').join(', ')}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [JOURNEYS-SAVE] Found ${journeys.length} journey(s) to save`, 'WORKFLOW-ANALYZER', {
+              journeys_count: journeys.length,
+              journey_ids: journeys.map(j => j.journey_id || 'no-id')
+            });
+          }
           
-          // Ensure workflow_id exists - create if needed
-          if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
-            try {
-              const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
-              workflowState.workflowId = workflow._id;
-              console.log(`✅ Auto-created workflow: ${workflow._id} (ai-prompt step for journeys)`);
-            } catch (createError) {
-              console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
+          // CRITICAL: Workflows must be created explicitly by the user, not auto-created
+          // If no workflow exists, log a warning and skip saving journeys/actions
+          if (!workflowState.workflowId) {
+            console.warn(`⚠️ [JOURNEYS-SAVE] No workflow_id available. Workflows must be created explicitly by the user. Skipping journey/action persistence.`);
+            console.warn(`⚠️ [JOURNEYS-SAVE] To save journeys/actions, create a workflow first via the API or UI.`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [JOURNEYS-SAVE] No workflow_id available. Skipping journey/action persistence.`, 'WORKFLOW-ANALYZER');
             }
           }
           
-          if (workflowState.workflowId) {
+          // CRITICAL: Save journeys even if workflow doesn't exist - pass page_id and project_id
+          // Backend will save to page if workflow doesn't exist
+          // CRITICAL: Get pageId and projectId from workflowState or context
+          let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+          let projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+          
+          // CRITICAL: If pageId is missing, try to get or create it
+          if (!pageIdToUse) {
+            if (projectIdToUse && workflowState.pageUrl) {
+              console.log(`🔍 [JOURNEYS-SAVE] pageId missing, attempting to get/create page for URL: ${workflowState.pageUrl}`);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [JOURNEYS-SAVE] pageId missing, attempting to create page`, 'WORKFLOW-ANALYZER', {
+                  page_url: workflowState.pageUrl,
+                  project_id: projectIdToUse
+                });
+              }
+              try {
+                pageIdToUse = await this.ensurePageId(workflowState, jobId);
+                if (pageIdToUse) {
+                  console.log(`✅ [JOURNEYS-SAVE] Got pageId: ${pageIdToUse}`);
+                  if (jobId && this.backendLogger) {
+                    await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-SAVE] Created page with pageId: ${pageIdToUse}`, 'WORKFLOW-ANALYZER', {
+                      page_id: pageIdToUse
+                    });
+                  }
+                } else {
+                  console.warn(`⚠️ [JOURNEYS-SAVE] ensurePageId returned null`);
+                }
+              } catch (pageError) {
+                console.warn(`⚠️ [JOURNEYS-SAVE] Failed to get/create pageId: ${pageError.message}`);
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'error', `❌ [JOURNEYS-SAVE] Failed to create page: ${pageError.message}`, 'WORKFLOW-ANALYZER', {
+                    error: pageError.message
+                  });
+                }
+              }
+            } else {
+              console.warn(`⚠️ [JOURNEYS-SAVE] Cannot create page: missing projectId (${projectIdToUse}) or pageUrl (${workflowState.pageUrl})`);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [JOURNEYS-SAVE] Cannot create page: missing projectId or pageUrl`, 'WORKFLOW-ANALYZER', {
+                  project_id: projectIdToUse,
+                  page_url: workflowState.pageUrl
+                });
+              }
+            }
+          }
+          
+          console.log(`🔍 [JOURNEYS-SAVE] pageId: ${pageIdToUse}, projectId: ${projectIdToUse}, workflowState.pageId: ${workflowState.pageId}, workflowState.projectId: ${workflowState.projectId}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [JOURNEYS-SAVE] Checking pageId/projectId: pageId=${pageIdToUse}, projectId=${projectIdToUse}`, 'WORKFLOW-ANALYZER', {
+              page_id: pageIdToUse,
+              project_id: projectIdToUse,
+              workflow_state_page_id: workflowState.pageId,
+              workflow_state_project_id: workflowState.projectId,
+              page_url: workflowState.pageUrl
+            });
+          }
+          
+          if (pageIdToUse && projectIdToUse) {
             try {
+              // Use workflowId if available, otherwise use a dummy ID (backend will detect it doesn't exist)
+              const workflowIdForUrl = workflowState.workflowId || '000000000000000000000000';
+              
+              // CRITICAL: Verify journeys have actions before sending
+              const journeysWithActions = journeys.map(j => {
+                const actionsCount = Array.isArray(j.actions) ? j.actions.length : 0;
+                if (actionsCount === 0) {
+                  console.warn(`⚠️ [JOURNEYS-SAVE] Journey ${j.journey_id || 'no-id'} has NO actions array or empty actions array!`);
+                  if (jobId && this.backendLogger) {
+                    this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [JOURNEYS-SAVE] Journey ${j.journey_id || 'no-id'} has NO actions!`, 'WORKFLOW-ANALYZER', {
+                      journey_id: j.journey_id || 'no-id'
+                    });
+                  }
+                } else {
+                  console.log(`✅ [JOURNEYS-SAVE] Journey ${j.journey_id || 'no-id'} has ${actionsCount} action(s)`);
+                }
+                return j;
+              });
+              
+              // CRITICAL: Clean journeys to remove circular references before sending
+              const cleanedJourneys = journeysWithActions.map(j => this.cleanJourneyForSave(j));
+              
               const payload = {
                 saveLegs: true, // CRITICAL: Must be true for backend to process journeys (backend checks: if (saveLegs && journeys.length > 0))
-                journeys: journeys,
+                journeys: cleanedJourneys,
                 job_id: jobId
               };
               
-              console.log(`🔍 [JOURNEYS-SAVE] Sending POST to ${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data with ${journeys.length} journey(s)`);
+              const totalActions = journeys.reduce((sum, j) => sum + (Array.isArray(j.actions) ? j.actions.length : 0), 0);
+              console.log(`🔍 [JOURNEYS-SAVE] Sending POST to ${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis with ${journeys.length} journey(s)`);
               console.log(`🔍 [JOURNEYS-SAVE] Payload: saveLegs=${payload.saveLegs}, journeys.length=${payload.journeys.length}, job_id=${payload.job_id}`);
+              console.log(`🔍 [JOURNEYS-SAVE] Total actions across all journeys: ${totalActions}`);
+              
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [JOURNEYS-SAVE] Sending ${journeys.length} journey(s) with ${totalActions} total actions to backend`, 'WORKFLOW-ANALYZER', {
+                  journeys_count: journeys.length,
+                  total_actions: totalActions,
+                  page_id: workflowState.pageId
+                });
+              }
               
               const response = await axios.post(
-                `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+                `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
                 payload,
                 {
                   headers: this.getAuthHeaders()
                 }
               );
               
-              console.log(`💾 [JOURNEYS-SAVE] ✅ Successfully saved ${journeys.length} journey(s) to workflow ${workflowState.workflowId}. Response status: ${response.status}`);
+              console.log(`💾 [JOURNEYS-SAVE] ✅ Successfully saved ${journeys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'info', `💾 [JOURNEYS-SAVE] ✅ Successfully saved ${journeys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`, 'WORKFLOW-ANALYZER', {
+                  journeys_count: journeys.length,
+                  page_id: pageIdToUse,
+                  response_status: response.status
+                });
+              }
             } catch (journeySaveError) {
               console.error(`❌ [JOURNEYS-SAVE] Failed to save journeys: ${journeySaveError.message}`);
               if (journeySaveError.response) {
                 console.error(`❌ [JOURNEYS-SAVE] Response status: ${journeySaveError.response.status}, data:`, JSON.stringify(journeySaveError.response.data).substring(0, 500));
               }
               console.error(`❌ [JOURNEYS-SAVE] Stack:`, journeySaveError.stack);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'error', `❌ [JOURNEYS-SAVE] Failed to save journeys: ${journeySaveError.message}`, 'WORKFLOW-ANALYZER', {
+                  error: journeySaveError.message,
+                  response_status: journeySaveError.response?.status,
+                  response_data: journeySaveError.response?.data ? JSON.stringify(journeySaveError.response.data).substring(0, 500) : null
+                });
+              }
             }
           } else {
-            console.log(`⏳ [JOURNEYS-SAVE] Journeys collected but workflowId not yet available (pageId=${workflowState.pageId}, projectId=${workflowState.projectId}) - will save when workflow is created`);
+            console.warn(`⚠️ [JOURNEYS-SAVE] Cannot save journeys: missing pageId (${pageIdToUse}) or projectId (${projectIdToUse})`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [JOURNEYS-SAVE] Cannot save journeys: missing pageId or projectId`, 'WORKFLOW-ANALYZER', {
+                page_id: pageIdToUse,
+                project_id: projectIdToUse,
+                workflow_state_page_id: workflowState.pageId,
+                workflow_state_project_id: workflowState.projectId,
+                context_page_id: this.context?.page_id,
+                context_project_id: this.context?.project_id
+              });
+            }
           }
         } else {
           console.log(`⚠️ [JOURNEYS-SAVE] No journeys to save (journeys.length=${journeys.length}). This is OK if AI didn't return journeys.`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [JOURNEYS-SAVE] No journeys to save (length=${journeys.length})`, 'WORKFLOW-ANALYZER', {
+              journeys_length: journeys.length
+            });
+          }
         }
         
         if (candidateLegs.length > 0) {
@@ -4683,15 +5444,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
               }
             });
             
-            // Ensure workflow_id exists - create if needed (may already exist from journeys save above)
-            if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
-              try {
-                const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
-                workflowState.workflowId = workflow._id;
-                console.log(`✅ Auto-created workflow: ${workflow._id} (ai-prompt step)`);
-              } catch (createError) {
-                console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
-              }
+            // CRITICAL: Workflows must be created explicitly by the user, not auto-created
+            // If no workflow exists, log a warning and skip saving legs/actions
+            if (!workflowState.workflowId) {
+              console.warn(`⚠️ [AI-PROMPT] No workflow_id available. Workflows must be created explicitly by the user. Skipping leg/action persistence.`);
+              console.warn(`⚠️ [AI-PROMPT] To save legs/actions, create a workflow first via the API or UI.`);
             }
             
             // Save legs immediately to workflow
@@ -4752,9 +5509,296 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
       
+      // CRITICAL: Ensure journeys are in parsedResponse before storing
+      // If journeys were extracted and stored in workflowState, add them back to parsedResponse
+      // This ensures journeys are preserved in the step result
+      if (workflowState.journeys && Array.isArray(workflowState.journeys) && workflowState.journeys.length > 0) {
+        if (!parsedResponse.journeys || !Array.isArray(parsedResponse.journeys) || parsedResponse.journeys.length === 0) {
+          parsedResponse.journeys = workflowState.journeys;
+          console.log(`✅ [JOURNEYS-RESTORE] Restored ${workflowState.journeys.length} journey(s) to parsedResponse before storing step result`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-RESTORE] Restored ${workflowState.journeys.length} journey(s) to parsedResponse`, 'WORKFLOW-ANALYZER', {
+              journeys_count: workflowState.journeys.length
+            });
+          }
+        }
+      }
+      
+      // CRITICAL: If journeys exist in workflowState but weren't saved yet, save them now
+      // This is a fallback to ensure journeys are saved even if the earlier save code didn't execute
+      if (workflowState.journeys && Array.isArray(workflowState.journeys) && workflowState.journeys.length > 0) {
+        const pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+        const projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+        
+        // Check if journeys were already saved by checking if page has journeys
+        let needsSave = true;
+        if (pageIdToUse) {
+          try {
+            const pageCheckResponse = await axios.get(
+              `${this.backendUrl}/api/pages/${pageIdToUse}`,
+              { headers: this.getAuthHeaders() }
+            );
+            if (pageCheckResponse.data && pageCheckResponse.data.journeys && Array.isArray(pageCheckResponse.data.journeys) && pageCheckResponse.data.journeys.length > 0) {
+              needsSave = false;
+              console.log(`✅ [JOURNEYS-FALLBACK] Journeys already saved to page (${pageCheckResponse.data.journeys.length} journeys found)`);
+            }
+          } catch (checkError) {
+            // Page might not exist yet, continue with save
+            console.log(`🔍 [JOURNEYS-FALLBACK] Could not check page (might not exist yet): ${checkError.message}`);
+          }
+        }
+        
+        if (needsSave && pageIdToUse && projectIdToUse) {
+          console.log(`🔍 [JOURNEYS-FALLBACK] Saving ${workflowState.journeys.length} journey(s) as fallback (pageId: ${pageIdToUse})`);
+          try {
+            // CRITICAL: Clean journeys to remove circular references before sending
+            const cleanedJourneys = workflowState.journeys.map(j => this.cleanJourneyForSave(j));
+            
+            const payload = {
+              saveLegs: true,
+              journeys: cleanedJourneys,
+              job_id: jobId
+            };
+            
+            const response = await axios.post(
+              `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+              payload,
+              { headers: this.getAuthHeaders() }
+            );
+            
+            console.log(`✅ [JOURNEYS-FALLBACK] Successfully saved ${workflowState.journeys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-FALLBACK] Saved ${workflowState.journeys.length} journey(s) to page`, 'WORKFLOW-ANALYZER', {
+                journeys_count: workflowState.journeys.length,
+                page_id: pageIdToUse,
+                response_status: response.status
+              });
+            }
+          } catch (fallbackError) {
+            console.error(`❌ [JOURNEYS-FALLBACK] Failed to save journeys: ${fallbackError.message}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'error', `❌ [JOURNEYS-FALLBACK] Failed to save journeys: ${fallbackError.message}`, 'WORKFLOW-ANALYZER', {
+                error: fallbackError.message
+              });
+            }
+          }
+        } else if (needsSave) {
+          console.warn(`⚠️ [JOURNEYS-FALLBACK] Cannot save journeys: missing pageId (${pageIdToUse}) or projectId (${projectIdToUse})`);
+        }
+      }
+      
       // Store result - storeStepResult will structure it according to schema
       this.storeStepResult(step, parsedResponse, workflowState);
+      
+      // CRITICAL: After storing step result, ensure journeys are saved to backend
+      // This is a final safety net to ensure journeys are saved even if earlier save attempts failed
+      // Check both workflowState.journeys and variablePool for journeys (variableOutputs might have extracted them)
+      let journeysToSave = workflowState.journeys || null;
+      if (!journeysToSave || journeysToSave.length === 0) {
+        // Check variablePool for journeys extracted by variableOutputs
+        const journeysVar = this.readVariable(workflowState, 'journeysToExecute', 'page');
+        if (journeysVar && Array.isArray(journeysVar) && journeysVar.length > 0) {
+          journeysToSave = journeysVar;
+          console.log(`🔍 [JOURNEYS-FINAL] Found ${journeysVar.length} journey(s) in variablePool, using those for save`);
+          // Update workflowState for consistency
+          workflowState.journeys = journeysVar;
+          workflowState.journeysToExecute = journeysVar;
+        }
+      }
+      
+      if (journeysToSave && Array.isArray(journeysToSave) && journeysToSave.length > 0) {
+        // Get pageId and projectId
+        let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+        let projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+        
+        // Try to get pageId if missing
+        if (!pageIdToUse && projectIdToUse && workflowState.pageUrl) {
+          try {
+            pageIdToUse = await this.ensurePageId(workflowState, jobId);
+          } catch (pageError) {
+            console.warn(`⚠️ [JOURNEYS-FINAL] Failed to get pageId: ${pageError.message}`);
+          }
+        }
+        
+        if (pageIdToUse && projectIdToUse) {
+          // Check if journeys were already saved
+          try {
+            const pageCheckResponse = await axios.get(
+              `${this.backendUrl}/api/pages/${pageIdToUse}`,
+              { headers: this.getAuthHeaders() }
+            );
+            const existingJourneys = pageCheckResponse.data?.journeys || [];
+            const existingJourneyIds = new Set(existingJourneys.map(j => j.journey_id));
+            const newJourneys = journeysToSave.filter(j => !existingJourneyIds.has(j.journey_id));
+            
+            if (newJourneys.length > 0) {
+              console.log(`🔍 [JOURNEYS-FINAL] Saving ${newJourneys.length} new journey(s) to page ${pageIdToUse} (${existingJourneys.length} already exist)`);
+              try {
+                const payload = {
+                  saveLegs: true,
+                  journeys: newJourneys,
+                  job_id: jobId
+                };
+                
+                const response = await axios.post(
+                  `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+                  payload,
+                  { headers: this.getAuthHeaders() }
+                );
+                
+                console.log(`✅ [JOURNEYS-FINAL] Successfully saved ${newJourneys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) to page`, 'WORKFLOW-ANALYZER', {
+                    journeys_count: newJourneys.length,
+                    page_id: pageIdToUse,
+                    response_status: response.status
+                  });
+                }
+              } catch (finalError) {
+                console.error(`❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`);
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'error', `❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`, 'WORKFLOW-ANALYZER', {
+                    error: finalError.message
+                  });
+                }
+              }
+            } else {
+              console.log(`✅ [JOURNEYS-FINAL] All ${journeysToSave.length} journey(s) already exist on page`);
+            }
+          } catch (checkError) {
+            // Page might not exist, try to save anyway
+            console.log(`🔍 [JOURNEYS-FINAL] Could not check page, attempting to save ${journeysToSave.length} journey(s)`);
+            try {
+              const payload = {
+                saveLegs: true,
+                journeys: journeysToSave,
+                job_id: jobId
+              };
+              
+              const response = await axios.post(
+                `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+                payload,
+                { headers: this.getAuthHeaders() }
+              );
+              
+              console.log(`✅ [JOURNEYS-FINAL] Successfully saved ${journeysToSave.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
+            } catch (finalError) {
+              console.error(`❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`);
+            }
+          }
+        } else {
+          console.warn(`⚠️ [JOURNEYS-FINAL] Cannot save journeys: missing pageId (${pageIdToUse}) or projectId (${projectIdToUse})`);
+        }
+      }
 
+      // CRITICAL: Final save of journeys at the end of AI prompt step execution
+      // This ensures journeys are saved even if earlier save attempts failed
+      // Check all possible locations for journeys
+      let finalJourneysToSave = workflowState.journeys || null;
+      if (!finalJourneysToSave || finalJourneysToSave.length === 0) {
+        // Check variablePool
+        const journeysVar = this.readVariable(workflowState, 'journeysToExecute', 'page');
+        if (journeysVar && Array.isArray(journeysVar) && journeysVar.length > 0) {
+          finalJourneysToSave = journeysVar;
+        }
+      }
+      if (!finalJourneysToSave || finalJourneysToSave.length === 0) {
+        // Check context
+        if (workflowState.context?.journeysToExecute && Array.isArray(workflowState.context.journeysToExecute) && workflowState.context.journeysToExecute.length > 0) {
+          finalJourneysToSave = workflowState.context.journeysToExecute;
+        }
+      }
+      
+      if (finalJourneysToSave && Array.isArray(finalJourneysToSave) && finalJourneysToSave.length > 0) {
+        // Get pageId and projectId
+        let pageIdFinal = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+        let projectIdFinal = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+        
+        // Try to get pageId if missing
+        if (!pageIdFinal && projectIdFinal && workflowState.pageUrl) {
+          try {
+            pageIdFinal = await this.ensurePageId(workflowState, jobId);
+          } catch (pageError) {
+            console.warn(`⚠️ [AI-PROMPT-END] Failed to get pageId: ${pageError.message}`);
+          }
+        }
+        
+        if (pageIdFinal && projectIdFinal) {
+          try {
+            // Check if journeys already exist
+            try {
+              const pageCheck = await axios.get(
+                `${this.backendUrl}/api/pages/${pageIdFinal}`,
+                { headers: this.getAuthHeaders() }
+              );
+              const existing = pageCheck.data?.journeys || [];
+              const existingIds = new Set(existing.map(j => j.journey_id));
+              const newOnes = finalJourneysToSave.filter(j => !existingIds.has(j.journey_id));
+              
+              if (newOnes.length > 0) {
+                console.log(`🔍 [AI-PROMPT-END] Saving ${newOnes.length} new journey(s) at end of AI prompt step`);
+                const payload = {
+                  saveLegs: true,
+                  journeys: newOnes,
+                  job_id: jobId
+                };
+                
+                const response = await axios.post(
+                  `${this.backendUrl}/api/pages/${pageIdFinal}/save-analysis`,
+                  payload,
+                  { headers: this.getAuthHeaders() }
+                );
+                
+                console.log(`✅ [AI-PROMPT-END] Successfully saved ${newOnes.length} journey(s). Response status: ${response.status}`);
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'info', `✅ [AI-PROMPT-END] Saved ${newOnes.length} journey(s) at end of AI prompt step`, 'WORKFLOW-ANALYZER', {
+                    journeys_count: newOnes.length,
+                    page_id: pageIdFinal,
+                    response_status: response.status
+                  });
+                }
+              } else {
+                console.log(`✅ [AI-PROMPT-END] All ${finalJourneysToSave.length} journey(s) already exist on page`);
+              }
+            } catch (checkErr) {
+              // Page might not exist, save anyway
+              console.log(`🔍 [AI-PROMPT-END] Could not check page, saving ${finalJourneysToSave.length} journey(s) anyway`);
+              const payload = {
+                saveLegs: true,
+                journeys: finalJourneysToSave,
+                job_id: jobId
+              };
+              
+              const response = await axios.post(
+                `${this.backendUrl}/api/pages/${pageIdFinal}/save-analysis`,
+                payload,
+                { headers: this.getAuthHeaders() }
+              );
+              
+              console.log(`✅ [AI-PROMPT-END] Successfully saved ${finalJourneysToSave.length} journey(s). Response status: ${response.status}`);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'info', `✅ [AI-PROMPT-END] Saved ${finalJourneysToSave.length} journey(s)`, 'WORKFLOW-ANALYZER', {
+                  journeys_count: finalJourneysToSave.length,
+                  page_id: pageIdFinal,
+                  response_status: response.status
+                });
+              }
+            }
+          } catch (endError) {
+            console.error(`❌ [AI-PROMPT-END] Failed to save journeys: ${endError.message}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'error', `❌ [AI-PROMPT-END] Failed to save journeys: ${endError.message}`, 'WORKFLOW-ANALYZER', {
+                error: endError.message
+              });
+            }
+          }
+        } else {
+          console.warn(`⚠️ [AI-PROMPT-END] Cannot save journeys: missing pageId (${pageIdFinal}) or projectId (${projectIdFinal})`);
+        }
+      } else {
+        console.warn(`⚠️ [AI-PROMPT-END] No journeys found to save (finalJourneysToSave=${finalJourneysToSave ? finalJourneysToSave.length : 'null'})`);
+      }
+      
       // CRITICAL: For determine_completion step, also store directly by ID for easy access
       if (step.id === 'determine_completion' || step.name?.includes('Determine Login Progress')) {
         // Validate that status field is present
@@ -4838,7 +5882,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         this.saveVariable(workflowState, 'journeysToExecute', workflowState.journeys, 'page', step);
         
         // Try to save journeys to backend if workflowId exists
-        if (workflowState.workflowId) {
+        if (workflowState.pageId) {
           try {
             const payload = {
               saveLegs: true,
@@ -4847,7 +5891,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             };
             
             await axios.post(
-              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+              `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
               payload,
               {
                 headers: this.getAuthHeaders(),
@@ -4927,17 +5971,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         console.log(`♻️ Legs already from page-summary (${workflowState.legs.length} legs), skipping duplicate application`);
       }
       
-      // CRITICAL: Ensure workflow_id is set if not already set (since create-workflow step was removed)
-      if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
-        try {
-          const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
-          workflowState.workflowId = workflow._id;
-          console.log(`✅ Auto-created workflow: ${workflow._id} (workflow-analysis step, reused legs)`);
-        } catch (createError) {
-          console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
-          // Don't fail the step if workflow creation fails
-        }
-      }
+      // Workflows must be explicitly created - no auto-creation
       
       workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
       workflowState.aiAnalysisResult.page_description = workflowState.aiAnalysisResult.page_description || workflowState.pageDescription || null;
@@ -5023,17 +6057,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         workflowState.aiAnalysisResult.legs = normalizedLegs;
         console.log(`✅ Workflow analysis completed: ${normalizedLegs.length} legs identified`);
         
-        // CRITICAL: Ensure workflow_id is set if not already set (since create-workflow step was removed)
-        if (!workflowState.workflowId && workflowState.pageId && workflowState.projectId) {
-          try {
-            const workflow = await this.createWorkflow(workflowState.pageId, workflowState.projectId, workflowState.pageUrl, workflowState.playwrightAnalysis, jobId);
-            workflowState.workflowId = workflow._id;
-            console.log(`✅ Auto-created workflow: ${workflow._id} (workflow-analysis step)`);
-          } catch (createError) {
-            console.warn(`⚠️ Failed to auto-create workflow: ${createError.message}`);
-            // Don't fail the step if workflow creation fails
-          }
-        }
+        // Workflows must be explicitly created - no auto-creation
         
         this.storeStepResult(step, {
           legs: normalizedLegs,
@@ -5128,7 +6152,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
               // CRITICAL: Include forms with fields so UI can display input counts
               forms: workflowState.playwrightAnalysis?.forms || [],
               interactive_elements: workflowState.playwrightAnalysis?.interactive_elements || [],
-              links: workflowState.playwrightAnalysis?.links || []
+              links: workflowState.playwrightAnalysis?.links || [],
+              // CRITICAL: Also include in ai_analysis so extraction logic can find them
+              ai_analysis: {
+                ...(workflowState.aiAnalysisResult || {}),
+                forms: workflowState.playwrightAnalysis?.forms || [],
+                interactive_elements: workflowState.playwrightAnalysis?.interactive_elements || [],
+                links: workflowState.playwrightAnalysis?.links || []
+              }
             }
           );
           console.log(`✅ Page discovery updated with analysis and actions`);
@@ -5193,16 +6224,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
     if (includeContent && workflowState.htmlContent) {
       discoveryData.content = workflowState.htmlContent;
     }
-    if (includeForms && workflowState.playwrightAnalysis?.forms) {
+    // CRITICAL: Always save forms/interactive_elements from playwrightAnalysis (not conditional)
+    // This ensures elements are populated even if workflow steps don't explicitly request them
+    // Check for array existence (not truthiness - empty arrays are falsy but still valid)
+    if (workflowState.playwrightAnalysis && Array.isArray(workflowState.playwrightAnalysis.forms)) {
       discoveryData.forms = workflowState.playwrightAnalysis.forms;
     }
-    if (includeLinks && workflowState.playwrightAnalysis?.links) {
+    if (workflowState.playwrightAnalysis && Array.isArray(workflowState.playwrightAnalysis.links)) {
       discoveryData.links = workflowState.playwrightAnalysis.links;
     }
-    if (includeInteractive && workflowState.playwrightAnalysis?.interactive_elements) {
+    if (workflowState.playwrightAnalysis && Array.isArray(workflowState.playwrightAnalysis.interactive_elements)) {
       discoveryData.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
     }
-    if (includeNonInteractive && workflowState.playwrightAnalysis?.non_interactive_elements) {
+    if (workflowState.playwrightAnalysis && Array.isArray(workflowState.playwrightAnalysis.non_interactive_elements)) {
       discoveryData.non_interactive_elements = workflowState.playwrightAnalysis.non_interactive_elements;
     }
     if (includeDescription && workflowState.pageDescription) {
@@ -5220,10 +6254,41 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     if (includeAiAnalysis && workflowState.aiAnalysisResult) {
+      // Get SEO/Content/Accessibility analysis from variablePool (set by AI prompt steps via variableOutputs)
+      const seoAnalysis = workflowState.seoAnalysis || 
+                          workflowState.context?.seoAnalysis || 
+                          (workflowState.variablePool?.step?.seoAnalysis?.value) ||
+                          (workflowState.stepResults?.seo_analysis?.seo_analysis) ||
+                          (workflowState.stepResults?.seo_analysis?.result?.seo_analysis) ||
+                          null;
+      
+      const contentAnalysis = workflowState.contentAnalysis ||
+                              workflowState.context?.contentAnalysis ||
+                              (workflowState.variablePool?.step?.contentAnalysis?.value) ||
+                              (workflowState.stepResults?.content_optimization_analysis?.content_analysis) ||
+                              (workflowState.stepResults?.content_optimization_analysis?.result?.content_analysis) ||
+                              null;
+      
+      const accessibilityAnalysis = workflowState.accessibilityAnalysis ||
+                                     workflowState.context?.accessibilityAnalysis ||
+                                     (workflowState.variablePool?.step?.accessibilityAnalysis?.value) ||
+                                     (workflowState.stepResults?.accessibility_analysis?.accessibility_analysis) ||
+                                     (workflowState.stepResults?.accessibility_analysis?.result?.accessibility_analysis) ||
+                                     null;
+      
       discoveryData.ai_analysis = {
+        ...(workflowState.aiAnalysisResult || {}),
         page_description: workflowState.aiAnalysisResult.page_description,
         legs_count: workflowState.legs.length,
-        analyzed_at: new Date().toISOString()
+        analyzed_at: new Date().toISOString(),
+        // CRITICAL: Include forms/interactive_elements in ai_analysis so extraction logic can find them
+        forms: workflowState.playwrightAnalysis?.forms || [],
+        interactive_elements: workflowState.playwrightAnalysis?.interactive_elements || [],
+        links: workflowState.playwrightAnalysis?.links || [],
+        // Include all AI analysis results (SEO, Content, Accessibility)
+        seo_analysis: seoAnalysis,
+        content_analysis: contentAnalysis,
+        accessibility_analysis: accessibilityAnalysis
       };
       discoveryData.analyzed = true;
     }
@@ -5389,7 +6454,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   async saveLegIterationsToWorkflow(workflowState, legs, jobId) {
-    if (!Array.isArray(legs) || legs.length === 0 || !workflowState.workflowId) {
+    if (!Array.isArray(legs) || legs.length === 0 || !workflowState.pageId) {
       return null;
     }
 
@@ -5397,7 +6462,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const legsPayload = JSON.parse(JSON.stringify(legs));
 
       const response = await axios.post(
-        `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+        `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
         {
           saveLegs: true,
           saveInteractiveElements: false,
@@ -5414,7 +6479,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       const results = response.data?.results || null;
       if (results) {
-        console.log('💾 Saved leg iterations via page-discovery:', results.legs || results);
+        console.log('💾 Saved leg iterations:', results.legs || results);
       }
       return results;
     } catch (error) {
@@ -5424,14 +6489,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   /**
-   * Execute save-data step - saves discovered data immediately to database
+   * Execute save-data step - DEPRECATED: This step type has been removed.
+   * Each workflow step must now save its own data directly.
+   * @deprecated Use individual step data saving instead
    */
   async executeSaveDataStep(page, step, workflowState, jobId) {
-    console.log(`💾 Executing save-data step (${step.name})`);
+      console.error(`❌ DEPRECATED: save-data step type has been removed. Each step must save its own data.`);
+    throw new Error('save-data step type has been removed. Each workflow step must save its own data when executed.');
     
-    if (!workflowState.workflowId) {
-      throw new Error('No workflow ID available for save-data step');
-    }
+    // Original implementation removed - steps must save data individually
+    // This function is deprecated and will always throw an error
     
     const config = step.config || {};
     
@@ -5607,16 +6674,56 @@ IMPORTANT OUTPUT REQUIREMENTS:
           
           console.log(`✅ [SAVE-DATA] Created iteration for journey ${journey.journey_id} with reason: ${justification.reason ? justification.reason.substring(0, 80) + '...' : 'NO REASON'}`);
           
+          // CRITICAL: Check if this journey is designed to test failure scenarios
+          const journeyDesc = (journey.description || '').toLowerCase();
+          const journeyExpectedOutcome = (journey.expected_outcome || '').toLowerCase();
+          const isFailureTestJourney = 
+            journeyDesc.includes('always fail') ||
+            journeyDesc.includes('verify that submission fails') ||
+            journeyDesc.includes('verify that submission does not succeed') ||
+            journeyDesc.includes('non-existent domain') ||
+            journeyDesc.includes('will fail') ||
+            journeyDesc.includes('should fail') ||
+            journeyDesc.includes('expected to fail') ||
+            journeyDesc.includes('does not succeed') ||
+            journeyDesc.includes('submission fails') ||
+            journeyDesc.includes('does not navigate') ||
+            journeyDesc.includes('stays on page') ||
+            journeyDesc.includes('form remains visible') ||
+            journeyDesc.includes('form still visible') ||
+            journeyExpectedOutcome.includes('fail') ||
+            journeyExpectedOutcome.includes('does not succeed') ||
+            journeyExpectedOutcome.includes('does not navigate') ||
+            journeyExpectedOutcome.includes('stays on page') ||
+            journeyExpectedOutcome.includes('form remains visible');
+          
+          if (isFailureTestJourney) {
+            console.log(`🔍 [FAILURE-TEST-DETECTED] Journey ${journey.journey_id} is a failure-test journey`);
+            console.log(`   Description: ${journeyDesc.substring(0, 100)}...`);
+            console.log(`   Expected Outcome: ${journeyExpectedOutcome.substring(0, 100)}...`);
+          }
+          
           // CRITICAL: Map status based on expected_outcome_verified (primary source)
           // If expected_outcome_verified is true, status should be 'success'
           // This ensures green status on the journeys page
           let finalStatus = justification.status;
-          if (justification.expected_outcome_verified === true) {
-            finalStatus = 'success';
-          } else if (justification.expected_outcome_verified === false) {
+          
+          // CRITICAL: For failure-test journeys, ALWAYS mark as 'failure' (form correctly failed)
+          // The user explicitly stated: "the one which is shown always fail will obviously fail to mock the app, it must be marked as failed"
+          if (isFailureTestJourney) {
+            // For failure-test journeys, mark as 'failure' regardless of AI response
+            // This indicates the form correctly failed (which is the expected behavior)
             finalStatus = 'failure';
+            console.log(`✅ [FAILURE-TEST] Journey ${journey.journey_id} - marking as 'failure' (form correctly failed as expected)`);
+          } else {
+            // Normal journey logic
+            if (justification.expected_outcome_verified === true) {
+              finalStatus = 'success';
+            } else if (justification.expected_outcome_verified === false) {
+              finalStatus = 'failure';
+            }
+            // Otherwise keep the AI's status (pending, etc.)
           }
-          // Otherwise keep the AI's status (pending, etc.)
           
           return {
             ...journey,
@@ -5770,14 +6877,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     try {
-      if (!workflowState.workflowId) {
-        console.error(`❌ [SAVE-DATA] Cannot save data: workflowId is missing`);
-        throw new Error('workflowId is required to save data');
+      if (!workflowState.pageId) {
+        console.error(`❌ [SAVE-DATA] Cannot save data: pageId is missing`);
+        throw new Error('pageId is required to save data');
       }
       
-      console.log(`💾 [SAVE-DATA] POSTing to ${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data with ${journeys.length} journeys`);
+      console.log(`💾 [SAVE-DATA] POSTing to ${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis with ${journeys.length} journeys`);
       const response = await axios.post(
-        `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+        `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
         payload,
         {
           headers: this.getAuthHeaders()
@@ -5960,25 +7067,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // Don't throw - login jobs should continue even if data saving fails
       }
     } else {
-      // For non-login jobs, use the standard save-data functionality
-      if (!workflowState.workflowId) {
-        console.warn(`⚠️ No workflow ID available for save-page-data step, skipping save-data`);
-        if (variableDump) {
-          // Still perform var-dump even without workflowId
-          return;
-        }
-        return;
-      }
-      
-      // Execute standard save-data step
-      await this.executeSaveDataStep(page, step, workflowState, jobId);
+      // For non-login jobs, save-page-data should handle its own saving
+      // The save-data step type has been removed - each step must save its own data
+      console.warn(`⚠️ save-page-data step in non-login job - ensure data is saved by individual steps`);
     }
   }
 
   /**
    * Store step result by slug with structured JSON format including namespaces
    */
-  storeStepResult(step, result, workflowState) {
+  async storeStepResult(step, result, workflowState) {
     const slug = step.slug || this.generateSlug(step.name || 'step');
     
     // Get output schema for this step type to determine namespaces
@@ -6040,7 +7138,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     };
 
     // Process variable outputs if configured
-    this.processVariableOutputs(step, workflowState, structuredResult);
+    await this.processVariableOutputs(step, workflowState, structuredResult);
     
     // Also store individual fields in their appropriate namespaces
     this.storeResultFieldsToNamespaces(structuredResult, workflowState, step);
@@ -6451,7 +7549,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Process variable outputs configuration for a step
    * Saves variables according to step configuration
    */
-  processVariableOutputs(step, workflowState, stepResult) {
+  async processVariableOutputs(step, workflowState, stepResult) {
     if (!step.config?.variableOutputs || !Array.isArray(step.config.variableOutputs)) {
       return;
     }
@@ -6497,6 +7595,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       // CRITICAL: For journeys, also check if it's stored directly in parsedResponse from executeAIPromptStep
       // This handles the case where journeys array exists but is empty (empty arrays are valid!)
+      // CRITICAL: If sourcePath is "legs" but response has "journeys", automatically use "journeys" instead
+      // This handles workflows that haven't been updated to use journeys format yet
+      if (value === undefined && output.sourcePath === 'legs' && step.id) {
+        const stepId = step.id || step.slug;
+        const stepResult = workflowState.stepResults?.[stepId]?.result;
+        if (stepResult && stepResult.journeys !== undefined) {
+          value = stepResult.journeys;
+          console.log(`🔍 [VARIABLE-OUTPUT] sourcePath "legs" not found, using "journeys" instead: ${Array.isArray(value) ? value.length : 'not array'} items`);
+        }
+      }
+      
       if (value === undefined && output.sourcePath === 'journeys' && step.id) {
         // Try to get from the step's stored result in stepResults
         const stepId = step.id || step.slug;
@@ -6504,6 +7613,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (stepResult && stepResult.journeys !== undefined) {
           value = stepResult.journeys;
           console.log(`🔍 Found journeys in stepResults[${stepId}].result: ${Array.isArray(value) ? value.length : 'not array'} items`);
+        }
+      }
+      
+      // CRITICAL: If journeys still not found and this is the journeys variable, check workflowState.journeys directly
+      // This ensures we find journeys even if they're stored in workflowState but not in the structured result
+      if (value === undefined && output.sourcePath === 'journeys' && output.variableName === 'journeysToExecute') {
+        if (workflowState.journeys && Array.isArray(workflowState.journeys)) {
+          value = workflowState.journeys;
+          console.log(`🔍 [JOURNEYS-FALLBACK] Found ${workflowState.journeys.length} journey(s) in workflowState.journeys (not in structured result)`);
         }
       }
 
@@ -6517,6 +7635,74 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
         this.saveVariable(workflowState, output.variableName, value, namespace, step);
         console.log(`💾 Saved variable "${output.variableName}" to namespace "${namespace}" from path "${output.sourcePath}"`);
+        
+        // CRITICAL: If this is journeysToExecute, save journeys to backend immediately
+        if (output.variableName === 'journeysToExecute' && Array.isArray(value) && value.length > 0) {
+          // Update workflowState with journeys
+          workflowState.journeys = value;
+          workflowState.journeysToExecute = value;
+          if (!workflowState.context) {
+            workflowState.context = {};
+          }
+          workflowState.context.journeysToExecute = value;
+          
+          console.log(`✅ [JOURNEYS-VAROUTPUT] Found ${value.length} journey(s) via variableOutputs, saving immediately`);
+          
+          // Get pageId and projectId
+          let pageIdToSave = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+          let projectIdToSave = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+          
+          // Try to get pageId if missing
+          if (!pageIdToSave && projectIdToSave && workflowState.pageUrl) {
+            try {
+              // We need jobId - get it from context or workflowState
+              const jobIdToUse = workflowState.jobId || this.context?.job_id || null;
+              if (jobIdToUse) {
+                pageIdToSave = await this.ensurePageId(workflowState, jobIdToUse);
+              }
+            } catch (pageError) {
+              console.warn(`⚠️ [JOURNEYS-VAROUTPUT] Failed to get pageId: ${pageError.message}`);
+            }
+          }
+          
+          // Save journeys if we have pageId and projectId
+          if (pageIdToSave && projectIdToSave) {
+            try {
+              const jobIdToUse = workflowState.jobId || this.context?.job_id || null;
+              const payload = {
+                saveLegs: true,
+                journeys: value,
+                job_id: jobIdToUse
+              };
+              
+              console.log(`🔍 [JOURNEYS-VAROUTPUT] Saving ${value.length} journey(s) from variableOutputs to page ${pageIdToSave}`);
+              const response = await axios.post(
+                `${this.backendUrl}/api/pages/${pageIdToSave}/save-analysis`,
+                payload,
+                { headers: this.getAuthHeaders() }
+              );
+              
+              console.log(`✅ [JOURNEYS-VAROUTPUT] Successfully saved ${value.length} journey(s) from variableOutputs. Response status: ${response.status}`);
+              if (jobIdToUse && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobIdToUse, 'info', `✅ [JOURNEYS-VAROUTPUT] Saved ${value.length} journey(s) from variableOutputs`, 'WORKFLOW-ANALYZER', {
+                  journeys_count: value.length,
+                  page_id: pageIdToSave,
+                  response_status: response.status
+                });
+              }
+            } catch (varOutputError) {
+              console.error(`❌ [JOURNEYS-VAROUTPUT] Failed to save journeys from variableOutputs: ${varOutputError.message}`);
+              const jobIdToUse = workflowState.jobId || this.context?.job_id || null;
+              if (jobIdToUse && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobIdToUse, 'error', `❌ [JOURNEYS-VAROUTPUT] Failed to save journeys: ${varOutputError.message}`, 'WORKFLOW-ANALYZER', {
+                  error: varOutputError.message
+                });
+              }
+            }
+          } else {
+            console.warn(`⚠️ [JOURNEYS-VAROUTPUT] Cannot save journeys: missing pageId (${pageIdToSave}) or projectId (${projectIdToSave})`);
+          }
+        }
       } else {
         console.warn(`⚠️ Could not resolve value for variable "${output.variableName}" from path "${output.sourcePath}"`);
       }
@@ -10418,7 +11604,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           };
           
           const response = await axios.post(
-            `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+            `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
             payload,
             {
               headers: this.getAuthHeaders()
@@ -10472,10 +11658,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
       
+      // CRITICAL: Check if this is a wizard/multistep journey before limiting iterations
+      const pageUrl = (workflowState.pageUrl || '').toLowerCase();
+      const currentJourney = workflowState.currentJourney || workflowState.currentItem || {};
+      const journeyId = (currentJourney.journey_id || '').toLowerCase();
+      const journeyDesc = (currentJourney.description || '').toLowerCase();
+      const isWizardPage = pageUrl.includes('multi-step-wizard') || pageUrl.includes('multistep') || 
+                          journeyId.includes('wizard') || journeyDesc.includes('wizard') || 
+                          journeyDesc.includes('multi-step') || journeyDesc.includes('multistep');
+      
       const detectedStepCount = resolveStepCountFromText(visibleText);
       if (detectedStepCount) {
         maxIterations = detectedStepCount;
         console.log(`🔢 Detected step count from page text: ${detectedStepCount}`);
+      } else if (isWizardPage) {
+        // Wizard page but step count not detected - keep maxIterations from config (don't limit to 1)
+        console.log(`🔢 Wizard page detected but step count not found - keeping maxIterations=${maxIterations} from config`);
       } else {
         maxIterations = 1;
         console.log(`🔢 No step indicator detected; limiting iterations to 1 for single-step journey`);
@@ -10614,13 +11812,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
               )
             ]);
             
-            // CRITICAL: If this is the determine_completion step, store its result for condition evaluation
+            // CRITICAL: If this is the determine_completion or justify_journey step, store its result for condition evaluation
             const stepId = nestedStep.id || nestedStep.slug || '';
             const stepName = (nestedStep.name || '').toLowerCase();
             const isDetermineStep = stepId.includes('determine') && (stepId.includes('completion') || stepId.includes('complete')) ||
                                    stepName.includes('determine') && (stepName.includes('completion') || stepName.includes('complete'));
+            const isJustifyJourneyStep = stepId.includes('justify') && (stepId.includes('journey') || stepId.includes('leg')) ||
+                                       stepName.includes('justify') && (stepName.includes('journey') || stepName.includes('leg'));
+            const isConditionStep = isDetermineStep || isJustifyJourneyStep;
             
-            if (isDetermineStep) {
+            if (isConditionStep) {
               // CRITICAL: Store result immediately after step execution for condition evaluation
               // Wait a bit for storeStepResult to complete (it's async)
               await new Promise(resolve => setTimeout(resolve, 100));
@@ -10691,22 +11892,43 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys: ${Object.keys(normalizedResult || {}).join(', ')}\nNormalized result: ${JSON.stringify(normalizedResult, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
                 }
                 
-                // Store in determine_completion for easy access
-                workflowState.determine_completion = {
-                  result: normalizedResult,
-                  step_id: nestedStep.id,
-                  iteration: iteration
-                };
-                
-                // Also store directly for backward compatibility
-                if (!workflowState.results) {
-                  workflowState.results = {};
+                // Store in determine_completion/justify_journey for easy access
+                if (isDetermineStep) {
+                  workflowState.determine_completion = {
+                    result: normalizedResult,
+                    step_id: nestedStep.id,
+                    iteration: iteration
+                  };
+                  
+                  // Also store directly for backward compatibility
+                  if (!workflowState.results) {
+                    workflowState.results = {};
+                  }
+                  workflowState.results.determine_completion = {
+                    result: normalizedResult,
+                    step_id: nestedStep.id,
+                    iteration: iteration
+                  };
+                  workflowState.variablePool.steps['determine_completion'] = { result: normalizedResult }; // Also store by name
                 }
-                workflowState.results.determine_completion = {
-                  result: normalizedResult,
-                  step_id: nestedStep.id,
-                  iteration: iteration
-                };
+                
+                if (isJustifyJourneyStep) {
+                  workflowState.justify_journey = {
+                    result: normalizedResult,
+                    step_id: nestedStep.id,
+                    iteration: iteration
+                  };
+                  
+                  if (!workflowState.results) {
+                    workflowState.results = {};
+                  }
+                  workflowState.results.justify_journey = {
+                    result: normalizedResult,
+                    step_id: nestedStep.id,
+                    iteration: iteration
+                  };
+                  workflowState.variablePool.steps['justify_journey'] = { result: normalizedResult }; // Also store by name
+                }
                 
                 // CRITICAL: Also store directly by step ID for condition path resolution
                 if (!workflowState[nestedStep.id]) {
@@ -10722,10 +11944,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   workflowState.variablePool.steps = {};
                 }
                 workflowState.variablePool.steps[nestedStep.id] = { result: normalizedResult };
-                workflowState.variablePool.steps['determine_completion'] = { result: normalizedResult }; // Also store by name
                 
-                console.log(`✅ Stored determine_completion result from nested step ${nestedStep.id} (iteration ${iteration}): status=${normalizedResult.status || normalizedResult.completion_status || normalizedResult.is_complete}`);
-                console.log(`📄 Stored in: workflowState.determine_completion.result, workflowState.results.determine_completion.result, workflowState[${nestedStep.id}].result, workflowState.variablePool.steps[${nestedStep.id}].result`);
+                const stepType = isDetermineStep ? 'determine_completion' : (isJustifyJourneyStep ? 'justify_journey' : nestedStep.id);
+                console.log(`✅ Stored ${stepType} result from nested step ${nestedStep.id} (iteration ${iteration}): status=${normalizedResult.status || normalizedResult.completion_status || normalizedResult.is_complete}`);
+                console.log(`📄 Stored in: workflowState.${stepType}.result, workflowState.results.${stepType}.result, workflowState[${nestedStep.id}].result, workflowState.variablePool.steps[${nestedStep.id}].result`);
               } else {
                 const errorMessage = `determine_completion step executed but result not found in expected locations for step "${nestedStep.name || nestedStep.id}" (iteration ${iteration})`;
                 const missingPath = `workflowState.determine_completion.result`;
@@ -11313,7 +12535,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Journey being saved has ai_justification: ${journeyToSave.ai_justification ? `YES (${journeyToSave.ai_justification.length} chars)` : 'NO'}, justification_status: ${journeyToSave.justification_status || 'N/A'}`);
                   console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Journey payload keys: ${Object.keys(journeyToSave).join(', ')}`);
                   await axios.post(
-                    `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+                    `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
                     payload,
                     { headers: this.getAuthHeaders() }
                   );
@@ -11485,12 +12707,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
             }
           }
           
-          // If still not found, try finding the determine_completion step result directly
+          // If still not found, try finding the determine_completion or justify_journey step result directly
           if (conditionValue === undefined || conditionValue === null) {
-            // CRITICAL: Check workflowState.determine_completion first (stored after nested step execution)
+            // CRITICAL: Check workflowState.determine_completion or justify_journey first (stored after nested step execution)
             let determineStepResult = null;
             
-            if (workflowState.determine_completion?.result) {
+            // Check for justify_journey first (for simplified workflow)
+            if (conditionPath && conditionPath.includes('justify_journey') && workflowState.justify_journey?.result) {
+              determineStepResult = workflowState.justify_journey.result;
+              console.log(`✅ Found justify_journey result from workflowState.justify_journey`);
+            } else if (workflowState.determine_completion?.result) {
               determineStepResult = workflowState.determine_completion.result;
               console.log(`✅ Found determine_completion result from workflowState.determine_completion`);
             } else {
@@ -11648,15 +12874,125 @@ IMPORTANT OUTPUT REQUIREMENTS:
             if (typeof conditionValue === 'string') {
               // New format: status field with 'success', 'failure', 'continue', 'stuck', 'pending'
               const expectedValue = config.conditionValue || 'pending';
-              condition = conditionValue === expectedValue;
               
-              // CRITICAL: For multi-step wizards, stop when status is "success"
-              // The condition should be false (exit loop) when status is "success"
-              if (conditionValue === 'success') {
-                condition = false; // Exit loop on success
-                console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Status is "success" - EXITING loop (condition=false)`);
+              // CRITICAL: Check if this is a multistep wizard by looking at visible text or step result
+              // Try multiple sources for step result
+              let stepResult = workflowState.currentStepResult;
+              if (!stepResult) {
+                // Try justify_journey result from various locations
+                stepResult = workflowState.justify_journey?.result || 
+                            workflowState.variablePool?.steps?.['justify-journey']?.result ||
+                            workflowState.variablePool?.steps?.['justify_journey']?.result ||
+                            workflowState.results?.['justify-journey']?.result ||
+                            workflowState.results?.['justify_journey']?.result ||
+                            {};
+              }
+              
+              const verificationDetails = stepResult.verification_details || stepResult.reason || '';
+              const visibleText = workflowState.visibleText || '';
+              const pageDescription = workflowState.pageDescription || '';
+              
+              // Detect if we're in a multistep wizard (look for step indicators in multiple places)
+              const searchText = (verificationDetails + ' ' + visibleText + ' ' + pageDescription).toLowerCase();
+              const hasStepIndicator = /step\s+\d+\s+of\s+\d+/i.test(searchText);
+              
+              // Also check if journey description mentions wizard or multistep
+              const currentJourney = workflowState.currentJourney || workflowState.currentItem || {};
+              const journeyDesc = (currentJourney.description || '').toLowerCase();
+              const journeyId = (currentJourney.journey_id || '').toLowerCase();
+              const pageUrl = (workflowState.pageUrl || '').toLowerCase();
+              const isWizardJourney = journeyDesc.includes('wizard') || journeyDesc.includes('multi-step') || journeyDesc.includes('multistep') ||
+                                     journeyId.includes('wizard') || pageUrl.includes('multi-step-wizard') || pageUrl.includes('multistep');
+              
+              // Log detection results
+              console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Condition evaluation:`, {
+                conditionValue,
+                hasStepIndicator,
+                isWizardJourney,
+                iteration,
+                maxIterations: config.maxIterations || 5,
+                pageUrl: workflowState.pageUrl,
+                journeyId: currentJourney.journey_id
+              });
+              
+              // If multistep wizard and status is "success", check if we're on final step
+              if ((hasStepIndicator || isWizardJourney) && conditionValue === 'success') {
+                // Extract step numbers from verification details or visible text
+                const stepMatch = searchText.match(/step\s+(\d+)\s+of\s+(\d+)/i);
+                if (stepMatch) {
+                  const currentStep = parseInt(stepMatch[1]);
+                  const totalSteps = parseInt(stepMatch[2]);
+                  
+                  if (currentStep < totalSteps) {
+                    // Not on final step - force pending
+                    console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Multistep wizard detected: Step ${currentStep} of ${totalSteps} - forcing 'pending' to continue`);
+                    condition = true; // Continue loop
+                    conditionValue = 'pending'; // Override status for logging
+                  } else if (currentStep === totalSteps) {
+                    // On final step - success is valid
+                    condition = false; // Exit loop on success
+                    console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Multistep wizard: Final step (${currentStep} of ${totalSteps}) - EXITING loop`);
+                  } else {
+                    // Invalid step numbers - use original logic
+                    condition = false;
+                    console.log(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Invalid step numbers (${currentStep} > ${totalSteps}) - EXITING loop`);
+                  }
+                } else if (isWizardJourney && iteration < (config.maxIterations || 5)) {
+                  // Wizard journey but can't determine step - if we're not at max iterations, continue
+                  console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Wizard journey detected but step unclear - continuing (iteration ${iteration}/${config.maxIterations || 5})`);
+                  condition = true; // Continue loop
+                  conditionValue = 'pending'; // Override status for logging
+                } else if (isWizardJourney && conditionValue === 'success' && iteration < (config.maxIterations || 5)) {
+                  // Wizard journey, status is success but not at max iterations
+                  // Check if we can determine if this is the final step
+                  // If step indicator shows we're on final step, allow success
+                  // Otherwise, continue to next iteration
+                  const finalStepMatch = searchText.match(/step\s+(\d+)\s+of\s+(\d+)/i);
+                  if (finalStepMatch) {
+                    const currentStep = parseInt(finalStepMatch[1]);
+                    const totalSteps = parseInt(finalStepMatch[2]);
+                    if (currentStep === totalSteps) {
+                      // This IS the final step - allow success
+                      console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Wizard journey: Final step (${currentStep} of ${totalSteps}) with success - EXITING loop`);
+                      condition = false; // Exit loop
+                    } else {
+                      // Not final step - continue
+                      console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Wizard journey: Step ${currentStep} of ${totalSteps} with success - continuing`);
+                      condition = true; // Continue loop
+                      conditionValue = 'pending'; // Override status for logging
+                    }
+                  } else {
+                    // Can't determine step - if we're close to max iterations, allow success
+                    // Otherwise continue
+                    if (iteration >= (config.maxIterations || 5) - 1) {
+                      console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Wizard journey: Near max iterations with success - EXITING loop`);
+                      condition = false; // Exit loop
+                    } else {
+                      console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Wizard journey: Status is 'success' but iteration ${iteration} < max ${config.maxIterations || 5} - continuing`);
+                      condition = true; // Continue loop
+                      conditionValue = 'pending'; // Override status for logging
+                    }
+                  }
+                } else {
+                  // Can't determine step and not clearly a wizard - use original logic
+                  condition = false; // Exit loop on success
+                  console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Status is "success" - journey complete, EXITING loop (condition=false)`);
+                }
               } else {
-                console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
+                // Not a multistep wizard or status is not success - use normal logic
+                condition = conditionValue === expectedValue;
+                
+                if (conditionValue === 'success') {
+                  // Success means journey is complete - exit loop
+                  condition = false; // Exit loop on success
+                  console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Status is "success" - journey complete, EXITING loop (condition=false)`);
+                } else if (conditionValue === 'pending') {
+                  // Pending means more steps to complete - continue loop
+                  condition = true; // Continue loop on pending
+                  console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Status is "pending" - more steps to complete, CONTINUING loop (condition=true)`);
+                } else {
+                  console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
+                }
               }
             } else {
               // Legacy format: boolean is_complete
@@ -12179,7 +13515,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   journeys: [journey],
                   job_id: jobId
                 };
-                console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Saving journey ${journeyId} with ${journey.iterations.length} iteration(s) and justification_status=${finalJustificationStatus} to workflow ${workflowState.workflowId}`);
+                console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Saving journey ${journeyId} with ${journey.iterations.length} iteration(s) and justification_status=${finalJustificationStatus} to page ${workflowState.pageId}`);
                 console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] DEBUG: Journey object:`, JSON.stringify({
                   journey_id: journey.journey_id,
                   iterations_count: journey.iterations?.length || 0,
@@ -12190,11 +13526,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   })) || []
                 }, null, 2));
                 await axios.post(
-                  `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+                  `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
                   payload,
                   { headers: this.getAuthHeaders() }
                 );
-                console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] ✅ Successfully saved iteration ${iteration} for journey ${journeyId} with justification_status=${finalJustificationStatus} to workflow`);
+                console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] ✅ Successfully saved iteration ${iteration} for journey ${journeyId} with justification_status=${finalJustificationStatus} to page`);
               } catch (saveError) {
                 console.error(`❌ [WHILE-LOOP-ITERATION-${iteration}] Failed to immediately save journey iteration: ${saveError.message}`, saveError);
               }
@@ -12733,9 +14069,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
               journeys: [journeyToSave],
               job_id: jobId
             };
-            console.log(`💾 [WHILE-LOOP-COMPLETE] Saving journey ${journeyId} with final justification_status=${journeyToSave.justification_status || 'N/A'}, ai_justification=${journeyToSave.ai_justification ? `YES (${journeyToSave.ai_justification.length} chars)` : 'NO'} to workflow ${workflowState.workflowId}`);
+            console.log(`💾 [WHILE-LOOP-COMPLETE] Saving journey ${journeyId} with final justification_status=${journeyToSave.justification_status || 'N/A'}, ai_justification=${journeyToSave.ai_justification ? `YES (${journeyToSave.ai_justification.length} chars)` : 'NO'} to page ${workflowState.pageId}`);
             await axios.post(
-              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+              `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
               payload,
               { headers: this.getAuthHeaders() }
             );
@@ -12776,7 +14112,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           try {
             console.log(`💾 [WHILE-LOOP-FINAL] Saving ${journey.iterations.length} iteration(s) for journey ${journeyId} at end of while-loop`);
             await axios.post(
-              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/save-data`,
+              `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
               {
                 saveLegs: false,
                 journeys: [journey],
@@ -13512,6 +14848,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
    */
   async executeStepByType(page, step, workflowState, jobId, stepContext = null) {
     switch (step.type) {
+      case 'browser-config':
+        await this.executeBrowserConfigStep(page, step, workflowState, jobId);
+        break;
       case 'screenshot':
         await this.executeScreenshotStep(page, step, workflowState, jobId, workflowState.pageId);
         break;
@@ -13550,8 +14889,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         await this.executeUpdateWorkflowStep(step, workflowState, jobId);
         break;
       case 'page-discovery':
-        await this.executePageDiscoveryStep(step, workflowState, jobId, workflowState.pageId, workflowState.projectId);
-        break;
+        console.error(`❌ DEPRECATED: page-discovery step type has been removed. Each step must save its own data.`);
+        throw new Error('page-discovery step type has been removed. Each workflow step must save its own data when executed.');
       case 'execute-code':
         await this.executeCodeStep(page, step, workflowState);
         break;
@@ -13616,9 +14955,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       case 'if':
       case 'if-step':
         await this.executeIfStep(page, step, workflowState, jobId);
-        break;
-      case 'save-data':
-        await this.executeSaveDataStep(page, step, workflowState, jobId);
         break;
       case 'save-page-data':
         await this.executeSavePageDataStep(page, step, workflowState, jobId);
