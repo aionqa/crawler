@@ -1985,7 +1985,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
                           this.context?.job_type === 'login' ||
                           this.context?.isLoginJob === true;
         const loginEnabled = this.context?.login_enabled === true || 
-                            this.context?.options?.login_enabled === true;
+                            this.context?.options?.login_enabled === true ||
+                            this.context?.must_login_first === true ||
+                            this.context?.automate_login === true ||
+                            this.context?.options?.must_login_first === true ||
+                            this.context?.options?.automate_login === true;
         
         // Only require credentials for login jobs or if login is explicitly enabled
         if (isLoginJob || loginEnabled) {

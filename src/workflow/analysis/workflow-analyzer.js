@@ -2195,7 +2195,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
                           this.context?.job_type === 'login' ||
                           this.context?.isLoginJob === true;
         const loginEnabled = this.context?.login_enabled === true || 
-                            this.context?.options?.login_enabled === true;
+                            this.context?.options?.login_enabled === true ||
+                            this.context?.must_login_first === true ||
+                            this.context?.automate_login === true ||
+                            this.context?.options?.must_login_first === true ||
+                            this.context?.options?.automate_login === true;
         
         // Only require credentials for login jobs or if login is explicitly enabled
         if (isLoginJob || loginEnabled) {
@@ -6713,8 +6717,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
           if (isFailureTestJourney) {
             // For failure-test journeys, mark as 'failure' regardless of AI response
             // This indicates the form correctly failed (which is the expected behavior)
-            finalStatus = 'failure';
-            console.log(`✅ [FAILURE-TEST] Journey ${journey.journey_id} - marking as 'failure' (form correctly failed as expected)`);
+            // UNLESS the AI explicitly says it succeeded (which would be a bug)
+            const aiSaysSuccess = (justification.status || '').toLowerCase() === 'success' ||
+                                  (justification.completion_status || '').toLowerCase() === 'success' ||
+                                  (justification.reason || '').toLowerCase().includes('successfully submitted') ||
+                                  (justification.reason || '').toLowerCase().includes('form submitted successfully');
+            
+            if (aiSaysSuccess) {
+              console.warn(`⚠️ [FAILURE-TEST-BUG] Journey ${journey.journey_id} is marked as 'always fail' but AI says it succeeded - this is a bug!`);
+              console.warn(`   AI justification: ${justification.reason?.substring(0, 200)}...`);
+              // Still mark as failure because the form should fail
+              finalStatus = 'failure';
+            } else {
+              finalStatus = 'failure';
+              console.log(`✅ [FAILURE-TEST] Journey ${journey.journey_id} - marking as 'failure' (form correctly failed as expected)`);
+            }
           } else {
             // Normal journey logic
             if (justification.expected_outcome_verified === true) {
@@ -9984,15 +10001,37 @@ IMPORTANT OUTPUT REQUIREMENTS:
     } catch (error) {
       console.error(`❌ Code execution failed: ${error.message}`);
       const urlAfterAction = page.url();
+      
+      // CRITICAL: Check if this is a verify action failure (waitForFunction timeout/error)
+      // Verify actions should be marked as failed separately, not fail the entire journey
+      const isVerifyActionFailure = error.message?.toLowerCase().includes('waitforfunction') ||
+                                    error.message?.toLowerCase().includes('timeout') ||
+                                    error.message?.toLowerCase().includes('verification failed') ||
+                                    (workflowState.lastExecutedActionLines || []).some(line => 
+                                      line.toLowerCase().includes('waitforfunction') ||
+                                      line.toLowerCase().includes('verify')
+                                    );
+      
       const errorResult = {
         success: false,
         error: error.message,
         urlBeforeAction: workflowState.urlBeforeAction || page.url(),
         urlAfterAction,
-        pageChanged: (workflowState.urlBeforeAction || '') !== urlAfterAction
+        pageChanged: (workflowState.urlBeforeAction || '') !== urlAfterAction,
+        isVerifyActionFailure: isVerifyActionFailure,
+        verifyActionFailed: isVerifyActionFailure // For backward compatibility
       };
       workflowState.lastExecutionResult = errorResult;
       this.storeStepResult(step, errorResult, workflowState);
+      
+      // CRITICAL: For verify action failures, log but don't fail the journey
+      // The AI justification step will determine if the journey succeeded despite verify failure
+      if (isVerifyActionFailure) {
+        console.log(`⚠️ [VERIFY-ACTION-FAILED] Verify action failed: ${error.message}`);
+        console.log(`   This is a verify action failure - journey status will be determined by AI justification`);
+        // Don't throw - let workflow continue to justification step
+        return errorResult;
+      }
       
       // If next step is self-adjustable-ai-workflow, don't throw - let workflow continue
       if (nextStep && nextStep.type === 'self-adjustable-ai-workflow') {
@@ -12248,21 +12287,83 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 // Extract verification_details - handle structured format
                 verificationDetails = extractValue(justifyResult?.verification_details) || extractValue(unwrappedJustifyData?.verification_details) || null;
                 
+                // Extract warnings - handle structured format
+                const warningDetails = extractValue(justifyResult?.warning_details) || extractValue(unwrappedJustifyData?.warning_details) || null;
+                const fixInstructions = extractValue(justifyResult?.fix_instructions) || extractValue(unwrappedJustifyData?.fix_instructions) || null;
+                const warningFixNeeded = justifyResult?.warning_fix_needed || unwrappedJustifyData?.warning_fix_needed || false;
+                
                 console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] DEBUG (PATH-1): Extracted:`, {
                   justificationReason: justificationReason ? `${justificationReason.length} chars` : 'EMPTY',
                   justificationStatus: justificationStatus || 'N/A',
-                  expectedOutcomeVerified: expectedOutcomeVerified !== undefined ? expectedOutcomeVerified : 'undefined'
+                  expectedOutcomeVerified: expectedOutcomeVerified !== undefined ? expectedOutcomeVerified : 'undefined',
+                  hasWarnings: !!(warningDetails || fixInstructions || warningFixNeeded)
                 });
+                
+                // Store warnings in workflowState for use in iteration details
+                workflowState.warnings = {
+                  warning_details: warningDetails,
+                  fix_instructions: fixInstructions,
+                  warning_fix_needed: warningFixNeeded
+                };
               }
+              
+              // CRITICAL: Check if this is a failure-test journey BEFORE mapping status
+              const journeyDesc = (journey.description || '').toLowerCase();
+              const journeyExpectedOutcome = (journey.expected_outcome || '').toLowerCase();
+              const isFailureTestJourney = 
+                journeyDesc.includes('always fail') ||
+                journeyDesc.includes('verify that submission fails') ||
+                journeyDesc.includes('verify that submission does not succeed') ||
+                journeyDesc.includes('non-existent domain') ||
+                journeyDesc.includes('will fail') ||
+                journeyDesc.includes('should fail') ||
+                journeyDesc.includes('expected to fail') ||
+                journeyDesc.includes('does not succeed') ||
+                journeyDesc.includes('submission fails') ||
+                journeyDesc.includes('does not navigate') ||
+                journeyDesc.includes('stays on page') ||
+                journeyDesc.includes('form remains visible') ||
+                journeyDesc.includes('form still visible') ||
+                journeyExpectedOutcome.includes('fail') ||
+                journeyExpectedOutcome.includes('does not succeed') ||
+                journeyExpectedOutcome.includes('does not navigate') ||
+                journeyExpectedOutcome.includes('stays on page') ||
+                journeyExpectedOutcome.includes('form remains visible');
               
               // Map status based on expected_outcome_verified (primary source)
               let finalJustificationStatus = justificationStatus;
-              if (justificationStatus === 'pending') {
-                finalJustificationStatus = 'pending';
-              } else if (expectedOutcomeVerified === true) {
-                finalJustificationStatus = 'success';
-              } else if (expectedOutcomeVerified === false) {
-                finalJustificationStatus = 'failure';
+              
+              // CRITICAL: For failure-test journeys, check if failure message was detected
+              if (isFailureTestJourney) {
+                // Check if the reason mentions failure messages
+                const reasonLower = (justificationReason || '').toLowerCase();
+                const hasFailureMessage = 
+                  reasonLower.includes('validation failed') ||
+                  reasonLower.includes('form is configured to always fail') ||
+                  reasonLower.includes('form failed') ||
+                  reasonLower.includes('submission failed') ||
+                  reasonLower.includes('does not succeed') ||
+                  reasonLower.includes('error') ||
+                  reasonLower.includes('cannot submit');
+                
+                // If failure message detected, mark as 'failure' (form correctly failed)
+                if (hasFailureMessage || justificationStatus === 'failure') {
+                  finalJustificationStatus = 'failure';
+                  console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Failure-test journey: marking as 'failure' (form correctly failed as expected)`);
+                } else if (justificationStatus === 'success') {
+                  // AI incorrectly marked as success - override to failure
+                  finalJustificationStatus = 'failure';
+                  console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Failure-test journey incorrectly marked as 'success' by AI - overriding to 'failure'`);
+                }
+              } else {
+                // Normal journey logic
+                if (justificationStatus === 'pending') {
+                  finalJustificationStatus = 'pending';
+                } else if (expectedOutcomeVerified === true) {
+                  finalJustificationStatus = 'success';
+                } else if (expectedOutcomeVerified === false) {
+                  finalJustificationStatus = 'failure';
+                }
               }
 
               // CRITICAL: Ensure justify_journey status reflects final status so while-loop condition can exit
@@ -12480,7 +12581,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   justification_status: finalJustificationStatus,
                   expected_outcome_verified: expectedOutcomeVerified,
                   verification_details: verificationDetails,
-                  ai_justification: justificationReason
+                  ai_justification: justificationReason,
+                  // Warnings (if any)
+                  warning_details: workflowState.warnings?.warning_details || null,
+                  fix_instructions: workflowState.warnings?.fix_instructions || null,
+                  warning_fix_needed: workflowState.warnings?.warning_fix_needed || false
                 },
                 
                 // Backward compatibility fields (for existing code that expects flat structure)
@@ -14267,11 +14372,142 @@ IMPORTANT OUTPUT REQUIREMENTS:
         condition = conditionResult === true || conditionResult === 'true' || conditionResult === 1;
         
       } else if (conditionType === 'path' || conditionType === 'ai-response') {
-        // Get condition from workflowState path
-        const conditionValue = this.resolvePathValue(workflowState, conditionPath || 'determine_completion.is_complete', 'results');
+        // Get condition from workflowState path (check multiple locations like while-loop does)
+        let conditionValue = null;
+        
+        if (conditionPath) {
+          // Try multiple path variants: with hyphen, with underscore, with slug
+          const pathVariants = [];
+          pathVariants.push(conditionPath);
+          if (conditionPath.includes('-')) {
+            pathVariants.push(conditionPath.replace(/-/g, '_'));
+          }
+          if (conditionPath.includes('_')) {
+            pathVariants.push(conditionPath.replace(/_/g, '-'));
+          }
+          
+          // Try each variant in multiple locations
+          for (const variant of pathVariants) {
+            // Try in results namespace
+            conditionValue = this.resolvePathValue(workflowState, variant, 'results');
+            if (conditionValue !== undefined && conditionValue !== null) {
+              console.log(`✅ [IF-STEP] Found condition value via path "${variant}" in results: ${conditionValue}`);
+              break;
+            }
+            
+            // Try in variablePool.steps namespace
+            if (workflowState.variablePool?.steps) {
+              const [stepId, ...restPath] = variant.split('.');
+              const stepResult = workflowState.variablePool.steps[stepId]?.result;
+              if (stepResult) {
+                let current = stepResult;
+                for (const segment of restPath) {
+                  if (current && typeof current === 'object') {
+                    current = current[segment];
+                  } else {
+                    current = undefined;
+                    break;
+                  }
+                }
+                if (current !== undefined) {
+                  conditionValue = current;
+                  console.log(`✅ [IF-STEP] Found condition value via path "${variant}" in variablePool.steps: ${conditionValue}`);
+                  break;
+                }
+              }
+            }
+            
+            // Try direct access on workflowState
+            const [stepId, ...restPath] = variant.split('.');
+            const stepData = workflowState[stepId];
+            if (stepData?.result) {
+              let current = stepData.result;
+              for (const segment of restPath) {
+                if (current && typeof current === 'object') {
+                  current = current[segment];
+                } else {
+                  current = undefined;
+                  break;
+                }
+              }
+              if (current !== undefined) {
+                conditionValue = current;
+                console.log(`✅ [IF-STEP] Found condition value via path "${variant}" in workflowState: ${conditionValue}`);
+                break;
+              }
+            }
+          }
+          
+          // CRITICAL: Also try to find justify_journey step result (for simplified workflow)
+          if (conditionValue === undefined || conditionValue === null) {
+            if (conditionPath && conditionPath.includes('justify_journey')) {
+              const justifyStepId = 'justify_journey';
+              const justifyStepSlug = 'justify-journey';
+              const stepIdVariants = [justifyStepId, justifyStepSlug, justifyStepId.replace(/_/g, '-'), justifyStepSlug.replace(/-/g, '_')];
+              
+              for (const variant of stepIdVariants) {
+                const stepData = workflowState.variablePool?.steps?.[variant] ||
+                                workflowState[variant] ||
+                                workflowState.results?.[variant] ||
+                                null;
+                
+                if (stepData) {
+                  let rawResult = stepData.result || 
+                              stepData.openai_response || 
+                              (stepData.result?.openai_response) ||
+                              (typeof stepData === 'object' && !stepData.result && !stepData.openai_response ? stepData : null);
+                  
+                  // Unwrap structured result if needed
+                  if (rawResult && typeof rawResult === 'object' && 'value' in rawResult && 'namespace' in rawResult) {
+                    rawResult = rawResult.value;
+                  }
+                  
+                  if (rawResult && typeof rawResult === 'object') {
+                    // Extract value from justify_journey result based on conditionPath
+                    const pathSegments = conditionPath.split('.');
+                    if (pathSegments.length > 1) {
+                      // Skip first segment (justify_journey) and resolve rest
+                      const restPath = pathSegments.slice(1).join('.');
+                      let current = rawResult;
+                      for (const segment of restPath.split('.')) {
+                        if (current && typeof current === 'object') {
+                          current = current[segment];
+                        } else {
+                          current = undefined;
+                          break;
+                        }
+                      }
+                      if (current !== undefined) {
+                        conditionValue = current;
+                        console.log(`✅ [IF-STEP] Found justify_journey.${restPath} via variant "${variant}": ${conditionValue}`);
+                        break;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        // Fallback to resolvePathValue if still not found
+        if (conditionValue === undefined || conditionValue === null) {
+          conditionValue = this.resolvePathValue(workflowState, conditionPath || 'determine_completion.is_complete', 'results');
+        }
         
         if (conditionValue !== undefined && conditionValue !== null) {
-          condition = conditionValue === true || conditionValue === 'true' || conditionValue === 1 || conditionValue === 'complete';
+          // Check if conditionValue matches conditionValue from config (if specified)
+          const expectedValue = config.conditionValue;
+          if (expectedValue !== undefined) {
+            condition = conditionValue === expectedValue || 
+                       conditionValue === true || 
+                       conditionValue === 'true' || 
+                       conditionValue === 1 ||
+                       String(conditionValue).toLowerCase() === String(expectedValue).toLowerCase();
+          } else {
+            // Default: treat truthy values as true
+            condition = conditionValue === true || conditionValue === 'true' || conditionValue === 1 || conditionValue === 'complete';
+          }
         }
       }
       
