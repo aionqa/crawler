@@ -12,6 +12,7 @@
 import * as backendLogger from '../backend-logger.js';
 import { humanType } from '../browser/human-typing.js';
 import WorkflowAnalyzer from '../workflow/analysis/workflow-analyzer.js';
+import { LoginWorkflowExecutor } from '../workflow/execution/login-workflow-executor.js';
 
 // Import AI conversation logger (same as unified-crawler pattern)
 let aiLogger = null;
@@ -885,15 +886,33 @@ export async function performLoginWithWorkflow(
       }
     }).catch(() => {});
 
-    const workflowAnalyzer = new WorkflowAnalyzer(BACKEND_URL, conversationLogger, normalizedContext);
-    console.log(`📄 VAR_DUMP: Created WorkflowAnalyzer, calling analyzePage`);
-    console.log(`📄 VAR_DUMP: analyzePage params: jobId=${jobId}, pageId=null, projectId=${projectId}`);
-    const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, null, projectId);
-    console.log(`📄 VAR_DUMP: analyzePage completed, analysisResult keys: ${Object.keys(analysisResult || {}).join(', ')}`);
+    // Use specialized LoginWorkflowExecutor for login workflows
+    const loginExecutor = new LoginWorkflowExecutor(BACKEND_URL, conversationLogger, null, normalizedContext);
+    console.log(`📄 VAR_DUMP: Created LoginWorkflowExecutor, loading workflow template`);
+    
+    // Load workflow template
+    const workflowTemplateResponse = await axios.get(`${BACKEND_URL}/api/workflows/templates/${workflowTemplateId}`, {
+      headers: normalizedContext.runner_token ? { 'Authorization': `Bearer ${normalizedContext.runner_token}` } : {}
+    }).catch(async (error) => {
+      // Fallback: try to get from local templates
+      console.warn(`⚠️ Could not fetch workflow template from API: ${error.message}`);
+      return null;
+    });
+    
+    const workflowTemplate = workflowTemplateResponse?.data || null;
+    if (!workflowTemplate) {
+      throw new Error(`Workflow template ${workflowTemplateId} not found`);
+    }
+    
+    console.log(`📄 VAR_DUMP: Workflow template loaded, executing login workflow`);
+    const loginResult = await loginExecutor.executeLoginWorkflow(page, jobId, workflowTemplate);
+    console.log(`📄 VAR_DUMP: Login workflow completed, result: ${JSON.stringify({
+      success: loginResult.success,
+      loginStatus: loginResult.loginStatus,
+      cookiesCollected: loginResult.cookiesCollected
+    })}`);
 
-    // Extract determine_completion result from multiple possible locations
-    // CRITICAL: The while-loop stores determine_completion in each iteration, need to get from last iteration
-    // NO FALLBACKS: Use ONLY determine_completion from while-loop, ignore validate_login_success
+    // Extract determine_completion result from login executor result
     let determineResult = null;
     
     console.log(`📄 VAR_DUMP: Extracting determineResult from analysisResult`);
