@@ -14,6 +14,10 @@ class WorkflowAnalyzer {
     this.context = context;
     this.workflowTemplate = null;
     this.workflowCapabilities = this.detectCapabilities([]);
+    
+    // Debug: Log credentials in context
+    console.log(`📄 VAR_DUMP: WorkflowAnalyzer constructor - context.credentials=${context?.credentials ? JSON.stringify({username: context.credentials.username || 'MISSING', password: context.credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
+    console.log(`📄 VAR_DUMP: WorkflowAnalyzer constructor - context.must_login_first=${context?.must_login_first}, context.automate_login=${context?.automate_login}`);
   }
 
   /**
@@ -2201,6 +2205,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
                             this.context?.options?.must_login_first === true ||
                             this.context?.options?.automate_login === true;
         
+        console.log(`📄 VAR_DUMP: inputCredentials check - isLoginJob=${isLoginJob}, loginEnabled=${loginEnabled}`);
+        console.log(`📄 VAR_DUMP: context.must_login_first=${this.context?.must_login_first}, context.automate_login=${this.context?.automate_login}`);
+        console.log(`📄 VAR_DUMP: context.credentials=${this.context?.credentials ? JSON.stringify({username: this.context.credentials.username || 'MISSING', password: this.context.credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
+        
         // Only require credentials for login jobs or if login is explicitly enabled
         if (isLoginJob || loginEnabled) {
           if (!this.context?.credentials || !this.context.credentials.username || !this.context.credentials.password ||
@@ -2301,9 +2309,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // Get step timeout
         const stepTimeout = this.getStepTimeout(step);
         console.log(`⏱️  Step timeout: ${Math.round(stepTimeout / 1000)}s`);
+        console.log(`🔍 [DEBUG] Step details - type: "${step.type}", id: "${step.id}", name: "${step.name}"`);
         
         // Log step execution with parameters
-        await this.logStepExecution(step, jobId);
+        try {
+          await this.logStepExecution(step, jobId);
+          console.log(`🔍 [DEBUG] logStepExecution completed`);
+        } catch (logError) {
+          console.warn(`⚠️ logStepExecution failed: ${logError.message}`);
+          // Continue anyway - logging failure shouldn't stop execution
+        }
         
         // Execute step with timeout
         let stepCompleted = false;
@@ -2313,12 +2328,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
         try {
           const currentUrl = page.url();
           pageLoadedSuccessfully = !!currentUrl && currentUrl !== 'about:blank';
+          console.log(`🔍 [DEBUG] Page check - loaded: ${pageLoadedSuccessfully}, URL: ${currentUrl}`);
         } catch (e) {
+          console.warn(`🔍 [DEBUG] Page check failed: ${e.message}`);
           // Page check failed, but continue
         }
         
+        console.log(`🔍 [BEFORE-SWITCH] About to enter Promise.race for step: ${step.name || step.id}, type: ${step.type}`);
+        console.log(`🔍 [DEBUG] stepCompleted flag: ${stepCompleted}, stepTimeout: ${stepTimeout}ms`);
         await Promise.race([
           (async () => {
+            console.log(`🔍 [SWITCH] About to switch on step.type="${step.type}", step.id="${step.id}", step.name="${step.name}"`);
             switch (step.type) {
           case 'screenshot':
             await this.executeScreenshotStep(page, step, workflowState, effectiveJobId, pageId);
@@ -2417,7 +2437,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
             break;
             
           case 'cookie-collect':
-            await this.executeCookieCollectStep(page, step, workflowState, jobId);
+            console.log(`🍪 [SWITCH] Matched case 'cookie-collect' for step: ${step.name || step.id}`);
+            console.log(`🍪 [COOKIE-COLLECT] About to execute cookie-collect step: ${step.name || step.id}`);
+            console.log(`🍪 [COOKIE-COLLECT] Page available: ${!!page}, Page URL: ${page ? page.url() : 'N/A'}`);
+            try {
+              await this.executeCookieCollectStep(page, step, workflowState, jobId);
+              console.log(`🍪 [COOKIE-COLLECT] Step completed successfully`);
+            } catch (cookieError) {
+              console.error(`🍪 [COOKIE-COLLECT] Step failed: ${cookieError.message}`);
+              console.error(`🍪 [COOKIE-COLLECT] Error stack: ${cookieError.stack}`);
+              throw cookieError;
+            }
             break;
             
           case 'job-configuration':
@@ -2483,25 +2513,34 @@ IMPORTANT OUTPUT REQUIREMENTS:
             break;
             
           default:
-            console.log(`⚠️ Unknown step type: ${step.type}`);
+            console.error(`❌ [SWITCH] Unknown step type: ${step.type} for step: ${step.name || step.id}`);
+            console.error(`❌ [SWITCH] Available step types: screenshot, browser-config, playwright-analysis, ai-prompt, hardcoded-workflow-analysis, update-workflow, save-page-data, execute-code, execute-code-from-variable, cookie-add, cookie-update, cookie-remove, cookie-collect, job-configuration, content-change, validate-response, filter-response, cycle-start, cycle-end, conditional, print, var-dump, sleep, complete-leg, for-each, while-loop, if, if-step`);
+            throw new Error(`Unknown step type: ${step.type} for step "${step.name || step.id}". This step cannot be executed.`);
         }
             stepCompleted = true;
+            console.log(`🔍 [DEBUG] Step execution completed, stepCompleted set to true`);
           })(),
           new Promise((resolve, reject) => 
             setTimeout(() => {
               if (!stepCompleted) {
+                console.log(`🔍 [DEBUG] Step timeout triggered - stepCompleted: ${stepCompleted}, step type: ${step.type}`);
                 // For for-each steps, check if page loaded successfully before failing
                 if (step.type === 'for-each' && pageLoadedSuccessfully) {
                   console.log(`⚠️ Step "${step.name || step.id}" timed out but page loaded successfully - allowing to continue`);
                   // Resolve instead of reject to allow step to continue
                   resolve();
                 } else {
+                  console.error(`❌ Step "${step.name || step.id}" timed out after ${Math.round(stepTimeout / 1000)}s`);
                   reject(new Error(`Step "${step.name || step.id}" timed out after ${Math.round(stepTimeout / 1000)}s`));
                 }
+              } else {
+                console.log(`🔍 [DEBUG] Step timeout check - step already completed, not rejecting`);
               }
             }, stepTimeout)
           )
         ]);
+        
+        console.log(`🔍 [DEBUG] Promise.race completed for step: ${step.name || step.id}`);
         
         // CRITICAL: Check if any step has signaled the workflow should stop
         // This is workflow-driven: steps can set stopWorkflow in their results
@@ -10376,7 +10415,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Execute cookie collect step
    */
   async executeCookieCollectStep(page, step, workflowState, jobId) {
-    console.log(`🔍 Collecting cookies from browser (${step.name})`);
+    console.log(`🔍 [COOKIE-COLLECT] Starting cookie collection for step: ${step.name || step.id}`);
+    console.log(`🔍 [COOKIE-COLLECT] Step config:`, JSON.stringify(step.config || {}, null, 2));
+    console.log(`🔍 [COOKIE-COLLECT] Page available: ${!!page}`);
+    console.log(`🔍 [COOKIE-COLLECT] Job ID: ${jobId}`);
     
     const config = step.config || {};
     let collectedCookies = []; // Declare early so it's available in catch block
@@ -10384,13 +10426,64 @@ IMPORTANT OUTPUT REQUIREMENTS:
     try {
       // Always collect from browser - this is self-explanatory
       if (!page) {
+        console.error(`❌ [COOKIE-COLLECT] Page is null - cannot collect cookies`);
         throw new Error('Playwright page is not available - cannot collect cookies from browser');
       }
       
+      const currentUrl = page.url();
+      console.log(`🔍 [COOKIE-COLLECT] Page URL: ${currentUrl}`);
+      
+      // Get browser context
+      const browserContext = page.context();
+      if (!browserContext) {
+        throw new Error('Browser context is not available - cannot collect cookies');
+      }
+      
+      console.log(`🔍 [COOKIE-COLLECT] Browser context available, calling cookies()...`);
+      
       // Collect all cookies from the browser context
-      const contextCookies = await page.context().cookies();
-      collectedCookies = contextCookies;
-      console.log(`✅ Collected ${collectedCookies.length} cookie(s) from browser`);
+      // Try with current URL first, then without URL (gets all cookies)
+      try {
+        let contextCookies = [];
+        try {
+          // Try getting cookies for the current page URL
+          contextCookies = await browserContext.cookies([currentUrl]);
+          console.log(`🔍 [COOKIE-COLLECT] Got ${contextCookies.length} cookie(s) for URL: ${currentUrl}`);
+        } catch (urlError) {
+          console.warn(`⚠️ [COOKIE-COLLECT] Failed to get cookies for URL, trying all cookies: ${urlError.message}`);
+        }
+        
+        // If no cookies for current URL, try getting all cookies
+        if (contextCookies.length === 0) {
+          contextCookies = await browserContext.cookies();
+          console.log(`🔍 [COOKIE-COLLECT] Got ${contextCookies.length} cookie(s) from all domains`);
+        }
+        
+        collectedCookies = Array.isArray(contextCookies) ? contextCookies : [];
+        console.log(`✅ [COOKIE-COLLECT] Collected ${collectedCookies.length} cookie(s) from browser`);
+        if (collectedCookies.length > 0) {
+          const cookieNames = collectedCookies.map(c => c.name).join(', ');
+          console.log(`✅ [COOKIE-COLLECT] Cookie names: ${cookieNames}`);
+          console.log(`✅ [COOKIE-COLLECT] Cookie details:`, collectedCookies.map(c => ({name: c.name, domain: c.domain, path: c.path})));
+        } else {
+          console.warn(`⚠️ [COOKIE-COLLECT] No cookies found in browser context at URL: ${currentUrl}`);
+          // Also try page.evaluate to check document.cookie as a fallback
+          try {
+            const documentCookies = await page.evaluate(() => document.cookie);
+            console.log(`🔍 [COOKIE-COLLECT] document.cookie from page: ${documentCookies || '(empty)'}`);
+            if (documentCookies) {
+              // Parse document.cookie string into cookie objects
+              const cookiePairs = documentCookies.split(';').map(c => c.trim());
+              console.log(`🔍 [COOKIE-COLLECT] Found ${cookiePairs.length} cookie(s) in document.cookie`);
+            }
+          } catch (evalError) {
+            console.warn(`⚠️ [COOKIE-COLLECT] Could not read document.cookie: ${evalError.message}`);
+          }
+        }
+      } catch (cookieError) {
+        console.error(`❌ [COOKIE-COLLECT] Error calling browserContext.cookies(): ${cookieError.message}`);
+        throw cookieError;
+      }
       
       // Try to get project_id to save cookies to project (optional)
       let projectId = null;
@@ -10447,7 +10540,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
 
       this.storeStepResult(step, { cookies: collectedCookies, count: collectedCookies.length }, workflowState);
-      console.log(`✅ Collected ${collectedCookies.length} cookie(s) successfully`);
+      console.log(`✅ [COOKIE-COLLECT] Step completed - stored ${collectedCookies.length} cookie(s) in workflow state`);
+      console.log(`✅ [COOKIE-COLLECT] Cookies stored in workflowState.collectedCookies: ${!!workflowState.collectedCookies}`);
+      if (config.outputVariable) {
+        console.log(`✅ [COOKIE-COLLECT] Cookies also stored in workflowState.${config.outputVariable}: ${!!workflowState[config.outputVariable]}`);
+      }
+      console.log(`✅ [COOKIE-COLLECT] Step result stored with step ID: ${step.id || 'no-id'}, step name: ${step.name || 'no-name'}`);
     } catch (error) {
       // If we have cookies collected, don't fail the step
       if (collectedCookies && collectedCookies.length > 0) {
