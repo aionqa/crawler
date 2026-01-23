@@ -24,33 +24,46 @@ export class LoginWorkflowExecutor {
   /**
    * Execute login workflow
    * Returns result with login status, cookies, and AI justification
+   * Uses the same execution pattern as WorkflowAnalyzer for consistency
    */
   async executeLoginWorkflow(page, jobId, workflowTemplate) {
     console.log(`🔐 [LOGIN-WORKFLOW] Starting login workflow execution`);
     console.log(`🔐 [LOGIN-WORKFLOW] Job ID: ${jobId}`);
     console.log(`🔐 [LOGIN-WORKFLOW] Template: ${workflowTemplate.name || workflowTemplate._id}`);
+    console.log(`🔐 [LOGIN-WORKFLOW] Page URL: ${page.url()}`);
     
-    const workflowState = {
-      jobId,
-      jobType: 'login',
-      isLoginJob: true,
-      collectedCookies: [],
-      determine_completion: null,
-      loginStatus: null,
-      loginReason: null,
-      shouldCollectCookies: false,
-      workflowResults: {}
-    };
-
     try {
-      // Set workflow template
-      this.workflowAnalyzer.workflowTemplate = workflowTemplate;
+      // CRITICAL: Use the same execution pattern as WorkflowAnalyzer
+      // Load workflow template into the analyzer
+      await this.workflowAnalyzer.loadWorkflowTemplate(workflowTemplate._id?.toString() || workflowTemplate.identifier || workflowTemplate._id);
       
-      // Execute workflow steps
-      const result = await this.workflowAnalyzer.analyzePage(page, jobId, null, this.context.project_id);
+      // Ensure context is properly set for login jobs
+      const loginContext = {
+        ...this.context,
+        jobType: 'login',
+        job_type: 'login',
+        isLoginJob: true,
+        preventCrawling: true,
+        preventLinkDiscovery: true,
+        credentials: this.context.credentials || this.context.login_credentials,
+        must_login_first: this.context.must_login_first || true,
+        automate_login: this.context.automate_login || true
+      };
       
-      // Extract login-specific results
-      const loginResult = this.extractLoginResults(workflowState, result);
+      // Update workflowAnalyzer context
+      this.workflowAnalyzer.context = loginContext;
+      
+      // Execute workflow steps using the same method as regular workflows
+      // This ensures consistency with test workflow execution
+      const result = await this.workflowAnalyzer.analyzePage(
+        page, 
+        jobId, 
+        null, // pageId (not needed for login)
+        this.context.project_id || loginContext.project_id
+      );
+      
+      // Extract login-specific results from the workflow execution
+      const loginResult = this.extractLoginResults({}, result);
       
       console.log(`🔐 [LOGIN-WORKFLOW] Login workflow completed`);
       console.log(`🔐 [LOGIN-WORKFLOW] Status: ${loginResult.loginStatus}`);
