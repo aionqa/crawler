@@ -328,9 +328,20 @@ async function executeLoginJob(job, streamInterval) {
   console.log(`[DEBUG] job.options.credentials:`, job.options?.credentials);
   
   // Extract login credentials from job.login_data or fallback to top-level fields
+  // CRITICAL: URL can be at multiple locations (login_data.url, job.url, job.start_url, job.seed_url)
   const loginData = job.login_data || {};
-  const { url, username, password, maxAttempts = 2, context: jobContext = {} } = {
-    url: loginData.url || job.url,
+  const url = loginData.url || job.url || job.start_url || job.seed_url;
+  
+  if (!url) {
+    console.error(`[DEBUG] ❌ No login URL found in job!`);
+    console.error(`   job.login_data?.url: ${loginData.url || 'MISSING'}`);
+    console.error(`   job.url: ${job.url || 'MISSING'}`);
+    console.error(`   job.start_url: ${job.start_url || 'MISSING'}`);
+    console.error(`   job.seed_url: ${job.seed_url || 'MISSING'}`);
+    throw new Error('Login URL is required - must be in login_data.url, job.url, job.start_url, or job.seed_url');
+  }
+  
+  const { username, password, maxAttempts = 2, context: jobContext = {} } = {
     username: loginData.username || job.username,
     password: loginData.password || job.password,
     maxAttempts: job.maxAttempts || 2,
@@ -480,22 +491,40 @@ async function executeLoginJob(job, streamInterval) {
     await page.waitForTimeout(1000);
     console.log(`[DEBUG] Navigated to login URL: ${page.url()}`);
 
-    const { performLoginWithWorkflow } = await import('./login/login-operations.js');
-    console.log(
-      `[DEBUG] About to execute performLoginWithWorkflow with context:`,
-      JSON.stringify({
-        workflow_template_id: workflowExecutionContext.workflow_template_id,
-        project_id: workflowExecutionContext.project_id
-      })
-    );
-    const result = await performLoginWithWorkflow(
-      page,
-      job.id,
+    // CRITICAL: Use the same workflow execution pattern as test workflows
+    // This ensures login workflows execute exactly like test workflows
+    const { startCrawl } = await import('./crawling/unified-operations.js');
+    
+    // Build context for workflow execution (same as crawl jobs)
+    const workflowContext = {
+      ...workflowExecutionContext,
+      job_id: job.id,
+      jobId: job.id,
+      jobType: 'login',
+      job_type: 'login',
+      isLoginJob: true,
+      preventCrawling: true,
+      preventLinkDiscovery: true,
+      start_url: url,
+      page_url: url,
+      module_name: 'workflow', // Use workflow mode (same as test workflows)
+      execute_workflow: true,
+      workflow_template_id: workflowExecutionContext.workflow_template_id || job.workflow_template_id,
+      credentials: workflowExecutionContext.credentials,
+      must_login_first: true,
+      automate_login: true
+    };
+    
+    console.log(`[DEBUG] Executing login workflow using same engine as test workflows`);
+    console.log(`[DEBUG] Workflow template ID: ${workflowContext.workflow_template_id}`);
+    console.log(`[DEBUG] Using module_name: workflow (same as test workflows)`);
+    
+    // Execute using the same workflow engine as test workflows
+    const result = await startCrawl(
       url,
-      username,
-      password,
-      openaiApiKey,
-      workflowExecutionContext
+      [], // cookies (empty for login)
+      workflowContext,
+      openaiApiKey
     );
 
     if (result.success) {
@@ -555,10 +584,16 @@ async function executeCrawlJob(job, streamInterval) {
 
   // Extract job parameters
   // CRITICAL: URL can be at job.url or job.start_url (from runner_jobs structure)
-  const url = job.url || job.start_url || null;
-  const rawContext = job.context || {};
-  const jobOptions = job.options || {};
-  const projectId = rawContext.project_id || job.project_id || null;
+  // CRITICAL: runner_jobs has nested structure: job.job.context and job.job.options
+  const url = job.url || job.start_url || job.job?.start_url || null;
+  const rawContext = job.context || job.job?.context || {};
+  const jobOptions = job.options || job.job?.options || {};
+  const projectId = rawContext.project_id || job.project_id || job.job?.project_id || null;
+  
+  console.log(`[DEBUG] Job structure check - job.context exists: ${!!job.context}, job.job.context exists: ${!!job.job?.context}`);
+  console.log(`[DEBUG] Job structure check - job.options exists: ${!!job.options}, job.job.options exists: ${!!job.job?.options}`);
+  console.log(`[DEBUG] rawContext.credentials:`, rawContext.credentials ? {username: rawContext.credentials.username || 'MISSING', password: rawContext.credentials.password ? '***' : 'MISSING'} : 'MISSING');
+  console.log(`[DEBUG] jobOptions.credentials:`, jobOptions.credentials ? {username: jobOptions.credentials.username || 'MISSING', password: jobOptions.credentials.password ? '***' : 'MISSING'} : 'MISSING');
 
   if (!rawContext.project_id && projectId) {
     rawContext.project_id = projectId;
@@ -586,7 +621,11 @@ async function executeCrawlJob(job, streamInterval) {
   const loginJobId = rawContext?.login_job_id || null;
   
   // CRITICAL: Always extract credentials from top-level fields and override any "MISSING" values
+  // Check multiple locations: rawContext.credentials, jobOptions.credentials, job.job.context.credentials, job.job.options.credentials
+  const credsFromContext = rawContext?.credentials;
   const credsFromOptions = jobOptions?.credentials;
+  const credsFromNestedContext = job.job?.context?.credentials;
+  const credsFromNestedOptions = job.job?.options?.credentials;
   const credsFromTopLevel = job.username && job.password && 
     job.username !== 'MISSING' && job.password !== 'MISSING' ? 
     { username: job.username, password: job.password } : null;
@@ -594,7 +633,10 @@ async function executeCrawlJob(job, streamInterval) {
     job.login_data.username !== 'MISSING' && job.login_data.password !== 'MISSING' ? 
     { username: job.login_data.username, password: job.login_data.password } : null;
   
-  const extractedCreds = credsFromOptions || credsFromTopLevel || credsFromLoginData;
+  const extractedCreds = credsFromContext || credsFromOptions || credsFromNestedContext || credsFromNestedOptions || credsFromTopLevel || credsFromLoginData;
+  
+  console.log(`[DEBUG] Credential extraction - credsFromContext: ${!!credsFromContext}, credsFromOptions: ${!!credsFromOptions}, credsFromNestedContext: ${!!credsFromNestedContext}, credsFromNestedOptions: ${!!credsFromNestedOptions}, credsFromTopLevel: ${!!credsFromTopLevel}, credsFromLoginData: ${!!credsFromLoginData}`);
+  console.log(`[DEBUG] extractedCreds:`, extractedCreds ? {username: extractedCreds.username || 'MISSING', password: extractedCreds.password ? '***' : 'MISSING'} : 'MISSING');
   
   // CRITICAL: Always set credentials in context, overriding any "MISSING" values
   if (extractedCreds && extractedCreds.username && extractedCreds.password &&
@@ -658,10 +700,22 @@ async function executeCrawlJob(job, streamInterval) {
     job_type: rawContext.job_type || (job.jobType === 'login' ? 'login' : undefined),
     isLoginJob: rawContext.isLoginJob || (job.jobType === 'login' ? true : undefined),
     preventCrawling: rawContext.preventCrawling || (job.jobType === 'login' ? true : undefined),
+    // CRITICAL: Pass must_login_first and automate_login flags from rawContext or job options (check nested structure too)
+    must_login_first: rawContext.must_login_first !== undefined ? rawContext.must_login_first : 
+                     (job.job?.context?.must_login_first !== undefined ? job.job.context.must_login_first : 
+                     (job.options?.must_login_first !== undefined ? job.options.must_login_first :
+                     (job.job?.options?.must_login_first !== undefined ? job.job.options.must_login_first : false))),
+    automate_login: rawContext.automate_login !== undefined ? rawContext.automate_login : 
+                   (job.job?.context?.automate_login !== undefined ? job.job.context.automate_login :
+                   (job.options?.automate_login !== undefined ? job.options.automate_login :
+                   (job.job?.options?.automate_login !== undefined ? job.job.options.automate_login : false))),
     options: {
       ...mergedOptions,
       execute_workflow: executeWorkflowFlag,
-      single_action_only: Boolean(singleActionOnlyValue)
+      single_action_only: Boolean(singleActionOnlyValue),
+      // CRITICAL: Also pass must_login_first and automate_login in options
+      must_login_first: rawContext.must_login_first !== undefined ? rawContext.must_login_first : (job.options?.must_login_first || false),
+      automate_login: rawContext.automate_login !== undefined ? rawContext.automate_login : (job.options?.automate_login || false)
     }
   };
   
@@ -680,6 +734,8 @@ async function executeCrawlJob(job, streamInterval) {
   console.log(`[DEBUG] normalizedContext.credentials:`, normalizedContext.credentials ? 
     { username: normalizedContext.credentials.username, password: normalizedContext.credentials.password ? '***' : 'MISSING' } : 
     'MISSING');
+  console.log(`[DEBUG] normalizedContext.must_login_first:`, normalizedContext.must_login_first);
+  console.log(`[DEBUG] normalizedContext.automate_login:`, normalizedContext.automate_login);
 
   const openaiApiKey = normalizedContext.openai_api_key || process.env.OPENAI_API_KEY;
 
