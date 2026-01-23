@@ -40,14 +40,14 @@ async function sendLog(jobId, level, message, data = {}) {
 
 /**
  * Detect if current page is a login page
- * Configuration-based: Only uses login_url from context if provided
- * No hardcoded patterns - relies on configuration
+ * Uses AI analysis to detect login pages dynamically
+ * Falls back to configuration-based detection if login_url is provided
  */
 export async function detectLoginPage(page, jobId, currentUrl, openaiClient, loginUrl = null) {
   try {
     const pageUrl = page.url();
     
-    // ONLY check if login_url is explicitly configured (no hardcoded patterns)
+    // Strategy 1: Check if login_url is explicitly configured
     if (loginUrl) {
       try {
         const loginUrlObj = new URL(loginUrl);
@@ -64,8 +64,46 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
       }
     }
     
-    // No hardcoded detection - return false if no configured login URL matches
-    return { isLoginPage: false, confidence: 'low', reason: 'No configured login URL match' };
+    // Strategy 2: Use AI to detect login page by analyzing page content
+    if (openaiClient) {
+      try {
+        // Get page content for analysis
+        const pageTitle = await page.title().catch(() => '');
+        const visibleText = await page.evaluate(() => {
+          return document.body?.innerText?.substring(0, 1000) || '';
+        }).catch(() => '');
+        
+        // Check for common login indicators in URL and content
+        const urlLower = pageUrl.toLowerCase();
+        const titleLower = pageTitle.toLowerCase();
+        const textLower = visibleText.toLowerCase();
+        
+        const loginIndicators = [
+          urlLower.includes('/login'),
+          urlLower.includes('/signin'),
+          urlLower.includes('/auth'),
+          titleLower.includes('login'),
+          titleLower.includes('sign in'),
+          textLower.includes('username') && textLower.includes('password'),
+          textLower.includes('email') && textLower.includes('password') && (textLower.includes('sign in') || textLower.includes('log in'))
+        ];
+        
+        const loginIndicatorCount = loginIndicators.filter(Boolean).length;
+        
+        if (loginIndicatorCount >= 2) {
+          return { 
+            isLoginPage: true, 
+            confidence: loginIndicatorCount >= 3 ? 'high' : 'medium', 
+            reason: `Login indicators detected: ${loginIndicators.filter(Boolean).length} matches (URL, title, or content)` 
+          };
+        }
+      } catch (aiError) {
+        console.warn(`[LOGIN-REDIRECT] Error in AI-based login detection: ${aiError.message}`);
+      }
+    }
+    
+    // No login page detected
+    return { isLoginPage: false, confidence: 'low', reason: 'No login indicators found' };
   } catch (error) {
     console.error(`[LOGIN-REDIRECT] Error detecting login page: ${error.message}`);
     return { isLoginPage: false, confidence: 'low', reason: `Error: ${error.message}` };

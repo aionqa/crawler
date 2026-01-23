@@ -1918,40 +1918,129 @@ const modeHandlers = {
                           context?.isLoginJob === true ||
                           context?.preventCrawling === true;
         
+        // Check if auto_detect_login is enabled (for test workflows that should automatically login)
+        const autoDetectLogin = context.auto_detect_login === true;
+        const hasLoginCredentials = context.login_credentials || context.credentials;
+        
         // Only check for login redirects if explicitly configured (not default)
         // AND only for crawl jobs (not login jobs)
         const handleLoginRedirect = context.handle_login_redirect;
-        if (!isLoginJob && handleLoginRedirect && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail')) {
+        if (!isLoginJob && (handleLoginRedirect || autoDetectLogin) && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail' || autoDetectLogin)) {
           try {
-            const { handleLoginRedirect: handleRedirect } = await import('../login/login-redirect-handler.js');
-            const redirectResult = await handleRedirect(page, jobId, finalUrl, context, openaiClient, handleLoginRedirect);
+            const { detectLoginPage } = await import('../login/login-redirect-handler.js');
+            const loginDetection = await detectLoginPage(page, jobId, finalUrl, openaiClient, context.login_url || null);
             
-            if (redirectResult && redirectResult.reauthenticated) {
-              // Re-authentication successful, update context and continue from root
-              await sendLog(jobId, 'info', `✅ Re-authenticated successfully, continuing crawl from ${redirectResult.newUrl}`);
-              // Update context with new cookies
-              if (redirectResult.cookies) {
-                context.cookies = redirectResult.cookies;
-                // Also update browser context cookies
+            if (loginDetection.isLoginPage) {
+              await sendLog(jobId, 'info', `🔐 Login page detected during test execution (${loginDetection.confidence} confidence): ${loginDetection.reason}`);
+              
+              // If auto_detect_login is enabled and credentials are available, trigger login workflow
+              if (autoDetectLogin && hasLoginCredentials) {
+                await sendLog(jobId, 'info', `🔄 Automatically triggering login workflow with provided credentials`);
+                
                 try {
-                  await page.context().addCookies(redirectResult.cookies);
-                } catch (cookieError) {
-                  console.warn(`Failed to update browser cookies: ${cookieError.message}`);
+                  const { performLoginWithWorkflow } = await import('../login/login-operations.js');
+                  const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
+                  
+                  // Get login workflow template from project or use default
+                  let loginWorkflowTemplateId = context.login_workflow_template_id || null;
+                  if (!loginWorkflowTemplateId) {
+                    // Try to get from backend
+                    try {
+                      const axios = (await import('axios')).default;
+                      const projectResponse = await axios.get(`${BACKEND_URL}/api/projects/${context.project_id}`, {
+                        headers: context.runner_token ? { 'Authorization': `Bearer ${context.runner_token}` } : {}
+                      });
+                      loginWorkflowTemplateId = projectResponse.data?.login_workflow_id || null;
+                    } catch (e) {
+                      console.warn(`Could not fetch project login_workflow_id: ${e.message}`);
+                    }
+                  }
+                  
+                  // Use credentials from context
+                  const credentials = context.login_credentials || context.credentials;
+                  const loginUrl = finalUrl; // Use current URL (login page)
+                  
+                  await sendLog(jobId, 'info', `🔐 Executing automatic login workflow for ${loginUrl}`);
+                  
+                  const loginResult = await performLoginWithWorkflow(
+                    page,
+                    jobId,
+                    loginUrl,
+                    credentials.username,
+                    credentials.password,
+                    context.openai_api_key || null,
+                    {
+                      ...context,
+                      workflow_template_id: loginWorkflowTemplateId,
+                      project_id: context.project_id,
+                      runner_token: context.runner_token
+                    }
+                  );
+                  
+                  if (loginResult.success) {
+                    await sendLog(jobId, 'info', `✅ Automatic login successful - ${loginResult.cookies?.length || 0} cookie(s) collected`);
+                    
+                    // Update context with new cookies
+                    if (loginResult.cookies && loginResult.cookies.length > 0) {
+                      context.cookies = loginResult.cookies;
+                      // Also update browser context cookies
+                      try {
+                        await page.context().addCookies(loginResult.cookies);
+                      } catch (cookieError) {
+                        console.warn(`Failed to update browser cookies: ${cookieError.message}`);
+                      }
+                    }
+                    
+                    // Continue with test workflow from the authenticated page
+                    await sendLog(jobId, 'info', `🔄 Continuing test workflow from authenticated page: ${page.url()}`);
+                    // Don't reset URL queue - continue from current authenticated state
+                  } else {
+                    await sendLog(jobId, 'error', `❌ Automatic login failed: ${loginResult.error || loginResult.loginReason || 'Unknown error'}`);
+                    // Continue anyway - test workflow will handle the failure
+                  }
+                } catch (loginError) {
+                  await sendLog(jobId, 'error', `❌ Automatic login workflow execution failed: ${loginError.message}`);
+                  // Continue anyway - test workflow will handle the failure
                 }
+              } else if (handleLoginRedirect && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail')) {
+                // Use existing login redirect handler
+                const { handleLoginRedirect: handleRedirect } = await import('../login/login-redirect-handler.js');
+                const redirectResult = await handleRedirect(page, jobId, finalUrl, context, openaiClient, handleLoginRedirect);
+                
+                if (redirectResult && redirectResult.reauthenticated) {
+                  // Re-authentication successful, update context and continue from root
+                  await sendLog(jobId, 'info', `✅ Re-authenticated successfully, continuing crawl from ${redirectResult.newUrl}`);
+                  // Update context with new cookies
+                  if (redirectResult.cookies) {
+                    context.cookies = redirectResult.cookies;
+                    // Also update browser context cookies
+                    try {
+                      await page.context().addCookies(redirectResult.cookies);
+                    } catch (cookieError) {
+                      console.warn(`Failed to update browser cookies: ${cookieError.message}`);
+                    }
+                  }
+                  // Reset URL queue to start from root
+                  urlQueue.length = 0;
+                  urlQueue.push({ url: redirectResult.newUrl, depth: 0 });
+                  visitedUrls.clear(); // Clear visited URLs to restart crawl
+                  pagesAnalyzed = 0; // Reset page counter
+                  await sendLog(jobId, 'info', `🔄 Restarting crawl from root path with fresh authentication`);
+                  continue; // Skip current page and start fresh
+                }
+              } else if (handleLoginRedirect === 'fail') {
+                await sendLog(jobId, 'error', `❌ Login page detected - failing crawl as configured`);
+                throw new Error(`Login page detected at ${finalUrl} - crawl failed (handle_login_redirect: fail)`);
               }
-              // Reset URL queue to start from root
-              urlQueue.length = 0;
-              urlQueue.push({ url: redirectResult.newUrl, depth: 0 });
-              visitedUrls.clear(); // Clear visited URLs to restart crawl
-              pagesAnalyzed = 0; // Reset page counter
-              await sendLog(jobId, 'info', `🔄 Restarting crawl from root path with fresh authentication`);
-              continue; // Skip current page and start fresh
             }
           } catch (redirectError) {
             // If handleLoginRedirect is 'fail', the error is already thrown
             // If it's 'auto_retry' and fails, we should also fail
             await sendLog(jobId, 'error', `❌ Login redirect handling failed: ${redirectError.message}`);
-            throw redirectError;
+            if (handleLoginRedirect === 'fail') {
+              throw redirectError;
+            }
+            // For auto_retry, continue anyway
           }
         }
         
