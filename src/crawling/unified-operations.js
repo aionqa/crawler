@@ -1753,13 +1753,20 @@ const modeHandlers = {
     const jobId = context.job_id || 'unknown-job';
     const projectId = context.project_id || null;
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
-    const maxPages = context.options?.max_pages || 10;
-    const maxDepth = context.options?.max_depth || 2;
-    
-    // CRITICAL: For single-page scans (max_pages=1, max_depth=0), disable link discovery
-    const isSinglePageScan = maxPages === 1 && maxDepth === 0;
-    
-    await sendLog(jobId, 'info', `🔄 WORKFLOW MODE: ${isSinglePageScan ? 'Single-page' : 'Multi-page'} crawl (max ${maxPages} pages, depth ${maxDepth})`);
+    const requestedMaxPages = context.options?.max_pages;
+    const requestedMaxDepth = context.options?.max_depth;
+
+    // CRITICAL: Workflow execution is page-scoped. Domain crawling is backend-orchestrated by enqueueing
+    // many single-page crawl jobs so multiple runner containers can share work.
+    const maxPages = 1;
+    const maxDepth = 0;
+    const isSinglePageScan = true;
+
+    await sendLog(
+      jobId,
+      'info',
+      `🔄 WORKFLOW MODE: Single-page analysis (backend controls crawling). Requested max_pages=${requestedMaxPages ?? 'n/a'}, max_depth=${requestedMaxDepth ?? 'n/a'}`
+    );
     
     // Initialize workflow analyzer and enhanced executor with context
     const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger, context);
@@ -4496,7 +4503,7 @@ async function safeSetSessionStorage(page, tokens) {
 }
 
 // Export safe storage functions for use in other modules
-export { safeGetLocalStorage, safeGetSessionStorage, safeSetLocalStorage, safeSetSessionStorage };
+export { safeGetLocalStorage, safeGetSessionStorage, safeSetLocalStorage, safeSetSessionStorage, takeScreenshot };
 
 /**
  * Collect all cookies from current page and send to backend

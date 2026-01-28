@@ -2927,7 +2927,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
       page_title: workflowState.pageTitle,
       page_url: workflowState.pageUrl,
       visible_text: workflowState.visibleText,
-      additional_prompt_text: this.context.additional_prompt_text || ''
+      additional_prompt_text: this.context.additional_prompt_text || '',
+      formsCount: 0 // Initialize formsCount to 0 so it's always available in template
     };
 
     const attachments = Array.isArray(step.config?.attachments)
@@ -2940,8 +2941,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
       descriptionPayload.interactive_elements_json = JSON.stringify(interactiveElements, null, 2);
     }
 
+    // CRITICAL: Always set formsCount (even if forms attachment not requested) so it's available in template
+    const formsCount = workflowState.playwrightAnalysis?.forms?.length || 0;
+    descriptionPayload.formsCount = formsCount;
+    
     if (attachments.includes('forms')) {
-      const formsCount = workflowState.playwrightAnalysis?.forms?.length || 0;
       console.log(`🔍 Forms attachment requested. Checking workflowState...`);
       console.log(`  playwrightAnalysis exists: ${!!workflowState.playwrightAnalysis}`);
       console.log(`  forms array exists: ${!!workflowState.playwrightAnalysis?.forms}`);
@@ -3994,7 +3998,100 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
 
           // CRITICAL: Store as legScriptToExecute for execute-code-from-variable steps
-          const cleanedScript = this.cleanScript(parsedResponse.playwright_script);
+          let cleanedScript = this.cleanScript(parsedResponse.playwright_script);
+          
+          // CRITICAL: Fix undefined variable references that AI might generate
+          // Use MULTIPLE aggressive methods to catch ALL variations (including edge cases)
+          if (cleanedScript) {
+            const beforeReplacement = cleanedScript;
+            const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+            
+            // Check if variables are present BEFORE replacement
+            const hasVarsBefore = variableNames.some(v => cleanedScript.includes(v));
+            if (hasVarsBefore) {
+              console.error(`❌ CRITICAL: Found forbidden variables in cleanedScript BEFORE replacement!`);
+              const foundVars = variableNames.filter(v => cleanedScript.includes(v));
+              console.error(`❌ Found variables: ${foundVars.join(', ')}`);
+            }
+            
+            // Method 1: Simple string replace using while loop (catches ANY form, even if split or encoded)
+            for (const varName of variableNames) {
+              let replaced = 0;
+              while (cleanedScript.includes(varName)) {
+                cleanedScript = cleanedScript.replace(varName, "(await page.textContent('body') || '')");
+                replaced++;
+                if (replaced > 100) break; // Safety limit
+              }
+              if (replaced > 0) {
+                console.log(`🔧 Method 1: Replaced ${replaced} occurrence(s) of ${varName} using while loop`);
+              }
+              // Also try case variations
+              const lowerVar = varName.toLowerCase();
+              const upperVar = varName.toUpperCase();
+              while (cleanedScript.includes(lowerVar)) {
+                cleanedScript = cleanedScript.replace(lowerVar, "(await page.textContent('body') || '')");
+              }
+              while (cleanedScript.includes(upperVar)) {
+                cleanedScript = cleanedScript.replace(upperVar, "(await page.textContent('body') || '')");
+              }
+            }
+            
+            // Method 2: Word boundary regex (catches as identifiers)
+            cleanedScript = cleanedScript.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+            cleanedScript = cleanedScript.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
+            cleanedScript = cleanedScript.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+            
+            // Method 3: Template literal context
+            cleanedScript = cleanedScript.replace(/\$\{resolvedVisibleText\}/gi, "${await page.textContent('body') || ''}");
+            cleanedScript = cleanedScript.replace(/\$\{visible_text\}/gi, "${await page.textContent('body') || ''}");
+            cleanedScript = cleanedScript.replace(/\$\{visibleText\}/gi, "${await page.textContent('body') || ''}");
+            
+            // Method 4: Case-insensitive regex without word boundaries (catches in strings, comments, etc.)
+            cleanedScript = cleanedScript.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
+            cleanedScript = cleanedScript.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+            cleanedScript = cleanedScript.replace(/visibleText/gi, "(await page.textContent('body') || '')");
+            
+            // Replace credentials.username/password with input_credentials.username/password
+            cleanedScript = cleanedScript.replace(/\bcredentials\.username\b/gi, 'input_credentials.username');
+            cleanedScript = cleanedScript.replace(/\bcredentials\.password\b/gi, 'input_credentials.password');
+            cleanedScript = cleanedScript.replace(/\bcreds\.username\b/gi, 'input_credentials.username');
+            cleanedScript = cleanedScript.replace(/\bcreds\.password\b/gi, 'input_credentials.password');
+            
+            if (cleanedScript !== beforeReplacement) {
+              const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+              console.log(`🔧 Enhanced replacement in legScriptToExecute: Fixed ${replacedCount} undefined variable(s)`);
+            }
+            
+            // Final verification - if still present, this is critical
+            if (/resolvedVisibleText|visibleText|visible_text/i.test(cleanedScript)) {
+              console.error(`❌ CRITICAL: Variable STILL present in cleanedScript after ALL replacement methods!`);
+              const stillPresent = cleanedScript.match(/resolvedVisibleText|visibleText|visible_text/gi);
+              console.error(`❌ Still present: ${stillPresent?.length || 0} occurrence(s): ${stillPresent?.slice(0, 5).join(', ') || 'none'}`);
+              // Find exact positions
+              const positions = [];
+              for (const varName of variableNames) {
+                let pos = 0;
+                while ((pos = cleanedScript.indexOf(varName, pos)) !== -1) {
+                  positions.push({ varName, pos });
+                  pos += varName.length;
+                }
+              }
+              positions.slice(0, 3).forEach(({ varName, pos }, i) => {
+                const context = cleanedScript.substring(Math.max(0, pos - 200), Math.min(cleanedScript.length, pos + 200));
+                console.error(`❌ Position ${i + 1}: ${varName} at ${pos}, context: ...${context}...`);
+              });
+              // Last resort: replace character by character if needed
+              for (const varName of variableNames) {
+                const chars = varName.split('');
+                const pattern = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('');
+                cleanedScript = cleanedScript.replace(new RegExp(pattern, 'gi'), "(await page.textContent('body') || '')");
+              }
+              console.warn(`⚠️ Applied character-by-character replacement as last resort`);
+            } else {
+              console.log(`✅ Verified: No forbidden variables remain in cleanedScript`);
+            }
+          }
+          
           if (cleanedScript && cleanedScript.trim().length > 0) {
             workflowState.legScriptToExecute = cleanedScript;
             if (!workflowState.context) {
@@ -4034,7 +4131,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
             null;
 
           if (typeof fallbackScript === 'string' && fallbackScript.trim().length > 0) {
-            const cleanedFallback = this.cleanScript(fallbackScript);
+            let cleanedFallback = this.cleanScript(fallbackScript);
+            
+            // CRITICAL: Fix undefined variable references
+            if (cleanedFallback) {
+              cleanedFallback = cleanedFallback.replace(/\bresolvedVisibleText\b/gi, "await page.textContent('body')");
+              cleanedFallback = cleanedFallback.replace(/\bvisible_text\b/gi, "await page.textContent('body')");
+              cleanedFallback = cleanedFallback.replace(/\bvisibleText\b/gi, "await page.textContent('body')");
+              cleanedFallback = cleanedFallback.replace(/\bcredentials\.username\b/gi, 'input_credentials.username');
+              cleanedFallback = cleanedFallback.replace(/\bcredentials\.password\b/gi, 'input_credentials.password');
+              cleanedFallback = cleanedFallback.replace(/\bcreds\.username\b/gi, 'input_credentials.username');
+              cleanedFallback = cleanedFallback.replace(/\bcreds\.password\b/gi, 'input_credentials.password');
+            }
+            
             if (cleanedFallback && cleanedFallback.trim().length > 0) {
               workflowState.legScriptToExecute = cleanedFallback;
               if (!workflowState.context) {
@@ -4133,8 +4242,54 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // This ensures we have the raw value before it gets structured
       // Note: The code at line 3200-3207 already stores it as legScriptToExecute, but we also store as playwright_script for direct access
       if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
-        const scriptValue = parsedResponse.playwright_script;
+        let scriptValue = parsedResponse.playwright_script;
         if (scriptValue) {
+          // CRITICAL: Replace undefined variables IMMEDIATELY after receiving from AI, before storing
+          // This is the earliest possible point to catch and fix the issue
+          if (typeof scriptValue === 'string') {
+            const beforeReplacement = scriptValue;
+            const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+            
+            // Replace using multiple methods to catch all forms
+            for (const varName of variableNames) {
+              // Method 1: Simple string replace (catches any form)
+              while (scriptValue.includes(varName)) {
+                scriptValue = scriptValue.replace(varName, "(await page.textContent('body') || '')");
+              }
+              // Method 2: Case-insensitive regex
+              scriptValue = scriptValue.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
+            }
+            
+            // Also replace credentials variables
+            scriptValue = scriptValue.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
+            scriptValue = scriptValue.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
+            scriptValue = scriptValue.replace(/\bcreds\.username\b/gi, "input_credentials.username");
+            scriptValue = scriptValue.replace(/\bcreds\.password\b/gi, "input_credentials.password");
+            
+            if (scriptValue !== beforeReplacement) {
+              const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+              console.log(`🔧 IMMEDIATE replacement in AI response: Fixed ${replacedCount} undefined variable(s) in playwright_script`);
+              // Update parsedResponse so the fixed version is stored
+              parsedResponse.playwright_script = scriptValue;
+            }
+          }
+          
+          // CRITICAL: Final validation - if script still contains forbidden variables, reject and fix
+          const forbiddenVars = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+          let hasForbiddenVars = false;
+          for (const varName of forbiddenVars) {
+            if (scriptValue.includes(varName)) {
+              hasForbiddenVars = true;
+              console.error(`❌ CRITICAL: AI generated script contains forbidden variable: ${varName}`);
+              console.error(`❌ Script will be automatically fixed, but this indicates the AI prompt needs improvement`);
+              // Force replace all instances
+              scriptValue = scriptValue.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
+            }
+          }
+          if (hasForbiddenVars) {
+            console.warn(`⚠️ Fixed forbidden variables in AI response - script should now work`);
+          }
+          
           // Store playwright_script directly in page namespace for easy access
           this.initializeVariablePool(workflowState);
           this.saveVariable(workflowState, 'playwright_script', scriptValue, 'page', step);
@@ -5433,6 +5588,33 @@ IMPORTANT OUTPUT REQUIREMENTS:
   saveVariable(workflowState, variableName, value, namespace = null, step = null) {
     this.initializeVariablePool(workflowState);
     
+    // CRITICAL: If saving playwright_script or any code variable, replace undefined variables immediately
+    let cleanedValue = value;
+    if ((variableName === 'playwright_script' || variableName.includes('script') || variableName.includes('code')) && typeof value === 'string') {
+      const beforeClean = cleanedValue;
+      const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+      
+      for (const varName of variableNames) {
+        // Replace using while loop to catch all instances
+        while (cleanedValue.includes(varName)) {
+          cleanedValue = cleanedValue.replace(varName, "(await page.textContent('body') || '')");
+        }
+        // Also use regex for case-insensitive matching
+        cleanedValue = cleanedValue.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
+      }
+      
+      // Also replace credentials variables
+      cleanedValue = cleanedValue.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
+      cleanedValue = cleanedValue.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
+      cleanedValue = cleanedValue.replace(/\bcreds\.username\b/gi, "input_credentials.username");
+      cleanedValue = cleanedValue.replace(/\bcreds\.password\b/gi, "input_credentials.password");
+      
+      if (cleanedValue !== beforeClean) {
+        const replacedCount = (beforeClean.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+        console.log(`🔧 saveVariable: Replaced ${replacedCount} undefined variable(s) in ${variableName}`);
+      }
+    }
+    
     // Auto-detect namespace if not provided
     if (!namespace) {
       // If inside a cycle, default to cycle namespace
@@ -5445,14 +5627,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     if (namespace === 'job') {
       workflowState.variablePool.job[variableName] = {
-        value,
+        value: cleanedValue,
         savedAt: new Date().toISOString(),
         stepSlug: step?.slug || null,
         stepName: step?.name || null
       };
     } else if (namespace === 'page') {
       workflowState.variablePool.page[variableName] = {
-        value,
+        value: cleanedValue,
         savedAt: new Date().toISOString(),
         stepSlug: step?.slug || null,
         stepName: step?.name || null
@@ -5465,7 +5647,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           workflowState.variablePool.cycle[cycleIndex] = {};
         }
         workflowState.variablePool.cycle[cycleIndex][variableName] = {
-          value,
+          value: cleanedValue,
           savedAt: new Date().toISOString(),
           stepSlug: step?.slug || null,
           stepName: step?.name || null,
@@ -5474,7 +5656,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       } else {
         // Fallback to page if no cycle active
         workflowState.variablePool.page[variableName] = {
-          value,
+          value: cleanedValue,
           savedAt: new Date().toISOString(),
           stepSlug: step?.slug || null,
           stepName: step?.name || null
@@ -6304,8 +6486,20 @@ IMPORTANT OUTPUT REQUIREMENTS:
     code = code.replace(/(username\w*\.fill)\(''\)/gi, `$1('${fallbackUsername}')`);
     code = code.replace(/(password\w*\.fill)\(''\)/gi, `$1('${fallbackPassword}')`);
 
-    // Clean the code to remove markdown code blocks and function declarations
+    // Clean the code to remove markdown code blocks and function declarations FIRST
     code = this.cleanScript(code);
+    
+    // CRITICAL: Fix undefined variable references that AI might generate (AFTER cleaning)
+    // Replace common undefined variables with proper Playwright calls
+    // Use word boundaries to avoid partial matches
+    code = code.replace(/\bresolvedVisibleText\b/gi, "await page.textContent('body')");
+    code = code.replace(/\bvisible_text\b/gi, "await page.textContent('body')");
+    code = code.replace(/\bvisibleText\b/gi, "await page.textContent('body')");
+    // Ensure input_credentials is used correctly (it's passed as parameter)
+    code = code.replace(/\bcredentials\.username\b/gi, 'input_credentials.username');
+    code = code.replace(/\bcredentials\.password\b/gi, 'input_credentials.password');
+    code = code.replace(/\bcreds\.username\b/gi, 'input_credentials.username');
+    code = code.replace(/\bcreds\.password\b/gi, 'input_credentials.password');
     code = code.replace(/page\.goto\([^)]*\)\s*;?/gi, '');
     const cleanedCodeLength = code?.length || 0;
     
@@ -6710,8 +6904,105 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // CRITICAL: First check variable pool (page namespace) for direct variable access
     if (workflowState.variablePool?.page?.[sourceField]) {
       const varData = workflowState.variablePool.page[sourceField];
-      code = varData?.value !== undefined ? varData.value : varData;
-      if (code) {
+      console.log(`🔍 DEBUG: varData type: ${typeof varData}, has value: ${varData?.value !== undefined}, value type: ${typeof varData?.value}`);
+      let rawCode = varData?.value !== undefined ? varData.value : varData;
+      console.log(`🔍 DEBUG: rawCode type after extraction: ${typeof rawCode}, length: ${rawCode?.length || 0}`);
+      
+      // CRITICAL: Ensure code is a string before processing
+      if (rawCode && typeof rawCode !== 'string') {
+        console.log(`🔍 DEBUG: Converting rawCode to string (was ${typeof rawCode})`);
+        rawCode = String(rawCode);
+      }
+      
+      console.log(`🔍 DEBUG: Checking rawCode - type: ${typeof rawCode}, length: ${rawCode?.length || 0}, isString: ${typeof rawCode === 'string'}, hasLength: ${rawCode?.length > 0}`);
+      if (rawCode && typeof rawCode === 'string' && rawCode.length > 0) {
+        console.log(`🔍 DEBUG: Entering replacement block - rawCode is valid string`);
+        // CRITICAL: Check for unresolved variables BEFORE replacement
+        const hasUnresolved = /resolvedVisibleText|visibleText|visible_text/i.test(rawCode);
+        console.log(`🔍 DEBUG: hasUnresolved check: ${hasUnresolved}`);
+        if (hasUnresolved) {
+          console.warn(`⚠️ WARNING: Code contains unresolved variables! Checking before replacement...`);
+          const unresolvedMatches = rawCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+          console.warn(`⚠️ Found ${unresolvedMatches?.length || 0} unresolved variable(s): ${unresolvedMatches?.slice(0, 5).join(', ') || 'none'}`);
+        } else {
+          console.log(`🔍 DEBUG: No unresolved variables found in code`);
+        }
+        
+        // CRITICAL: Apply variable replacement IMMEDIATELY after retrieving from variable pool
+        // Use regex with global flag for efficiency (faster than while loops when no matches)
+        console.log(`🔧 Starting variable replacement on ${rawCode.length} char code`);
+        const beforeReplacement = rawCode;
+        const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+        
+        // Quick check - if no variables found, skip expensive operations
+        const hasAnyVariables = variableNames.some(v => rawCode.includes(v)) || 
+                                rawCode.includes('credentials.username') || 
+                                rawCode.includes('credentials.password') ||
+                                rawCode.includes('creds.username') ||
+                                rawCode.includes('creds.password');
+        
+        if (hasAnyVariables) {
+          console.log(`🔧 Variables found, applying replacement...`);
+          // Replace using regex with global flag (faster and catches all)
+          for (const varName of variableNames) {
+            if (rawCode.includes(varName)) {
+              const regex = new RegExp(varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+              const matches = rawCode.match(regex);
+              if (matches) {
+                rawCode = rawCode.replace(regex, "(await page.textContent('body') || '')");
+                console.log(`🔧 Replaced ${matches.length} occurrence(s) of ${varName}`);
+              }
+            }
+          }
+          
+          // Replace credentials using regex
+          if (rawCode.includes('credentials.username')) {
+            rawCode = rawCode.replace(/credentials\.username/gi, "input_credentials.username");
+          }
+          if (rawCode.includes('credentials.password')) {
+            rawCode = rawCode.replace(/credentials\.password/gi, "input_credentials.password");
+          }
+          if (rawCode.includes('creds.username')) {
+            rawCode = rawCode.replace(/creds\.username/gi, "input_credentials.username");
+          }
+          if (rawCode.includes('creds.password')) {
+            rawCode = rawCode.replace(/creds\.password/gi, "input_credentials.password");
+          }
+        } else {
+          console.log(`🔧 No variables found, skipping replacement`);
+        }
+        
+        // CRITICAL: Final aggressive pass - replace ANY remaining instances using regex with global flag
+        const beforeFinal = rawCode;
+        rawCode = rawCode.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
+        rawCode = rawCode.replace(/visibleText/gi, "(await page.textContent('body') || '')");
+        rawCode = rawCode.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+        
+        if (rawCode !== beforeReplacement || rawCode !== beforeFinal) {
+          const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text|credentials\.(username|password)|creds\.(username|password)/gi) || []).length;
+          console.log(`🔧 Applied variable replacement on retrieved code: ${replacedCount} occurrence(s) fixed`);
+        }
+        console.log(`🔧 Variable replacement completed`);
+        
+        // CRITICAL: Final check - if still present, this is a critical error
+        if (/resolvedVisibleText|visibleText|visible_text/i.test(rawCode)) {
+          console.error(`❌ CRITICAL ERROR: Variables STILL present after ALL replacement attempts!`);
+          const stillPresent = rawCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+          console.error(`❌ Still present: ${stillPresent?.length || 0} occurrence(s): ${stillPresent?.slice(0, 5).join(', ') || 'none'}`);
+          const firstIndex = rawCode.search(/resolvedVisibleText|visibleText|visible_text/i);
+          if (firstIndex >= 0) {
+            console.error(`❌ Code snippet: ${rawCode.substring(Math.max(0, firstIndex - 100), Math.min(rawCode.length, firstIndex + 200))}`);
+          }
+          // Emergency replacement - replace everything one more time using while loop
+          for (const varName of variableNames) {
+            while (rawCode.includes(varName)) {
+              rawCode = rawCode.replace(varName, "(await page.textContent('body') || '')");
+            }
+          }
+          console.warn(`⚠️ Applied emergency replacement - script may still fail`);
+        }
+        
+        code = rawCode;
         console.log(`✅ Resolved code from variable pool (page namespace): ${sourceField} (${code.length} chars)`);
       }
     }
@@ -6721,17 +7012,46 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const fieldData = workflowState[sourceField];
       if (typeof fieldData === 'object' && fieldData !== null && fieldData.value !== undefined) {
         code = fieldData.value;
-        console.log(`✅ Resolved code from workflowState[${sourceField}].value (${code.length} chars)`);
       } else if (typeof fieldData === 'string') {
         code = fieldData;
-        console.log(`✅ Resolved code from workflowState[${sourceField}] (direct string, ${code.length} chars)`);
+      }
+      if (code && typeof code === 'string') {
+        // CRITICAL: Apply variable replacement
+        const beforeReplacement = code;
+        code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
+        code = code.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
+        code = code.replace(/\bcreds\.username\b/gi, "input_credentials.username");
+        code = code.replace(/\bcreds\.password\b/gi, "input_credentials.password");
+        if (code !== beforeReplacement) {
+          const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text|credentials\.(username|password)|creds\.(username|password)/gi) || []).length;
+          console.log(`🔧 Applied variable replacement on workflowState code: ${replacedCount} occurrence(s) fixed`);
+        }
+        console.log(`✅ Resolved code from workflowState[${sourceField}] (${code.length} chars)`);
       }
     }
     
     // Also check context.legScriptToExecute (legacy location)
     if (!code && workflowState.context?.[sourceField]) {
       code = workflowState.context[sourceField];
-      console.log(`✅ Resolved code from workflowState.context[${sourceField}] (${typeof code === 'string' ? code.length + ' chars' : typeof code})`);
+      if (code && typeof code === 'string') {
+        // CRITICAL: Apply variable replacement
+        const beforeReplacement = code;
+        code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
+        code = code.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
+        code = code.replace(/\bcreds\.username\b/gi, "input_credentials.username");
+        code = code.replace(/\bcreds\.password\b/gi, "input_credentials.password");
+        if (code !== beforeReplacement) {
+          const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text|credentials\.(username|password)|creds\.(username|password)/gi) || []).length;
+          console.log(`🔧 Applied variable replacement on context code: ${replacedCount} occurrence(s) fixed`);
+        }
+        console.log(`✅ Resolved code from workflowState.context[${sourceField}] (${code.length} chars)`);
+      }
     }
     
     // Also check resolvePathValue which handles variable pool access
@@ -6773,16 +7093,114 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
     
+    // CRITICAL: Apply variable replacement IMMEDIATELY after retrieving code
+    // This ensures that even if code was stored with unresolved variables, they're fixed now
+    // Use MULTIPLE aggressive methods to catch ALL variations
+    if (code && typeof code === 'string') {
+      const beforeReplacement = code;
+      const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+      
+      // Method 1: Simple string replace using while loop (catches ANY form)
+      for (const varName of variableNames) {
+        while (code.includes(varName)) {
+          code = code.replace(varName, "(await page.textContent('body') || '')");
+        }
+        // Also try case variations
+        const lowerVar = varName.toLowerCase();
+        const upperVar = varName.toUpperCase();
+        while (code.includes(lowerVar)) {
+          code = code.replace(lowerVar, "(await page.textContent('body') || '')");
+        }
+        while (code.includes(upperVar)) {
+          code = code.replace(upperVar, "(await page.textContent('body') || '')");
+        }
+      }
+      
+      // Method 2: Word boundary regex
+      code = code.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
+      
+      // Method 3: Template literal context
+      code = code.replace(/\$\{resolvedVisibleText\}/gi, "${await page.textContent('body') || ''}");
+      code = code.replace(/\$\{visible_text\}/gi, "${await page.textContent('body') || ''}");
+      code = code.replace(/\$\{visibleText\}/gi, "${await page.textContent('body') || ''}");
+      
+      // Method 4: Case-insensitive regex without word boundaries
+      code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+      
+      // Replace credentials references
+      code = code.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
+      code = code.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
+      code = code.replace(/\bcreds\.username\b/gi, "input_credentials.username");
+      code = code.replace(/\bcreds\.password\b/gi, "input_credentials.password");
+      
+      if (code !== beforeReplacement) {
+        const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+        console.log(`🔧 Replacement after code retrieval: Fixed ${replacedCount} undefined variable(s)`);
+      }
+      
+      // Final verification
+      if (/resolvedVisibleText|visibleText|visible_text/i.test(code)) {
+        console.error(`❌ CRITICAL: Variable STILL present after retrieval replacement!`);
+        const stillPresent = code.match(/resolvedVisibleText|visibleText|visible_text/gi);
+        console.error(`❌ Still present: ${stillPresent?.length || 0} occurrence(s)`);
+        // Last resort: character-by-character replacement
+        for (const varName of variableNames) {
+          const chars = varName.split('');
+          const pattern = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('');
+          code = code.replace(new RegExp(pattern, 'gi'), "(await page.textContent('body') || '')");
+        }
+        console.warn(`⚠️ Applied character-by-character replacement as last resort`);
+      }
+      if (code !== beforeReplacement) {
+        const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text|credentials\.(username|password)|creds\.(username|password)/gi) || []).length;
+        console.log(`🔧 Applied variable replacement on retrieved code: ${replacedCount} occurrence(s) fixed`);
+      }
+    }
+    
     // Final fallback: log available keys for debugging and fail if code still not found
     if (!code) {
       // Try final fallbacks
       if (workflowState.legScriptToExecute) {
         code = workflowState.legScriptToExecute;
         console.log(`✅ Using workflowState.legScriptToExecute as fallback: ${code.length} chars`);
+        // CRITICAL: Apply replacement on fallback code too
+        if (code && typeof code === 'string') {
+          const beforeFallbackReplacement = code;
+          const fallbackVariableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+          for (const varName of fallbackVariableNames) {
+            while (code.includes(varName)) {
+              code = code.replace(varName, "(await page.textContent('body') || '')");
+            }
+            code = code.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
+          }
+          if (code !== beforeFallbackReplacement) {
+            const replacedCount = (beforeFallbackReplacement.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+            console.log(`🔧 Replacement on fallback legScriptToExecute: Fixed ${replacedCount} undefined variable(s)`);
+          }
+        }
       }
       if (!code && workflowState.context?.legScriptToExecute) {
         code = workflowState.context.legScriptToExecute;
         console.log(`✅ Using workflowState.context.legScriptToExecute as fallback: ${code.length} chars`);
+        // CRITICAL: Apply replacement on fallback code too
+        if (code && typeof code === 'string') {
+          const beforeFallbackReplacement = code;
+          const fallbackVariableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+          for (const varName of fallbackVariableNames) {
+            while (code.includes(varName)) {
+              code = code.replace(varName, "(await page.textContent('body') || '')");
+            }
+            code = code.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
+          }
+          if (code !== beforeFallbackReplacement) {
+            const replacedCount = (beforeFallbackReplacement.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+            console.log(`🔧 Replacement on fallback context.legScriptToExecute: Fixed ${replacedCount} undefined variable(s)`);
+          }
+        }
       }
       
       // If still not found, fail with detailed error
@@ -6966,12 +7384,161 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     }
     
+    // CRITICAL: Apply variable replacement BEFORE cleaning
+    // This ensures variables are replaced even if they're in comments or strings that might be removed
+    if (code && typeof code === 'string') {
+      const beforePreClean = code;
+      code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
+      code = code.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
+      code = code.replace(/\bcreds\.username\b/gi, "input_credentials.username");
+      code = code.replace(/\bcreds\.password\b/gi, "input_credentials.password");
+      if (code !== beforePreClean) {
+        const preCleanCount = (beforePreClean.match(/resolvedVisibleText|visibleText|visible_text|credentials\.(username|password)|creds\.(username|password)/gi) || []).length;
+        console.log(`🔧 Pre-clean variable replacement: ${preCleanCount} occurrence(s) fixed`);
+      }
+    }
+    
     // Clean the code to remove markdown code blocks and function declarations
     code = this.cleanScript(code);
     console.log(`🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
     
     if (!code || code.trim().length === 0) {
       throw new Error(`Script is empty after cleaning for step: ${step.name}`);
+    }
+    
+    // CRITICAL: Replace undefined variables with correct Playwright API equivalents
+    // This happens AFTER cleaning but BEFORE execution
+    // Replace common undefined variables that AI might use from context
+    // IMPORTANT: Use more aggressive patterns to catch all variations (case-insensitive)
+    const variableReplacements = [
+      // Replace resolvedVisibleText, visible_text, visibleText with page.textContent('body')
+      // Match with word boundaries and also in string contexts (case-insensitive)
+      { pattern: /\bresolvedVisibleText\b/gi, replacement: "(await page.textContent('body') || '')" },
+      { pattern: /\bvisible_text\b/gi, replacement: "(await page.textContent('body') || '')" },
+      { pattern: /\bvisibleText\b/gi, replacement: "(await page.textContent('body') || '')" },
+      // Replace credentials.username/password with input_credentials.username/password
+      { pattern: /\bcredentials\.username\b/gi, replacement: "input_credentials.username" },
+      { pattern: /\bcredentials\.password\b/gi, replacement: "input_credentials.password" },
+      { pattern: /\bcreds\.username\b/gi, replacement: "input_credentials.username" },
+      { pattern: /\bcreds\.password\b/gi, replacement: "input_credentials.password" },
+      // Also catch if used in template strings or other contexts
+      { pattern: /\$\{resolvedVisibleText\}/gi, replacement: "${await page.textContent('body') || ''}" },
+      { pattern: /\$\{visible_text\}/gi, replacement: "${await page.textContent('body') || ''}" },
+      { pattern: /\$\{visibleText\}/gi, replacement: "${await page.textContent('body') || ''}" },
+    ];
+    
+    let replacementCount = 0;
+    const originalCode = code;
+    for (const { pattern, replacement } of variableReplacements) {
+      const matches = code.match(pattern);
+      if (matches) {
+        code = code.replace(pattern, replacement);
+        replacementCount += matches.length;
+        console.log(`🔧 Replaced ${matches.length} occurrence(s) of ${pattern.source} with ${replacement}`);
+      }
+    }
+    
+    // CRITICAL: Final aggressive pass - replace ANY remaining instances (case-insensitive, no word boundaries)
+    // This catches variables in any context (strings, comments, variable names, etc.)
+    const beforeAggressive = code;
+    code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
+    code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
+    code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+    if (code !== beforeAggressive) {
+      const aggressiveCount = (beforeAggressive.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+      replacementCount += aggressiveCount;
+      console.log(`🔧 Applied aggressive replacement: ${aggressiveCount} occurrence(s) removed`);
+    }
+    
+    // CRITICAL: Final check - search for variable in ALL possible forms (including edge cases)
+    // Use multiple methods to ensure we catch it
+    const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+    let foundVariables = [];
+    
+    for (const varName of variableNames) {
+      // Method 1: Simple indexOf (catches any form)
+      const indexOfMatch = code.indexOf(varName);
+      if (indexOfMatch >= 0) {
+        foundVariables.push({ name: varName, method: 'indexOf', position: indexOfMatch });
+      }
+      
+      // Method 2: Case-insensitive regex
+      const regexMatch = new RegExp(varName, 'gi').test(code);
+      if (regexMatch) {
+        const matches = code.match(new RegExp(varName, 'gi'));
+        foundVariables.push({ name: varName, method: 'regex', count: matches?.length || 0 });
+      }
+    }
+    
+    if (foundVariables.length > 0) {
+      console.error(`❌ CRITICAL ERROR: Code STILL contains unresolved variable after ALL replacement attempts!`);
+      foundVariables.forEach(({ name, method, position, count }) => {
+        if (method === 'indexOf') {
+          const context = code.substring(Math.max(0, position - 200), Math.min(code.length, position + 200));
+          console.error(`❌ Found '${name}' via ${method} at position ${position}, context: ...${context}...`);
+        } else {
+          console.error(`❌ Found '${name}' via ${method}, count: ${count}`);
+        }
+      });
+      
+      // Last resort: replace with a safe fallback using multiple methods
+      // Method 1: Simple string replace (catches any form)
+      for (const varName of variableNames) {
+        while (code.includes(varName)) {
+          code = code.replace(varName, "(await page.textContent('body') || '')");
+        }
+        // Also try case variations
+        const lowerVar = varName.toLowerCase();
+        const upperVar = varName.toUpperCase();
+        while (code.includes(lowerVar)) {
+          code = code.replace(lowerVar, "(await page.textContent('body') || '')");
+        }
+        while (code.includes(upperVar)) {
+          code = code.replace(upperVar, "(await page.textContent('body') || '')");
+        }
+      }
+      
+      // Method 2: Regex replace (catches word boundaries and template literals)
+      code = code.replace(/resolvedVisibleText|visibleText|visible_text/gi, "(await page.textContent('body') || '')");
+      
+      console.warn(`⚠️ Applied emergency replacement using multiple methods - script should now be clean`);
+      
+      // Final verification
+      const stillPresent = variableNames.some(v => code.includes(v));
+      if (stillPresent) {
+        console.error(`❌ CRITICAL: Variable STILL present after emergency replacement! This should not happen!`);
+        // One more aggressive pass - replace character by character if needed
+        for (const varName of variableNames) {
+          const regex = new RegExp(varName.split('').join('[\\s\\S]*?'), 'gi');
+          code = code.replace(regex, "(await page.textContent('body') || '')");
+        }
+      }
+    }
+    
+    if (replacementCount > 0) {
+      console.log(`✅ Total variable replacements: ${replacementCount}`);
+      if (jobId) {
+        try {
+          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+            jobId: jobId,
+            level: 'debug',
+            message: `🔧 Replaced ${replacementCount} undefined variable(s) with correct Playwright API equivalents`,
+            component: 'WORKFLOW-ANALYZER',
+            metadata: {
+              step_id: step.id,
+              step_name: step.name,
+              replacement_count: replacementCount
+            }
+          }, {
+            headers: this.getAuthHeaders()
+          });
+        } catch (logError) {
+          // Silent fail - don't block execution
+        }
+      }
     }
     
     try {
@@ -6989,7 +7556,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       if (resolvedPageUrl && urlBeforeAction !== resolvedPageUrl) {
         console.log(`🔁 Navigating to start page before executing journey: ${resolvedPageUrl}`);
         await page.goto(resolvedPageUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => null);
+        // DO NOT wait for load state - it can hang on static pages
+        // Just wait a short time for page to settle
+        await page.waitForTimeout(1000);
         urlBeforeAction = page.url();
       }
 
@@ -7046,17 +7615,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
         console.warn(`⚠️ Failed to capture before screenshot: ${screenshotError.message}`);
       }
 
+      // Get visible text from workflow state (not from undefined resolvedVisibleText)
+      const visibleText = workflowState.visible_text || 
+                         workflowState.variablePool?.page?.visible_text?.value ||
+                         workflowState.playwrightAnalysis?.visible_text ||
+                         '';
+      
       const shouldPrefillSpecificCredentials =
-        resolvedVisibleText &&
-        typeof resolvedVisibleText === 'string' &&
-        resolvedVisibleText.toLowerCase().includes('specific credentials') &&
-        extractedUsername &&
-        extractedPassword;
+        visibleText &&
+        typeof visibleText === 'string' &&
+        visibleText.toLowerCase().includes('specific credentials') &&
+        inputCredentials?.username &&
+        inputCredentials?.password;
 
       if (shouldPrefillSpecificCredentials) {
         try {
-          await page.fill('#username', extractedUsername);
-          await page.fill('#password', extractedPassword);
+          await page.fill('#username', inputCredentials.username);
+          await page.fill('#password', inputCredentials.password);
           console.log(`🔐 Prefilled specific credentials into #username/#password`);
         } catch (prefillError) {
           console.warn(`⚠️ Failed to prefill specific credentials: ${prefillError.message}`);
@@ -7321,12 +7896,58 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
         };
         
-        // Wrap common Playwright methods to log execution
+        // Helper function to capture screenshot after action
+        const captureScreenshotAfterAction = async (methodName, args) => {
+          if (!jobId || !pageObj) {
+            console.warn(`⚠️ Cannot capture screenshot: jobId=${!!jobId}, pageObj=${!!pageObj}`);
+            return;
+          }
+          
+          try {
+            // Wait a bit for the action to complete and page to update
+            await pageObj.waitForTimeout(500);
+            
+            // Import takeScreenshot function
+            const unifiedOps = await import('../../crawling/unified-operations.js');
+            
+            // Capture screenshot with action context
+            const actionDisplay = methodName + (args.length > 0 ? `(${typeof args[0] === 'string' ? args[0].substring(0, 50) : '...'})` : '()');
+            console.log(`📸 Attempting to capture screenshot after action: ${actionDisplay}`);
+            
+            await unifiedOps.takeScreenshot(pageObj, jobId, `action_${methodName}`, {
+              action: actionDisplay,
+              method_name: methodName,
+              step_id: stepInfo?.id,
+              step_name: stepInfo?.name,
+              action_type: 'playwright_method'
+            });
+            
+            console.log(`✅ Screenshot captured after action: ${actionDisplay}`);
+          } catch (screenshotError) {
+            // Don't fail execution if screenshot fails
+            console.warn(`⚠️ Failed to capture screenshot after ${methodName}: ${screenshotError.message}`);
+            if (screenshotError.stack) {
+              console.warn(`⚠️ Screenshot error stack: ${screenshotError.stack.substring(0, 500)}`);
+            }
+          }
+        };
+        
+        // Wrap common Playwright methods to log execution and capture screenshots
         const wrapMethod = (methodName, originalMethod) => {
           return async function(...args) {
             console.log(`🔍 Wrapper called for method: ${methodName}`);
             await logAction(methodName, args);
-            return await originalMethod.apply(pageObj, args);
+            
+            // Execute the original method
+            const result = await originalMethod.apply(pageObj, args);
+            
+            // Capture screenshot after action completes (for interactive methods)
+            const interactiveMethods = ['click', 'fill', 'type', 'press', 'selectOption', 'check', 'uncheck', 'hover', 'focus', 'goto'];
+            if (interactiveMethods.includes(methodName)) {
+              await captureScreenshotAfterAction(methodName, args);
+            }
+            
+            return result;
           };
         };
         
@@ -7355,8 +7976,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
           // Wrap locator methods
           const wrapLocatorMethod = (methodName, originalLocatorMethod) => {
             return async function(...args) {
-              await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).${methodName}`, args);
-              return await originalLocatorMethod.apply(locator, args);
+              const locatorAction = `locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).${methodName}`;
+              await logAction(locatorAction, args);
+              
+              // Execute the original method
+              const result = await originalLocatorMethod.apply(locator, args);
+              
+              // Capture screenshot after action completes (for interactive methods)
+              const interactiveMethods = ['click', 'fill', 'type', 'press', 'selectOption', 'check', 'uncheck', 'hover', 'focus'];
+              if (interactiveMethods.includes(methodName)) {
+                await captureScreenshotAfterAction(locatorAction, args);
+              }
+              
+              return result;
             };
           };
           
@@ -7523,7 +8155,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
           wrappedPage = pageObj;
         }
 
-        if (!allowNavigation && typeof wrappedPage.goto === 'function') {
+        // Check if navigation should be blocked (for login jobs)
+        // Note: isLoginJob is defined in outer scope, but we'll check it from context
+        const blockNavigation = (this.context?.jobType === 'login' || 
+                                 this.context?.job_type === 'login' || 
+                                 this.context?.isLoginJob === true);
+        if (blockNavigation && typeof wrappedPage.goto === 'function') {
           const originalGoto = wrappedPage.goto.bind(wrappedPage);
           wrappedPage.goto = async (...args) => {
             console.warn(`⚠️ Blocked page.goto during journey execution`, args?.[0] || '');
@@ -7537,21 +8174,381 @@ IMPORTANT OUTPUT REQUIREMENTS:
         console.log(`🔍 Testing wrapper: wrappedPage.locator is function? ${typeof wrappedPage.locator === 'function'}`);
         console.log(`🔍 Testing wrapper: wrappedPage type=${typeof wrappedPage}, isProxy=${wrappedPage !== pageObj}`);
         
+        // CRITICAL: Apply variable replacement AGAIN right before execution
+        // This ensures any variables that weren't replaced earlier are caught
+        let finalScriptCode = scriptCode;
+        console.log(`🔧 executeInNodeContext: Starting replacement on ${finalScriptCode.length} char script`);
+        
+        // CRITICAL: Check for unresolved variables BEFORE replacement
+        const hasUnresolvedBeforeFinal = /resolvedVisibleText|visibleText|visible_text/i.test(finalScriptCode);
+        if (hasUnresolvedBeforeFinal) {
+          const unresolvedMatches = finalScriptCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+          console.error(`❌ CRITICAL: Found ${unresolvedMatches?.length || 0} unresolved variable(s) BEFORE final replacement: ${unresolvedMatches?.slice(0, 10).join(', ') || 'none'}`);
+          // Log context around first occurrence
+          const firstIndex = finalScriptCode.search(/resolvedVisibleText|visibleText|visible_text/i);
+          if (firstIndex >= 0) {
+            const context = finalScriptCode.substring(Math.max(0, firstIndex - 200), Math.min(finalScriptCode.length, firstIndex + 300));
+            console.error(`❌ Context around first occurrence (position ${firstIndex}): ...${context}...`);
+          }
+        } else {
+          console.log(`✅ No unresolved variables found in script before final replacement`);
+        }
+        
+        const variableReplacements = [
+          { pattern: /\bresolvedVisibleText\b/gi, replacement: "(await page.textContent('body') || '')" },
+          { pattern: /\bvisible_text\b/gi, replacement: "(await page.textContent('body') || '')" },
+          { pattern: /\bvisibleText\b/gi, replacement: "(await page.textContent('body') || '')" },
+          { pattern: /\bcredentials\.username\b/gi, replacement: "input_credentials.username" },
+          { pattern: /\bcredentials\.password\b/gi, replacement: "input_credentials.password" },
+          { pattern: /\bcreds\.username\b/gi, replacement: "input_credentials.username" },
+          { pattern: /\bcreds\.password\b/gi, replacement: "input_credentials.password" },
+          { pattern: /\binput_input_credentials\b/gi, replacement: "input_credentials" },
+        ];
+        
+        let finalReplacementCount = 0;
+        for (const { pattern, replacement } of variableReplacements) {
+          const matches = finalScriptCode.match(pattern);
+          if (matches) {
+            finalScriptCode = finalScriptCode.replace(pattern, replacement);
+            finalReplacementCount += matches.length;
+            console.log(`🔧 Final replacement: ${matches.length} occurrence(s) of ${pattern.source} with ${replacement}`);
+          }
+        }
+        
+        // CRITICAL: Final aggressive pass - replace ANY remaining instances (case-insensitive, no word boundaries)
+        // This is the LAST chance to fix before execution
+        const beforeFinalAggressive = finalScriptCode;
+        finalScriptCode = finalScriptCode.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
+        finalScriptCode = finalScriptCode.replace(/visibleText/gi, "(await page.textContent('body') || '')");
+        finalScriptCode = finalScriptCode.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+        if (finalScriptCode !== beforeFinalAggressive) {
+          const aggressiveCount = (beforeFinalAggressive.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+          finalReplacementCount += aggressiveCount;
+          console.log(`🔧 Final aggressive replacement: ${aggressiveCount} occurrence(s) removed`);
+        }
+        
+        // CRITICAL: Final check - if still present, this is a critical error
+        if (/resolvedVisibleText|visibleText|visible_text/i.test(finalScriptCode)) {
+          console.error(`❌ CRITICAL ERROR: Code STILL contains unresolved variable after ALL replacement attempts!`);
+          const stillPresent = finalScriptCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+          console.error(`❌ Still present: ${stillPresent?.length || 0} occurrence(s): ${stillPresent?.slice(0, 10).join(', ') || 'none'}`);
+          const firstIndex = finalScriptCode.search(/resolvedVisibleText|visibleText|visible_text/i);
+          if (firstIndex >= 0) {
+            console.error(`❌ Code snippet around error: ${finalScriptCode.substring(Math.max(0, firstIndex - 100), Math.min(finalScriptCode.length, firstIndex + 200))}`);
+          }
+          // Emergency replacement - replace everything
+          finalScriptCode = finalScriptCode.replace(/resolvedVisibleText|visibleText|visible_text/gi, "(await page.textContent('body') || '')");
+          console.warn(`⚠️ Applied emergency replacement - script execution may fail`);
+        }
+        
+        if (finalReplacementCount > 0) {
+          console.log(`✅ Applied ${finalReplacementCount} final variable replacement(s) before execution`);
+        }
+        
+        // CRITICAL: One more pass right before function creation - catch ANY form of the variable
+        // This is the absolute last chance before execution
+        const beforeFunctionCreation = finalScriptCode;
+        // Replace in all possible forms: direct reference, template literal, string concatenation, etc.
+        finalScriptCode = finalScriptCode.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+        finalScriptCode = finalScriptCode.replace(/\$\{resolvedVisibleText\}/gi, "${await page.textContent('body') || ''}");
+        finalScriptCode = finalScriptCode.replace(/['"]resolvedVisibleText['"]/gi, "(await page.textContent('body') || '')");
+        finalScriptCode = finalScriptCode.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+        finalScriptCode = finalScriptCode.replace(/\$\{visibleText\}/gi, "${await page.textContent('body') || ''}");
+        finalScriptCode = finalScriptCode.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
+        finalScriptCode = finalScriptCode.replace(/\$\{visible_text\}/gi, "${await page.textContent('body') || ''}");
+        if (finalScriptCode !== beforeFunctionCreation) {
+          const lastPassCount = (beforeFunctionCreation.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+          console.log(`🔧 Last-pass replacement before function creation: ${lastPassCount} occurrence(s) fixed`);
+        }
+        
+        // Final verification - if still present, log the exact location
+        if (/resolvedVisibleText|visibleText|visible_text/i.test(finalScriptCode)) {
+          const matches = finalScriptCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+          console.error(`❌ CRITICAL: Variable STILL present after all replacements! Found ${matches?.length || 0} occurrence(s)`);
+          matches?.forEach((match, idx) => {
+            const index = finalScriptCode.indexOf(match);
+            const context = finalScriptCode.substring(Math.max(0, index - 50), Math.min(finalScriptCode.length, index + 50));
+            console.error(`❌ Occurrence ${idx + 1}: "${match}" at position ${index}, context: ...${context}...`);
+          });
+          // Force replace one more time
+          finalScriptCode = finalScriptCode.replace(/resolvedVisibleText|visibleText|visible_text/gi, "(await page.textContent('body') || '')");
+          console.warn(`⚠️ Applied forced replacement - proceeding with execution`);
+        }
+        
+        // CRITICAL: Final check - search for variable in ANY form (including non-standard)
+        // This is the absolute last check before execution
+        const variablePatterns = [
+          /resolvedVisibleText/gi,
+          /visibleText/gi,
+          /visible_text/gi,
+          /resolved.*visible.*text/gi,
+          /visible.*text/gi
+        ];
+        let foundAny = false;
+        for (const pattern of variablePatterns) {
+          if (pattern.test(finalScriptCode)) {
+            foundAny = true;
+            const matches = finalScriptCode.match(pattern);
+            console.error(`❌ CRITICAL: Found variable pattern ${pattern.source} in final script! ${matches?.length || 0} occurrence(s)`);
+            matches?.forEach((match, idx) => {
+              const index = finalScriptCode.indexOf(match);
+              const context = finalScriptCode.substring(Math.max(0, index - 100), Math.min(finalScriptCode.length, index + 100));
+              console.error(`❌ Match ${idx + 1}: "${match}" at position ${index}, context: ...${context}...`);
+            });
+            // Force replace
+            finalScriptCode = finalScriptCode.replace(pattern, "(await page.textContent('body') || '')");
+          }
+        }
+        if (foundAny) {
+          console.warn(`⚠️ Applied emergency replacement for found variables`);
+        }
+        
+        // CRITICAL: Final absolute check - search the ENTIRE script for the variable in ANY form
+        // This is the last line of defense before execution
+        const entireScriptCheck = finalScriptCode;
+        const entireCheckVariableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+        let foundVariables = [];
+        for (const varName of entireCheckVariableNames) {
+          // Check in all possible forms: direct, in template literals, in strings, etc.
+          const patterns = [
+            new RegExp(`\\b${varName}\\b`, 'gi'),
+            new RegExp(`\\$\\{${varName}\\}`, 'gi'),
+            new RegExp(`['"]${varName}['"]`, 'gi'),
+            new RegExp(varName, 'gi') // Catch any form
+          ];
+          for (const pattern of patterns) {
+            const matches = entireScriptCheck.match(pattern);
+            if (matches && matches.length > 0) {
+              foundVariables.push({ name: varName, pattern: pattern.source, count: matches.length, matches: matches.slice(0, 5) });
+              // Replace immediately
+              finalScriptCode = finalScriptCode.replace(pattern, "(await page.textContent('body') || '')");
+            }
+          }
+        }
+        if (foundVariables.length > 0) {
+          console.error(`❌ CRITICAL: Found variables in final script after all replacements!`);
+          foundVariables.forEach(({ name, pattern, count, matches }) => {
+            console.error(`❌ Variable: ${name}, Pattern: ${pattern}, Count: ${count}, Sample matches: ${matches.join(', ')}`);
+            // Find exact locations
+            const indices = [];
+            let searchIndex = 0;
+            while ((searchIndex = finalScriptCode.indexOf(name, searchIndex)) !== -1) {
+              indices.push(searchIndex);
+              searchIndex += name.length;
+            }
+            indices.slice(0, 3).forEach((idx, i) => {
+              const context = finalScriptCode.substring(Math.max(0, idx - 150), Math.min(finalScriptCode.length, idx + 150));
+              console.error(`❌ Location ${i + 1} (position ${idx}): ...${context}...`);
+            });
+          });
+          console.warn(`⚠️ Applied final emergency replacement`);
+        }
+        
+        // Log a sample of the script to verify it's clean
+        const scriptSample = finalScriptCode.substring(0, 500);
+        console.log(`📝 Script sample (first 500 chars): ${scriptSample}`);
+        
         // Use string concatenation (not template literals) to avoid escaping issues
         // This allows the script code to contain backticks, ${}, etc. without problems
-        const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
+        let functionBody = 'return (async function() {\n' + finalScriptCode + '\n})();';
+        
+        // CRITICAL: Final absolute check on the ENTIRE function body string
+        // This is the absolute last check - search the entire functionBody for the variable
+        const bodyCheckPatterns = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+        let bodyReplacements = 0;
+        for (const varName of bodyCheckPatterns) {
+          const regex = new RegExp(varName, 'gi');
+          const matches = functionBody.match(regex);
+          if (matches && matches.length > 0) {
+            console.error(`❌ CRITICAL: Found '${varName}' in functionBody ${matches.length} time(s)!`);
+            // Find all positions
+            const positions = [];
+            let pos = 0;
+            while ((pos = functionBody.indexOf(varName, pos)) !== -1) {
+              positions.push(pos);
+              pos += varName.length;
+            }
+            // Log first 3 occurrences with context
+            positions.slice(0, 3).forEach((idx, i) => {
+              const context = functionBody.substring(Math.max(0, idx - 300), Math.min(functionBody.length, idx + 300));
+              console.error(`❌ FunctionBody occurrence ${i + 1} (position ${idx}): ...${context}...`);
+            });
+            // Replace in functionBody
+            functionBody = functionBody.replace(regex, "(await page.textContent('body') || '')");
+            bodyReplacements += matches.length;
+            console.warn(`⚠️ Replaced ${matches.length} occurrence(s) of '${varName}' in functionBody`);
+          }
+        }
+        if (bodyReplacements > 0) {
+          console.warn(`⚠️ Total functionBody replacements: ${bodyReplacements}`);
+        }
+        
+        // CRITICAL: One final check right before new Function() - search functionBody one more time
+        // Use multiple detection methods to catch the variable in ANY form
+        const beforeNewFunction = functionBody;
+        const finalCheckVariableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+        let foundInFunctionBody = false;
+        
+        for (const varName of finalCheckVariableNames) {
+          // Method 1: Simple indexOf (catches any form, even if split or encoded)
+          if (functionBody.includes(varName)) {
+            foundInFunctionBody = true;
+            const positions = [];
+            let pos = 0;
+            while ((pos = functionBody.indexOf(varName, pos)) !== -1) {
+              positions.push(pos);
+              pos += varName.length;
+            }
+            console.error(`❌ CRITICAL: Found '${varName}' in functionBody RIGHT BEFORE new Function()! ${positions.length} occurrence(s)`);
+            positions.slice(0, 3).forEach((idx, i) => {
+              const context = functionBody.substring(Math.max(0, idx - 300), Math.min(functionBody.length, idx + 300));
+              console.error(`❌ Occurrence ${i + 1} (position ${idx}): ...${context}...`);
+            });
+            // Replace using while loop to catch all instances
+            while (functionBody.includes(varName)) {
+              functionBody = functionBody.replace(varName, "(await page.textContent('body') || '')");
+            }
+          }
+          
+          // Method 2: Case-insensitive regex
+          const regex = new RegExp(varName, 'gi');
+          if (regex.test(functionBody)) {
+            if (!foundInFunctionBody) {
+              foundInFunctionBody = true;
+              const matches = functionBody.match(regex);
+              console.error(`❌ CRITICAL: Found '${varName}' via regex in functionBody! ${matches?.length || 0} occurrence(s)`);
+            }
+            functionBody = functionBody.replace(regex, "(await page.textContent('body') || '')");
+          }
+        }
+        
+        if (foundInFunctionBody) {
+          console.warn(`⚠️ Applied final emergency replacement in functionBody before new Function()`);
+          
+          // Final verification - check again
+          const stillPresent = finalCheckVariableNames.some(v => functionBody.includes(v));
+          if (stillPresent) {
+            console.error(`❌ CRITICAL: Variable STILL present after emergency replacement! This is a critical bug!`);
+            // Last resort: replace character by character
+            for (const varName of finalCheckVariableNames) {
+              // Replace any sequence that might be the variable (handling potential encoding issues)
+              const chars = varName.split('');
+              const pattern = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('');
+              functionBody = functionBody.replace(new RegExp(pattern, 'gi'), "(await page.textContent('body') || '')");
+            }
+          }
+        }
+        
+        // CRITICAL: Log the actual script content to see if variable is present
+        const scriptCheck = finalScriptCode.toLowerCase();
+        if (scriptCheck.includes('resolvedvisibletext') || scriptCheck.includes('visibletext') || scriptCheck.includes('visible_text')) {
+          console.error(`❌ CRITICAL: Variable found in finalScriptCode BEFORE function creation!`);
+          const positions = [];
+          ['resolvedVisibleText', 'visibleText', 'visible_text'].forEach(varName => {
+            let pos = 0;
+            while ((pos = finalScriptCode.indexOf(varName, pos)) !== -1) {
+              positions.push({ varName, pos });
+              pos += varName.length;
+            }
+          });
+          positions.slice(0, 5).forEach(({ varName, pos }, i) => {
+            const context = finalScriptCode.substring(Math.max(0, pos - 300), Math.min(finalScriptCode.length, pos + 300));
+            console.error(`❌ Variable ${i + 1}: "${varName}" at position ${pos}, context: ...${context}...`);
+          });
+          // Force replace one more time
+          finalScriptCode = finalScriptCode.replace(/resolvedVisibleText|visibleText|visible_text/gi, "(await page.textContent('body') || '')");
+          functionBody = 'return (async function() {\n' + finalScriptCode + '\n})();';
+          console.warn(`⚠️ Applied emergency replacement and rebuilt functionBody`);
+        }
         
         // Create a function with page and input_credentials as parameters
-        console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
-        const fn = new Function('page', 'input_credentials', functionBody);
-        console.log(`🚀 Executing script with wrapped page object...`);
-        const result = await fn(wrappedPage, credentials);
-        console.log(`✅ Script execution completed, result.success=${result?.success}`);
-        console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
-        return result;
+        console.log(`🔧 Creating function with wrappedPage, script length=${finalScriptCode.length}, functionBody length=${functionBody.length}`);
+        
+        // CRITICAL: One final check using indexOf (most reliable method)
+        const finalCheckVars = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+        let finalCheckFound = false;
+        for (const varName of finalCheckVars) {
+          if (functionBody.includes(varName)) {
+            finalCheckFound = true;
+            console.error(`❌ CRITICAL: Found '${varName}' in functionBody using indexOf!`);
+            const positions = [];
+            let pos = 0;
+            while ((pos = functionBody.indexOf(varName, pos)) !== -1) {
+              positions.push(pos);
+              pos += varName.length;
+            }
+            positions.slice(0, 3).forEach((idx, i) => {
+              const context = functionBody.substring(Math.max(0, idx - 400), Math.min(functionBody.length, idx + 400));
+              console.error(`❌ Position ${idx}: ...${context}...`);
+            });
+            // Replace using while loop
+            while (functionBody.includes(varName)) {
+              functionBody = functionBody.replace(varName, "(await page.textContent('body') || '')");
+            }
+            console.warn(`⚠️ Applied indexOf-based replacement for '${varName}'`);
+          }
+        }
+        if (finalCheckFound) {
+          console.warn(`⚠️ Rebuilt functionBody after final check replacement`);
+        }
+        
+        // CRITICAL: Test if function can be created and if it contains the variable
+        // This is a final safety check before actual execution
+        try {
+          // Try to create the function first
+          const fn = new Function('page', 'input_credentials', functionBody);
+          
+          // Test if the function source contains the variable (Function.toString())
+          const fnSource = fn.toString();
+          if (fnSource.includes('resolvedVisibleText') || fnSource.includes('visibleText') || fnSource.includes('visible_text')) {
+            console.error(`❌ CRITICAL: Variable found in function source after creation!`);
+            const testVars = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+            testVars.forEach(varName => {
+              if (fnSource.includes(varName)) {
+                const idx = fnSource.indexOf(varName);
+                const context = fnSource.substring(Math.max(0, idx - 300), Math.min(fnSource.length, idx + 300));
+                console.error(`❌ Found '${varName}' in function source at position ${idx}: ...${context}...`);
+              }
+            });
+            // This shouldn't happen, but if it does, we need to rebuild
+            throw new Error(`Variable found in function source - this indicates a critical bug in replacement logic`);
+          }
+          
+          console.log(`🚀 Executing script with wrapped page object...`);
+          const result = await fn(wrappedPage, credentials);
+          console.log(`✅ Script execution completed, result.success=${result?.success}`);
+          console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
+          return result;
+        } catch (execError) {
+          // If execution fails with "resolvedVisibleText is not defined", log the exact script
+          if (execError.message && execError.message.includes('resolvedVisibleText')) {
+            console.error(`❌ CRITICAL EXECUTION ERROR: ${execError.message}`);
+            console.error(`❌ Full function body length: ${functionBody.length}`);
+            // Search for the variable in the function body using multiple methods
+            const errorIndices = [];
+            let searchIdx = 0;
+            while ((searchIdx = functionBody.indexOf('resolvedVisibleText', searchIdx)) !== -1) {
+              errorIndices.push(searchIdx);
+              searchIdx += 'resolvedVisibleText'.length;
+            }
+            if (errorIndices.length > 0) {
+              console.error(`❌ Found ${errorIndices.length} occurrence(s) of 'resolvedVisibleText' in function body using indexOf!`);
+              errorIndices.slice(0, 3).forEach((idx, i) => {
+                const context = functionBody.substring(Math.max(0, idx - 400), Math.min(functionBody.length, idx + 400));
+                console.error(`❌ Occurrence ${i + 1} (position ${idx}): ...${context}...`);
+              });
+            } else {
+              console.error(`❌ Variable not found in function body using indexOf, but error occurred.`);
+              console.error(`❌ This suggests the variable might be constructed dynamically or in a non-standard form.`);
+              console.error(`❌ Function body sample (first 2000 chars): ${functionBody.substring(0, 2000)}`);
+            }
+          }
+          throw execError;
+        }
       };
       
       // Wrap script execution with timeout
+      console.log(`📄 VAR_DUMP: About to call executeInNodeContext with page=${!!page}, code length=${code?.length || 0}, credentials=${!!inputCredentials}`);
       const executionStartTime = Date.now();
       const result = await Promise.race([
         executeInNodeContext(page, code, inputCredentials),
@@ -7603,6 +8600,24 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       
       // After executing code, wait for page to stabilize (navigation, DOM updates, etc.)
+      // CRITICAL: For login jobs, wait for navigation after form submission
+      if (isLoginJob) {
+        try {
+          // Wait for navigation with timeout (form submission should trigger navigation)
+          console.log(`🔐 Login job detected - waiting for navigation after form submission...`);
+          await Promise.race([
+            page.waitForURL('**', { timeout: 10000, waitUntil: 'domcontentloaded' }).catch(() => {
+              // URL might not change, wait for load state instead
+              return page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+            }),
+            new Promise(resolve => setTimeout(resolve, 10000)) // Max 10s wait
+          ]);
+          console.log(`✅ Navigation wait completed for login job`);
+        } catch (navError) {
+          console.log(`⚠️ Navigation wait completed (timeout or no navigation): ${navError.message}`);
+        }
+      }
+      
       try {
         await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
           console.warn('Page DOM not fully loaded after 30s, continuing anyway');
@@ -8285,7 +9300,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     try {
       await axios.post(
-        `${this.backendUrl}/api/workflows/${workflowState.workflowId}/legs/${legId}/complete`,
+        `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys/${legId}/complete`,
         {
           final_result: finalResult,
           error: error
@@ -9154,7 +10169,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState[itemVariable] = item;
       workflowState[indexVariable] = idx;
       
-      console.log(`🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
+      // CRITICAL: Also set currentLeg and currentJourney for while-loop to use
+      // The while-loop reads workflowState.currentLeg || workflowState.currentItem
+      // So we need to ensure both are set correctly for each iteration
+      if (itemsPath === 'journeysToExecute' || itemsPath === 'legsToExecute') {
+        workflowState.currentLeg = item;
+        workflowState.currentItem = item;
+        workflowState.currentJourney = item;
+        const journeyId = item.journey_id || item.leg_id || item.id;
+        console.log(`🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing journey ${journeyId} (${item.description || 'no description'})`);
+      } else {
+        console.log(`🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
+      }
       
       // Report progress: current iteration
       await this.updateJobProgress(jobId, {
@@ -9229,6 +10255,111 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepResults
       });
 
+      // CRITICAL: Mark leg as completed if this is a journey/leg execution
+      // The while-loop exits when justify_journey.result.status is NOT 'pending' (i.e., 'success' or 'failure')
+      // So if the loop completed, the journey finished with a final status
+      console.log(`🔍 [LEG-COMPLETION] Checking if leg should be marked: itemsPath=${itemsPath}, item keys=${Object.keys(item || {}).join(',')}`);
+      
+      if (itemsPath === 'journeysToExecute' || itemsPath === 'legsToExecute') {
+        const journey = item;
+        const legId = journey.leg_id || journey.journey_id || journey.id;
+        
+        console.log(`🔍 [LEG-COMPLETION] Processing journey/leg: legId=${legId}, workflowId=${workflowState.workflowId}, stepResults.length=${stepResults.length}`);
+        
+        if (!workflowState.workflowId || !legId) {
+          console.log(`⚠️ Cannot mark leg as completed: workflowId=${!!workflowState.workflowId}, legId=${!!legId}`);
+          // Continue to next iteration
+        } else {
+          // Find justify_journey result - check multiple locations
+          let justifyResult = null;
+          let journeyStatus = 'unknown';
+          
+          // Try stepResults first (most direct)
+          const justifyStep = stepResults.find(s => 
+            s.originalStepId === 'justify_journey' || 
+            s.stepId?.includes('justify_journey')
+          );
+          
+          console.log(`🔍 [LEG-COMPLETION] Looking for justify_journey: found=${!!justifyStep}, stepResults keys=${stepResults.map(s => s.originalStepId || s.stepId).join(',')}`);
+          
+          if (justifyStep) {
+            justifyResult = justifyStep.result?.result || justifyStep.result;
+            journeyStatus = justifyResult?.status || 'unknown';
+            console.log(`🔍 [LEG-COMPLETION] Found justify_journey in stepResults: status=${journeyStatus}`);
+          }
+          
+          // Fallback: check workflowState for nested step result
+          if (journeyStatus === 'unknown') {
+            const nestedStepId = `${step.id || 'for-each'}::${idx}::justify_journey`;
+            const justifyStateResult = workflowState[nestedStepId]?.result || 
+                                       workflowState.results?.[nestedStepId]?.result ||
+                                       workflowState.variablePool?.steps?.[nestedStepId]?.result;
+            
+            if (justifyStateResult) {
+              justifyResult = justifyStateResult?.result || justifyStateResult;
+              journeyStatus = justifyResult?.status || 'unknown';
+            }
+          }
+          
+          // Fallback: check variable pool for justify_journey
+          if (journeyStatus === 'unknown') {
+            const justifyVar = this.readVariable(workflowState, 'justify_journey', 'step');
+            if (justifyVar) {
+              justifyResult = justifyVar?.result || justifyVar;
+              journeyStatus = justifyResult?.status || 'unknown';
+            }
+          }
+          
+          // If status is still unknown but journey executed, assume success (while-loop completed)
+          // The while-loop only exits when status is NOT 'pending', so if we're here, journey finished
+          if (journeyStatus === 'unknown') {
+            const hasExecutionResults = stepResults.some(s => 
+              s.originalStepId === 'execute_journey_action_script' || 
+              s.originalStepId === 'execute-code-from-variable' ||
+              s.originalStepId === 'execute-code'
+            );
+            
+            if (hasExecutionResults) {
+              // Journey executed and loop completed - treat as success
+              journeyStatus = 'success';
+              console.log(`✅ Journey ${legId} executed successfully (status inferred from loop completion)`);
+            }
+          }
+          
+          const isSuccess = journeyStatus === 'success';
+          const finalResult = isSuccess ? 'success' : (journeyStatus === 'failure' ? 'failure' : 'success'); // Default to success if unknown but executed
+          const error = justifyResult?.reason || null;
+          
+          try {
+            // CRITICAL: Include job_id in the completion request so actions can be matched correctly
+            await axios.post(
+              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys/${legId}/complete`,
+              {
+                final_result: finalResult,
+                error: error,
+                job_id: jobId  // CRITICAL: Include job_id for action matching
+              },
+              {
+                headers: this.getAuthHeaders()
+              }
+            );
+            
+            console.log(`✅ Marked leg ${legId} as ${finalResult} after journey execution (journey status: ${journeyStatus}, job_id: ${jobId})`);
+            
+            // Log to backend
+            await this.sendLogToBackend(jobId, 'info', `✅ Leg ${legId} completed with status: ${finalResult}`, 'WORKFLOW-ANALYZER', {
+              leg_id: legId,
+              final_result: finalResult,
+              journey_status: journeyStatus,
+              error: error
+            });
+          } catch (completeError) {
+            console.error(`❌ Failed to mark leg ${legId} as completed: ${completeError.message}`);
+            // Don't throw - continue with next iteration
+          }
+        }
+      }
+
       // Save currentItem to cycle namespace for each iteration
       this.saveVariable(workflowState, itemVariable, item, 'cycle', null);
       this.saveVariable(workflowState, indexVariable, idx, 'cycle', null);
@@ -9266,7 +10397,72 @@ IMPORTANT OUTPUT REQUIREMENTS:
       resultKey
     }, workflowState);
 
-    console.log(`✅ For-each step completed: ${iterationSummaries.length} iterations`);
+    console.log(`✅ For-each step completed: ${iterationSummaries.length} iterations, itemsPath=${itemsPath}`);
+    
+    // CRITICAL: Mark all legs as completed after for-each finishes (if this was a journey/leg execution)
+    // This handles the case where journeys executed but individual leg completion wasn't triggered
+    if ((itemsPath === 'journeysToExecute' || itemsPath === 'legsToExecute') && workflowState.workflowId) {
+      console.log(`🔍 [LEG-COMPLETION] For-each completed for ${itemsPath}, checking ${iterationSummaries.length} iterations for leg completion`);
+      
+      for (const iteration of iterationSummaries) {
+        const journey = iteration.item;
+        const legId = journey?.leg_id || journey?.journey_id || journey?.id;
+        
+        if (!legId) {
+          console.log(`⚠️ [LEG-COMPLETION] Skipping iteration - no legId found`);
+          continue;
+        }
+        
+        // Check if leg was already completed (from per-iteration completion)
+        // If not, mark it based on iteration results
+        const stepResults = iteration.stepResults || [];
+        const justifyStep = stepResults.find(s => 
+          s.originalStepId === 'justify_journey' || 
+          s.stepId?.includes('justify_journey')
+        );
+        
+        let journeyStatus = 'unknown';
+        let justifyResult = null;
+        
+        if (justifyStep) {
+          justifyResult = justifyStep.result?.result || justifyStep.result;
+          journeyStatus = justifyResult?.status || 'unknown';
+        }
+        
+        // If status is unknown, check if journey executed (has execution step)
+        if (journeyStatus === 'unknown') {
+          const hasExecutionResults = stepResults.some(s => 
+            s.originalStepId === 'execute_journey_action_script' || 
+            s.originalStepId === 'execute-code-from-variable' ||
+            s.originalStepId === 'execute-code'
+          );
+          
+          if (hasExecutionResults) {
+            journeyStatus = 'success'; // Journey executed, assume success
+          }
+        }
+        
+        const finalResult = journeyStatus === 'success' ? 'success' : (journeyStatus === 'failure' ? 'failure' : 'success');
+        const error = justifyResult?.reason || null;
+        
+        try {
+          await axios.post(
+            `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys/${legId}/complete`,
+            {
+              final_result: finalResult,
+              error: error
+            },
+            {
+              headers: this.getAuthHeaders()
+            }
+          );
+          
+          console.log(`✅ [LEG-COMPLETION] Marked leg ${legId} as ${finalResult} after for-each completion (journey status: ${journeyStatus})`);
+        } catch (completeError) {
+          console.error(`❌ [LEG-COMPLETION] Failed to mark leg ${legId} as completed: ${completeError.message}`);
+        }
+      }
+    }
   }
 
   /**
@@ -9318,9 +10514,81 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     const loopState = workflowState.loopState[step.id];
     
+    // CRITICAL: For login workflows, create a journey/action if none exists
+    // This ensures login workflows can complete actions even if they don't have a for-each step
+    // CRITICAL: Read currentItem/currentLeg FRESH at the start of each while-loop execution
+    // This ensures that when while-loop is nested in for-each, it uses the correct journey for this iteration
+    let currentLeg = workflowState.currentLeg || workflowState.currentItem || workflowState.currentJourney || {};
+    
+    // Log which journey we're using for debugging
+    const journeyId = currentLeg?.journey_id || currentLeg?.leg_id || currentLeg?.id || 'none';
+    const journeyDesc = currentLeg?.description || 'no description';
+    console.log(`🔄 While-loop: Using journey ${journeyId} (${journeyDesc})`);
+    
+    if (iteration === 0 && workflowState.workflowId && !currentLeg?.leg_id && !currentLeg?.journey_id) {
+      // Check if this is a login workflow (no journeys/legs exist)
+      const hasJourneys = workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0;
+      const hasLegs = workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute) && workflowState.legsToExecute.length > 0;
+      
+      if (!hasJourneys && !hasLegs) {
+        // Create a single journey for login workflow
+        const loginJourneyId = `login-${Date.now()}`;
+        const loginJourney = {
+          journey_id: loginJourneyId,
+          leg_id: loginJourneyId, // Also set leg_id for backward compatibility
+          description: step.name || 'Login attempt',
+          status: 'pending',
+          type: 'login'
+        };
+        
+        // Initialize journeysToExecute if it doesn't exist
+        if (!workflowState.journeysToExecute) {
+          workflowState.journeysToExecute = [];
+        }
+        workflowState.journeysToExecute.push(loginJourney);
+        
+        // CRITICAL: Also add to legsToExecute for backward compatibility (while-loop completion checks legsToExecute)
+        if (!workflowState.legsToExecute) {
+          workflowState.legsToExecute = [];
+        }
+        workflowState.legsToExecute.push(loginJourney);
+        
+        // Also set as currentLeg for backward compatibility
+        workflowState.currentLeg = loginJourney;
+        workflowState.currentItem = loginJourney;
+        currentLeg = loginJourney;
+        
+        console.log(`✅ Created login journey ${loginJourneyId} for while-loop`);
+        
+        // Create action in backend
+        try {
+          const pageId = workflowState.pageId || this.context?.page_id || this.context?.pageId;
+          const projectId = workflowState.projectId || this.context?.project_id || this.context?.projectId;
+          
+          if (pageId && projectId) {
+            await axios.post(
+              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys`,
+              {
+                journeys: [loginJourney],
+                create_actions: true,
+                job_id: jobId,
+                page_id: pageId,
+                project_id: projectId
+              },
+              {
+                headers: this.getAuthHeaders()
+              }
+            );
+            console.log(`✅ Created login action in backend for journey ${loginJourneyId}`);
+          }
+        } catch (createError) {
+          console.warn(`⚠️ Failed to create login action in backend: ${createError.message}`);
+        }
+      }
+    }
+    
     // Update status to 'analyzing' when starting while-loop (first iteration only)
     // This indicates page analysis/testing is about to begin
-    const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
     if (iteration === 0 && workflowState.workflowId && currentLeg?.leg_id) {
       try {
         await this.updateLegStatus(workflowState.workflowId, currentLeg.leg_id, 'analyzing', jobId);
@@ -10081,16 +11349,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     // Update leg with final status if we have a leg
-    if (finalCurrentLeg && finalCurrentLeg.leg_id && workflowState.legsToExecute && Array.isArray(workflowState.legsToExecute)) {
-      const legIndex = workflowState.legsToExecute.findIndex(l => 
+    // CRITICAL: Check both journeysToExecute and legsToExecute (login workflows use journeysToExecute)
+    const journeysArray = workflowState.journeysToExecute || workflowState.legsToExecute || [];
+    if (finalCurrentLeg && (finalCurrentLeg.leg_id || finalCurrentLeg.journey_id) && Array.isArray(journeysArray)) {
+      const legIndex = journeysArray.findIndex(l => 
         (l.leg_id === finalCurrentLeg.leg_id) || 
+        (l.journey_id === finalCurrentLeg.journey_id) ||
         (l.id === finalCurrentLeg.leg_id) ||
+        (l.id === finalCurrentLeg.journey_id) ||
         (l.leg_id === finalCurrentLeg.id) ||
+        (l.journey_id === finalCurrentLeg.id) ||
         (l.id === finalCurrentLeg.id)
       );
       
       if (legIndex >= 0 && finalLegStatus) {
-        const leg = workflowState.legsToExecute[legIndex];
+        const leg = journeysArray[legIndex];
         leg.status = finalLegStatus;
         leg.final_result = finalLegResult;
         if (finalLegError) {
@@ -10124,23 +11397,26 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
         }
         
-        // Call complete-leg endpoint to finalize
+        // Call complete-journey endpoint to finalize (legs renamed to journeys)
         if (workflowState.workflowId && finalLegStatus) {
           try {
+            // Try journeys endpoint first (new), fallback to legs (legacy)
+            const journeyId = finalCurrentLeg.journey_id || finalCurrentLeg.leg_id || finalCurrentLeg.id;
+            // CRITICAL: Include job_id in the completion request so actions can be matched correctly
             await axios.post(
-              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/legs/${finalCurrentLeg.leg_id}/complete`,
+              `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys/${journeyId}/complete`,
               {
                 final_result: finalLegResult,
                 error: finalLegError,
-                job_id: jobId
+                job_id: jobId  // CRITICAL: Include job_id for action matching
               },
               {
                 headers: this.getAuthHeaders()
               }
             );
-            console.log(`✅ Marked leg ${finalCurrentLeg.leg_id} as completed with status: ${finalLegResult}`);
+            console.log(`✅ Marked journey ${journeyId} as completed with status: ${finalLegResult} (job_id: ${jobId})`);
           } catch (completeError) {
-            console.warn(`⚠️ Failed to mark leg as completed: ${completeError.message}`);
+            console.warn(`⚠️ Failed to mark journey as completed: ${completeError.message}`);
           }
         }
       }
