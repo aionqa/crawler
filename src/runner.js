@@ -5,7 +5,7 @@
  */
 
 import { startCrawl } from './crawling/unified-operations.js';
-import { performLogin } from './login/login-operations.js';
+import { executeLoginWithWorkflow } from './login/login-workflow-engine.js';
 import axios from 'axios';
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
@@ -403,27 +403,46 @@ async function executeLoginJob(job, streamInterval) {
   }
   
   // ALWAYS set credentials in jobContext, overriding any existing (possibly "MISSING") values
-  jobContext.credentials = {
-    username: extractedCreds.username,
-    password: extractedCreds.password
-  };
+  // CRITICAL: Ensure credentials are set correctly - don't use spread operator if credentials are MISSING
+  if (!jobContext.credentials || 
+      jobContext.credentials.username === 'MISSING' || jobContext.credentials.username === 'missing' ||
+      jobContext.credentials.password === 'MISSING' || jobContext.credentials.password === 'missing') {
+    jobContext.credentials = {
+      username: extractedCreds.username,
+      password: extractedCreds.password
+    };
+  } else {
+    // Override with extracted credentials to ensure they're correct
+    jobContext.credentials.username = extractedCreds.username;
+    jobContext.credentials.password = extractedCreds.password;
+  }
   console.log(`[DEBUG] ✅ Credentials extracted and set in jobContext: username=${extractedCreds.username}, password=***`);
   
   const finalCredentials = jobContext.credentials;
   
   console.log(`[DEBUG] ✅ Credentials found: username=${finalCredentials.username}, password=${finalCredentials.password ? '***' : 'MISSING'}`);
   
+  // CRITICAL: Create workflowExecutionContext with explicit credentials (don't rely on spread)
   const workflowExecutionContext = {
     ...jobContext,
     workflow_template_id: jobContext.workflow_template_id,
     project_id: job.project_id || jobContext.project_id || job.projectId || null,
     projectId: job.project_id || jobContext.projectId || null,
-    credentials: finalCredentials, // Use extracted credentials
+    // CRITICAL: Explicitly set credentials (don't rely on spread from jobContext)
+    credentials: {
+      username: finalCredentials.username,
+      password: finalCredentials.password
+    },
     username: finalCredentials.username, // Also set top-level for fallback
     password: finalCredentials.password, // Also set top-level for fallback
     options: {
       ...(jobContext.options || {}),
-      openai_api_key: openaiApiKey
+      openai_api_key: openaiApiKey,
+      // CRITICAL: Also set credentials in options
+      credentials: {
+        username: finalCredentials.username,
+        password: finalCredentials.password
+      }
     },
     openai_api_key: openaiApiKey,
     runner_token: RUNNER_TOKEN // Add runner token for API authentication
@@ -465,12 +484,6 @@ async function executeLoginJob(job, streamInterval) {
   // Inject stealth scripts to hide automation
   await injectStealthScripts(page);
 
-  // Start video recording (full video for playback)
-  videoRecorder.startRecording(job.id, context, page);
-  
-  // Start real-time video streaming (live frames)
-  startVideoStream(page, job.id);
-
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     // Check if DOM is ready after 30s, continue anyway if not
@@ -480,50 +493,89 @@ async function executeLoginJob(job, streamInterval) {
     await page.waitForTimeout(1000);
     console.log(`[DEBUG] Navigated to login URL: ${page.url()}`);
 
-    const { performLoginWithWorkflow } = await import('./login/login-operations.js');
+    // Start video recording (full video for playback) - AFTER page navigation
+    videoRecorder.startRecording(job.id, context, page);
+    
+    // Start real-time video streaming (live frames)
+    startVideoStream(page, job.id);
+
     console.log(
-      `[DEBUG] About to execute performLoginWithWorkflow with context:`,
+      `[DEBUG] About to execute login workflow with context:`,
       JSON.stringify({
         workflow_template_id: workflowExecutionContext.workflow_template_id,
         project_id: workflowExecutionContext.project_id
       })
     );
-    const result = await performLoginWithWorkflow(
+
+    const result = await executeLoginWithWorkflow(
       page,
       job.id,
       url,
-      username,
-      password,
       openaiApiKey,
       workflowExecutionContext
     );
 
-    if (result.success) {
-      const { safeGetLocalStorage, safeGetSessionStorage } = await import('./crawling/unified-operations.js');
-
-      let cookies = Array.isArray(result.cookies) ? result.cookies : [];
-      if ((!cookies || cookies.length === 0) && Array.isArray(result.iterationCookies)) {
-        cookies = result.iterationCookies;
-      }
-      if (!cookies || cookies.length === 0) {
-        console.log(`No cookies returned from workflow result, collecting from current page context`);
+    // CRITICAL: Ensure result has all required fields for login jobs
+    // Extract cookies from multiple possible locations
+    let cookies = [];
+    if (Array.isArray(result.cookies)) {
+      cookies = result.cookies;
+      console.log(`🍪 Found ${cookies.length} cookie(s) in result.cookies`);
+    } else if (Array.isArray(result.iterationCookies)) {
+      cookies = result.iterationCookies;
+      console.log(`🍪 Found ${cookies.length} cookie(s) in result.iterationCookies`);
+    } else if (result.workflowResult?.workflowState?.finalCookies && Array.isArray(result.workflowResult.workflowState.finalCookies)) {
+      cookies = result.workflowResult.workflowState.finalCookies;
+      console.log(`🍪 Found ${cookies.length} cookie(s) in workflowState.finalCookies`);
+    } else if (result.workflowResult?.workflowState?.iterationCookies && Array.isArray(result.workflowResult.workflowState.iterationCookies)) {
+      cookies = result.workflowResult.workflowState.iterationCookies;
+      console.log(`🍪 Found ${cookies.length} cookie(s) in workflowState.iterationCookies`);
+    }
+    
+    // If no cookies found in result, try to collect from page context
+    if (cookies.length === 0) {
+      console.log(`🍪 No cookies in result, collecting from current page context`);
+      try {
         cookies = await context.cookies();
+        console.log(`🍪 Collected ${cookies.length} cookie(s) from page context`);
+      } catch (cookieError) {
+        console.warn(`⚠️ Failed to collect cookies from page context: ${cookieError.message}`);
       }
+    }
+
+    // CRITICAL: Ensure result has all required fields
+    const finalResult = {
+      success: result.success || false,
+      loginStatus: result.loginStatus || (result.success ? 'success' : 'unknown'),
+      determineResult: result.determineResult || null,
+      cookies: cookies, // CRITICAL: Always include cookies array
+      cookiesCollected: cookies.length, // CRITICAL: Include count
+      workflowResult: result.workflowResult || null,
+      error: result.error || null
+    };
+
+    if (result.success && cookies.length > 0) {
+      const { safeGetLocalStorage, safeGetSessionStorage } = await import('./crawling/unified-operations.js');
 
       const localStorage = await safeGetLocalStorage(page);
       const sessionStorage = await safeGetSessionStorage(page);
 
-      result.authTokens = {
+      finalResult.authTokens = {
         cookies,
         localStorage,
         sessionStorage,
         finalUrl: page.url()
       };
+      
+      console.log(`✅ Login successful: ${cookies.length} cookie(s) collected, loginStatus: ${finalResult.loginStatus}`);
     } else {
-      console.log(`Workflow execution failed: ${result.error || 'Unknown error'}`);
+      console.log(`⚠️ Login result: success=${result.success}, cookies=${cookies.length}, loginStatus=${finalResult.loginStatus}`);
+      if (result.error) {
+        console.log(`   Error: ${result.error}`);
+      }
     }
 
-    return result;
+    return finalResult;
   } finally {
     // Stop video streaming
     stopVideoStream(job.id);
