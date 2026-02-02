@@ -9,15 +9,15 @@ import { StructuredAIResponse } from './structured-ai-response.js';
 import OpenAI from 'openai';
 import { chromium } from 'playwright';
 import axios from 'axios';
+import { createOpenAIClient } from '../src/openai-client-factory.js';
 
 export class AIConversationLogger {
-  constructor(backendUrl = null, runnerToken = null) {
+  constructor(backendUrl = null, runnerToken = null, context = {}) {
     // Use environment variable if available, otherwise fallback to default
     this.backendUrl = backendUrl || process.env.BACKEND_URL || 'http://back:4000';
     this.runnerToken = runnerToken || process.env.RUNNER_TOKEN;
-    this.openaiClient = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY
-    });
+    this.context = context; // Store context for AI service URL configuration
+    this._openaiClient = null; // Lazy initialization
     this.promptCache = new Map(); // Cache prompts to avoid repeated fetches
     
     // OpenAI pricing (as of 2024, in USD per 1M tokens)
@@ -32,6 +32,29 @@ export class AIConversationLogger {
       'o1-preview': { input: 15.00, output: 60.00 },
       'o1-mini': { input: 3.00, output: 12.00 }
     };
+  }
+  
+  /**
+   * Get OpenAI client (lazy initialization with current context)
+   * Updates context if provided
+   */
+  getOpenAIClient(updateContext = null) {
+    if (updateContext) {
+      this.context = { ...this.context, ...updateContext };
+      this._openaiClient = null; // Reset to recreate with new context
+    }
+    if (!this._openaiClient) {
+      // Use AI service instead of direct OpenAI client
+      this._openaiClient = createOpenAIClient(this.context);
+    }
+    return this._openaiClient;
+  }
+  
+  /**
+   * Getter for backward compatibility
+   */
+  get openaiClient() {
+    return this.getOpenAIClient();
   }
   
   /**
@@ -883,7 +906,15 @@ export class AIConversationLogger {
       if (jobId) {
         await this.ensureAiBudget(jobId);
       }
-      const response = await this.openaiClient.responses.create(openaiRequest);
+      // Update context with job_id and project_id for AI service URL resolution
+      const contextUpdate = {
+        job_id: jobId,
+        jobId: jobId,
+        project_id: payload?.project_id || sourcePayload?.project_id || this.context?.project_id,
+        projectId: payload?.project_id || sourcePayload?.project_id || this.context?.project_id
+      };
+      const client = this.getOpenAIClient(contextUpdate);
+      const response = await client.responses.create(openaiRequest);
 
       // 7. Determine finish reason
       let finishReason = 'stop';
@@ -2514,7 +2545,10 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
 }
 
 // Create a default instance using environment variables
+// Singleton instance - will be recreated with context when needed
+// Note: This is deprecated - use new AIConversationLogger(backendUrl, runnerToken, context) instead
 export const aiConversationLogger = new AIConversationLogger(
   process.env.BACKEND_URL || 'http://back:4000',
-  process.env.RUNNER_TOKEN
+  process.env.RUNNER_TOKEN,
+  {}
 );

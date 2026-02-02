@@ -606,8 +606,8 @@ async function executeCrawlJob(job, streamInterval) {
   }
 
   // Extract job parameters
-  // CRITICAL: URL can be at job.url or job.start_url (from runner_jobs structure)
-  const url = job.url || job.start_url || null;
+  // CRITICAL: URL can be at job.url, job.start_url, or job.seed_url (from jobs collection)
+  const url = job.url || job.start_url || job.seed_url || null;
   const rawContext = job.context || {};
   const jobOptions = job.options || {};
   const projectId = rawContext.project_id || job.project_id || null;

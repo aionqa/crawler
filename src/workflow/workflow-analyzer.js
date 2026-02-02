@@ -3357,8 +3357,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Add current journey context (for journey-based templates)
     if (workflowState.currentJourney || workflowState.currentItem) {
       const currentJourney = workflowState.currentJourney || workflowState.currentItem;
-      stepPayload.currentJourney = currentJourney;
-      stepPayload.current_journey = currentJourney;
+      
+      // CRITICAL: Filter out verify/check actions before passing to AI prompt
+      // During execution, we only want interactive actions (clicks, fills, etc.)
+      // Verifications should NOT be executed - they are for analysis only
+      let filteredJourney = { ...currentJourney };
+      if (currentJourney.actions && Array.isArray(currentJourney.actions)) {
+        filteredJourney.actions = currentJourney.actions.filter(action => {
+          const actionType = (action.type || '').toLowerCase();
+          return actionType !== 'verify' && actionType !== 'check';
+        });
+        console.log(`[WorkflowAnalyzer] Filtered journey actions: ${currentJourney.actions.length} -> ${filteredJourney.actions.length} (removed verify/check actions)`);
+      }
+      
+      stepPayload.currentJourney = filteredJourney;
+      stepPayload.current_journey = filteredJourney;
     }
     
     // Add execution history
@@ -8745,6 +8758,48 @@ IMPORTANT OUTPUT REQUIREMENTS:
       headers['Authorization'] = `Bearer ${this.context.runner_token}`;
     }
     return headers;
+  }
+
+  /**
+   * Upload file for download (returns public URL)
+   * @param {string} jobId - Job ID
+   * @param {string|Buffer} content - File content (string or buffer)
+   * @param {string} fileName - File name
+   * @param {string} contentType - MIME type
+   * @returns {Promise<string|null>} Public URL or null if upload fails
+   */
+  async uploadFileForDownload(jobId, content, fileName, contentType) {
+    try {
+      // Convert content to buffer if it's a string
+      const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+
+      // Request presigned URL from backend
+      const presignedResponse = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
+        type: 'file',
+        jobId: jobId,
+        contentType: contentType,
+        fileName: fileName
+      }, {
+        timeout: 10000,
+        headers: this.getAuthHeaders()
+      });
+
+      const { url: presignedUrl, key, publicUrl: returnedUrl } = presignedResponse.data;
+
+      // Upload file to presigned URL
+      await axios.put(presignedUrl, buffer, {
+        headers: { 'Content-Type': contentType },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 30000
+      });
+
+      console.log(`✅ File uploaded for download: ${returnedUrl}`);
+      return returnedUrl || null;
+    } catch (error) {
+      console.error(`❌ Failed to upload file for download: ${error.message}`);
+      return null;
+    }
   }
 
   /**
