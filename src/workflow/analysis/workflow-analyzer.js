@@ -7579,89 +7579,70 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
 
       // Resolve the value from sourcePath
-      // CRITICAL: stepResult is structured (has .value wrapper), so check both structured and raw
-      let value = this.getNestedValue(stepResult, output.sourcePath);
-      if (value === undefined && stepResult[output.sourcePath]?.value !== undefined) {
-        // Try accessing via .value wrapper (structured format)
-        value = stepResult[output.sourcePath].value;
-      }
-      if (value === undefined) {
-        // Try from raw parsedResponse (stored in stepResults by step ID)
+      // CRITICAL: For result.journeys path, check raw AI response FIRST (no fallbacks - must work on first attempt)
+      // The raw AI response is stored in stepResults[stepId].result and has the exact structure from OpenAI
+      let value = undefined;
+      
+      // For result.journeys specifically, check raw AI response FIRST (where it's actually stored)
+      if (output.sourcePath === 'result.journeys' || (output.sourcePath.endsWith('.journeys') && output.sourcePath.startsWith('result.'))) {
         const stepId = step.id || step.slug;
-        if (workflowState.stepResults?.[stepId]?.result) {
-          value = this.getNestedValue(workflowState.stepResults[stepId].result, output.sourcePath);
-        }
-      }
-      if (value === undefined) {
-        // Try from workflowState
-        value = this.getNestedValue(workflowState, output.sourcePath);
-      }
-      if (value === undefined) {
-        // Try from context
-        value = this.getNestedValue(workflowState.context || {}, output.sourcePath);
-      }
-      // Also try from the raw result stored by step ID
-      if (value === undefined && step.id && workflowState[step.id]?.result) {
-        const rawResult = workflowState[step.id].result;
-        // If it's structured, unwrap it
-        if (rawResult[output.sourcePath]?.value !== undefined) {
-          value = rawResult[output.sourcePath].value;
-        } else {
+        const rawResult = workflowState.stepResults?.[stepId]?.result;
+        if (rawResult) {
+          // Direct access: rawResult.result.journeys (AI response structure from OpenAI)
           value = this.getNestedValue(rawResult, output.sourcePath);
-        }
-      }
-      // CRITICAL: For journeys, also check if it's stored directly in parsedResponse from executeAIPromptStep
-      // This handles the case where journeys array exists but is empty (empty arrays are valid!)
-      // CRITICAL: If sourcePath is "legs" but response has "journeys", automatically use "journeys" instead
-      // This handles workflows that haven't been updated to use journeys format yet
-      if (value === undefined && output.sourcePath === 'legs' && step.id) {
-        const stepId = step.id || step.slug;
-        const stepResult = workflowState.stepResults?.[stepId]?.result;
-        if (stepResult && stepResult.journeys !== undefined) {
-          value = stepResult.journeys;
-          console.log(`🔍 [VARIABLE-OUTPUT] sourcePath "legs" not found, using "journeys" instead: ${Array.isArray(value) ? value.length : 'not array'} items`);
-        }
-      }
-      
-      if (value === undefined && output.sourcePath === 'journeys' && step.id) {
-        // Try to get from the step's stored result in stepResults
-        const stepId = step.id || step.slug;
-        const stepResult = workflowState.stepResults?.[stepId]?.result;
-        if (stepResult && stepResult.journeys !== undefined) {
-          value = stepResult.journeys;
-          console.log(`🔍 Found journeys in stepResults[${stepId}].result: ${Array.isArray(value) ? value.length : 'not array'} items`);
-        }
-      }
-      
-      // CRITICAL: Handle result.journeys path (common in workflow templates)
-      if (value === undefined && (output.sourcePath === 'result.journeys' || output.sourcePath.endsWith('.journeys'))) {
-        const stepId = step.id || step.slug;
-        const stepResult = workflowState.stepResults?.[stepId]?.result;
-        if (stepResult) {
-          // Try result.journeys
-          if (stepResult.result && stepResult.result.journeys !== undefined) {
-            value = stepResult.result.journeys;
-            console.log(`🔍 [VARIABLE-OUTPUT] Found journeys via result.journeys: ${Array.isArray(value) ? value.length : 'not array'} items`);
+          if (value !== undefined) {
+            console.log(`✅ [VARIABLE-OUTPUT] Found ${output.sourcePath} in raw AI response: ${Array.isArray(value) ? value.length : 'not array'} items`);
+          } else {
+            // If not found in raw result, try structured result as backup
+            value = this.getNestedValue(stepResult, output.sourcePath);
+            if (value !== undefined) {
+              console.log(`✅ [VARIABLE-OUTPUT] Found ${output.sourcePath} in structured result: ${Array.isArray(value) ? value.length : 'not array'} items`);
+            }
           }
-          // Also try journeys directly
-          else if (stepResult.journeys !== undefined) {
-            value = stepResult.journeys;
-            console.log(`🔍 [VARIABLE-OUTPUT] Found journeys directly: ${Array.isArray(value) ? value.length : 'not array'} items`);
+        } else {
+          // Try structured result if raw result not available
+          value = this.getNestedValue(stepResult, output.sourcePath);
+          if (value !== undefined) {
+            console.log(`✅ [VARIABLE-OUTPUT] Found ${output.sourcePath} in structured result: ${Array.isArray(value) ? value.length : 'not array'} items`);
           }
         }
-      }
-      
-      // CRITICAL: If journeys still not found and this is the journeys variable, check workflowState.journeys directly
-      // This ensures we find journeys even if they're stored in workflowState but not in the structured result
-      if (value === undefined && (output.sourcePath === 'journeys' || output.sourcePath === 'result.journeys' || output.sourcePath.endsWith('.journeys')) && output.variableName === 'journeysToExecute') {
-        if (workflowState.journeys && Array.isArray(workflowState.journeys)) {
-          value = workflowState.journeys;
-          console.log(`🔍 [JOURNEYS-FALLBACK] Found ${workflowState.journeys.length} journey(s) in workflowState.journeys (not in structured result)`);
+        
+        // If still undefined, fail immediately (no fallbacks for result.journeys)
+        if (value === undefined) {
+          const stepId = step.id || step.slug;
+          const rawResult = workflowState.stepResults?.[stepId]?.result;
+          console.error(`❌ [VARIABLE-OUTPUT] Failed to find ${output.sourcePath} in AI response`);
+          console.error(`   Step ID: ${stepId}`);
+          console.error(`   Raw result keys: ${rawResult ? Object.keys(rawResult).join(', ') : 'null'}`);
+          if (rawResult && rawResult.result) {
+            console.error(`   Raw result.result keys: ${Object.keys(rawResult.result).join(', ')}`);
+          }
+          if (rawResult && typeof rawResult === 'object') {
+            console.error(`   Raw result structure: ${JSON.stringify(rawResult, null, 2).substring(0, 500)}`);
+          }
+          throw new Error(`Variable output "${output.variableName}" requires "${output.sourcePath}" but it was not found in the AI response. The AI step must return the data at this path.`);
         }
-        // Also check journeysToExecute directly
-        if (value === undefined && workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute)) {
-          value = workflowState.journeysToExecute;
-          console.log(`🔍 [JOURNEYS-FALLBACK] Found ${workflowState.journeysToExecute.length} journey(s) in workflowState.journeysToExecute`);
+      } else {
+        // For other sourcePaths, use existing logic
+        value = this.getNestedValue(stepResult, output.sourcePath);
+        if (value === undefined && stepResult[output.sourcePath]?.value !== undefined) {
+          // Try accessing via .value wrapper (structured format)
+          value = stepResult[output.sourcePath].value;
+        }
+        if (value === undefined) {
+          // Try from raw parsedResponse (stored in stepResults by step ID)
+          const stepId = step.id || step.slug;
+          if (workflowState.stepResults?.[stepId]?.result) {
+            value = this.getNestedValue(workflowState.stepResults[stepId].result, output.sourcePath);
+          }
+        }
+        if (value === undefined) {
+          // Try from workflowState
+          value = this.getNestedValue(workflowState, output.sourcePath);
+        }
+        if (value === undefined) {
+          // Try from context
+          value = this.getNestedValue(workflowState.context || {}, output.sourcePath);
         }
       }
 
