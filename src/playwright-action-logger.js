@@ -131,12 +131,11 @@ export function createActionLoggedPage(page, jobId) {
             };
 
           case 'waitForSelector':
+            // CRITICAL: Do NOT log waitForSelector calls during execution
+            // waitForSelector is often used for verification, which should not happen during execution
+            // Only execute without logging - this is for waiting, not verification
             return async function(selector, options = {}) {
-              await logAction('waitForSelector', {
-                selector,
-                state: options.state || 'visible',
-                timeout: options.timeout || 30000
-              });
+              // Execute without logging
               return original.call(target, selector, options);
             };
 

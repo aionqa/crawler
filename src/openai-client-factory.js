@@ -1,17 +1,19 @@
 /**
  * OpenAI Client Factory
- * Creates OpenAI client that uses configured endpoint (proxy) instead of direct OpenAI API
+ * Creates OpenAI client that uses AionQA AI Service instead of direct OpenAI API
  */
 
 import OpenAI from 'openai';
 import axios from 'axios';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
+const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://aionqa-ai-service:5000';
+const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN;
 
 /**
- * Create OpenAI client that uses configured endpoint
+ * Create OpenAI client that uses AionQA AI Service
  * @param {Object} context - Job context containing llm_config, project_id, job_id
- * @param {string} fallbackApiKey - Fallback API key for backward compatibility
+ * @param {string} fallbackApiKey - Fallback API key for backward compatibility (deprecated)
  * @returns {OpenAI} OpenAI client instance
  */
 export function createOpenAIClient(context = {}, fallbackApiKey = null) {
@@ -19,69 +21,26 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
   const projectId = context.project_id || context.projectId;
   const jobId = context.job_id || context.jobId;
   
-  // Check if we should use the proxy endpoint
-  const useProxy = llmConfig.endpoint && llmConfig.endpoint !== 'https://api.openai.com/v1';
+  // Determine AI service URL - priority: llm_config.endpoint > AI_SERVICE_URL > default
+  const aiServiceUrl = llmConfig.endpoint || AI_SERVICE_URL;
   
-  if (useProxy && projectId) {
-    // Use proxy endpoint - create a custom client that proxies through backend
-    console.log(`[OpenAI-Client] Using proxy endpoint: ${llmConfig.endpoint} for project ${projectId}${jobId ? ` (job: ${jobId})` : ''}`);
-    
-    // Create a custom OpenAI client that uses axios to call the proxy
-    return new Proxy(new OpenAI({ apiKey: 'proxy' }), {
-      get(target, prop) {
-        if (prop === 'chat') {
-          return {
-            completions: {
-              create: async (params) => {
-                try {
-                  // Call the proxy endpoint
-                  const response = await axios.post(
-                    llmConfig.endpoint,
-                    {
-                      project_id: projectId,
-                      job_id: jobId, // Pass jobId for spending logs
-                      messages: params.messages,
-                      model: params.model || llmConfig.model || 'gpt-5-mini',
-                      temperature: params.temperature,
-                      max_tokens: params.max_tokens,
-                      ...params
-                    },
-                    {
-                      headers: {
-                        'Content-Type': 'application/json'
-                      },
-                      timeout: 60000
-                    }
-                  );
-                  
-                  // Return in OpenAI format
-                  return response.data;
-                } catch (error) {
-                  console.error(`[OpenAI-Client] Proxy request failed:`, error);
-                  if (error.response) {
-                    // Convert axios error to OpenAI-like error
-                    const err = new Error(error.response.data?.error || error.message);
-                    err.status = error.response.status;
-                    err.response = error.response.data;
-                    throw err;
-                  }
-                  throw error;
-                }
-              }
-            }
-          };
-        }
-        if (prop === 'responses') {
-          // Support for responses.create() (used by AIConversationLogger)
-          return {
+  // Always use AI service (no direct OpenAI API calls)
+  console.log(`[OpenAI-Client] Using AI Service: ${aiServiceUrl} for project ${projectId}${jobId ? ` (job: ${jobId})` : ''}`);
+  
+  // Create a custom OpenAI client that uses axios to call the AI service
+  return new Proxy(new OpenAI({ apiKey: 'ai-service' }), {
+    get(target, prop) {
+      if (prop === 'chat') {
+        return {
+          completions: {
             create: async (params) => {
               try {
-                // Call the proxy endpoint
+                // Call the AI service endpoint
                 const response = await axios.post(
-                  llmConfig.endpoint,
+                  `${aiServiceUrl}/api/ai/chat`,
                   {
                     project_id: projectId,
-                    job_id: jobId, // Pass jobId for spending logs
+                    job_id: jobId,
                     messages: params.messages,
                     model: params.model || llmConfig.model || 'gpt-5-mini',
                     temperature: params.temperature,
@@ -90,19 +49,20 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                   },
                   {
                     headers: {
-                      'Content-Type': 'application/json'
+                      'Content-Type': 'application/json',
+                      ...(AI_SERVICE_TOKEN && { 'Authorization': `Bearer ${AI_SERVICE_TOKEN}` })
                     },
-                    timeout: 60000
+                    timeout: 300000 // 5 minutes timeout for AI requests
                   }
                 );
                 
                 // Return in OpenAI format
                 return response.data;
               } catch (error) {
-                console.error(`[OpenAI-Client] Proxy request failed:`, error);
+                console.error(`[OpenAI-Client] AI Service request failed:`, error.message);
                 if (error.response) {
                   // Convert axios error to OpenAI-like error
-                  const err = new Error(error.response.data?.error || error.message);
+                  const err = new Error(error.response.data?.error?.message || error.response.data?.error || error.message);
                   err.status = error.response.status;
                   err.response = error.response.data;
                   throw err;
@@ -110,19 +70,51 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                 throw error;
               }
             }
-          };
-        }
-        return target[prop];
+          }
+        };
       }
-    });
-  } else {
-    // Use direct OpenAI API (backward compatibility)
-    const apiKey = fallbackApiKey || process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      throw new Error('OpenAI API key not provided and no proxy endpoint configured');
+      if (prop === 'responses') {
+        // Support for responses.create() (used by AIConversationLogger)
+        return {
+          create: async (params) => {
+            try {
+              // Call the AI service endpoint
+              const response = await axios.post(
+                `${aiServiceUrl}/api/ai/chat`,
+                {
+                  project_id: projectId,
+                  job_id: jobId,
+                  messages: params.messages,
+                  model: params.model || llmConfig.model || 'gpt-5-mini',
+                  temperature: params.temperature,
+                  max_tokens: params.max_tokens,
+                  ...params
+                },
+                {
+                  headers: {
+                    'Content-Type': 'application/json'
+                  },
+                  timeout: 300000 // 5 minutes timeout for AI requests
+                }
+              );
+              
+              // Return in OpenAI format
+              return response.data;
+            } catch (error) {
+              console.error(`[OpenAI-Client] AI Service request failed:`, error.message);
+              if (error.response) {
+                // Convert axios error to OpenAI-like error
+                const err = new Error(error.response.data?.error?.message || error.response.data?.error || error.message);
+                err.status = error.response.status;
+                err.response = error.response.data;
+                throw err;
+              }
+              throw error;
+            }
+          }
+        };
+      }
+      return target[prop];
     }
-    console.log(`[OpenAI-Client] Using direct OpenAI API`);
-    return new OpenAI({ apiKey });
-  }
+  });
 }
-

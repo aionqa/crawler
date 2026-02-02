@@ -2637,7 +2637,13 @@ class WorkflowExecutor {
         wrapper.waitForTimeout = wrapMethod('waitForTimeout', pageObj.waitForTimeout.bind(pageObj));
         wrapper.waitFor = wrapMethod('waitFor', pageObj.waitFor.bind(pageObj));
         wrapper.waitForLoadState = wrapMethod('waitForLoadState', pageObj.waitForLoadState.bind(pageObj));
-        wrapper.waitForSelector = wrapMethod('waitForSelector', pageObj.waitForSelector.bind(pageObj));
+        // CRITICAL: Do NOT log waitForSelector calls during execution
+        // waitForSelector is often used for verification, which should not happen during execution
+        // Only use it for waiting before interaction, but don't log it
+        wrapper.waitForSelector = async function(selector, options = {}) {
+          // Execute without logging - this is for waiting, not verification
+          return await pageObj.waitForSelector(selector, options);
+        };
         wrapper.selectOption = wrapMethod('selectOption', pageObj.selectOption.bind(pageObj));
         wrapper.check = wrapMethod('check', pageObj.check.bind(pageObj));
         wrapper.uncheck = wrapMethod('uncheck', pageObj.uncheck.bind(pageObj));

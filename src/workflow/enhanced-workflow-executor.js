@@ -250,6 +250,15 @@ class EnhancedWorkflowExecutor {
       const text = leg.description || leg.text || leg.name || 'AI-generated action';
       const selector = leg.element_info?.selector || leg.selector || leg.element_selector || null;
       
+      // CRITICAL: Skip verify/check actions - they should not be created during execution
+      const actionType = (kind || '').toLowerCase();
+      const actionText = (text || '').toLowerCase();
+      if (actionType === 'verify' || actionType === 'check' || 
+          actionText.includes('verify') || actionText.includes('check')) {
+        console.log(`[EnhancedWorkflowExecutor] Skipping verify/check action: ${text}`);
+        return null;
+      }
+      
       // Ensure kind is always a valid string (not undefined)
       const finalKind = (typeof kind === 'string' && kind.trim()) ? kind.trim() : 'click';
       
