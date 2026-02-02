@@ -8,7 +8,9 @@ import axios from 'axios';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://aionqa-ai-service:5000';
-const AI_SERVICE_TOKEN = process.env.AI_SERVICE_TOKEN;
+// CRITICAL: Use RUNNER_TOKEN for AI service authentication (not AI_SERVICE_TOKEN for security)
+// Helper provides RUNNER_TOKEN to crawler containers, AI service accepts it as alternative auth
+const AI_SERVICE_TOKEN = process.env.RUNNER_TOKEN || process.env.AI_SERVICE_TOKEN;
 
 /**
  * Create OpenAI client that uses AionQA AI Service
