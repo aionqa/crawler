@@ -7633,12 +7633,35 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
       
+      // CRITICAL: Handle result.journeys path (common in workflow templates)
+      if (value === undefined && (output.sourcePath === 'result.journeys' || output.sourcePath.endsWith('.journeys'))) {
+        const stepId = step.id || step.slug;
+        const stepResult = workflowState.stepResults?.[stepId]?.result;
+        if (stepResult) {
+          // Try result.journeys
+          if (stepResult.result && stepResult.result.journeys !== undefined) {
+            value = stepResult.result.journeys;
+            console.log(`🔍 [VARIABLE-OUTPUT] Found journeys via result.journeys: ${Array.isArray(value) ? value.length : 'not array'} items`);
+          }
+          // Also try journeys directly
+          else if (stepResult.journeys !== undefined) {
+            value = stepResult.journeys;
+            console.log(`🔍 [VARIABLE-OUTPUT] Found journeys directly: ${Array.isArray(value) ? value.length : 'not array'} items`);
+          }
+        }
+      }
+      
       // CRITICAL: If journeys still not found and this is the journeys variable, check workflowState.journeys directly
       // This ensures we find journeys even if they're stored in workflowState but not in the structured result
-      if (value === undefined && output.sourcePath === 'journeys' && output.variableName === 'journeysToExecute') {
+      if (value === undefined && (output.sourcePath === 'journeys' || output.sourcePath === 'result.journeys' || output.sourcePath.endsWith('.journeys')) && output.variableName === 'journeysToExecute') {
         if (workflowState.journeys && Array.isArray(workflowState.journeys)) {
           value = workflowState.journeys;
           console.log(`🔍 [JOURNEYS-FALLBACK] Found ${workflowState.journeys.length} journey(s) in workflowState.journeys (not in structured result)`);
+        }
+        // Also check journeysToExecute directly
+        if (value === undefined && workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute)) {
+          value = workflowState.journeysToExecute;
+          console.log(`🔍 [JOURNEYS-FALLBACK] Found ${workflowState.journeysToExecute.length} journey(s) in workflowState.journeysToExecute`);
         }
       }
 
