@@ -94,7 +94,8 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                 },
                 {
                   headers: {
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    ...(AI_SERVICE_TOKEN && { 'Authorization': `Bearer ${AI_SERVICE_TOKEN}` })
                   },
                   timeout: 300000 // 5 minutes timeout for AI requests
                 }
