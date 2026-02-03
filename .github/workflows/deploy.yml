@@ -67,9 +67,6 @@ jobs:
 
       - name: Verify task definition
         run: |
-          echo "✅ Crawler task definition registered successfully"
+          echo "вњ… Crawler task definition registered successfully"
           echo "Note: Crawler now uses task-per-job model - tasks are deployed by backend when jobs start"
           echo "No service deployment needed - tasks run once per job and exit when complete"
-
-
-
