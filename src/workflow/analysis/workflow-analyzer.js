@@ -11998,6 +11998,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
                     iteration: iteration
                   };
                   workflowState.variablePool.steps['justify_journey'] = { result: normalizedResult }; // Also store by name
+                  // CRITICAL: Also store with slug variants for condition path resolution
+                  workflowState.variablePool.steps['justify-journey'] = { result: normalizedResult };
                 }
                 
                 // CRITICAL: Also store directly by step ID for condition path resolution
@@ -12005,6 +12007,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   workflowState[nestedStep.id] = {};
                 }
                 workflowState[nestedStep.id].result = normalizedResult;
+                
+                // CRITICAL: Store by slug for condition path resolution (justify-journey)
+                if (isJustifyJourneyStep) {
+                  workflowState['justify-journey'] = { result: normalizedResult };
+                  if (!workflowState.results) {
+                    workflowState.results = {};
+                  }
+                  workflowState.results['justify-journey'] = { result: normalizedResult };
+                }
                 
                 // CRITICAL: Store in variablePool.steps for condition path resolution
                 if (!workflowState.variablePool) {

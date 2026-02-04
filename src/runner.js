@@ -41,6 +41,11 @@ if (!RUNNER_TOKEN) {
 
 console.log(`🤖 Runner ID: ${RUNNER_ID}`);
 console.log(`🤖 Runner Type: ${RUNNER_TYPE} (${RUNNER_TYPE === 'service-managed' ? 'spawned by backend service' : 'user-managed'})`);
+// Version info for image update verification
+const CRAWLER_VERSION = process.env.CRAWLER_VERSION || process.env.IMAGE_TAG || 'unknown';
+const CRAWLER_BUILD_DATE = process.env.BUILD_DATE || new Date().toISOString();
+console.log(`🏷️  Crawler Version: ${CRAWLER_VERSION}`);
+console.log(`📅 Crawler Build Date: ${CRAWLER_BUILD_DATE}`);
 
 // Initialize video stream manager for real-time streaming
 const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID);
