@@ -68,19 +68,19 @@ class WorkflowAnalyzer {
    * Range: 1 minute (60000ms) to 10 minutes (600000ms)
    */
   getStepTimeout(step) {
-    // If step has explicit timeout config, use it (clamped to 1m-10m range)
+    // If step has explicit timeout config, use it (clamped to 1m-15m range)
     if (step.config?.timeout_ms !== undefined) {
-      const timeout = Math.max(60000, Math.min(600000, step.config.timeout_ms));
+      const timeout = Math.max(60000, Math.min(900000, step.config.timeout_ms));
       return timeout;
     }
     if (step.config?.timeout !== undefined) {
-      const timeout = Math.max(60000, Math.min(600000, step.config.timeout));
+      const timeout = Math.max(60000, Math.min(900000, step.config.timeout));
       return timeout;
     }
 
     // Default timeouts by step type (in milliseconds)
     const defaultTimeouts = {
-      'ai-prompt': 180000,           // 3 minutes - AI calls can take time
+      'ai-prompt': 900000,           // 15 minutes - AI calls can take time
       'workflow-analysis': 180000,   // 3 minutes - Complex analysis
       'page-description': 120000,    // 2 minutes - Page analysis
       'playwright-analysis': 120000, // 2 minutes - Playwright analysis
