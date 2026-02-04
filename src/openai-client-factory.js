@@ -5,11 +5,11 @@
 
 import OpenAI from 'openai';
 import axios from 'axios';
+import { getAIServiceToken } from './ai-token-manager.js';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://aionqa-ai-service:5000';
-// CRITICAL: Use RUNNER_TOKEN for AI service authentication (not AI_SERVICE_TOKEN for security)
-// Helper provides RUNNER_TOKEN to crawler containers, AI service accepts it as alternative auth
+// Fallback token for backward compatibility (deprecated - use 24-hour tokens instead)
 const AI_SERVICE_TOKEN = process.env.RUNNER_TOKEN || process.env.AI_SERVICE_TOKEN;
 
 /**
@@ -37,6 +37,33 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
           completions: {
             create: async (params) => {
               try {
+                // Always get 24-hour AI service token from backend (required for authentication)
+                let token = null;
+                if (projectId && jobId) {
+                  try {
+                    token = await getAIServiceToken(projectId, jobId);
+                    if (!token) {
+                      throw new Error('Token request returned null');
+                    }
+                    console.log(`[OpenAI-Client] Using AI service token for authentication`);
+                  } catch (tokenError) {
+                    console.error(`[OpenAI-Client] Failed to get AI service token:`, tokenError.message);
+                    if (tokenError.response) {
+                      console.error(`  Status: ${tokenError.response.status}`);
+                      console.error(`  Response:`, tokenError.response.data);
+                    }
+                    // Don't use fallback - fail explicitly
+                    throw new Error(`Failed to get AI service token: ${tokenError.message}`);
+                  }
+                } else {
+                  // Fallback to RUNNER_TOKEN if project/job IDs not available
+                  token = AI_SERVICE_TOKEN;
+                  if (!token) {
+                    throw new Error('No AI service token available and project/job IDs not provided');
+                  }
+                  console.log(`[OpenAI-Client] Using fallback token (project/job IDs not available)`);
+                }
+                
                 // Call the AI service endpoint
                 const response = await axios.post(
                   `${aiServiceUrl}/api/ai/chat`,
@@ -52,7 +79,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                   {
                     headers: {
                       'Content-Type': 'application/json',
-                      ...(AI_SERVICE_TOKEN && { 'Authorization': `Bearer ${AI_SERVICE_TOKEN}` })
+                      ...(token && { 'Authorization': `Bearer ${token}` })
                     },
                     timeout: 300000 // 5 minutes timeout for AI requests
                   }
@@ -80,12 +107,40 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
         return {
           create: async (params) => {
             try {
+              // Always get 24-hour AI service token from backend (required for authentication)
+              let token = null;
+              if (projectId && jobId) {
+                try {
+                  token = await getAIServiceToken(projectId, jobId);
+                  if (!token) {
+                    throw new Error('Token request returned null');
+                  }
+                  console.log(`[OpenAI-Client] Using AI service token for authentication`);
+                } catch (tokenError) {
+                  console.error(`[OpenAI-Client] Failed to get AI service token:`, tokenError.message);
+                  if (tokenError.response) {
+                    console.error(`  Status: ${tokenError.response.status}`);
+                    console.error(`  Response:`, tokenError.response.data);
+                  }
+                  // Don't use fallback - fail explicitly
+                  throw new Error(`Failed to get AI service token: ${tokenError.message}`);
+                }
+              } else {
+                // Fallback to RUNNER_TOKEN if project/job IDs not available
+                token = AI_SERVICE_TOKEN;
+                if (!token) {
+                  throw new Error('No AI service token available and project/job IDs not provided');
+                }
+                console.log(`[OpenAI-Client] Using fallback token (project/job IDs not available)`);
+              }
+              
               // Call the AI service endpoint
               const response = await axios.post(
                 `${aiServiceUrl}/api/ai/chat`,
                 {
                   project_id: projectId,
                   job_id: jobId,
+                  input: params.input || params.messages, // Support both formats
                   messages: params.messages,
                   model: params.model || llmConfig.model || 'gpt-5-mini',
                   temperature: params.temperature,
@@ -95,7 +150,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                 {
                   headers: {
                     'Content-Type': 'application/json',
-                    ...(AI_SERVICE_TOKEN && { 'Authorization': `Bearer ${AI_SERVICE_TOKEN}` })
+                    ...(token && { 'Authorization': `Bearer ${token}` })
                   },
                   timeout: 300000 // 5 minutes timeout for AI requests
                 }
