@@ -80,7 +80,7 @@ class WorkflowAnalyzer {
 
     // Default timeouts by step type (in milliseconds)
     const defaultTimeouts = {
-      'ai-prompt': 180000,           // 3 minutes - AI calls can take time
+      'ai-prompt': 900000,           // 15 minutes - AI calls can take time
       'workflow-analysis': 180000,   // 3 minutes - Complex analysis
       'page-description': 120000,    // 2 minutes - Page analysis
       'playwright-analysis': 120000, // 2 minutes - Playwright analysis
