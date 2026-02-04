@@ -956,10 +956,23 @@ export class AIConversationLogger {
       
       let aiResponse;
       try {
-        aiResponse = JSON.parse(rawContent);
+        // Try to extract JSON from markdown code blocks if present
+        let jsonContent = rawContent.trim();
+        const codeBlockMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+        if (codeBlockMatch) {
+          jsonContent = codeBlockMatch[1].trim();
+        }
+        
+        // Try to find JSON object/array in the content
+        const jsonMatch = jsonContent.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+        if (jsonMatch) {
+          jsonContent = jsonMatch[0];
+        }
+        
+        aiResponse = JSON.parse(jsonContent);
       } catch (parseError) {
         // Check if JSON is incomplete (ends with incomplete string/object)
-        const isIncomplete = rawContent.match(/['"`][^'"`]*$/); // Ends with incomplete string
+        const isIncomplete = rawContent.match(/['"`][^'"`]*$/) || rawContent.match(/[,\[\{]$/); // Ends with incomplete string or structure
         if (isIncomplete || finishReason === 'length') {
           // Log incomplete response error to job logs
           if (jobId && this.backendUrl) {
@@ -974,7 +987,8 @@ export class AIConversationLogger {
                   prompt_slug: promptSlug,
                   incomplete: true,
                   parse_error: parseError.message,
-                  content_preview: rawContent.substring(Math.max(0, rawContent.length - 200))
+                  content_preview: rawContent.substring(Math.max(0, rawContent.length - 200)),
+                  full_content_length: rawContent.length
                 }
               }, {
               headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}
@@ -985,7 +999,11 @@ export class AIConversationLogger {
           }
           throw new Error(`OpenAI response appears incomplete (finish_reason: ${finishReason}). JSON parsing failed: ${parseError.message}. Content preview: ${rawContent.substring(Math.max(0, rawContent.length - 200))}`);
         }
-        throw new Error(`Failed to parse OpenAI response as JSON: ${parseError.message}. Content: ${rawContent.substring(0, 200)}`);
+        // For non-incomplete errors, log the full error with content preview
+        console.error(`[AI-CALL] ❌ JSON parse error: ${parseError.message}`);
+        console.error(`[AI-CALL] ❌ Content (first 500 chars): ${rawContent.substring(0, 500)}`);
+        console.error(`[AI-CALL] ❌ Content (last 200 chars): ${rawContent.substring(Math.max(0, rawContent.length - 200))}`);
+        throw new Error(`Failed to parse OpenAI response as JSON: ${parseError.message}. Content preview: ${rawContent.substring(0, 200)}`);
       }
       
       // 8. Validate response against schema
