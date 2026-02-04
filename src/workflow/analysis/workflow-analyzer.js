@@ -65,16 +65,16 @@ class WorkflowAnalyzer {
   /**
    * Get timeout for a workflow step (in milliseconds)
    * Returns step-specific timeout or default based on step type
-   * Range: 1 minute (60000ms) to 10 minutes (600000ms)
+   * Range: 1 minute (60000ms) to 15 minutes (900000ms)
    */
   getStepTimeout(step) {
-    // If step has explicit timeout config, use it (clamped to 1m-10m range)
+    // If step has explicit timeout config, use it (clamped to 1m-15m range)
     if (step.config?.timeout_ms !== undefined) {
-      const timeout = Math.max(60000, Math.min(600000, step.config.timeout_ms));
+      const timeout = Math.max(60000, Math.min(900000, step.config.timeout_ms));
       return timeout;
     }
     if (step.config?.timeout !== undefined) {
-      const timeout = Math.max(60000, Math.min(600000, step.config.timeout));
+      const timeout = Math.max(60000, Math.min(900000, step.config.timeout));
       return timeout;
     }
 
