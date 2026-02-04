@@ -3004,6 +3004,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       } catch (error) {
         console.error(`❌ Failed to upload screenshot: ${error.message}`);
+        if (error.response) {
+          console.error(`   Status: ${error.response.status}`);
+          console.error(`   Response: ${JSON.stringify(error.response.data)}`);
+        }
+        if (error.request) {
+          console.error(`   Request made but no response received`);
+        }
       }
     }
 
