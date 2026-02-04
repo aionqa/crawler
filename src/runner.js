@@ -57,6 +57,158 @@ let isProcessing = false;
 let currentJobId = null;
 let currentPage = null; // Track current page for streaming
 
+// Log capture for container logs
+const jobLogs = new Map(); // jobId -> array of log entries
+const originalConsole = {
+  log: console.log,
+  error: console.error,
+  warn: console.warn,
+  info: console.info,
+  debug: console.debug
+};
+
+/**
+ * Start capturing console logs for a job
+ */
+function startLogCapture(jobId) {
+  if (!jobId) return;
+  
+  jobLogs.set(jobId, []);
+  
+  const logEntry = (level, args) => {
+    const timestamp = new Date().toISOString();
+    const message = args.map(arg => 
+      typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+    ).join(' ');
+    
+    const entry = `[${timestamp}] [${level.toUpperCase()}] ${message}\n`;
+    const logs = jobLogs.get(jobId);
+    if (logs) {
+      logs.push(entry);
+    }
+    
+    // Also output to original console
+    originalConsole[level](...args);
+  };
+  
+  console.log = (...args) => logEntry('log', args);
+  console.error = (...args) => logEntry('error', args);
+  console.warn = (...args) => logEntry('warn', args);
+  console.info = (...args) => logEntry('info', args);
+  console.debug = (...args) => logEntry('debug', args);
+}
+
+/**
+ * Stop capturing console logs for a job
+ */
+function stopLogCapture(jobId) {
+  if (!jobId) return;
+  
+  // Restore original console methods
+  console.log = originalConsole.log;
+  console.error = originalConsole.error;
+  console.warn = originalConsole.warn;
+  console.info = originalConsole.info;
+  console.debug = originalConsole.debug;
+}
+
+/**
+ * Get captured logs for a job
+ */
+function getCapturedLogs(jobId) {
+  const logs = jobLogs.get(jobId) || [];
+  return logs.join('');
+}
+
+/**
+ * Clear captured logs for a job
+ */
+function clearCapturedLogs(jobId) {
+  jobLogs.delete(jobId);
+}
+
+/**
+ * Upload file using presigned URL helper (similar to uploadFileForDownload)
+ */
+async function uploadFileForDownload(jobId, content, fileName, contentType) {
+  try {
+    // Convert content to buffer if it's a string
+    const buffer = Buffer.isBuffer(content) ? Buffer.from(content, 'utf8') : Buffer.from(content, 'utf8');
+
+    // Request presigned URL from backend
+    const presignedResponse = await axios.post(`${BACKEND_URL}/api/upload/presigned-url`, {
+      type: 'file',
+      jobId: jobId,
+      contentType: contentType,
+      fileName: fileName
+    }, {
+      timeout: 10000,
+      headers: getAuthHeaders()
+    });
+
+    const { url: presignedUrl, key, publicUrl: returnedUrl } = presignedResponse.data;
+
+    // Upload file to presigned URL
+    await axios.put(presignedUrl, buffer, {
+      headers: { 'Content-Type': contentType },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      timeout: 30000
+    });
+
+    console.log(`✅ File uploaded for download: ${returnedUrl}`);
+    return returnedUrl || null;
+  } catch (error) {
+    console.error(`❌ Failed to upload file for download: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Upload container logs for a job
+ */
+async function uploadContainerLogs(jobId) {
+  try {
+    const logs = getCapturedLogs(jobId);
+    if (!logs || logs.length === 0) {
+      console.log(`ℹ️  No logs captured for job ${jobId}`);
+      return null;
+    }
+    
+    const fileName = `crawler-logs-${jobId}-${Date.now()}.txt`;
+    const logUrl = await uploadFileForDownload(jobId, logs, fileName, 'text/plain');
+    
+    if (logUrl) {
+      // Attach the log file to the job by updating job with attachment reference
+      try {
+        await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
+          jobId,
+          level: 'info',
+          message: `📄 Container logs uploaded: ${fileName}`,
+          component: 'RUNNER',
+          metadata: {
+            attachment_type: 'container_logs',
+            attachment_url: logUrl,
+            attachment_filename: fileName,
+            attachment_size: logs.length
+          }
+        }, {
+          headers: getAuthHeaders(),
+          timeout: 10000
+        });
+        console.log(`✅ Container logs uploaded and attached to job ${jobId}`);
+      } catch (attachError) {
+        console.warn(`⚠️  Failed to attach log file reference to job: ${attachError.message}`);
+      }
+    }
+    
+    return logUrl;
+  } catch (error) {
+    console.error(`❌ Failed to upload container logs for job ${jobId}:`, error.message);
+    return null;
+  }
+}
+
 // Export for unified-operations to use
 export const runnerContext = {
   RUNNER_ID,
@@ -226,6 +378,9 @@ async function executeJob(job) {
   currentJobId = job.id;
   let streamInterval = null;
   
+  // Start capturing container logs for this job
+  startLogCapture(job.id);
+  
   console.log(`\n🎯 Executing ${job.jobType} job ${job.id}`);
   const jobUrl = job.url || job.start_url || job.context?.start_url || 'undefined';
   console.log(`📍 URL: ${jobUrl}`);
@@ -259,6 +414,14 @@ async function executeJob(job) {
       console.log(`✅ Reported skipped job ${job.id} to backend`);
     } catch (error) {
       console.error(`❌ Error reporting skipped job:`, error.message);
+    }
+    // Stop log capture and upload logs even for skipped jobs
+    try {
+      stopLogCapture(job.id);
+      await uploadContainerLogs(job.id);
+      clearCapturedLogs(job.id);
+    } catch (logError) {
+      console.error(`❌ Error handling container logs: ${logError.message}`);
     }
     return false;
   }
@@ -310,6 +473,15 @@ async function executeJob(job) {
   } finally {
     // Stop video streaming
     stopVideoStream(job.id);
+    
+    // Stop log capture and upload logs
+    try {
+      stopLogCapture(job.id);
+      await uploadContainerLogs(job.id);
+      clearCapturedLogs(job.id);
+    } catch (logError) {
+      console.error(`❌ Error handling container logs: ${logError.message}`);
+    }
     
     currentJobId = null;
     currentPage = null;
