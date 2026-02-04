@@ -65,7 +65,7 @@ class WorkflowAnalyzer {
   /**
    * Get timeout for a workflow step (in milliseconds)
    * Returns step-specific timeout or default based on step type
-   * Range: 1 minute (60000ms) to 10 minutes (600000ms)
+   * Range: 1 minute (60000ms) to 15 minutes (900000ms)
    */
   getStepTimeout(step) {
     // If step has explicit timeout config, use it (clamped to 1m-15m range)
