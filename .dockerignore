@@ -1,0 +1,55 @@
+# Environment files - never copy secrets
+.env
+.env.*
+*.env
+
+# Secrets and keys
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+*.secret
+
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+README*
+LICENSE
+CHANGELOG
+
+# Test files
+test/
+tests/
+__tests__/
+*.test.js
+*.spec.js
+
+# Development files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+node_modules/.cache/
