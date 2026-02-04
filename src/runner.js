@@ -1396,10 +1396,35 @@ async function executeSingleJob() {
     // Fetch job data from backend API instead of environment variable
     // This avoids ECS container overrides 8192 character limit
     console.log(`📥 Fetching job data from backend API for job ${JOB_ID}`);
-    const response = await axios.get(`${BACKEND_URL}/api/jobs/${JOB_ID}`, {
-      headers: getAuthHeaders(),
-      timeout: 10000
-    });
+    
+    // Retry logic for 502/503 errors (gateway/backend issues)
+    let response = null;
+    let retries = 3;
+    let delay = 2000; // Start with 2 seconds
+    
+    while (retries > 0) {
+      try {
+        response = await axios.get(`${BACKEND_URL}/api/jobs/${JOB_ID}`, {
+          headers: getAuthHeaders(),
+          timeout: 15000 // Increased timeout for 502 cases
+        });
+        break; // Success, exit retry loop
+      } catch (error) {
+        retries--;
+        if (error.response && (error.response.status === 502 || error.response.status === 503)) {
+          if (retries > 0) {
+            console.warn(`⚠️  Backend gateway error (${error.response.status}), retrying in ${delay}ms... (${retries} retries left)`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay *= 2; // Exponential backoff
+            continue;
+          } else {
+            throw error; // No more retries, throw error
+          }
+        } else {
+          throw error; // Not a 502/503, throw immediately
+        }
+      }
+    }
     
     if (!response.data) {
       console.error(`❌ Job ${JOB_ID} not found in backend`);
@@ -1463,6 +1488,14 @@ async function executeSingleJob() {
       } else if (error.response.status === 500) {
         console.error(`   ❌ Backend server error`);
         console.error(`   The backend encountered an error while fetching job data`);
+      } else if (error.response.status === 502 || error.response.status === 503) {
+        console.error(`   ❌ Backend gateway error (${error.response.status})`);
+        console.error(`   The backend gateway is unavailable or timing out`);
+        console.error(`   This could mean:`);
+        console.error(`   - Backend service is down or restarting`);
+        console.error(`   - Gateway timeout (backend taking too long to respond)`);
+        console.error(`   - Load balancer issue`);
+        console.error(`   Fix: Check backend service status and logs`);
       }
     } else if (error.request) {
       console.error(`   ❌ Network error - could not reach backend`);
