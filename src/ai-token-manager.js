@@ -38,8 +38,8 @@ export async function getAIServiceToken(projectId, jobId) {
     const response = await axios.post(
       `${BACKEND_URL}/api/ai/issue-token`,
       {
-        projectId: projectId, // Backend expects camelCase
-        jobId: jobId // Backend expects camelCase
+        project_id: projectId, // Backend expects snake_case
+        job_id: jobId // Backend expects snake_case
       },
       {
         headers: {
