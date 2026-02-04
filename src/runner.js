@@ -1396,35 +1396,10 @@ async function executeSingleJob() {
     // Fetch job data from backend API instead of environment variable
     // This avoids ECS container overrides 8192 character limit
     console.log(`📥 Fetching job data from backend API for job ${JOB_ID}`);
-    
-    // Retry logic for 502/503 errors (gateway/backend issues)
-    let response = null;
-    let retries = 3;
-    let delay = 2000; // Start with 2 seconds
-    
-    while (retries > 0) {
-      try {
-        response = await axios.get(`${BACKEND_URL}/api/jobs/${JOB_ID}`, {
-          headers: getAuthHeaders(),
-          timeout: 15000 // Increased timeout for 502 cases
-        });
-        break; // Success, exit retry loop
-      } catch (error) {
-        retries--;
-        if (error.response && (error.response.status === 502 || error.response.status === 503)) {
-          if (retries > 0) {
-            console.warn(`⚠️  Backend gateway error (${error.response.status}), retrying in ${delay}ms... (${retries} retries left)`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            delay *= 2; // Exponential backoff
-            continue;
-          } else {
-            throw error; // No more retries, throw error
-          }
-        } else {
-          throw error; // Not a 502/503, throw immediately
-        }
-      }
-    }
+    const response = await axios.get(`${BACKEND_URL}/api/jobs/${JOB_ID}`, {
+      headers: getAuthHeaders(),
+      timeout: 10000
+    });
     
     if (!response.data) {
       console.error(`❌ Job ${JOB_ID} not found in backend`);
