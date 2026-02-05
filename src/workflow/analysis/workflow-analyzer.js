@@ -4680,6 +4680,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
             this.initializeVariablePool(workflowState);
             this.saveVariable(workflowState, 'legScriptToExecute', cleanedScript, 'page', step);
             console.log(`✅ Stored playwright_script as legScriptToExecute in workflowState, context, and variablePool: ${cleanedScript.length} chars`);
+            
+            // CRITICAL: Upsert script to scripts collection for tracking
+            try {
+              await this.upsertScriptToCollection(
+                cleanedScript,
+                parsedResponse,
+                step,
+                workflowState,
+                jobId,
+                stepContext
+              );
+            } catch (upsertError) {
+              console.warn(`⚠️ Failed to upsert script to collection: ${upsertError.message}`);
+              // Don't throw - script is still stored in workflowState
+            }
           } else {
             console.warn(`⚠️ Cleaned script is empty after cleaning`);
           }
@@ -15728,6 +15743,148 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     return modifiedPrompt;
+  }
+
+  /**
+   * Upsert script to scripts collection for tracking
+   */
+  async upsertScriptToCollection(scriptCode, parsedResponse, step, workflowState, jobId, stepContext = null) {
+    try {
+      // Get page_id and project_id from workflowState or context
+      const pageId = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
+      const projectId = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
+      
+      if (!pageId || !projectId) {
+        console.warn(`⚠️ Cannot upsert script: missing pageId or projectId (pageId: ${pageId}, projectId: ${projectId})`);
+        return;
+      }
+
+      // Get journey and action information from workflowState
+      const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.legsToExecute?.[workflowState.currentLegIndex];
+      const journeyId = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id;
+      const actionId = currentJourney?.action_id || stepContext?.action_id;
+
+      // Build script name and description
+      const scriptName = parsedResponse.name || 
+                        parsedResponse.description?.substring(0, 100) ||
+                        step.name || 
+                        step.id || 
+                        `Script for ${journeyId || 'journey'}`;
+      const scriptDescription = parsedResponse.description || 
+                                parsedResponse.expected_result ||
+                                `Generated script for ${step.name || step.id}`;
+
+      // Build script data
+      const scriptData = {
+        project_id: projectId,
+        page_id: pageId,
+        action_id: actionId || null,
+        name: scriptName,
+        description: scriptDescription,
+        script_type: 'playwright',
+        script_code: scriptCode,
+        parameters: parsedResponse.parameters || {},
+        generated_by: 'ai',
+        ai_prompt: step.config?.user_message_template || step.config?.prompt || null,
+        ai_model: 'gpt-5-mini',
+        generation_date: new Date(),
+        expected_outcome: parsedResponse.expected_result || parsedResponse.expected_outcome || null,
+        validation_rules: parsedResponse.validation_rules || [],
+        status: 'active',
+        tags: [step.id, step.name].filter(Boolean),
+        updated_at: new Date()
+      };
+
+      // Try to find existing script by page_id, journey_id, and action_id
+      const findQuery = {
+        project_id: projectId,
+        page_id: pageId,
+        status: { $ne: 'archived' }
+      };
+      if (journeyId) {
+        findQuery['tags'] = { $in: [journeyId] };
+      }
+      if (actionId) {
+        findQuery.action_id = actionId;
+      }
+
+      // Use backend API to upsert script
+      const backendUrl = this.backendUrl || process.env.BACKEND_URL || 'http://back:4000';
+      
+      // First try to find existing script
+      const authHeaders = this.getAuthHeaders();
+      const findResponse = await fetch(`${backendUrl}/api/scripts?project_id=${projectId}&page_id=${pageId}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...authHeaders
+        }
+      });
+
+      let existingScript = null;
+      if (findResponse.ok) {
+        const scripts = await findResponse.json();
+        // Find script matching journey/action
+        existingScript = scripts.find(s => {
+          if (actionId && s.action_id?.toString() === actionId.toString()) return true;
+          if (journeyId && s.tags?.includes(journeyId)) return true;
+          if (s.name === scriptName) return true;
+          return false;
+        });
+      }
+
+      if (existingScript) {
+        // Update existing script
+        const updateResponse = await fetch(`${backendUrl}/api/scripts/${existingScript._id}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders
+          },
+          body: JSON.stringify({
+            ...scriptData,
+            execution_count: existingScript.execution_count || 0,
+            last_executed_at: existingScript.last_executed_at,
+            last_result: existingScript.last_result,
+            success_rate: existingScript.success_rate || 0,
+            created_at: existingScript.created_at
+          })
+        });
+
+        if (updateResponse.ok) {
+          console.log(`✅ Updated existing script in collection: ${existingScript._id}`);
+        } else {
+          console.warn(`⚠️ Failed to update script: ${updateResponse.statusText}`);
+        }
+      } else {
+        // Create new script
+        scriptData.created_at = new Date();
+        scriptData.execution_count = 0;
+        scriptData.last_executed_at = null;
+        scriptData.last_result = null;
+        scriptData.success_rate = 0;
+
+        const createResponse = await fetch(`${backendUrl}/api/scripts`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders
+          },
+          body: JSON.stringify(scriptData)
+        });
+
+        if (createResponse.ok) {
+          const newScript = await createResponse.json();
+          console.log(`✅ Created new script in collection: ${newScript._id}`);
+        } else {
+          const errorText = await createResponse.text();
+          console.warn(`⚠️ Failed to create script: ${createResponse.statusText} - ${errorText}`);
+        }
+      }
+    } catch (error) {
+      console.warn(`⚠️ Error upserting script to collection: ${error.message}`);
+      // Don't throw - script is still stored in workflowState
+    }
   }
 }
 
