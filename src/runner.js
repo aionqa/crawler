@@ -141,10 +141,15 @@ async function uploadFileForDownload(jobId, content, fileName, contentType) {
     const buffer = Buffer.isBuffer(content) ? Buffer.from(content, 'utf8') : Buffer.from(content, 'utf8');
 
     // Request presigned URL from backend
+    const jobIdStr = jobId != null ? String(jobId) : '';
+    if (!jobIdStr) {
+      console.error('❌ uploadFileForDownload: jobId is required');
+      return null;
+    }
     const presignedResponse = await axios.post(`${BACKEND_URL}/api/upload/presigned-url`, {
       type: 'file',
-      jobId: jobId,
-      contentType: contentType,
+      jobId: jobIdStr,
+      contentType: contentType || 'application/octet-stream',
       fileName: fileName
     }, {
       timeout: 10000,
@@ -784,7 +789,14 @@ async function executeCrawlJob(job, streamInterval) {
 
   // Extract job parameters
   // CRITICAL: URL can be at job.url, job.start_url, or job.seed_url (from jobs collection)
-  const url = job.url || job.start_url || job.seed_url || null;
+  let url = job.url || job.start_url || job.seed_url || null;
+  // Ensure URL has scheme (page.goto fails with "invalid URL" for e.g. "tests.aionqa.com")
+  if (url && typeof url === 'string') {
+    const t = url.trim();
+    if (t && !t.startsWith('http://') && !t.startsWith('https://')) {
+      url = `https://${t}`;
+    }
+  }
   const rawContext = job.context || {};
   const jobOptions = job.options || {};
   const projectId = rawContext.project_id || job.project_id || null;
