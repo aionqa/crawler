@@ -66,8 +66,7 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
     const stepVerbosity = parameters.verbosity !== undefined ? parameters.verbosity : undefined;
     const stepStoreLogs = parameters.store_logs !== undefined ? parameters.store_logs : undefined;
     
-    // Make AI call - makeAICallWithPrompt has built-in retry logic (2 attempts)
-    // Don't add outer retry loop to avoid duplicate calls
+    // Make AI call - makeAICallWithPrompt tries one service; if multiple ai_services configured, fails over to next on non-200 or invalid JSON (no retry of same service)
     try {
       // Get step name from context or parameters
       const stepName = context?.stepName || parameters?.name || stepId || 'AI Request';
@@ -101,7 +100,7 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
           workflow_step: true
         },
         promptTemplate,
-        1, // attemptNumber (makeAICallWithPrompt will retry internally if needed)
+        1, // attemptNumber (legacy param; failover handled inside makeAICallWithPrompt when multiple ai_services)
         null, // previousError
         stepModel, // modelOverride
         stepReasoningEnabled, // reasoningEnabled
