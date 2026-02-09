@@ -865,6 +865,10 @@ export class AIConversationLogger {
       if (prompt.response_schema && typeof prompt.response_schema === 'object') {
         openaiRequest.response_schema = prompt.response_schema;
       }
+      // Generous max_output_tokens so script/JSON responses are not truncated (LM Studio / Ollama default may be low)
+      const scriptPromptSlugs = ['generate_journey_script', 'generate_login_script', 'generate-workflow-script', 'generate-form-fill-script', 'generate-click-script', 'generate-navigation-script', 'generate-validation-script'];
+      const defaultMaxOut = scriptPromptSlugs.includes(promptSlug) ? 4096 : 2048;
+      openaiRequest.max_output_tokens = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? defaultMaxOut;
       
       // Add reasoning if enabled and supported
       if (useReasoning) {
