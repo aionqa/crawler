@@ -7515,7 +7515,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const actions = [];
       let order = 0;
       (form.fields || []).forEach((field) => {
-        const sel = field.selector || (field.id ? `#${field.id}`) || (field.name ? `input[name="${field.name}"]`) || null;
+        const sel = field.selector || (field.id ? `#${field.id}` : null) || (field.name ? `input[name="${field.name}"]` : null) || null;
         if (sel) {
           actions.push({
             action_id: `action_${order}`,
