@@ -23,9 +23,14 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
   const projectId = context.project_id || context.projectId;
   const jobId = context.job_id || context.jobId;
   
-  // Determine AI service URL - priority: llm_config.endpoint > AI_SERVICE_URL > default
-  const aiServiceUrl = llmConfig.endpoint || AI_SERVICE_URL;
-  
+  // Determine AI service URL. When running on a remote helper, llm_config.endpoint may be
+  // the backend URL (e.g. http://back:4000/openai) which does not resolve; use AI_SERVICE_URL.
+  let aiServiceUrl = llmConfig.endpoint || AI_SERVICE_URL;
+  const isBackendUrl = !aiServiceUrl || aiServiceUrl.includes('back') || aiServiceUrl.includes('/openai');
+  if (isBackendUrl && AI_SERVICE_URL) {
+    aiServiceUrl = AI_SERVICE_URL;
+  }
+
   // Always use AI service (no direct OpenAI API calls)
   console.log(`[OpenAI-Client] Using AI Service: ${aiServiceUrl} for project ${projectId}${jobId ? ` (job: ${jobId})` : ''}`);
   
