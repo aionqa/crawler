@@ -2831,13 +2831,27 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // CRITICAL: Include all step results in the return value
     // Step results are stored by step.id, step.slug, and in workflowState.results
     // This allows login-operations.js to extract determine_completion and other step results
+
+    // When template returns journeys (not legs), workflowState.legs may never be set; derive from journeysToExecute so caller gets legs_count/legs
+    let resultLegs = Array.isArray(workflowState.legs) ? workflowState.legs : [];
+    if (resultLegs.length === 0 && workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0) {
+      resultLegs = workflowState.journeysToExecute.map(journey => ({
+        leg_id: journey.journey_id,
+        description: journey.description,
+        test_instructions: journey.test_instructions,
+        expected_outcome: journey.expected_outcome,
+        actions: journey.actions || [],
+        journey_id: journey.journey_id
+      }));
+      console.log(`✅ [WORKFLOW-RESULT] Derived ${resultLegs.length} legs from journeysToExecute for result (caller will see testable legs)`);
+    }
     
     // Build result object with all step results accessible
     const result = {
       workflow_id: workflowState.workflowId,
-      legs_count: workflowState.legs.length,
+      legs_count: resultLegs.length,
       page_description: workflowState.pageDescription,
-      legs: workflowState.legs,
+      legs: resultLegs,
       ai_analysis: workflowState.aiAnalysisResult,
       context: workflowState.context || {},
       collectedCookies: workflowState.collectedCookies || [],
