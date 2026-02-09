@@ -1768,6 +1768,10 @@ const modeHandlers = {
       `🔄 WORKFLOW MODE: Single-page analysis (backend controls crawling). Requested max_pages=${requestedMaxPages ?? 'n/a'}, max_depth=${requestedMaxDepth ?? 'n/a'}`
     );
     
+    // Set AI logger context (incl. ai_services from helper config) so token-based service selection works
+    if (aiConversationLogger && context) {
+      aiConversationLogger.context = { ...aiConversationLogger.context, ...context };
+    }
     // Initialize workflow analyzer and enhanced executor with context
     const workflowAnalyzer = new WorkflowAnalyzer(backendUrl, aiConversationLogger, context);
     // For page analysis workflows, don't retry legs on failure (no second attempt)

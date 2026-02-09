@@ -11,6 +11,61 @@ import { chromium } from 'playwright';
 import axios from 'axios';
 import { createOpenAIClient } from '../src/openai-client-factory.js';
 
+/**
+ * Extract the first complete JSON object or array from a string that may contain
+ * markdown, IIFEs, or other wrapper text (e.g. LM Studio output).
+ * Uses balanced-brace matching so trailing junk like "}; })();" is not included.
+ * @param {string} str - Raw content
+ * @returns {string|null} Extracted JSON substring or null
+ */
+function extractFirstCompleteJSON(str) {
+  if (typeof str !== 'string' || !str.trim()) return null;
+  const s = str.trim();
+  const openBrace = s.indexOf('{');
+  const openBracket = s.indexOf('[');
+  let start = -1;
+  if (openBrace >= 0 && (openBracket < 0 || openBrace < openBracket)) {
+    start = openBrace;
+  } else if (openBracket >= 0) {
+    start = openBracket;
+  }
+  if (start < 0) return null;
+  let depth = 0;
+  let i = start;
+  let inString = false;
+  let escape = false;
+  let stringChar = null;
+  while (i < s.length) {
+    const c = s[i];
+    if (escape) {
+      escape = false;
+      i++;
+      continue;
+    }
+    if (inString) {
+      if (c === '\\') { escape = true; i++; continue; }
+      if (c === stringChar) { inString = false; stringChar = null; i++; continue; }
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inString = true;
+      stringChar = c;
+      i++;
+      continue;
+    }
+    if (c === '{' || c === '[') { depth++; i++; continue; }
+    if (c === '}' || c === ']') {
+      depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+      i++;
+      continue;
+    }
+    i++;
+  }
+  return null;
+}
+
 export class AIConversationLogger {
   constructor(backendUrl = null, runnerToken = null, context = {}) {
     // Use environment variable if available, otherwise fallback to default
@@ -34,6 +89,32 @@ export class AIConversationLogger {
     };
   }
   
+  /**
+   * Estimate input token count for the request (heuristic: ~4 chars per token for text; images ~1000 each).
+   * Used to choose which AI service to call when context.ai_services has multiple entries with max_input_tokens.
+   */
+  estimateInputTokensFromRequest(openaiRequest) {
+    if (!openaiRequest) return 0;
+    let total = 0;
+    const input = openaiRequest.input || openaiRequest.messages;
+    if (Array.isArray(input)) {
+      for (const item of input) {
+        if (item.content && Array.isArray(item.content)) {
+          for (const part of item.content) {
+            if (part.text) total += Math.ceil(String(part.text).length / 4);
+            if (part.type === 'input_image' || part.image_url) total += 1000;
+          }
+        } else if (typeof item.content === 'string') {
+          total += Math.ceil(item.content.length / 4);
+        }
+      }
+    }
+    if (total === 0 && openaiRequest.input) {
+      total = Math.ceil(JSON.stringify(openaiRequest.input).length / 4);
+    }
+    return total;
+  }
+
   /**
    * Get OpenAI client (lazy initialization with current context)
    * Updates context if provided
@@ -607,14 +688,24 @@ export class AIConversationLogger {
       
       // No retry logic - removed
       
-      // 3. Add explicit output schema instruction to ensure AI knows the expected format
+      // 3. Add explicit output schema instruction for all models (OpenAI, LM Studio, etc.)
+      const wantsJson = payload?.text_format !== 'text';
       if (prompt.response_schema_description) {
-        userMessageText += `\n\n=== OUTPUT SCHEMA ===\n${prompt.response_schema_description}\n\nRespond with valid JSON matching this schema.`;
+        userMessageText += `\n\n=== OUTPUT SCHEMA (follow exactly) ===\n${prompt.response_schema_description}\n\nYou must respond with valid JSON that strictly matches this schema.`;
       }
-      
-      // 3a. CRITICAL: OpenAI requires the word "json" in the message when using json_object format
-      // Add this instruction if not already present
-      if (!userMessageText.toLowerCase().includes('json')) {
+      if (prompt.response_schema && typeof prompt.response_schema === 'object') {
+        // Include precise schema so models that support it can follow it
+        try {
+          const schemaStr = JSON.stringify(prompt.response_schema);
+          if (schemaStr.length < 4000) {
+            userMessageText += `\n\n=== JSON SCHEMA (strict) ===\n${schemaStr}\n\nYour response must be valid JSON conforming to this schema.`;
+          }
+        } catch (_) {}
+      }
+      // 3a. Same instruction for all models: raw JSON only, no markdown/wrappers (critical for LM Studio and others)
+      if (wantsJson) {
+        userMessageText += `\n\nIMPORTANT: Output only the raw JSON object. Do not wrap in markdown code blocks (no \`\`\`json), no prefixes, no suffixes, no explanations. Reply with nothing but the JSON.`;
+      } else if (!userMessageText.toLowerCase().includes('json')) {
         userMessageText += `\n\nIMPORTANT: Respond with VALID JSON ONLY. No markdown, no code blocks, just pure JSON.`;
       }
       
@@ -718,13 +809,18 @@ export class AIConversationLogger {
         console.log(`[AI-CALL] 🔍 Reasoning: enabled=${useReasoning}, effort=${reasoningEffort}, from payload=${payload?.reasoning_effort}, from project=${projectOptions.reasoning_effort}`);
       }
       
+      // Request JSON format for all models (OpenAI, LM Studio, etc.) so they are asked the same way
       const openaiRequest = {
         model: model,
         input: responseInput,
         text: {
-          format: { type: textFormat === 'json_object' ? "json_object" : "text" }
+          format: { type: textFormat === 'json_object' ? 'json_object' : 'text' }
         }
       };
+      // Pass response_schema in request so AI service can use it for providers that support it
+      if (prompt.response_schema && typeof prompt.response_schema === 'object') {
+        openaiRequest.response_schema = prompt.response_schema;
+      }
       
       // Add reasoning if enabled and supported
       if (useReasoning) {
@@ -779,7 +875,7 @@ export class AIConversationLogger {
             job_id: jobId,
             agent_name: agentName,
             conversation_type: promptSlug,
-            text_request: userMessageText.substring(0, 500), // Preview of request
+            text_request: (userMessageText != null ? String(userMessageText) : '').substring(0, 500), // Preview of request
             source_payload: sourcePayload || payload,
             ai_response: null, // No response yet
             human_request: purpose,
@@ -913,6 +1009,24 @@ export class AIConversationLogger {
         project_id: payload?.project_id || sourcePayload?.project_id || this.context?.project_id,
         projectId: payload?.project_id || sourcePayload?.project_id || this.context?.project_id
       };
+      // Choose AI service by input token count when context.ai_services is provided (from helper config)
+      let aiServices = this.context?.ai_services || payload?.ai_services || sourcePayload?.ai_services;
+      if (Array.isArray(aiServices) && aiServices.length > 0) {
+        // Prefer smallest sufficient service: sort by max_input_tokens ascending
+        aiServices = [...aiServices].sort((a, b) => (a.max_input_tokens ?? 32000) - (b.max_input_tokens ?? 32000));
+        const estimatedInputTokens = this.estimateInputTokensFromRequest(openaiRequest);
+        const chosen = aiServices.find((s) => (s.max_input_tokens ?? 32000) >= estimatedInputTokens);
+        const serviceUrl = chosen?.url;
+        if (serviceUrl) {
+          contextUpdate.llm_config = { ...this.context?.llm_config, endpoint: serviceUrl };
+          if (attemptNumber === 1) {
+            console.log(`[AI-CALL] 📍 Selected AI service by tokens: ${estimatedInputTokens} input tokens -> ${chosen.label || serviceUrl} (max ${chosen.max_input_tokens ?? 32000})`);
+          }
+        }
+        if (!serviceUrl && attemptNumber === 1) {
+          console.warn(`[AI-CALL] ⚠️ No AI service with sufficient limit for ~${estimatedInputTokens} tokens; using default endpoint`);
+        }
+      }
       const client = this.getOpenAIClient(contextUpdate);
       const response = await client.responses.create(openaiRequest);
 
@@ -948,9 +1062,11 @@ export class AIConversationLogger {
         }
       }
       
-      // 8. Parse response with validation
-      const rawContent = response.output_text;
-      if (!rawContent) {
+      // 8. Parse response with validation (LM Studio may return output in output[0].text or array content)
+      const rawContent = typeof response?.output_text === 'string'
+        ? response.output_text
+        : (Array.isArray(response?.output) && response.output[0]?.text != null ? String(response.output[0].text) : '');
+      if (!rawContent || (typeof rawContent === 'string' && !rawContent.trim())) {
         throw new Error(`OpenAI returned empty or undefined content. Response: ${JSON.stringify(response)}`);
       }
       
@@ -962,13 +1078,16 @@ export class AIConversationLogger {
         if (codeBlockMatch) {
           jsonContent = codeBlockMatch[1].trim();
         }
-        
-        // Try to find JSON object/array in the content
-        const jsonMatch = jsonContent.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-        if (jsonMatch) {
-          jsonContent = jsonMatch[0];
+        // Prefer balanced-brace extraction so LM Studio wrappers (e.g. "}; })();") are not included
+        const extracted = extractFirstCompleteJSON(jsonContent);
+        if (extracted) {
+          jsonContent = extracted;
+        } else {
+          const jsonMatch = jsonContent.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+          if (jsonMatch) {
+            jsonContent = jsonMatch[0];
+          }
         }
-        
         aiResponse = JSON.parse(jsonContent);
       } catch (parseError) {
         // Check if JSON is incomplete (ends with incomplete string/object)
@@ -997,13 +1116,15 @@ export class AIConversationLogger {
               // Silent fail - don't block execution
             }
           }
-          throw new Error(`OpenAI response appears incomplete (finish_reason: ${finishReason}). JSON parsing failed: ${parseError.message}. Content preview: ${rawContent.substring(Math.max(0, rawContent.length - 200))}`);
+          const safeRaw = typeof rawContent === 'string' ? rawContent : String(rawContent ?? '');
+          throw new Error(`OpenAI response appears incomplete (finish_reason: ${finishReason}). JSON parsing failed: ${parseError.message}. Content preview: ${safeRaw.substring(Math.max(0, safeRaw.length - 200))}`);
         }
         // For non-incomplete errors, log the full error with content preview
+        const safeRaw = typeof rawContent === 'string' ? rawContent : String(rawContent ?? '');
         console.error(`[AI-CALL] ❌ JSON parse error: ${parseError.message}`);
-        console.error(`[AI-CALL] ❌ Content (first 500 chars): ${rawContent.substring(0, 500)}`);
-        console.error(`[AI-CALL] ❌ Content (last 200 chars): ${rawContent.substring(Math.max(0, rawContent.length - 200))}`);
-        throw new Error(`Failed to parse OpenAI response as JSON: ${parseError.message}. Content preview: ${rawContent.substring(0, 200)}`);
+        console.error(`[AI-CALL] ❌ Content (first 500 chars): ${safeRaw.substring(0, 500)}`);
+        console.error(`[AI-CALL] ❌ Content (last 200 chars): ${safeRaw.substring(Math.max(0, safeRaw.length - 200))}`);
+        throw new Error(`Failed to parse OpenAI response as JSON: ${parseError.message}. Content preview: ${safeRaw.substring(0, 200)}`);
       }
       
       // 8. Validate response against schema
@@ -1137,7 +1258,7 @@ export class AIConversationLogger {
             job_id: jobId,
             agent_name: agentName,
             conversation_type: promptSlug,
-            text_request: userMessageText.substring(0, 500),
+            text_request: (userMessageText != null ? String(userMessageText) : '').substring(0, 500),
             source_payload: sourcePayload || payload,
             ai_response: aiResponse,
             human_request: purpose,
@@ -1751,7 +1872,8 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
           aiGeneratedDescription = response.content.summary || response.content.description || response.content.chat_description;
         } else if (typeof response.content === 'string') {
           try {
-            const parsedContent = JSON.parse(response.content);
+            const toParse = extractFirstCompleteJSON(response.content) || response.content;
+            const parsedContent = JSON.parse(toParse);
             aiGeneratedDescription = parsedContent.summary || parsedContent.description || parsedContent.chat_description;
           } catch (e) {
             // Not JSON, ignore
@@ -1769,7 +1891,8 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
             pageSummaryShortDescription = response.content.short_description;
           } else if (typeof response.content === 'string') {
             try {
-              const parsedContent = JSON.parse(response.content);
+              const toParse = extractFirstCompleteJSON(response.content) || response.content;
+              const parsedContent = JSON.parse(toParse);
               pageSummaryShortDescription = parsedContent.short_description || null;
             } catch (_) {
               // Ignore parsing errors for string responses
@@ -2404,7 +2527,9 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
         }
       });
 
-      const aiAnalysis = JSON.parse(analysisResponse.output_text);
+      const rawAnalysis = analysisResponse.output_text || '';
+      const analysisJson = extractFirstCompleteJSON(rawAnalysis) || rawAnalysis;
+      const aiAnalysis = JSON.parse(analysisJson);
       
       // Create structured response with AI analysis
       const structuredResponse = StructuredAIResponse.createAIAnalyzedResponse(
