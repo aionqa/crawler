@@ -10077,14 +10077,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
    */
   async uploadFileForDownload(jobId, content, fileName, contentType) {
     try {
+      const jobIdStr = jobId != null ? String(jobId) : '';
+      if (!jobIdStr) {
+        console.error('❌ uploadFileForDownload: jobId is required');
+        return null;
+      }
       // Convert content to buffer if it's a string
       const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
 
       // Request presigned URL from backend
       const presignedResponse = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
         type: 'file',
-        jobId: jobId,
-        contentType: contentType,
+        jobId: jobIdStr,
+        contentType: contentType || 'application/octet-stream',
         fileName: fileName
       }, {
         timeout: 10000,

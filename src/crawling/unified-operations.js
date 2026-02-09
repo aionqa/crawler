@@ -1803,6 +1803,13 @@ const modeHandlers = {
     const hasAdvancedAnalysis = (workflowCapabilities.usesPlaywrightAnalysis === true) || (workflowCapabilities.usesAIModel === true);
     
     const visitedUrls = new Set();
+    // Ensure URL has a scheme (page.goto fails with "invalid URL" for e.g. "tests.aionqa.com")
+    const ensureUrlHasScheme = (url) => {
+      if (!url || typeof url !== 'string') return url;
+      const t = url.trim();
+      if (t.startsWith('http://') || t.startsWith('https://')) return t;
+      return `https://${t}`;
+    };
     // Get initial URL - handle case where page might navigate after cookies are loaded
     // IMPORTANT: Don't access page.url() immediately - page might not be ready or context might be destroyed
     // Use the seed URL from context instead
@@ -1826,6 +1833,7 @@ const modeHandlers = {
       await sendLog(jobId, 'error', `❌ No seed URL found in context (seed_url: ${context.seed_url}, start_url: ${context.start_url}, url: ${context.url})`);
       throw new Error('No seed URL found in context - cannot start crawl');
     }
+    seedUrl = ensureUrlHasScheme(seedUrl);
     
     const urlQueue = [{ url: seedUrl, depth: 0 }];
     await sendLog(jobId, 'info', `📍 Starting workflow crawl from seed URL: ${seedUrl}`);
@@ -1834,7 +1842,8 @@ const modeHandlers = {
     
     try {
       while (urlQueue.length > 0 && pagesAnalyzed < maxPages) {
-        const { url: currentUrl, depth } = urlQueue.shift();
+        const { url: rawUrl, depth } = urlQueue.shift();
+        const currentUrl = ensureUrlHasScheme(rawUrl) || rawUrl;
         
         // Skip if already visited or too deep
         if (visitedUrls.has(currentUrl) || depth > maxDepth) {
