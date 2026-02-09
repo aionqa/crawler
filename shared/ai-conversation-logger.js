@@ -287,11 +287,20 @@ export class AIConversationLogger {
     }
     
     let result = template;
+    const placeholderRegexEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     
     for (const [key, value] of Object.entries(values)) {
       const placeholder = `{{${key}}}`;
-      const replacement = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-      result = result.replace(new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), replacement);
+      let replacement;
+      // Don't embed huge base64 screenshot in prompt text - image is sent separately via buildResponseInput
+      if ((key === 'screenshot' || key === 'screenshot_base64') && typeof value === 'string' && value.length > 2000) {
+        replacement = `[Screenshot attached as image (${Math.round(value.length / 1024)} KB)]`;
+      } else if (typeof value === 'string') {
+        replacement = value;
+      } else {
+        replacement = JSON.stringify(value, null, 2);
+      }
+      result = result.replace(new RegExp(placeholderRegexEscape(placeholder), 'g'), replacement);
     }
     
     return result;
