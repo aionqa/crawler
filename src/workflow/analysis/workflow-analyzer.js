@@ -1137,19 +1137,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
       return null;
     };
 
-    // Track existing leg IDs from workflowState to prevent duplicates across multiple calls
+    // Track existing journey/leg IDs from workflowState to prevent duplicates within the same batch.
+    // When we have fresh AI journeys (hasJourneys), do NOT pre-populate with existing IDs so we don't
+    // discard the only AI journey as "duplicate" of a prior fallback (e.g. form_simple_form).
     const existingLegIds = new Set();
-    
-    // Build set of existing leg IDs
-    if (Array.isArray(workflowState.legs) && workflowState.legs.length > 0) {
+    if (!hasJourneys && Array.isArray(workflowState.legs) && workflowState.legs.length > 0) {
       for (const existingLeg of workflowState.legs) {
         if (existingLeg.leg_id) {
           existingLegIds.add(existingLeg.leg_id);
         }
       }
     }
-    
-    const seenIds = new Set(existingLegIds); // Initialize with existing IDs
+    const seenIds = new Set(existingLegIds);
     
     const generateLegId = (leg, index) => {
       const candidates = [
@@ -1200,15 +1199,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
     };
 
     const normalizedLegs = [];
-    for (let index = 0; index < rawLegs.length; index++) {
-      const rawLeg = rawLegs[index];
+    const itemsToNormalize = hasJourneys ? processedItems : rawLegs;
+    for (let index = 0; index < itemsToNormalize.length; index++) {
+      const rawLeg = itemsToNormalize[index];
       if (!rawLeg || typeof rawLeg !== 'object') {
         continue;
       }
 
       const type = normalizeType(rawLeg.type || rawLeg.action || rawLeg.action_type || rawLeg.kind);
       if (type === 'navigation') {
-        console.log('⚠️ Skipping navigation leg emitted by page summary');
+        console.log('⚠️ Skipping navigation journey emitted by page summary');
         continue;
       }
 
@@ -1247,8 +1247,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       
       if (!finalSelector) {
-        const legInfo = rawLeg.description || rawLeg.leg_id || rawLeg.type || `index_${index}`;
-        console.log(`⚠️ Skipping leg "${legInfo}" - no selector found. Available fields: ${Object.keys(rawLeg).join(', ')}`);
+        const legInfo = rawLeg.description || rawLeg.leg_id || rawLeg.journey_id || rawLeg.type || `index_${index}`;
+        console.log(`⚠️ Skipping journey "${legInfo}" - no selector found. Available fields: ${Object.keys(rawLeg).join(', ')}`);
         // Log available selector fields for debugging
         const selectorFields = {
           selector: rawLeg.selector,
@@ -1287,9 +1287,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
 
-      // Check for duplicate leg_id only
+      // Duplicate journey/leg id within this batch only (existingLegIds not in seenIds when hasJourneys)
       if (seenIds.has(legId)) {
-        console.warn(`⚠️ Duplicate leg_id detected: "${legId}". AI should not generate duplicate leg_ids.`);
+        console.warn(`⚠️ Duplicate journey_id in same batch: "${legId}". Skipping duplicate.`);
         continue;
       }
       seenIds.add(legId);
@@ -1323,16 +1323,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
 
     if (normalizedLegs.length === 0) {
-      console.log(`⚠️ No valid legs produced from ${source} response`);
+      console.log(`⚠️ No valid journeys produced from ${source} response`);
       return [];
     }
 
-    // Merge with existing legs instead of replacing
-    // This ensures legs from previous analysis steps are preserved
+    // Merge with existing: put new normalized first so we prefer AI output over prior fallback when same journey_id
     const existingLegs = Array.isArray(workflowState.legs) ? workflowState.legs : [];
-    const mergedLegs = [...existingLegs, ...normalizedLegs];
-    
-    // Remove duplicates by leg_id only
+    const mergedLegs = [...normalizedLegs, ...existingLegs];
     const finalLegs = [];
     const finalLegIds = new Set();
     for (const leg of mergedLegs) {
@@ -5488,11 +5485,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         if (candidateLegs.length > 0) {
-          console.log(`🔍 Found ${candidateLegs.length} legs in AI response, normalizing and storing in context.legsToExecute`);
-          // Normalize legs using applyLegsToWorkflowState which sets both workflowState.legs and context.legsToExecute
-          // CRITICAL: applyLegsToWorkflowState returns deduplicated legs (finalLegs), not normalizedLegs
+          console.log(`🔍 Found ${candidateLegs.length} journey(s) in AI response, normalizing and storing`);
           const normalizedLegs = await this.applyLegsToWorkflowState(candidateLegs, workflowState, 'ai-prompt');
-          console.log(`✅ Stored ${normalizedLegs.length} normalized legs in workflowState.context.legsToExecute (after deduplication)`);
+          console.log(`✅ Stored ${normalizedLegs.length} journey(s) in workflowState.context.legsToExecute (after deduplication)`);
           
           // CRITICAL: Also store legs in the structured result so it's accessible from step result
           // The structured result will be stored by storeStepResult, but we need to ensure legs are extractable
@@ -5543,7 +5538,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             });
           }
         } else {
-          console.log(`⚠️ No legs found in AI response`);
+          console.log(`⚠️ No journeys found in AI response`);
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ No legs found in AI response. Response keys: ${parsedResponse && typeof parsedResponse === 'object' ? Object.keys(parsedResponse).join(', ') : 'invalid'}`, 'WORKFLOW-ANALYZER');
           }

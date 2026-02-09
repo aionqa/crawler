@@ -1057,23 +1057,20 @@ export class AIConversationLogger {
         project_id: payload?.project_id || sourcePayload?.project_id || this.context?.project_id,
         projectId: payload?.project_id || sourcePayload?.project_id || this.context?.project_id
       };
-      // Choose AI service by input token count when context.ai_services is provided (from helper config)
-      let aiServices = this.context?.ai_services || payload?.ai_services || sourcePayload?.ai_services;
-      if (Array.isArray(aiServices) && aiServices.length > 0) {
-        // Prefer smallest sufficient service: sort by max_input_tokens ascending
-        aiServices = [...aiServices].sort((a, b) => (a.max_input_tokens ?? 32000) - (b.max_input_tokens ?? 32000));
-        const estimatedInputTokens = this.estimateInputTokensFromRequest(openaiRequest);
-        const chosen = aiServices.find((s) => (s.max_input_tokens ?? 32000) >= estimatedInputTokens);
-        const serviceUrl = chosen?.url;
-        if (serviceUrl) {
-          contextUpdate.llm_config = { ...this.context?.llm_config, endpoint: serviceUrl };
-          if (attemptNumber === 1) {
-            console.log(`[AI-CALL] 📍 Selected AI service by tokens: ${estimatedInputTokens} input tokens -> ${chosen.label || serviceUrl} (max ${chosen.max_input_tokens ?? 32000})`);
-          }
-        }
-        if (!serviceUrl && attemptNumber === 1) {
-          console.warn(`[AI-CALL] ⚠️ No AI service with sufficient limit for ~${estimatedInputTokens} tokens; using default endpoint`);
-        }
+      // AI service must be explicitly configured (no fallbacks). Use context.ai_services from helper config.
+      const aiServices = this.context?.ai_services || payload?.ai_services || sourcePayload?.ai_services;
+      if (!Array.isArray(aiServices) || aiServices.length === 0) {
+        throw new Error('AI not configured. Add at least one AI service in the helper config (e.g. OpenAI or LM Studio URL).');
+      }
+      const estimatedInputTokens = this.estimateInputTokensFromRequest(openaiRequest);
+      const chosen = aiServices.find((s) => (s.max_input_tokens ?? 32000) >= estimatedInputTokens);
+      const serviceUrl = chosen?.url;
+      if (!serviceUrl || !chosen) {
+        throw new Error(`No AI service with sufficient context limit for this request (~${estimatedInputTokens} tokens). Add a service with max_input_tokens >= ${estimatedInputTokens} in the helper config.`);
+      }
+      contextUpdate.llm_config = { ...this.context?.llm_config, endpoint: serviceUrl };
+      if (attemptNumber === 1) {
+        console.log(`[AI-CALL] 📍 Selected AI service (config order): ${estimatedInputTokens} input tokens -> ${chosen.label || serviceUrl} (max ${chosen.max_input_tokens ?? 32000})`);
       }
       const client = this.getOpenAIClient(contextUpdate);
       const response = await client.responses.create(openaiRequest);
