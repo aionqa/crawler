@@ -4375,7 +4375,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (jobId && this.backendLogger) {
           await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
         }
-        throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+        // Fallback for page_summary: build minimal journeys from playwright_analysis so for-each can run when AI is unavailable (e.g. Ollama timeout/500)
+        if (promptIdentifier === 'page_summary' && stepPayload?.playwright_analysis) {
+          const fallback = this.buildFallbackJourneysFromPlaywright(workflowState, stepPayload, jobId);
+          if (fallback && Array.isArray(fallback.journeys) && fallback.journeys.length > 0) {
+            console.warn(`⚠️ [WORKFLOW-ANALYZER] Using fallback journeys from playwright_analysis (${fallback.journeys.length} journey(s)) - AI step failed`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `⚠️ Using fallback journeys from form structure (${fallback.journeys.length} journey(s)) - AI step failed: ${aiError.message}`, 'WORKFLOW-ANALYZER', { fallback_journeys: fallback.journeys.length });
+            }
+            aiResponse = fallback;
+          } else {
+            throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+          }
+        } else {
+          throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+        }
       }
       
       // CRITICAL: Validate OpenAI response exists
@@ -7480,6 +7494,79 @@ IMPORTANT OUTPUT REQUIREMENTS:
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .substring(0, 50);
+  }
+
+  /**
+   * Build minimal fallback journeys from playwright_analysis when AI step (page_summary) fails.
+   * One journey per form: fill each field, submit, verify. Allows for-each step to run without AI.
+   * @param {Object} workflowState
+   * @param {Object} stepPayload - must have playwright_analysis.forms
+   * @param {string} jobId
+   * @returns {{ page_summary: object, journeys: Array } | null}
+   */
+  buildFallbackJourneysFromPlaywright(workflowState, stepPayload, jobId) {
+    const pa = stepPayload?.playwright_analysis;
+    if (!pa || !Array.isArray(pa.forms) || pa.forms.length === 0) return null;
+    const journeys = [];
+    pa.forms.forEach((form, formIndex) => {
+      const formSelector = form.selector || form.selectors?.[0]?.selector || `form`;
+      const formId = (form.id || formSelector.replace(/[^a-z0-9-_]/gi, '_') || `form_${formIndex}`).substring(0, 80);
+      const journeyId = `form_${formId}`;
+      const actions = [];
+      let order = 0;
+      (form.fields || []).forEach((field) => {
+        const sel = field.selector || (field.id ? `#${field.id}`) || (field.name ? `input[name="${field.name}"]`) || null;
+        if (sel) {
+          actions.push({
+            action_id: `action_${order}`,
+            type: 'input',
+            element_type: (field.type && field.type !== 'text' ? field.type : 'input'),
+            selector: sel,
+            description: `Fill ${field.name || field.id || 'field'}`,
+            order: order++
+          });
+        }
+      });
+      (form.buttons || []).forEach((btn) => {
+        const sel = btn.selector || (btn.text ? `button:has-text("${btn.text}")` : 'button[type="submit"]');
+        actions.push({
+          action_id: `action_${order}`,
+          type: 'form_submit',
+          element_type: 'button',
+          selector: sel,
+          description: btn.text ? `Submit: ${btn.text}` : 'Submit form',
+          order: order++
+        });
+      });
+      if (actions.length > 0) {
+        actions.push({
+          action_id: `action_${order}`,
+          type: 'verify',
+          element_type: 'other',
+          selector: 'body',
+          description: 'Verify submission or result',
+          order: order
+        });
+        journeys.push({
+          journey_id: journeyId,
+          description: `Fallback form journey for ${formSelector}`,
+          priority: 'high',
+          confidence: 0.7,
+          expected_outcome: 'Form submitted successfully',
+          test_instructions: 'Fill form and submit',
+          actions
+        });
+      }
+    });
+    if (journeys.length === 0) return null;
+    return {
+      page_summary: {
+        short_description: 'Fallback (AI unavailable): built from form structure',
+        primary_purpose: 'Form submission',
+        forms_present: true
+      },
+      journeys
+    };
   }
 
   /**
