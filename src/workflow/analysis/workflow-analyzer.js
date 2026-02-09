@@ -4610,20 +4610,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
         
         // CRITICAL: Store playwright_script as legScriptToExecute for ALL AI prompt steps that return it
         // This is used by execute-code-from-variable steps
-        if (parsedResponse.playwright_script) {
-          console.log(`✅ playwright_script found: ${parsedResponse.playwright_script.length} chars`);
-          console.log(`📄 VAR_DUMP: playwright_script length=${parsedResponse.playwright_script.length}`);
-          console.log(`📄 VAR_DUMP: playwright_script preview: ${parsedResponse.playwright_script.substring(0, 300)}`);
+        const playwrightScript = parsedResponse.playwright_script != null && typeof parsedResponse.playwright_script === 'string' ? parsedResponse.playwright_script : '';
+        if (playwrightScript) {
+          console.log(`✅ playwright_script found: ${playwrightScript.length} chars`);
+          console.log(`📄 VAR_DUMP: playwright_script length=${playwrightScript.length}`);
+          console.log(`📄 VAR_DUMP: playwright_script preview: ${playwrightScript.substring(0, 300)}`);
           
           // CRITICAL: Verify script uses input_credentials (only for login steps)
           if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
-            const scriptUsesCredentials = parsedResponse.playwright_script.includes('input_credentials') || 
-                                         parsedResponse.playwright_script.includes('input_credentials.username') ||
-                                         parsedResponse.playwright_script.includes('input_credentials.password');
+            const scriptUsesCredentials = playwrightScript.includes('input_credentials') ||
+                                         playwrightScript.includes('input_credentials.username') ||
+                                         playwrightScript.includes('input_credentials.password');
             console.log(`📄 VAR_DUMP: scriptUsesCredentials=${scriptUsesCredentials}`);
             if (!scriptUsesCredentials) {
               console.error(`❌ ERROR: Generated script does NOT use input_credentials!`);
-              console.error(`Script preview: ${parsedResponse.playwright_script.substring(0, 500)}`);
+              console.error(`Script preview: ${playwrightScript.substring(0, 500)}`);
               console.error(`Available credentials: username=${workflowState.inputCredentials?.username || 'MISSING'}, password=${workflowState.inputCredentials?.password ? '***' : 'MISSING'}`);
             } else {
               console.log(`✅ Generated script uses input_credentials`);
@@ -4640,7 +4641,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
               const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
               const stepName = (step.name || step.id || 'script').replace(/[^a-z0-9]/gi, '-').toLowerCase();
               const fileName = `playwright-script-${jobId}-${stepName}-${timestamp}.js`;
-              scriptUrl = await this.uploadFileForDownload(jobId, parsedResponse.playwright_script, fileName, 'text/javascript');
+              scriptUrl = await this.uploadFileForDownload(jobId, playwrightScript, fileName, 'text/javascript');
               
               if (scriptUrl) {
                 console.log(`✅ Playwright script uploaded: 📥 ${scriptUrl}`);
@@ -4652,8 +4653,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
           
           // Log to job history with download link
           const scriptLogMessage = scriptUrl
-            ? `✅ playwright_script extracted: ${parsedResponse.playwright_script.length} chars\n📥 Download: ${scriptUrl}`
-            : `✅ playwright_script extracted: ${parsedResponse.playwright_script.length} chars`;
+            ? `✅ playwright_script extracted: ${playwrightScript.length} chars\n📥 Download: ${scriptUrl}`
+            : `✅ playwright_script extracted: ${playwrightScript.length} chars`;
           
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'info',
@@ -4661,15 +4662,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
               'WORKFLOW-ANALYZER',
               {
                 step_id: step.id,
-                script_length: parsedResponse.playwright_script.length,
-                script_preview: parsedResponse.playwright_script.substring(0, 200),
+                script_length: playwrightScript.length,
+                script_preview: playwrightScript.substring(0, 200),
                 script_download_url: scriptUrl
               }
             );
           }
 
           // CRITICAL: Store as legScriptToExecute for execute-code-from-variable steps
-          const cleanedScript = this.cleanScript(parsedResponse.playwright_script);
+          const cleanedScript = this.cleanScript(playwrightScript);
           if (cleanedScript && cleanedScript.trim().length > 0) {
             workflowState.legScriptToExecute = cleanedScript;
             if (!workflowState.context) {
@@ -5542,7 +5543,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             }
             workflowState.context.legScriptToExecute = cleanedScript;
           }
-          console.log(`✅ Extracted playwright_script to page namespace, workflowState, and legScriptToExecute: ${scriptValue.substring(0, 100)}...`);
+          console.log(`✅ Extracted playwright_script to page namespace, workflowState, and legScriptToExecute: ${(typeof scriptValue === 'string' ? scriptValue : String(scriptValue || '')).substring(0, 100)}...`);
         } else {
           console.warn(`⚠️ playwright_script not found in generate_login_script result. Keys: ${Object.keys(parsedResponse || {}).join(', ')}`);
         }
