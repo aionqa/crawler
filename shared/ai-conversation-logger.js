@@ -291,10 +291,49 @@ export class AIConversationLogger {
     for (const [key, value] of Object.entries(values)) {
       const placeholder = `{{${key}}}`;
       const replacement = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-      result = result.replace(new RegExp(placeholder, 'g'), replacement);
+      result = result.replace(new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), replacement);
     }
     
     return result;
+  }
+
+  /**
+   * Build structured request context for UI expand/collapse (page_url, visible_text, interactive_elements, etc.)
+   * @param {Object} payload - Step payload used for the AI request
+   * @param {number} maxStringLength - Max length for string values (default 8000)
+   * @returns {Array<{key: string, label: string, value: string|object}>}
+   */
+  buildRequestContextComponents(payload, maxStringLength = 8000) {
+    if (!payload || typeof payload !== 'object') return [];
+    const components = [];
+    const keys = [
+      { key: 'page_url', label: 'Page URL' },
+      { key: 'url_before_action', label: 'URL before action' },
+      { key: 'url_after_action', label: 'URL after action' },
+      { key: 'visible_text', label: 'Visible text' },
+      { key: 'interactive_elements', label: 'Interactive elements' },
+      { key: 'forms', label: 'Forms' },
+      { key: 'currentJourney', label: 'Current journey' },
+      { key: 'playwright_analysis', label: 'Playwright analysis' }
+    ];
+    for (const { key, label } of keys) {
+      if (!(key in payload)) continue;
+      const raw = payload[key];
+      if (raw === undefined || raw === null) continue;
+      let value;
+      if (typeof raw === 'string') {
+        value = raw.length <= maxStringLength ? raw : raw.substring(0, maxStringLength) + '\n… [truncated]';
+      } else {
+        try {
+          const str = JSON.stringify(raw, null, 2);
+          value = str.length <= maxStringLength ? raw : { _truncated: true, _preview: str.substring(0, maxStringLength) + '…' };
+        } catch (_) {
+          value = String(raw);
+        }
+      }
+      components.push({ key, label, value });
+    }
+    return components;
   }
 
   /**
@@ -673,13 +712,9 @@ export class AIConversationLogger {
       prompt.response_schema_description = prompt.response_schema_description || null;
       prompt.response_schema = prompt.response_schema || null;
       
-      // 2. Replace placeholders in user message template
-      // CRITICAL: Remove URLs from payload to prevent OpenAI from making direct calls to websites
-      const safePayload = { ...payload };
-      delete safePayload.page_url;
-      delete safePayload.pageUrl;
-      delete safePayload.url;
-      let userMessageText = this.replacePlaceholders(prompt.user_message_template, safePayload);
+      // 2. Replace placeholders in user message template (e.g. {{page_url}}, {{url_after_action}}, {{visible_text}})
+      // Keep all payload keys so placeholders are substituted; URLs in the prompt are context only, not used for direct calls
+      let userMessageText = this.replacePlaceholders(prompt.user_message_template, payload);
       
       // 2a. Add project-specific additional prompt text if available
       if (payload.additional_prompt_text && payload.additional_prompt_text.trim()) {
@@ -1229,7 +1264,9 @@ export class AIConversationLogger {
             store_logs: storeLogs
           }
         };
-        
+        // Structured request context for UI expand/collapse (page_url, visible_text, interactive_elements, etc.)
+        const payloadComponents = this.buildRequestContextComponents(conversationRecord.sourcePayload || payload);
+
         await this.sendAIConversation(
           jobId,
           agentName,
@@ -1247,7 +1284,8 @@ export class AIConversationLogger {
             cost: conversationRecord.cost,
             usage: conversationRecord.usage,
             status: 'success', // Update status from pending to success
-            conversation_id: pendingConversationId || conversationKey || null
+            conversation_id: pendingConversationId || conversationKey || null,
+            payload_components: payloadComponents
           }
         );
       } else if (pendingConversationId && jobId && this.backendUrl) {

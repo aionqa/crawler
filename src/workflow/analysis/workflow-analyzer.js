@@ -3952,15 +3952,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
       stepPayload.ai_analysis_result = workflowState.aiAnalysisResult;
     }
     
-    // Add URL tracking
-    if (workflowState.urlBeforeAction) {
-      stepPayload.url_before_action = workflowState.urlBeforeAction;
-      stepPayload.before_url = workflowState.urlBeforeAction;
-    }
-    if (workflowState.urlAfterAction) {
-      stepPayload.url_after_action = workflowState.urlAfterAction;
-      stepPayload.after_url = workflowState.urlAfterAction;
-    }
+    // Add URL tracking (fallback to pageUrl so {{url_before_action}}/{{url_after_action}} are always substituted)
+    const currentPageUrl = workflowState.pageUrl || workflowState.currentUrl || (typeof page?.url === 'function' ? page.url() : null);
+    stepPayload.url_before_action = workflowState.urlBeforeAction || currentPageUrl || stepPayload.page_url || '';
+    stepPayload.before_url = stepPayload.url_before_action;
+    stepPayload.url_after_action = workflowState.urlAfterAction || currentPageUrl || stepPayload.page_url || '';
+    stepPayload.after_url = stepPayload.url_after_action;
     if (workflowState.currentUrl) {
       stepPayload.current_url = workflowState.currentUrl;
     }
@@ -4900,19 +4897,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
 
           // CRITICAL: Store journeys in workflowState IMMEDIATELY after extraction
-          // This ensures journeys are available even if the step times out later
-          // Only update workflowState.journeys if we have journeys to avoid overwriting with empty array
+          // Only journeys with a non-empty actions array are executable; filter out the rest
+          const validJourneys = journeys.filter(j => Array.isArray(j.actions) && j.actions.length > 0);
+          const skippedNoActions = journeys.length - validJourneys.length;
+          if (skippedNoActions > 0) {
+            console.warn(`⚠️ [JOURNEYS-EXTRACT] Skipped ${skippedNoActions} journey(s) with no actions; ${validJourneys.length} executable`);
+          }
           if (journeys.length > 0) {
             workflowState.journeys = journeys;
-            workflowState.journeysToExecute = journeys;
+            workflowState.journeysToExecute = validJourneys;
             if (!workflowState.context) {
               workflowState.context = {};
             }
-            workflowState.context.journeysToExecute = journeys;
+            workflowState.context.journeysToExecute = validJourneys;
             
             // CRITICAL: Also save to variable pool immediately so for-each step can find it
             this.initializeVariablePool(workflowState);
-            this.saveVariable(workflowState, 'journeysToExecute', journeys, 'page', step);
+            this.saveVariable(workflowState, 'journeysToExecute', validJourneys, 'page', step);
             
             // Also store in aiAnalysisResult for compatibility
             if (!workflowState.aiAnalysisResult) {
@@ -4920,12 +4921,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
             }
             workflowState.aiAnalysisResult.journeys = journeys;
             
-            console.log(`✅ [JOURNEYS-STATE] Immediately stored ${journeys.length} journey(s) in workflowState.journeysToExecute and variable pool`);
+            console.log(`✅ [JOURNEYS-STATE] Immediately stored ${validJourneys.length} journey(s) in workflowState.journeysToExecute and variable pool`);
             if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-STATE] Stored ${journeys.length} journey(s) in workflowState`, 'WORKFLOW-ANALYZER', {
-                journeys_count: journeys.length,
-                journey_ids: journeys.map(j => j.journey_id || 'no-id'),
-                total_actions: journeys.reduce((sum, j) => sum + (Array.isArray(j.actions) ? j.actions.length : 0), 0)
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-STATE] Stored ${validJourneys.length} executable journey(s) in workflowState`, 'WORKFLOW-ANALYZER', {
+                journeys_count: validJourneys.length,
+                skipped_no_actions: skippedNoActions,
+                journey_ids: validJourneys.map(j => j.journey_id || 'no-id'),
+                total_actions: validJourneys.reduce((sum, j) => sum + (Array.isArray(j.actions) ? j.actions.length : 0), 0)
               });
             }
             
