@@ -8,13 +8,12 @@ import axios from 'axios';
 import { getAIServiceToken } from './ai-token-manager.js';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
-const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://aionqa-ai-service:5000';
-// Fallback token for backward compatibility (deprecated - use 24-hour tokens instead)
+// No default AI_SERVICE_URL - endpoint must come from context.llm_config.endpoint (set from helper config ai_services).
 const AI_SERVICE_TOKEN = process.env.RUNNER_TOKEN || process.env.AI_SERVICE_TOKEN;
 
 /**
- * Create OpenAI client that uses AionQA AI Service
- * @param {Object} context - Job context containing llm_config, project_id, job_id
+ * Create OpenAI client that uses the configured AI service (no fallbacks).
+ * @param {Object} context - Job context containing llm_config.endpoint (from helper ai_services), project_id, job_id
  * @param {string} fallbackApiKey - Fallback API key for backward compatibility (deprecated)
  * @returns {OpenAI} OpenAI client instance
  */
@@ -22,16 +21,12 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
   const llmConfig = context.llm_config || {};
   const projectId = context.project_id || context.projectId;
   const jobId = context.job_id || context.jobId;
-  
-  // Determine AI service URL. When running on a remote helper, llm_config.endpoint may be
-  // the backend URL (e.g. http://back:4000/openai) which does not resolve; use AI_SERVICE_URL.
-  let aiServiceUrl = llmConfig.endpoint || AI_SERVICE_URL;
-  const isBackendUrl = !aiServiceUrl || aiServiceUrl.includes('back') || aiServiceUrl.includes('/openai');
-  if (isBackendUrl && AI_SERVICE_URL) {
-    aiServiceUrl = AI_SERVICE_URL;
+
+  const aiServiceUrl = llmConfig.endpoint && String(llmConfig.endpoint).trim();
+  if (!aiServiceUrl) {
+    throw new Error('AI not configured. Add at least one AI service in the helper config (e.g. OpenAI or LM Studio URL).');
   }
 
-  // Always use AI service (no direct OpenAI API calls)
   console.log(`[OpenAI-Client] Using AI Service: ${aiServiceUrl} for project ${projectId}${jobId ? ` (job: ${jobId})` : ''}`);
   
   // Create a custom OpenAI client that uses axios to call the AI service
