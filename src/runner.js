@@ -1408,7 +1408,13 @@ async function executeSingleJob() {
     console.error(`❌ JOB_ID is required in single-job mode`);
     process.exit(1);
   }
-  
+
+  try {
+    await appendJobLog(JOB_ID, 'info', `Single-job mode starting for job ${JOB_ID}`, { component: 'RUNNER' });
+  } catch (earlyLogErr) {
+    console.warn('Could not send early log to backend:', earlyLogErr.message);
+  }
+
   try {
     // Fetch job data from backend API instead of environment variable
     // This avoids ECS container overrides 8192 character limit
