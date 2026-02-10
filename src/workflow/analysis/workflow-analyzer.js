@@ -3882,8 +3882,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       stepPayload.current_iteration = workflowState.currentIteration;
       stepPayload.step_request_id = step.id || `${step.name || 'step'}_${workflowState.currentIteration}`;
       // Force unique conversation so AI service does not return cached response from previous iteration
-      // API: conversation.id max 64 chars, only letters/numbers/underscores/dashes (no colons)
-      const rawKey = (step.id || `iter-${workflowState.currentIteration}-${step.name || 'step'}`).replace(/[^a-zA-Z0-9_-]/g, '_');
+      // API: conversation.id must begin with 'conv', max 64 chars, only letters/numbers/underscores/dashes
+      const sanitized = (step.id || `iter_${workflowState.currentIteration}_${step.name || 'step'}`).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const rawKey = 'conv_' + sanitized;
       stepPayload.conversation_key = rawKey.length > 64 ? rawKey.slice(0, 64) : rawKey;
     }
 
