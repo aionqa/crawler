@@ -2638,29 +2638,32 @@ class WorkflowExecutor {
           };
         };
         
-        // Wrap common page methods
-        wrapper.type = wrapMethod('type', pageObj.type.bind(pageObj));
-        wrapper.press = wrapMethod('press', pageObj.press.bind(pageObj));
-        wrapper.goto = wrapMethod('goto', pageObj.goto.bind(pageObj));
-        wrapper.waitForTimeout = wrapMethod('waitForTimeout', pageObj.waitForTimeout.bind(pageObj));
-        wrapper.waitFor = wrapMethod('waitFor', pageObj.waitFor.bind(pageObj));
-        wrapper.waitForLoadState = wrapMethod('waitForLoadState', pageObj.waitForLoadState.bind(pageObj));
+        // Wrap common page methods (only bind when method exists to avoid "undefined.bind" errors)
+        if (typeof pageObj.type === 'function') wrapper.type = wrapMethod('type', pageObj.type.bind(pageObj));
+        if (typeof pageObj.press === 'function') wrapper.press = wrapMethod('press', pageObj.press.bind(pageObj));
+        if (typeof pageObj.goto === 'function') wrapper.goto = wrapMethod('goto', pageObj.goto.bind(pageObj));
+        if (typeof pageObj.waitForTimeout === 'function') {
+          wrapper.waitForTimeout = wrapMethod('waitForTimeout', pageObj.waitForTimeout.bind(pageObj));
+        } else {
+          wrapper.waitForTimeout = wrapMethod('waitForTimeout', (ms) => new Promise(resolve => setTimeout(resolve, ms)));
+        }
+        if (typeof pageObj.waitFor === 'function') wrapper.waitFor = wrapMethod('waitFor', pageObj.waitFor.bind(pageObj));
+        if (typeof pageObj.waitForLoadState === 'function') wrapper.waitForLoadState = wrapMethod('waitForLoadState', pageObj.waitForLoadState.bind(pageObj));
         // CRITICAL: Do NOT log waitForSelector calls during execution
-        // waitForSelector is often used for verification, which should not happen during execution
-        // Only use it for waiting before interaction, but don't log it
-        wrapper.waitForSelector = async function(selector, options = {}) {
-          // Execute without logging - this is for waiting, not verification
-          return await pageObj.waitForSelector(selector, options);
-        };
-        wrapper.selectOption = wrapMethod('selectOption', pageObj.selectOption.bind(pageObj));
-        wrapper.check = wrapMethod('check', pageObj.check.bind(pageObj));
-        wrapper.uncheck = wrapMethod('uncheck', pageObj.uncheck.bind(pageObj));
-        wrapper.hover = wrapMethod('hover', pageObj.hover.bind(pageObj));
-        wrapper.focus = wrapMethod('focus', pageObj.focus.bind(pageObj));
-        wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
+        if (typeof pageObj.waitForSelector === 'function') {
+          wrapper.waitForSelector = async function(selector, options = {}) {
+            return await pageObj.waitForSelector(selector, options);
+          };
+        }
+        if (typeof pageObj.selectOption === 'function') wrapper.selectOption = wrapMethod('selectOption', pageObj.selectOption.bind(pageObj));
+        if (typeof pageObj.check === 'function') wrapper.check = wrapMethod('check', pageObj.check.bind(pageObj));
+        if (typeof pageObj.uncheck === 'function') wrapper.uncheck = wrapMethod('uncheck', pageObj.uncheck.bind(pageObj));
+        if (typeof pageObj.hover === 'function') wrapper.hover = wrapMethod('hover', pageObj.hover.bind(pageObj));
+        if (typeof pageObj.focus === 'function') wrapper.focus = wrapMethod('focus', pageObj.focus.bind(pageObj));
+        if (typeof pageObj.blur === 'function') wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
         
         // Wrap locator method to also intercept methods on locators
-        const originalLocator = pageObj.locator.bind(pageObj);
+        const originalLocator = typeof pageObj.locator === 'function' ? pageObj.locator.bind(pageObj) : () => { throw new Error('page.locator is not available'); };
         wrapper.locator = function(selector, options) {
           const locator = originalLocator(selector, options);
           
@@ -2714,13 +2717,11 @@ class WorkflowExecutor {
         };
         
         // Wrap screenshot method to capture and log screenshots during script execution
-        const originalScreenshot = pageObj.screenshot.bind(pageObj);
+        const originalScreenshot = typeof pageObj.screenshot === 'function' ? pageObj.screenshot.bind(pageObj) : null;
         wrapper.screenshot = async function(options = {}) {
           try {
-            // Log the action execution
             await logAction('screenshot', [options]);
-            
-            // Take the screenshot
+            if (!originalScreenshot) throw new Error('page.screenshot is not available');
             const screenshotBuffer = await originalScreenshot(options);
             
             // Log and upload screenshot if jobId and backendLogger are available
