@@ -3876,12 +3876,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
       stepPayload.current_journey = filteredJourney;
     }
     
-    // For while-loop iterations: include iteration/step id and a valid conversation_key (API: must start with 'conv', max 64 chars, only a-z A-Z 0-9 _ -).
+    // For while-loop iterations: include iteration/step id only. Do NOT set conversation_key: backend returns 404 if id is not an existing conversation, so omit to let backend create new conversation and avoid log errors.
     if (workflowState.currentIteration !== undefined && workflowState.currentIteration !== null) {
       stepPayload.current_iteration = workflowState.currentIteration;
       stepPayload.step_request_id = step.id || `${step.name || 'step'}_${workflowState.currentIteration}`;
-      const raw = (step.id || `iter_${workflowState.currentIteration}_${step.name || 'step'}`).replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-      stepPayload.conversation_key = ('conv_' + raw).slice(0, 64);
     }
 
     // Add execution history
