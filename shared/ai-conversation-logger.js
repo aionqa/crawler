@@ -926,7 +926,8 @@ export class AIConversationLogger {
       // Generous max_output_tokens so script/JSON responses are not truncated (LM Studio / Ollama default may be low)
       const scriptPromptSlugs = ['generate_journey_script', 'generate_login_script', 'generate-workflow-script', 'generate-form-fill-script', 'generate-click-script', 'generate-navigation-script', 'generate-validation-script'];
       const largeJsonSlugs = ['page_summary'];
-      const defaultMaxOut = scriptPromptSlugs.includes(promptSlug) ? 4096 : (largeJsonSlugs.includes(promptSlug) ? 4096 : 2048);
+      const scriptMaxOut = 8192; // Multi-step wizards can produce long scripts
+      const defaultMaxOut = scriptPromptSlugs.includes(promptSlug) ? scriptMaxOut : (largeJsonSlugs.includes(promptSlug) ? 4096 : 2048);
       openaiRequest.max_output_tokens = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? defaultMaxOut;
       
       // Add reasoning if enabled and supported
