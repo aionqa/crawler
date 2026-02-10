@@ -11633,10 +11633,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
             });
           } catch (nestedError) {
             console.error(`❌ Nested step failed in iteration ${idx + 1}: ${nestedError.message}`);
-            // Continue with next step unless critical
-            if (nestedStep.config?.critical) {
-              throw nestedError;
-            }
+            // No fallbacks: fail the job on any nested step failure
+            throw nestedError;
           }
         }
       }
