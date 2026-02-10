@@ -793,7 +793,7 @@ export class AIConversationLogger {
       }
       // 3a. STRICT: AI must provide JSON only — no markdown, no code blocks (critical for parsing)
       if (expectsJson) {
-        userMessageText += `\n\nSTRICT: Respond with valid JSON only. No markdown, no code blocks (no \`\`\`), no explanation, no text outside the JSON. Your entire response must be parseable as JSON.`;
+        userMessageText += `\n\nSTRICT: Respond with valid JSON only. No markdown, no code blocks (no \`\`\`), no explanation, no text outside the JSON. Your entire response must be parseable as JSON. Avoid trailing commas, unescaped quotes inside strings, and newlines inside unquoted values.`;
       }
       
       // No retry logic - removed
@@ -1126,63 +1126,75 @@ export class AIConversationLogger {
             console.log(`[AI-CALL] 📍 Trying AI service ${idx + 1}/${eligibleServices.length} (config order): ${chosen.label || serviceUrl} (max ${chosen.max_input_tokens ?? 32000})`);
           }
           const client = this.getOpenAIClient(contextUpdate);
-          response = await client.responses.create(openaiRequest);
+          const maxParseAttempts = expectsJson ? 2 : 1; // One retry on JSON parse error
+          for (let parseAttempt = 1; parseAttempt <= maxParseAttempts; parseAttempt++) {
+            response = await client.responses.create(openaiRequest);
 
-          // 7. Determine finish reason
-          finishReason = 'stop';
-          if (response.incomplete_details?.reason === 'max_output_tokens') {
-            finishReason = 'length';
-          } else if (response.status && response.status !== 'completed') {
-            finishReason = response.status;
-          }
-
-          if (finishReason === 'length') {
-            console.warn(`[AI-CALL] ⚠️ OpenAI response was truncated (finish_reason: length). This may indicate incomplete content.`);
-            if (jobId && this.backendUrl) {
-              try {
-                await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-                  jobId,
-                  level: 'warn',
-                  message: `⚠️ OpenAI response was truncated (finish_reason: length). Response may be incomplete.`,
-                  component: 'AI-CALL',
-                  metadata: {
-                    finish_reason: finishReason,
-                    prompt_slug: promptSlug,
-                    truncated: true
-                  }
-                }, {
-                  headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}
-                }).catch(() => {});
-              } catch (e) {}
+            // 7. Determine finish reason
+            finishReason = 'stop';
+            if (response.incomplete_details?.reason === 'max_output_tokens') {
+              finishReason = 'length';
+            } else if (response.status && response.status !== 'completed') {
+              finishReason = response.status;
             }
-          }
 
-          // 8. Parse response with validation (LM Studio may return output in output[0].text or array content)
-          const rawContent = typeof response?.output_text === 'string'
-            ? response.output_text
-            : (Array.isArray(response?.output) && response.output[0]?.text != null ? String(response.output[0].text) : '');
-          if (!rawContent || (typeof rawContent === 'string' && !rawContent.trim())) {
-            throw new Error(`OpenAI returned empty or undefined content. Response: ${JSON.stringify(response)}`);
-          }
-
-          let jsonContent = rawContent.trim();
-          const codeBlockMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-          if (codeBlockMatch) {
-            jsonContent = codeBlockMatch[1].trim();
-          }
-          const extracted = extractFirstCompleteJSON(jsonContent);
-          if (extracted) {
-            jsonContent = extracted;
-          } else {
-            const jsonMatch = jsonContent.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
-            if (jsonMatch) {
-              jsonContent = jsonMatch[0];
+            if (finishReason === 'length') {
+              console.warn(`[AI-CALL] ⚠️ OpenAI response was truncated (finish_reason: length). This may indicate incomplete content.`);
+              if (jobId && this.backendUrl) {
+                try {
+                  await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+                    jobId,
+                    level: 'warn',
+                    message: `⚠️ OpenAI response was truncated (finish_reason: length). Response may be incomplete.`,
+                    component: 'AI-CALL',
+                    metadata: {
+                      finish_reason: finishReason,
+                      prompt_slug: promptSlug,
+                      truncated: true
+                    }
+                  }, {
+                    headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}
+                  }).catch(() => {});
+                } catch (e) {}
+              }
             }
-          }
-          aiResponse = JSON.parse(jsonContent);
-          // Success: valid response from this service
-          if (attemptNumber === 1 && idx > 0) {
-            console.log(`[AI-CALL] ✅ Succeeded with fallback service ${idx + 1}/${eligibleServices.length}: ${chosen.label || serviceUrl}`);
+
+            // 8. Parse response with validation (LM Studio may return output in output[0].text or array content)
+            const rawContent = typeof response?.output_text === 'string'
+              ? response.output_text
+              : (Array.isArray(response?.output) && response.output[0]?.text != null ? String(response.output[0].text) : '');
+            if (!rawContent || (typeof rawContent === 'string' && !rawContent.trim())) {
+              throw new Error(`OpenAI returned empty or undefined content. Response: ${JSON.stringify(response)}`);
+            }
+
+            let jsonContent = rawContent.trim();
+            const codeBlockMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+            if (codeBlockMatch) {
+              jsonContent = codeBlockMatch[1].trim();
+            }
+            const extracted = extractFirstCompleteJSON(jsonContent);
+            if (extracted) {
+              jsonContent = extracted;
+            } else {
+              const jsonMatch = jsonContent.match(/\{[\s\S]*\}|\[[\s\S]*\]/);
+              if (jsonMatch) {
+                jsonContent = jsonMatch[0];
+              }
+            }
+            try {
+              aiResponse = JSON.parse(jsonContent);
+              // Success: valid response from this service
+              if (attemptNumber === 1 && idx > 0) {
+                console.log(`[AI-CALL] ✅ Succeeded with fallback service ${idx + 1}/${eligibleServices.length}: ${chosen.label || serviceUrl}`);
+              }
+              break;
+            } catch (parseErr) {
+              if (expectsJson && parseAttempt === 1 && parseErr instanceof SyntaxError) {
+                console.warn(`[AI-CALL] ⚠️ JSON parse failed (${parseErr.message}), retrying request once...`);
+                continue;
+              }
+              throw parseErr;
+            }
           }
           break;
         } catch (err) {
