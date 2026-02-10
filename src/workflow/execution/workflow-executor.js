@@ -2174,8 +2174,14 @@ class WorkflowExecutor {
         throw new Error(error);
       }
       
-      // Use script exactly as provided - NO cleaning or sanitization
-      const cleanedScript = script;
+      // Use script as provided; normalize common AI-induced syntax breakers (smart quotes, etc.)
+      let cleanedScript = script;
+      if (typeof cleanedScript === 'string') {
+        cleanedScript = cleanedScript
+          .replace(/\u2018|\u2019/g, "'")  // ' '
+          .replace(/\u201C|\u201D/g, '"')  // " "
+          .replace(/\u00A0/g, ' ');        // nbsp
+      }
       
       const urlBefore = page.url();
       const titleBefore = await page.title();
@@ -2892,6 +2898,22 @@ class WorkflowExecutor {
               } catch (_) { /* use original and throw below */ }
             }
           }
+        }
+        // If still failing, try treating script as bare body (wrap in IIFE)
+        if (scriptToRun === cleanedScript) {
+          const trimmed = cleanedScript.trim();
+          const wrapped = `return (async function() {\n${trimmed}\n})();`;
+          try {
+            new Function(wrapped);
+            scriptToRun = wrapped;
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'debug',
+                'Recovered script by wrapping as async IIFE body',
+                'WORKFLOW-EXECUTOR',
+                { body_preview: trimmed.substring(0, 200) }
+              );
+            }
+          } catch (_) { /* ignore */ }
         }
         if (scriptToRun === cleanedScript) {
           const errorMsg = `Script syntax error: ${syntaxError.message}`;
