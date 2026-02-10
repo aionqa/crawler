@@ -2203,6 +2203,8 @@ class WorkflowExecutor {
           return value;
         };
         
+        const wrapper = {};
+        
         // Wrap click method with human-like behavior AND logging
         const originalClick = pageObj.click.bind(pageObj);
         wrapper.click = async function(selector, options = {}) {
