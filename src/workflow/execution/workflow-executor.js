@@ -2174,13 +2174,17 @@ class WorkflowExecutor {
         throw new Error(error);
       }
       
-      // Use script as provided; normalize common AI-induced syntax breakers (smart quotes, etc.)
+      // Use script as provided; normalize common AI-induced syntax breakers
       let cleanedScript = script;
       if (typeof cleanedScript === 'string') {
         cleanedScript = cleanedScript
           .replace(/\u2018|\u2019/g, "'")  // ' '
           .replace(/\u201C|\u201D/g, '"')  // " "
-          .replace(/\u00A0/g, ' ');        // nbsp
+          .replace(/\u00A0/g, ' ')         // nbsp
+          .replace(/\u2028/g, '\n')        // line separator
+          .replace(/\u2029/g, '\n')        // paragraph separator
+          .replace(/\uFEFF/g, '')          // BOM
+          .replace(/[\u200B-\u200D\u2060\uFEFF]/g, ''); // zero-width chars
       }
       
       const urlBefore = page.url();

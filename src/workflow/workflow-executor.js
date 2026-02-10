@@ -1993,13 +1993,17 @@ class WorkflowExecutor {
         throw new Error(error);
       }
       
-      // Use script as provided; normalize common AI-induced syntax breakers (smart quotes, etc.)
+      // Use script as provided; normalize common AI-induced syntax breakers
       let cleanedScript = script;
       if (typeof cleanedScript === 'string') {
         cleanedScript = cleanedScript
-          .replace(/\u2018|\u2019/g, "'")  // ' '
-          .replace(/\u201C|\u201D/g, '"')  // " "
-          .replace(/\u00A0/g, ' ');        // nbsp
+          .replace(/\u2018|\u2019/g, "'")
+          .replace(/\u201C|\u201D/g, '"')
+          .replace(/\u00A0/g, ' ')
+          .replace(/\u2028/g, '\n')
+          .replace(/\u2029/g, '\n')
+          .replace(/\uFEFF/g, '')
+          .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
       }
       
       const urlBefore = page.url();
