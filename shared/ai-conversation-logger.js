@@ -429,7 +429,9 @@ export class AIConversationLogger {
   getConversationKey({ jobId, agentName, pageUrl, promptSlug, payload }) {
     const explicitKey = payload?.conversation_key || payload?.conversationKey || payload?.conversationId || payload?.conversation_id;
     if (explicitKey) {
-      return String(explicitKey);
+      const key = String(explicitKey);
+      // OpenAI/API allows max 64 chars for conversation.id
+      return key.length > 64 ? key.slice(0, 64) : key;
     }
     return null;
   }
