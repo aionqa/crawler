@@ -3876,16 +3876,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
       stepPayload.current_journey = filteredJourney;
     }
     
-    // CRITICAL: For while-loop iterations, include iteration and unique step id in payload so each iteration
-    // triggers a fresh AI call (avoids backend/cache returning iteration-1 response for iteration-2 request)
+    // CRITICAL: For while-loop iterations, include iteration and step id in payload (for context only).
+    // Do NOT set conversation_key here: API requires conversation.id to start with 'conv' and be valid;
+    // backend/runner may not support that yet, and invalid id causes 400 and fails the job. Omitting
+    // avoids any log errors; iteration/step_request_id still give context for caching if needed.
     if (workflowState.currentIteration !== undefined && workflowState.currentIteration !== null) {
       stepPayload.current_iteration = workflowState.currentIteration;
       stepPayload.step_request_id = step.id || `${step.name || 'step'}_${workflowState.currentIteration}`;
-      // Force unique conversation so AI service does not return cached response from previous iteration
-      // API: conversation.id must begin with 'conv', max 64 chars, only letters/numbers/underscores/dashes
-      const sanitized = (step.id || `iter_${workflowState.currentIteration}_${step.name || 'step'}`).replace(/[^a-zA-Z0-9_-]/g, '_');
-      const rawKey = 'conv_' + sanitized;
-      stepPayload.conversation_key = rawKey.length > 64 ? rawKey.slice(0, 64) : rawKey;
     }
 
     // Add execution history
