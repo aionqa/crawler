@@ -11955,6 +11955,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             // Get timeout for nested step
             const nestedStepTimeout = this.getStepTimeout(nestedStep);
             console.log(`⏱️  Nested step "${nestedStep.name || nestedStep.id}" timeout: ${Math.round(nestedStepTimeout / 1000)}s`);
+            await this.sendLogToBackend(jobId, 'info', `🔄 While-loop iteration ${iteration}: running nested step ${nestedIdx + 1}/${nestedSteps.length} (${nestedStep.name || nestedStep.id}, type: ${nestedStep.type})`, 'WORKFLOW-ANALYZER', { iteration, nestedIdx, stepId: nestedStepId, stepType: nestedStep.type });
             
             // Execute nested step with timeout protection
             let nestedStepCompleted = false;
