@@ -2596,32 +2596,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
           : null;
         const nextStepIsAdjustable = nextStep && nextStep.type === 'self-adjustable-ai-workflow';
         
-        if (isScriptExecutionFailure && nextStepIsAdjustable) {
-          console.log(`🔄 Script execution failed, next step is self-adjustable-ai-workflow - will retry`);
-          // Store failure info for retry, including which step failed and which step generated the script
-          // Find the AI prompt step that generated this script (should be before the execute step)
-          let scriptGenerationStep = null;
-          for (let j = i - 1; j >= 0; j--) {
-            const prevStep = this.workflowTemplate.steps[j];
-            if (prevStep.type === 'ai-prompt') {
-              scriptGenerationStep = prevStep;
-              break;
-            }
-          }
-          workflowState.lastScriptFailure = {
-            step: step,
-            stepIndex: i,
-            scriptGenerationStep: scriptGenerationStep,
-            scriptGenerationStepIndex: scriptGenerationStep ? this.workflowTemplate.steps.findIndex(s => s.id === scriptGenerationStep.id || s.name === scriptGenerationStep.name) : null,
-            error: stepError.message,
-            script: workflowState.lastExecutionResult?.script || workflowState.lastExecutionResult?.code || null,
-            timestamp: new Date(),
-            executionResult: workflowState.lastExecutionResult || null
-          };
-          // Continue to next step (self-adjustable-ai-workflow) which will handle retry
-        } else if (step.config?.critical && !nextStepIsAdjustable) {
-          throw stepError;
-        }
+        // No fallbacks: fail the job immediately on any step failure
+        throw stepError;
       }
     }
     
