@@ -2677,23 +2677,56 @@ class WorkflowExecutor {
         }
       }
       
-      // Validate script syntax using JavaScript parser
+      // Validate script syntax; if broken, try extracting IIFE body (return await (async () => { BODY })();)
+      let scriptToRun = cleanedScript;
       try {
-        new Function(cleanedScript);
+        new Function(scriptToRun);
       } catch (syntaxError) {
-        const errorMsg = `Script syntax error: ${syntaxError.message}`;
-        if (jobId && this.backendLogger) {
-          await this.backendLogger.appendJobLog(jobId, 'error',
-            `❌ ${errorMsg}`,
-            'WORKFLOW-EXECUTOR',
-            {
-              script_preview: cleanedScript.substring(0, 500),
-              script_length: cleanedScript.length,
-              syntax_error: syntaxError.message
+        const trimmed = cleanedScript.trim();
+        const prefix = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{\s*/;
+        const suffix = /\s*\}\)\s*\(\s*\)\s*;?\s*$/;
+        if (prefix.test(trimmed) && suffix.test(trimmed)) {
+          const open = trimmed.match(prefix);
+          if (open) {
+            const start = open.index + open[0].length;
+            let depth = 1;
+            let end = start;
+            while (end < trimmed.length && depth > 0) {
+              if (trimmed[end] === '{') depth++;
+              else if (trimmed[end] === '}') depth--;
+              end++;
             }
-          );
+            if (depth === 0) {
+              const body = trimmed.slice(start, end - 1).trim();
+              try {
+                new Function(body);
+                scriptToRun = body;
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'debug',
+                    'Recovered script by extracting IIFE body',
+                    'WORKFLOW-EXECUTOR',
+                    { body_preview: body.substring(0, 200) }
+                  );
+                }
+              } catch (_) { /* use original and throw below */ }
+            }
+          }
         }
-        throw new Error(errorMsg);
+        if (scriptToRun === cleanedScript) {
+          const errorMsg = `Script syntax error: ${syntaxError.message}`;
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error',
+              `❌ ${errorMsg}`,
+              'WORKFLOW-EXECUTOR',
+              {
+                script_preview: cleanedScript.substring(0, 500),
+                script_length: cleanedScript.length,
+                syntax_error: syntaxError.message
+              }
+            );
+          }
+          throw new Error(errorMsg);
+        }
       }
       
       // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
@@ -2702,7 +2735,7 @@ class WorkflowExecutor {
       
       // Increased timeout to 90 seconds for complex interactions and CAPTCHA handling
       const result = await Promise.race([
-        executeInNodeContext(page, cleanedScript, jobId),
+        executeInNodeContext(page, scriptToRun, jobId),
         new Promise((_, reject) => 
           setTimeout(() => reject(new Error('Script execution timeout after 90 seconds')), 90000)
         )
