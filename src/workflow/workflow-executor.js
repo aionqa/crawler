@@ -1031,6 +1031,9 @@ class WorkflowExecutor {
         
         // Step 4: Execute Playwright script
         const executionResult = await this.executeScript(page, playwrightScript, jobId);
+        if (!executionResult?.success && executionResult?.error) {
+          throw new Error(`Script execution failed: ${executionResult.error}`);
+        }
         
         // Step 5: Take screenshot after action (always, even if script failed)
         // CRITICAL: Wrap in try-catch to handle browser crashes gracefully
@@ -2003,7 +2006,8 @@ class WorkflowExecutor {
           .replace(/\u2028/g, '\n')
           .replace(/\u2029/g, '\n')
           .replace(/\uFEFF/g, '')
-          .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+          .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+          .replace(/\.(click|fill|type|locator)\s*\(\s*#([a-zA-Z0-9_-]+)\s*\)/g, ".$1('#$2')");
       }
       
       const urlBefore = page.url();
