@@ -3881,6 +3881,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
     if (workflowState.currentIteration !== undefined && workflowState.currentIteration !== null) {
       stepPayload.current_iteration = workflowState.currentIteration;
       stepPayload.step_request_id = step.id || `${step.name || 'step'}_${workflowState.currentIteration}`;
+      // Force unique conversation so AI service does not return cached response from previous iteration
+      stepPayload.conversation_key = step.id || `iter-${workflowState.currentIteration}-${step.name || 'step'}`;
     }
 
     // Add execution history
