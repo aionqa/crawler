@@ -4665,7 +4665,30 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
 
           // CRITICAL: Store as legScriptToExecute for execute-code-from-variable steps
-          const cleanedScript = this.cleanScript(playwrightScript);
+          let cleanedScript = this.cleanScript(playwrightScript);
+          // Repair AI-generated script: add missing catch for outer try so executor does not fail with syntax error
+          if (cleanedScript && cleanedScript.trim().length > 0) {
+            try {
+              new Function(cleanedScript);
+            } catch (syntaxErr) {
+              if (syntaxErr.message && syntaxErr.message.includes('Missing catch or finally after try')) {
+                const trimmed = cleanedScript.trim();
+                let repaired = trimmed.replace(/\}\s*\}\s*\)\s*\(\s*\)\s*;?\s*$/, '} catch (e) { throw e; } })();');
+                if (repaired === trimmed) repaired = trimmed.replace(/\}\)\s*\(\s*\)\s*;?\s*$/, '} catch (e) { throw e; } })();');
+                if (repaired !== trimmed) {
+                  try {
+                    new Function(repaired);
+                    cleanedScript = repaired;
+                    parsedResponse.playwright_script = repaired;
+                    console.log('✅ Repaired playwright_script: added missing catch for outer try');
+                    if (jobId && this.backendLogger) {
+                      await this.backendLogger.appendJobLog(jobId, 'info', 'Repaired playwright_script: added missing catch for outer try', 'WORKFLOW-ANALYZER', { script_length: cleanedScript.length });
+                    }
+                  } catch (_) { /* keep original */ }
+                }
+              }
+            }
+          }
           if (cleanedScript && cleanedScript.trim().length > 0) {
             workflowState.legScriptToExecute = cleanedScript;
             if (!workflowState.context) {
