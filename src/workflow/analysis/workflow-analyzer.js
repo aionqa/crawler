@@ -3876,6 +3876,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
       stepPayload.current_journey = filteredJourney;
     }
     
+    // CRITICAL: For while-loop iterations, include iteration and unique step id in payload so each iteration
+    // triggers a fresh AI call (avoids backend/cache returning iteration-1 response for iteration-2 request)
+    if (workflowState.currentIteration !== undefined && workflowState.currentIteration !== null) {
+      stepPayload.current_iteration = workflowState.currentIteration;
+      stepPayload.step_request_id = step.id || `${step.name || 'step'}_${workflowState.currentIteration}`;
+    }
+
     // Add execution history
     if (workflowState.executionHistory && Array.isArray(workflowState.executionHistory) && workflowState.executionHistory.length > 0) {
       stepPayload.execution_history = workflowState.executionHistory;
