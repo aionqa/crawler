@@ -67,6 +67,19 @@ function extractFirstCompleteJSON(str) {
 }
 
 /**
+ * Best-effort repair of common JSON syntax errors (e.g. trailing commas) so parse can succeed.
+ * Only used when JSON.parse fails; does not change semantics.
+ * @param {string} raw
+ * @returns {string}
+ */
+function repairJsonTrailingCommas(raw) {
+  if (typeof raw !== 'string') return raw;
+  return raw
+    .replace(/,(\s*)\]/g, '$1]')
+    .replace(/,(\s*)}/g, '$1}');
+}
+
+/**
  * Normalize JSON schema for OpenAI strict response_format: required = exactly property keys, additionalProperties: false.
  * Object types without "properties" get properties: {}, required: [] so they are not dropped (avoids "Extra required key" from OpenAI).
  * Mutates the schema in place. Use so requests work whether sent to OpenAI directly or via aionqa-ai-service.
@@ -912,7 +925,8 @@ export class AIConversationLogger {
       }
       // Generous max_output_tokens so script/JSON responses are not truncated (LM Studio / Ollama default may be low)
       const scriptPromptSlugs = ['generate_journey_script', 'generate_login_script', 'generate-workflow-script', 'generate-form-fill-script', 'generate-click-script', 'generate-navigation-script', 'generate-validation-script'];
-      const defaultMaxOut = scriptPromptSlugs.includes(promptSlug) ? 4096 : 2048;
+      const largeJsonSlugs = ['page_summary'];
+      const defaultMaxOut = scriptPromptSlugs.includes(promptSlug) ? 4096 : (largeJsonSlugs.includes(promptSlug) ? 4096 : 2048);
       openaiRequest.max_output_tokens = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? defaultMaxOut;
       
       // Add reasoning if enabled and supported
@@ -1189,7 +1203,17 @@ export class AIConversationLogger {
               }
               break;
             } catch (parseErr) {
-              if (expectsJson && parseAttempt === 1 && parseErr instanceof SyntaxError) {
+              if (parseErr instanceof SyntaxError && expectsJson) {
+                const repaired = repairJsonTrailingCommas(jsonContent);
+                if (repaired !== jsonContent) {
+                  try {
+                    aiResponse = JSON.parse(repaired);
+                    console.warn(`[AI-CALL] ⚠️ JSON parse succeeded after trailing-comma repair`);
+                    break;
+                  } catch (_) {}
+                }
+              }
+              if (parseAttempt === 1 && expectsJson && parseErr instanceof SyntaxError) {
                 console.warn(`[AI-CALL] ⚠️ JSON parse failed (${parseErr.message}), retrying request once...`);
                 continue;
               }
