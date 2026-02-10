@@ -2765,9 +2765,15 @@ class WorkflowExecutor {
         )
       ]);
       
-      const urlAfter = page.url();
-      const titleAfter = await page.title();
       const executionTime = Date.now() - startTime;
+      let urlAfter = '';
+      let titleAfter = '';
+      try {
+        if (page && !page.isClosed()) {
+          urlAfter = page.url();
+          titleAfter = await page.title();
+        }
+      } catch (_) {}
 
       // Log successful execution
       if (jobId && this.backendLogger) {
@@ -2777,9 +2783,9 @@ class WorkflowExecutor {
           {
             execution_time_ms: executionTime,
             url_before: urlBefore,
-            url_after: urlAfter,
+            url_after: urlAfter || '(page closed or navigated)',
             title_before: titleBefore,
-            title_after: titleAfter,
+            title_after: titleAfter || '(page closed or navigated)',
             url_changed: urlBefore !== urlAfter,
             title_changed: titleBefore !== titleAfter,
             result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500)
@@ -2794,8 +2800,10 @@ class WorkflowExecutor {
       };
     } catch (error) {
       const executionTime = Date.now() - startTime;
-      
-      // Log execution failure
+      let pageUrl = null;
+      try {
+        if (page && !page.isClosed()) pageUrl = page.url();
+      } catch (_) {}
       if (jobId && this.backendLogger) {
         await this.backendLogger.appendJobLog(jobId, 'error',
           `❌ Script execution failed: ${error.message}`,
@@ -2806,11 +2814,10 @@ class WorkflowExecutor {
             error_stack: error.stack?.substring(0, 1000),
             original_script_preview: script?.substring(0, 500) || 'N/A',
             cleaned_script_preview: this.cleanScript(script)?.substring(0, 500) || 'N/A',
-            page_url: page.url()
+            page_url: pageUrl != null ? pageUrl : '(page closed or unavailable)'
           }
         );
       }
-      
       return {
         success: false,
         result: null,
