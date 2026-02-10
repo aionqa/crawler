@@ -8573,11 +8573,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     let cleaned = script.trim();
-    // Preserve async IIFE wrappers (return await (async () => { ... })()) to avoid breaking structure
-    const asyncIifePattern = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{/;
-    if (asyncIifePattern.test(cleaned)) {
-      return cleaned;
-    }
     
     // First, extract code from markdown code blocks if present
     const codeBlockRegex = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
@@ -8589,6 +8584,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
       cleaned = cleaned.replace(/\n?\s*```$/gm, '');
       cleaned = cleaned.replace(/^\s*```[\w]*\s*$/gm, '');
       cleaned = cleaned.replace(/```[\w]*/g, '');
+    }
+    cleaned = cleaned.trim();
+    
+    // Preserve async IIFE wrappers (return await (async () => { ... })()) to avoid breaking structure.
+    // Must run AFTER code block extraction so scripts inside ``` are preserved.
+    const asyncIifePattern = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{/;
+    if (asyncIifePattern.test(cleaned)) {
+      return cleaned;
     }
     
     // Extract function bodies instead of removing functions completely
@@ -8629,10 +8632,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     cleaned = extractFunctionBodies(cleaned);
     
-    // Remove IIFE wrappers
-    cleaned = cleaned.replace(/\(async\s*\([^)]*\)\s*=>\s*\{/g, '');
-    cleaned = cleaned.replace(/\(async\s+function\s*\([^)]*\)\s*\{[^}]*\}\)\s*\(\)/g, '');
-    cleaned = cleaned.replace(/\(async\s*\(\)\s*=>\s*\{[^}]*\}\)\s*\(\)/g, '');
+    // Remove IIFE wrappers only when that won't leave invalid "return await " + try/catch
+    const wouldLeaveBrokenReturn = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{/.test(cleaned.trim());
+    if (!wouldLeaveBrokenReturn) {
+      cleaned = cleaned.replace(/\(async\s*\([^)]*\)\s*=>\s*\{/g, '');
+      cleaned = cleaned.replace(/\(async\s+function\s*\([^)]*\)\s*\{[^}]*\}\)\s*\(\)/g, '');
+      cleaned = cleaned.replace(/\(async\s*\(\)\s*=>\s*\{[^}]*\}\)\s*\(\)/g, '');
+    }
     
     // Remove require statements
     cleaned = cleaned.replace(/const\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
