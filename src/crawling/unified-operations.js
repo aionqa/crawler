@@ -2461,10 +2461,19 @@ const modeHandlers = {
         }
       }
       
+      // If we have journeys and all failed, report crawl as failed (no fallbacks)
+      const lastWorkflow = allWorkflows.length > 0 ? allWorkflows[allWorkflows.length - 1] : null;
+      const journeys = lastWorkflow?.journeys || [];
+      const allJourneysFailed = journeys.length > 0 && journeys.every(j => j.status === 'failure');
+      const workflowSuccess = !allJourneysFailed;
+      if (allJourneysFailed) {
+        await sendLog(jobId, 'warn', `📊 All ${journeys.length} journey(s) failed - reporting crawl as FAILED`);
+      }
+      
       return {
-        success: true,
+        success: workflowSuccess,
         approach: 'workflow',
-        message: `Analyzed ${pagesAnalyzed} pages with workflow-based testing`,
+        message: workflowSuccess ? `Analyzed ${pagesAnalyzed} pages with workflow-based testing` : `All ${journeys.length} journey(s) failed`,
         url: finalPageUrl,
         title: finalPageTitle,
         details: {
