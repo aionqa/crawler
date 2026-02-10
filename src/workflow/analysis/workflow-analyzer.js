@@ -11940,9 +11940,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
       });
       
       try {
-        // Execute nested steps
+        // Execute nested steps - use unique step ID per iteration so each step (e.g. generate_journey_script) runs fresh every time
         for (let nestedIdx = 0; nestedIdx < nestedSteps.length; nestedIdx++) {
           const nestedStep = nestedSteps[nestedIdx];
+          const baseId = nestedStep.id || `nested-${nestedIdx}`;
+          const nestedStepId = `${step.id || 'while-loop'}::${iteration}::${baseId}`;
+          const nestedStepWithId = {
+            ...nestedStep,
+            id: nestedStepId,
+            originalId: baseId
+          };
           
           try {
             // Get timeout for nested step
@@ -11953,10 +11960,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
             let nestedStepCompleted = false;
             await Promise.race([
               (async () => {
-                await this.executeStepByType(page, nestedStep, workflowState, jobId, {
+                await this.executeStepByType(page, nestedStepWithId, workflowState, jobId, {
                   stepIndex: nestedIdx,
                   siblings: nestedSteps
                 });
+                // CRITICAL: For condition steps (justify_journey, determine_completion), copy result to original step id so conditionPath finds it
+                const isConditionStep = (baseId.includes('justify') && baseId.includes('journey')) || (baseId.includes('determine') && baseId.includes('completion'));
+                if (isConditionStep && workflowState[nestedStepId]?.result) {
+                  const stepSlug = nestedStep.slug || this.generateSlug(nestedStep.name || baseId);
+                  workflowState[baseId] = workflowState[nestedStepId];
+                  if (!workflowState.results) workflowState.results = {};
+                  workflowState.results[baseId] = workflowState[nestedStepId];
+                  if (workflowState.variablePool?.steps) {
+                    workflowState.variablePool.steps[stepSlug] = workflowState[nestedStepId];
+                    workflowState.variablePool.steps[baseId] = workflowState[nestedStepId];
+                  }
+                }
                 nestedStepCompleted = true;
               })(),
               new Promise((resolve, reject) => 
