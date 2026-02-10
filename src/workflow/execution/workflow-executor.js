@@ -2879,6 +2879,23 @@ class WorkflowExecutor {
         new Function(scriptToRun);
       } catch (syntaxError) {
         let trimmed = cleanedScript.trim();
+        // Repair: AI sometimes emits outer try without catch (e.g. try { ... } })(); )
+        if (syntaxError.message && syntaxError.message.includes('Missing catch or finally after try')) {
+          const repaired = trimmed.replace(/\}\s*\}\s*\)\s*\(\s*\)\s*;?\s*$/, '} catch (e) { throw e; } })();');
+          if (repaired !== trimmed) {
+            try {
+              new Function(repaired);
+              scriptToRun = repaired;
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'debug',
+                  'Repaired script: added missing catch for outer try',
+                  'WORKFLOW-EXECUTOR',
+                  { body_preview: repaired.substring(0, 200) }
+                );
+              }
+            } catch (_) { /* fall through */ }
+          }
+        }
         // Strip markdown code blocks if AI returned ```...``` despite instructions
         const codeBlockRe = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
         const blocks = [...trimmed.matchAll(codeBlockRe)];
