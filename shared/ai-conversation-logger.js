@@ -429,8 +429,9 @@ export class AIConversationLogger {
   getConversationKey({ jobId, agentName, pageUrl, promptSlug, payload }) {
     const explicitKey = payload?.conversation_key || payload?.conversationKey || payload?.conversationId || payload?.conversation_id;
     if (explicitKey) {
-      // API: max 64 chars, only letters/numbers/underscores/dashes
+      // API: must begin with 'conv', max 64 chars, only letters/numbers/underscores/dashes
       let key = String(explicitKey).replace(/[^a-zA-Z0-9_-]/g, '_');
+      if (!key.startsWith('conv')) key = 'conv_' + key;
       return key.length > 64 ? key.slice(0, 64) : key;
     }
     return null;
