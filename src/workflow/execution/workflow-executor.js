@@ -2879,11 +2879,28 @@ class WorkflowExecutor {
         new Function(scriptToRun);
       } catch (syntaxError) {
         let trimmed = cleanedScript.trim();
+        // Repair: "Invalid or unexpected token" often from smart quotes / ellipsis
+        if (syntaxError.message && syntaxError.message.includes('Invalid or unexpected token')) {
+          const fixed = trimmed.replace(/\u2018|\u2019/g, "'").replace(/\u201C|\u201D/g, '"').replace(/\u2026/g, '...');
+          try {
+            new Function(fixed);
+            scriptToRun = fixed;
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'debug', 'Repaired script: replaced smart quotes/ellipsis', 'WORKFLOW-EXECUTOR', {});
+            }
+          } catch (_) { /* fall through */ }
+        }
         // Repair: AI sometimes emits outer try without catch (e.g. try { ... } })(); or ... })(); )
-        if (syntaxError.message && syntaxError.message.includes('Missing catch or finally after try')) {
+        if (scriptToRun === cleanedScript && syntaxError.message && syntaxError.message.includes('Missing catch or finally after try')) {
           let repaired = trimmed.replace(/\}\s*\}\s*\)\s*\(\s*\)\s*;?\s*$/, '} catch (e) { throw e; } })();');
           if (repaired === trimmed) {
             repaired = trimmed.replace(/\}\)\s*\(\s*\)\s*;?\s*$/, '} catch (e) { throw e; } })();');
+          }
+          if (repaired === trimmed) {
+            const last = trimmed.lastIndexOf('})();');
+            if (last !== -1) {
+              repaired = trimmed.slice(0, last) + '} catch (e) { throw e; } ' + trimmed.slice(last);
+            }
           }
           if (repaired !== trimmed) {
             try {
