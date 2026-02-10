@@ -2825,6 +2825,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       legs_count: resultLegs.length,
       page_description: workflowState.pageDescription,
       legs: resultLegs,
+      journeys: workflowState.journeysToExecute || [], // Include so caller can check journey status (success/failure)
       ai_analysis: workflowState.aiAnalysisResult,
       context: workflowState.context || {},
       collectedCookies: workflowState.collectedCookies || [],
