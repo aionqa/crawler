@@ -10105,6 +10105,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       const executionResult = {
         ...result,
+        success: true, // Explicit so final-status logic can override justify 'failure' when script ran OK
         urlBeforeAction,
         urlAfterAction,
         pageChanged,
