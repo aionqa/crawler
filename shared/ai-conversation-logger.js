@@ -779,11 +779,11 @@ export class AIConversationLogger {
       
       // 3. Add explicit output schema instruction for all models (OpenAI, LM Studio, etc.)
       const wantsJson = payload?.text_format !== 'text';
+      const expectsJson = wantsJson || prompt.response_schema || prompt.response_schema_description;
       if (prompt.response_schema_description) {
         userMessageText += `\n\n=== OUTPUT SCHEMA (follow exactly) ===\n${prompt.response_schema_description}\n\nYou must respond with valid JSON that strictly matches this schema.`;
       }
       if (prompt.response_schema && typeof prompt.response_schema === 'object') {
-        // Include precise schema so models that support it can follow it
         try {
           const schemaStr = JSON.stringify(prompt.response_schema);
           if (schemaStr.length < 4000) {
@@ -791,11 +791,9 @@ export class AIConversationLogger {
           }
         } catch (_) {}
       }
-      // 3a. Same instruction for all models: raw JSON only, no markdown/wrappers (critical for LM Studio and others)
-      if (wantsJson) {
-        userMessageText += `\n\nIMPORTANT: Output only the raw JSON object. Do not wrap in markdown code blocks (no \`\`\`json), no prefixes, no suffixes, no explanations. Reply with nothing but the JSON.`;
-      } else if (!userMessageText.toLowerCase().includes('json')) {
-        userMessageText += `\n\nIMPORTANT: Respond with VALID JSON ONLY. No markdown, no code blocks, just pure JSON.`;
+      // 3a. STRICT: AI must provide JSON only — no markdown, no code blocks (critical for parsing)
+      if (expectsJson) {
+        userMessageText += `\n\nSTRICT: Respond with valid JSON only. No markdown, no code blocks (no \`\`\`), no explanation, no text outside the JSON. Your entire response must be parseable as JSON.`;
       }
       
       // No retry logic - removed
@@ -1192,16 +1190,10 @@ export class AIConversationLogger {
           const status = err.response?.status || err.status;
           const isHttpError = status != null && (status < 200 || status >= 300);
           const msg = err.message || String(err);
-          const isParseOrEmpty = /empty|undefined content|parse.*JSON|incomplete/.test(msg);
           if (attemptNumber === 1) {
             console.warn(`[AI-CALL] ⚠️ AI service failed (${chosen.label || serviceUrl}): ${msg}${isHttpError ? ` (HTTP ${status})` : ''}`);
           }
-          if (idx < eligibleServices.length - 1) {
-            if (attemptNumber === 1) {
-              console.log(`[AI-CALL] 🔄 Trying next AI service (${idx + 2}/${eligibleServices.length})...`);
-            }
-            continue;
-          }
+          // No fallbacks: fail immediately, do not try next AI service
           throw lastError;
         }
       }

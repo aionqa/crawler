@@ -4372,21 +4372,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (jobId && this.backendLogger) {
           await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
         }
-        // Fallback for page_summary: build minimal journeys from playwright_analysis so for-each can run when AI is unavailable (e.g. Ollama timeout/500)
-        if (promptIdentifier === 'page_summary' && stepPayload?.playwright_analysis) {
-          const fallback = this.buildFallbackJourneysFromPlaywright(workflowState, stepPayload, jobId);
-          if (fallback && Array.isArray(fallback.journeys) && fallback.journeys.length > 0) {
-            console.warn(`⚠️ [WORKFLOW-ANALYZER] Using fallback journeys from playwright_analysis (${fallback.journeys.length} journey(s)) - AI step failed`);
-            if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'info', `⚠️ Using fallback journeys from form structure (${fallback.journeys.length} journey(s)) - AI step failed: ${aiError.message}`, 'WORKFLOW-ANALYZER', { fallback_journeys: fallback.journeys.length });
-            }
-            aiResponse = fallback;
-          } else {
-            throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
-          }
-        } else {
-          throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
-        }
+        // No fallbacks: fail the job immediately so there is no confusion
+        throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
       }
       
       // CRITICAL: Validate OpenAI response exists
