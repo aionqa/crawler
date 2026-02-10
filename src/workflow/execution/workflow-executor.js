@@ -2879,9 +2879,12 @@ class WorkflowExecutor {
         new Function(scriptToRun);
       } catch (syntaxError) {
         let trimmed = cleanedScript.trim();
-        // Repair: AI sometimes emits outer try without catch (e.g. try { ... } })(); )
+        // Repair: AI sometimes emits outer try without catch (e.g. try { ... } })(); or ... })(); )
         if (syntaxError.message && syntaxError.message.includes('Missing catch or finally after try')) {
-          const repaired = trimmed.replace(/\}\s*\}\s*\)\s*\(\s*\)\s*;?\s*$/, '} catch (e) { throw e; } })();');
+          let repaired = trimmed.replace(/\}\s*\}\s*\)\s*\(\s*\)\s*;?\s*$/, '} catch (e) { throw e; } })();');
+          if (repaired === trimmed) {
+            repaired = trimmed.replace(/\}\)\s*\(\s*\)\s*;?\s*$/, '} catch (e) { throw e; } })();');
+          }
           if (repaired !== trimmed) {
             try {
               new Function(repaired);
