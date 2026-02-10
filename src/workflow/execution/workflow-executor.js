@@ -2869,12 +2869,32 @@ class WorkflowExecutor {
         }
       }
       
-      // Validate script syntax; if broken, try extracting IIFE body (return await (async () => { BODY })();)
+      // Validate script syntax; if broken, try stripping markdown then IIFE/body fallbacks
       let scriptToRun = cleanedScript;
       try {
         new Function(scriptToRun);
       } catch (syntaxError) {
-        const trimmed = cleanedScript.trim();
+        let trimmed = cleanedScript.trim();
+        // Strip markdown code blocks if AI returned ```...``` despite instructions
+        const codeBlockRe = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
+        const blocks = [...trimmed.matchAll(codeBlockRe)];
+        if (blocks.length > 0) {
+          const extracted = blocks.map(m => m[1].trim()).join('\n\n');
+          if (extracted.length > 0) {
+            try {
+              new Function(extracted);
+              scriptToRun = extracted;
+              trimmed = extracted;
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'debug', 'Recovered script by stripping markdown code blocks', 'WORKFLOW-EXECUTOR', {});
+              }
+            } catch (_) {
+              trimmed = extracted;
+              scriptToRun = extracted;
+            }
+          }
+        }
+        // Try extracting IIFE body (return await (async () => { BODY })();)
         const prefix = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{\s*/;
         const suffix = /\s*\}\)\s*\(\s*\)\s*;?\s*$/;
         if (prefix.test(trimmed) && suffix.test(trimmed)) {
@@ -2900,14 +2920,15 @@ class WorkflowExecutor {
                     { body_preview: body.substring(0, 200) }
                   );
                 }
-              } catch (_) { /* use original and throw below */ }
+              } catch (_) {}
             }
           }
         }
-        // If still failing, try treating script as bare body (wrap in IIFE)
-        if (scriptToRun === cleanedScript) {
-          const trimmed = cleanedScript.trim();
-          const wrapped = `return (async function() {\n${trimmed}\n})();`;
+        // If still invalid, try wrapping as async IIFE body
+        try {
+          new Function(scriptToRun);
+        } catch (_) {
+          const wrapped = `return (async function() {\n${scriptToRun}\n})();`;
           try {
             new Function(wrapped);
             scriptToRun = wrapped;
@@ -2915,12 +2936,15 @@ class WorkflowExecutor {
               await this.backendLogger.appendJobLog(jobId, 'debug',
                 'Recovered script by wrapping as async IIFE body',
                 'WORKFLOW-EXECUTOR',
-                { body_preview: trimmed.substring(0, 200) }
+                { body_preview: scriptToRun.substring(0, 200) }
               );
             }
-          } catch (_) { /* ignore */ }
+          } catch (_) {}
         }
-        if (scriptToRun === cleanedScript) {
+        // Final check: throw only if still invalid
+        try {
+          new Function(scriptToRun);
+        } catch (finalErr) {
           const errorMsg = `Script syntax error: ${syntaxError.message}`;
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'error',
