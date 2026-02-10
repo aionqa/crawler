@@ -9958,11 +9958,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // This allows the script code to contain backticks, ${}, etc. without problems
         const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
         
-        // Create a function with page and input_credentials as parameters
+        // Create a function with page, wrapper (alias for page), and input_credentials as parameters
+        // Some AI-generated scripts use 'wrapper' instead of 'page' - both refer to the same wrapped page
         console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
-        const fn = new Function('page', 'input_credentials', functionBody);
+        const fn = new Function('page', 'wrapper', 'input_credentials', functionBody);
         console.log(`🚀 Executing script with wrapped page object...`);
-        const result = await fn(wrappedPage, credentials);
+        const result = await fn(wrappedPage, wrappedPage, credentials);
         console.log(`✅ Script execution completed, result.success=${result?.success}`);
         console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
         workflowState.lastExecutedActionLines = executedActionLines;

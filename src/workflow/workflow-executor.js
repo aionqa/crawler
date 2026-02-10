@@ -2635,9 +2635,9 @@ class WorkflowExecutor {
         // This allows the script code to contain backticks, ${}, etc. without problems
         const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
         
-        // Create a function with page as parameter
-        const fn = new Function('page', functionBody);
-        return await fn(wrappedPage);
+        // Create a function with page and wrapper (alias) as parameters - AI may use either name
+        const fn = new Function('page', 'wrapper', functionBody);
+        return await fn(wrappedPage, wrappedPage);
       };
       
       // Fix incomplete string literals automatically instead of failing

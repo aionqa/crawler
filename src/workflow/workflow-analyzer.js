@@ -8509,7 +8509,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // This is a final safety check before actual execution
         try {
           // Try to create the function first
-          const fn = new Function('page', 'input_credentials', functionBody);
+          const fn = new Function('page', 'wrapper', 'input_credentials', functionBody);
           
           // Test if the function source contains the variable (Function.toString())
           const fnSource = fn.toString();
@@ -8528,7 +8528,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
           
           console.log(`🚀 Executing script with wrapped page object...`);
-          const result = await fn(wrappedPage, credentials);
+          const result = await fn(wrappedPage, wrappedPage, credentials);
           console.log(`✅ Script execution completed, result.success=${result?.success}`);
           console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
           return result;

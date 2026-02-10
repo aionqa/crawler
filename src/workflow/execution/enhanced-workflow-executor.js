@@ -1430,9 +1430,9 @@ class EnhancedWorkflowExecutor {
         // This allows the script code to contain backticks, ${}, etc. without problems
         const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
         
-        // Create a function with page as parameter
-        const fn = new Function('page', functionBody);
-        return await fn(pageObj);
+        // Create a function with page and wrapper (alias) as parameters - AI may use either name
+        const fn = new Function('page', 'wrapper', functionBody);
+        return await fn(pageObj, pageObj);
       };
       
       // DO NOT validate or check for incomplete strings - execute script as-is from OpenAI

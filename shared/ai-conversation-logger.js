@@ -66,6 +66,51 @@ function extractFirstCompleteJSON(str) {
   return null;
 }
 
+/**
+ * Normalize JSON schema for OpenAI strict response_format: required = exactly property keys, additionalProperties: false.
+ * Object types without "properties" get properties: {}, required: [] so they are not dropped (avoids "Extra required key" from OpenAI).
+ * Mutates the schema in place. Use so requests work whether sent to OpenAI directly or via aionqa-ai-service.
+ */
+function ensureStrictSchema(schema) {
+  if (!schema || typeof schema !== 'object') return;
+  // Fix object types that have no "properties" (OpenAI may drop them and then "required" has extra keys)
+  if (schema.type === 'object' && !(schema.properties && typeof schema.properties === 'object')) {
+    schema.properties = {};
+    schema.additionalProperties = false;
+    schema.required = [];
+  }
+  // Normalize any node that has "properties" so required exactly matches property keys
+  if (schema.properties && typeof schema.properties === 'object') {
+    const propKeys = Object.keys(schema.properties);
+    schema.required = [...propKeys];
+    if (!('additionalProperties' in schema)) {
+      schema.additionalProperties = false;
+    }
+    for (const key of propKeys) {
+      ensureStrictSchema(schema.properties[key]);
+    }
+  }
+  if (schema.type === 'object' && !('additionalProperties' in schema)) {
+    schema.additionalProperties = false;
+  }
+  if (schema.items) {
+    ensureStrictSchema(Array.isArray(schema.items) ? schema.items[0] : schema.items);
+  }
+  for (const key of ['definitions', 'oneOf', 'anyOf', 'allOf', 'schema']) {
+    if (schema[key] && Array.isArray(schema[key])) {
+      schema[key].forEach(ensureStrictSchema);
+    } else if (schema[key] && typeof schema[key] === 'object' && !Array.isArray(schema[key])) {
+      if (key === 'schema') {
+        ensureStrictSchema(schema[key]);
+      } else {
+        for (const k of Object.keys(schema[key])) {
+          ensureStrictSchema(schema[key][k]);
+        }
+      }
+    }
+  }
+}
+
 export class AIConversationLogger {
   constructor(backendUrl = null, runnerToken = null, context = {}) {
     // Use environment variable if available, otherwise fallback to default
@@ -861,9 +906,11 @@ export class AIConversationLogger {
           format: { type: textFormat === 'json_object' ? 'json_object' : 'text' }
         }
       };
-      // Pass response_schema in request so AI service can use it for providers that support it
+      // Pass response_schema in request (normalized for OpenAI strict mode so it works for direct OpenAI or aionqa-ai-service)
       if (prompt.response_schema && typeof prompt.response_schema === 'object') {
-        openaiRequest.response_schema = prompt.response_schema;
+        const schema = JSON.parse(JSON.stringify(prompt.response_schema));
+        ensureStrictSchema(schema);
+        openaiRequest.response_schema = schema;
       }
       // Generous max_output_tokens so script/JSON responses are not truncated (LM Studio / Ollama default may be low)
       const scriptPromptSlugs = ['generate_journey_script', 'generate_login_script', 'generate-workflow-script', 'generate-form-fill-script', 'generate-click-script', 'generate-navigation-script', 'generate-validation-script'];
