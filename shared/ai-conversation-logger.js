@@ -896,9 +896,12 @@ export class AIConversationLogger {
         console.log(`[AI-CALL] 🔍 Model selection: modelOverride=${modelOverride}, payload.model=${payload?.model}, projectModel=${projectModel}, final=${model}`);
       }
       
-      // Get reasoning/websearch from parameters, payload, or project options (in that order)
-      const useReasoning = reasoningEnabled || payload?.reasoning_enabled || projectOptions.reasoning_enabled || false;
-      const useWebsearch = websearchEnabled || payload?.websearch_enabled || projectOptions.websearch_enabled || false;
+      // Get reasoning/websearch from parameters, payload, or project options (in that order).
+      // IMPORTANT: payload false must override project true, so do not use plain || chaining.
+      const payloadReasoning = payload?.reasoning_enabled;
+      const payloadWebsearch = payload?.websearch_enabled;
+      const useReasoning = reasoningEnabled || (payloadReasoning !== undefined ? payloadReasoning : (projectOptions.reasoning_enabled || false));
+      const useWebsearch = websearchEnabled || (payloadWebsearch !== undefined ? payloadWebsearch : (projectOptions.websearch_enabled || false));
       
       // GPT-5 specific options (from payload, then project options, then defaults)
       // Use !== undefined check to properly handle null values (null means explicitly disabled)
