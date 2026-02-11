@@ -1779,6 +1779,34 @@ IMPORTANT OUTPUT REQUIREMENTS:
     return cleaned;
   }
 
+  /**
+   * Create a JSON-safe clone by removing circular refs/functions.
+   */
+  makeJsonSafe(value, maxDepth = 10, _seen = new WeakSet(), _depth = 0) {
+    if (value === null || value === undefined) return value;
+    if (_depth > maxDepth) return '[MaxDepthExceeded]';
+    if (typeof value === 'function') return undefined;
+    if (typeof value !== 'object') return value;
+    if (value instanceof Date) return value.toISOString();
+    if (_seen.has(value)) return '[CircularReference]';
+
+    _seen.add(value);
+    let result;
+    if (Array.isArray(value)) {
+      result = value.map((item) => this.makeJsonSafe(item, maxDepth, _seen, _depth + 1));
+    } else {
+      result = {};
+      for (const [key, item] of Object.entries(value)) {
+        const cleaned = this.makeJsonSafe(item, maxDepth, _seen, _depth + 1);
+        if (cleaned !== undefined) {
+          result[key] = cleaned;
+        }
+      }
+    }
+    _seen.delete(value);
+    return result;
+  }
+
   async ensurePageId(workflowState, jobId) {
     if (workflowState.pageId && workflowState.projectId) {
       return workflowState.pageId;
@@ -4388,6 +4416,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.log(`📄 VAR_DUMP: executeAIPromptStep - jobId=${jobId}`);
       console.log(`📄 VAR_DUMP: executeAIPromptStep - promptIdentifier=${promptIdentifier}`);
       console.log(`📄 VAR_DUMP: executeAIPromptStep - stepPayload.input_credentials=${stepPayload.input_credentials ? JSON.stringify({username: stepPayload.input_credentials.username || 'MISSING', password: stepPayload.input_credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
+      const safeStepPayload = this.makeJsonSafe(stepPayload);
       
       let aiResponse;
       // Reuse step classification for retry behavior
@@ -4397,12 +4426,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
         try {
           aiResponse = await this.aiLogger.makeAICallWithPrompt(
             promptIdentifier,
-            stepPayload,
+            safeStepPayload,
             jobId,
             'workflow-step',
             effectivePageUrl, // Use effectivePageUrl to ensure conversations are linked to correct page
             null,
-            stepPayload,
+            safeStepPayload,
             promptConfig // Pass full config (required - no fallback to database)
           );
         } catch (aiError) {
@@ -4471,7 +4500,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             step_type: step.type,
             prompt_identifier: promptIdentifier,
             step_config: step.config,
-            step_payload_keys: Object.keys(stepPayload || {}),
+            step_payload_keys: Object.keys(safeStepPayload || {}),
             attempt,
             max_attempts: maxAttempts,
             error: aiError.message,
@@ -4522,7 +4551,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           step_type: step.type,
           prompt_identifier: promptIdentifier,
           step_config: step.config,
-          step_payload_keys: Object.keys(stepPayload || {}),
+          step_payload_keys: Object.keys(safeStepPayload || {}),
           ai_response: null
         };
         console.error(`❌ ${errorMessage}`);
