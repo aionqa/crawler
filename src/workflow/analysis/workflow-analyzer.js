@@ -4270,6 +4270,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
     });
     
     try {
+      const isScriptGenerationStep = step.id === 'generate_journey_script' || step.id === 'generate_login_script' ||
+        step.name?.includes('Generate Journey Action Script') || step.name?.includes('Generate Login Script');
+
+      // Script-generation steps frequently fail with reasoning-only/incomplete outputs.
+      // Force direct JSON generation for these steps by disabling reasoning overrides.
+      if (isScriptGenerationStep) {
+        stepPayload.reasoning_enabled = false;
+        stepPayload.reasoning_effort = null;
+        stepPayload.websearch_enabled = false;
+      }
+
       // Check if this is a determine_completion step and if current leg has an associated action with action_test_prompt
       let finalTemplate = decoratedTemplate;
       const isDetermineCompletion = step.id?.includes('determine_completion') || 
@@ -4327,8 +4338,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.log(`📄 VAR_DUMP: executeAIPromptStep - stepPayload.input_credentials=${stepPayload.input_credentials ? JSON.stringify({username: stepPayload.input_credentials.username || 'MISSING', password: stepPayload.input_credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
       
       let aiResponse;
-      const isScriptGenerationStep = step.id === 'generate_journey_script' || step.id === 'generate_login_script' ||
-        step.name?.includes('Generate Journey Action Script') || step.name?.includes('Generate Login Script');
+      // Reuse step classification for retry behavior
       const configuredRetries = Number.isFinite(step.config?.maxRetries) ? step.config.maxRetries : 1;
       const maxAttempts = Math.max(1, configuredRetries + 1);
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
