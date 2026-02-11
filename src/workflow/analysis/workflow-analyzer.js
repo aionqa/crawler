@@ -4339,8 +4339,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // CRITICAL: The user_message_template already includes the schema format in the prompt text
       // We pass response_schema for validation but don't need response_schema_description
       // because the template explicitly describes the expected JSON structure
+      let effectiveTemplate = finalTemplate;
+      if (isScriptGenerationStep) {
+        // Runtime hardening: enforce deterministic dynamic-field handling even if older workflow templates are loaded.
+        effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
+          + '- Execute each listed action exactly once (no duplicate add/click actions unless explicitly repeated in currentJourney.actions).\n'
+          + '- If an action adds dynamic inputs (e.g., Add Email/Add Phone), ensure every visible required input is non-empty before submit.\n'
+          + '- Immediately before submit, handle browser validation safely: if any :invalid input exists, fill it with a valid realistic value and then submit.\n'
+          + '- Never return success while required fields remain empty or browser validation messages are visible.\n';
+      }
       const promptConfig = {
-        user_message_template: finalTemplate,
+        user_message_template: effectiveTemplate,
         system_message: systemMessage,
         response_schema: responseSchema
       };
