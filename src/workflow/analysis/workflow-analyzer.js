@@ -4475,54 +4475,41 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       if (parsedResponse && typeof parsedResponse === 'object') {
         console.log(`🔍 Response keys: ${Object.keys(parsedResponse).join(', ')}`);
-        // CRITICAL: For generate_login_script step, validate required playwright_script field
-        if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
-          if (!parsedResponse.playwright_script) {
-            const errorMessage = `Missing required field "playwright_script" in generate_login_script response for step "${step.name || step.id}"`;
-            const missingPath = 'response.playwright_script';
-            const fullContext = {
-              step_id: step.id,
-              step_name: step.name,
-              step_type: step.type,
-              step_config: step.config,
-              missing_field: 'playwright_script',
-              missing_path: missingPath,
-              available_keys: Object.keys(parsedResponse),
-              full_response: parsedResponse
-            };
-            console.error(`❌ ${errorMessage}`);
-            console.error(`❌ Missing JSON path: ${missingPath}`);
-            console.error(`❌ Available keys: ${Object.keys(parsedResponse).join(', ')}`);
-            console.error(`❌ Full response:`, JSON.stringify(parsedResponse, null, 2));
-            console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
-            if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+        // CRITICAL: Enforce response schema for script-generation steps (login + journey)
+        const isGenerateLoginScriptStep = step.id === 'generate_login_script' || step.name?.includes('Generate Login Script');
+        const isGenerateJourneyScriptStep = step.id === 'generate_journey_script' || step.name?.includes('Generate Journey Action Script');
+        if (isGenerateLoginScriptStep || isGenerateJourneyScriptStep) {
+          const requiredStringFields = isGenerateJourneyScriptStep
+            ? ['playwright_script', 'description', 'expected_result']
+            : ['playwright_script'];
+
+          for (const fieldName of requiredStringFields) {
+            const fieldValue = parsedResponse[fieldName];
+            if (typeof fieldValue !== 'string' || fieldValue.trim().length === 0) {
+              const stepTypeLabel = isGenerateJourneyScriptStep ? 'generate_journey_script' : 'generate_login_script';
+              const errorMessage = `Missing or invalid required field "${fieldName}" in ${stepTypeLabel} response for step "${step.name || step.id}"`;
+              const fullContext = {
+                step_id: step.id,
+                step_name: step.name,
+                step_type: step.type,
+                step_config: step.config,
+                missing_or_invalid_field: fieldName,
+                field_value_type: typeof fieldValue,
+                field_value_preview: typeof fieldValue === 'string' ? fieldValue.substring(0, 200) : fieldValue,
+                available_keys: Object.keys(parsedResponse),
+                full_response: parsedResponse
+              };
+              console.error(`❌ ${errorMessage}`);
+              console.error(`❌ Available keys: ${Object.keys(parsedResponse).join(', ')}`);
+              console.error(`❌ Full response:`, JSON.stringify(parsedResponse, null, 2));
+              console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+              }
+              throw new Error(`${errorMessage}\nAvailable keys: ${Object.keys(parsedResponse).join(', ')}\nFull response: ${JSON.stringify(parsedResponse, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
             }
-            throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys: ${Object.keys(parsedResponse).join(', ')}\nFull response: ${JSON.stringify(parsedResponse, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
           }
-          
-          // Validate playwright_script is a string
-          if (typeof parsedResponse.playwright_script !== 'string' || parsedResponse.playwright_script.trim().length === 0) {
-            const errorMessage = `Invalid playwright_script value in generate_login_script response for step "${step.name || step.id}". Expected non-empty string, got: ${typeof parsedResponse.playwright_script}`;
-            const fullContext = {
-              step_id: step.id,
-              step_name: step.name,
-              step_type: step.type,
-              step_config: step.config,
-              invalid_value_type: typeof parsedResponse.playwright_script,
-              invalid_value: parsedResponse.playwright_script,
-              full_response: parsedResponse
-            };
-            console.error(`❌ ${errorMessage}`);
-            console.error(`❌ playwright_script value:`, parsedResponse.playwright_script);
-            console.error(`❌ Full response:`, JSON.stringify(parsedResponse, null, 2));
-            console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
-            if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
-            }
-            throw new Error(`${errorMessage}\nplaywright_script value: ${JSON.stringify(parsedResponse.playwright_script)}\nFull response: ${JSON.stringify(parsedResponse, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
-          }
-          
+
           console.log(`✅ playwright_script PRESENT in response: ${parsedResponse.playwright_script.length} chars`);
         }
         
