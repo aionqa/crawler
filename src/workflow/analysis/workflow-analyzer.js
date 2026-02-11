@@ -9716,18 +9716,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
             let loggedCount = 0;
             let failedCount = 0;
             for (const actionLine of actionLines) {
-              console.log(`📝 Logging action: [executing] ${actionLine.substring(0, 100)}`);
+              const actionLineText = typeof actionLine === 'string' ? actionLine : String(actionLine || '');
+              if (!actionLineText) {
+                continue;
+              }
+              console.log(`📝 Logging action: [executing] ${actionLineText.substring(0, 100)}`);
               try {
                 const response = await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
                   jobId: jobId,
                   level: 'info',
-                  message: `[executing] ${actionLine}`,
+                  message: `[executing] ${actionLineText}`,
                   component: 'WORKFLOW-ANALYZER',
                   metadata: {
                     step_id: step.id,
                     step_name: step.name,
                     action_type: 'script_action',
-                    action_line: actionLine
+                    action_line: actionLineText
                   }
                 }, {
                   headers: this.getAuthHeaders(),
