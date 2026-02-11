@@ -2202,38 +2202,45 @@ const modeHandlers = {
               
               await sendLog(jobId, 'info', diagnosticMessage);
             } else if (!analysisResult?.workflow_id) {
-              // Execute legs directly without workflow_id (no database updates)
-              await sendLog(jobId, 'warn', `⚠️ Executing ${legsToExecute.length} legs without workflow_id (no database status updates will be made)`);
-              try {
-                if (!workflowTemplateLoaded) {
-                  await workflowExecutor.loadWorkflowTemplate();
-                  workflowTemplateLoaded = true;
-                }
-                
-                // Filter navigation legs for single-page scans
-                let filteredLegs = legsToExecute;
-                if (isSinglePageScan && filteredLegs.length > 0) {
-                  const originalCount = filteredLegs.length;
-                  filteredLegs = filteredLegs.filter(leg => {
-                    const action = leg.action || leg.type || '';
-                    const description = leg.description || '';
-                    const isNavigation = action === 'navigate' || 
-                                        action === 'navigation' ||
-                                        description.toLowerCase().includes('follow link') ||
-                                        description.toLowerCase().includes('navigate to');
-                    return !isNavigation;
-                  });
-                  if (filteredLegs.length < originalCount) {
-                    await sendLog(jobId, 'info', `⏭️ Single-page scan: Filtered out ${originalCount - filteredLegs.length} navigation legs`);
+              const hasJourneyDrivenExecution = Array.isArray(analysisResult?.journeys) && analysisResult.journeys.length > 0;
+              if (hasJourneyDrivenExecution) {
+                // Journey-first workflows already execute actions inside WorkflowAnalyzer.
+                // Running legacy direct legs again causes duplicate/unstable execution and false failures.
+                await sendLog(jobId, 'info', `⏭️ Skipping legacy direct-leg execution (${legsToExecute.length} legs) because journey execution already ran in workflow analyzer`);
+              } else {
+                // Execute legs directly without workflow_id (no database updates)
+                await sendLog(jobId, 'warn', `⚠️ Executing ${legsToExecute.length} legs without workflow_id (no database status updates will be made)`);
+                try {
+                  if (!workflowTemplateLoaded) {
+                    await workflowExecutor.loadWorkflowTemplate();
+                    workflowTemplateLoaded = true;
                   }
+                  
+                  // Filter navigation legs for single-page scans
+                  let filteredLegs = legsToExecute;
+                  if (isSinglePageScan && filteredLegs.length > 0) {
+                    const originalCount = filteredLegs.length;
+                    filteredLegs = filteredLegs.filter(leg => {
+                      const action = leg.action || leg.type || '';
+                      const description = leg.description || '';
+                      const isNavigation = action === 'navigate' || 
+                                          action === 'navigation' ||
+                                          description.toLowerCase().includes('follow link') ||
+                                          description.toLowerCase().includes('navigate to');
+                      return !isNavigation;
+                    });
+                    if (filteredLegs.length < originalCount) {
+                      await sendLog(jobId, 'info', `⏭️ Single-page scan: Filtered out ${originalCount - filteredLegs.length} navigation legs`);
+                    }
+                  }
+                  
+                  // Execute legs directly (workflow_id optional - only needed for DB updates)
+                  const executionResult = await workflowExecutor.executeLegsDirectly(page, jobId, filteredLegs, null);
+                  await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed, no workflow_id - execution only)`);
+                } catch (execError) {
+                  console.error(`Leg execution failed:`, execError);
+                  await sendLog(jobId, 'error', `❌ Failed to execute workflow legs: ${execError.message}`);
                 }
-                
-                // Execute legs directly (workflow_id optional - only needed for DB updates)
-                const executionResult = await workflowExecutor.executeLegsDirectly(page, jobId, filteredLegs, null);
-                await sendLog(jobId, 'info', `✅ Workflow legs executed (${executionResult.legs_executed} processed, no workflow_id - execution only)`);
-              } catch (execError) {
-                console.error(`Leg execution failed:`, execError);
-                await sendLog(jobId, 'error', `❌ Failed to execute workflow legs: ${execError.message}`);
               }
             } else {
               try {
