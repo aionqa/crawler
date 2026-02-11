@@ -4281,9 +4281,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepPayload.reasoning_enabled = false;
         stepPayload.reasoning_effort = null;
         stepPayload.websearch_enabled = false;
-        // Explicitly request larger output budget for generated scripts.
-        // This avoids nested prompt-slug default limits causing truncated empty responses.
-        stepPayload.max_completion_tokens = 8192;
+        // Use a faster/stable non-reasoning model for script generation to reduce 504 timeouts.
+        stepPayload.model = 'gpt-4.1-mini';
+        // Keep enough budget for complete scripts while avoiding oversized long-running generations.
+        stepPayload.max_completion_tokens = 4096;
 
         // Prevent stale scripts from previous attempts/runs from being reused.
         delete workflowState.legScriptToExecute;
