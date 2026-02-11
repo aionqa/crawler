@@ -4303,6 +4303,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepPayload.reasoning_enabled = false;
         stepPayload.reasoning_effort = null;
         stepPayload.websearch_enabled = false;
+        // Use a stable non-reasoning model for page discovery to avoid reasoning-only incomplete outputs.
+        stepPayload.model = 'gpt-4.1-mini';
         if (stepPayload.max_completion_tokens === undefined || stepPayload.max_completion_tokens === null) {
           stepPayload.max_completion_tokens = 2500;
         }
