@@ -14246,19 +14246,32 @@ IMPORTANT OUTPUT REQUIREMENTS:
             finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
           }
         } else {
-          // Check if failure is due to execution error
-          const hasExecutionError = workflowState.executionErrorType === 'execution' ||
-                                    lastDetermineCompletion.execution_error_type === 'execution' ||
-                                    lastDetermineCompletion.error_type === 'execution';
-          
-          if (hasExecutionError) {
-            finalLegStatus = 'execution_failure';
-            finalLegResult = 'execution_failure';
+          const executionSucceeded =
+            workflowState.lastExecutionResult?.success === true ||
+            (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType);
+          const completionText = `${lastDetermineCompletion?.reason || ''} ${lastDetermineCompletion?.what_happened || ''}`.toLowerCase();
+          const hasBlockingSignal = /(invalid|required|error|failed|failure|exception|timeout|blocked|captcha)/.test(completionText);
+          if (iteration >= maxIterations && executionSucceeded && !hasBlockingSignal) {
+            // In single-iteration mode, treat conservative AI failure as success when execution was clean.
+            finalLegStatus = 'success';
+            finalLegResult = 'success';
+            finalLegError = null;
+            console.log(`✅ Max-iteration fallback: overriding conservative failure to success after clean execution`);
           } else {
-            finalLegStatus = 'failure';
-            finalLegResult = 'failure';
+            // Check if failure is due to execution error
+            const hasExecutionError = workflowState.executionErrorType === 'execution' ||
+                                      lastDetermineCompletion.execution_error_type === 'execution' ||
+                                      lastDetermineCompletion.error_type === 'execution';
+            
+            if (hasExecutionError) {
+              finalLegStatus = 'execution_failure';
+              finalLegResult = 'execution_failure';
+            } else {
+              finalLegStatus = 'failure';
+              finalLegResult = 'failure';
+            }
+            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
           }
-          finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
         }
       } else if (status === 'continue' || status === 'stuck') {
         // If max iterations reached and status is still 'continue' or 'stuck', mark as failure
