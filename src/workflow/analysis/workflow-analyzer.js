@@ -8676,6 +8676,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     let cleaned = script.trim();
     // Fix smart/curly quotes and other chars that cause "Invalid or unexpected token" in executor
     cleaned = cleaned.replace(/\u2018|\u2019/g, "'").replace(/\u201C|\u201D/g, '"').replace(/\u2026/g, '...');
+    // Normalize common malformed locator syntax emitted by LLMs: page.locator(text="...") -> page.locator('text="..."')
+    cleaned = cleaned.replace(/page\.locator\(\s*text\s*=\s*"([^"]+)"\s*\)/g, "page.locator('text=\"$1\"')");
+    cleaned = cleaned.replace(/page\.locator\(\s*text\s*=\s*'([^']+)'\s*\)/g, "page.locator('text=$1')");
+    // Ensure direct page actions are awaited when generated without await.
+    cleaned = cleaned.replace(/(^|\n)\s*(page\.(?:click|fill|check|uncheck|selectOption|type|press)\s*\()/g, '$1await $2');
     
     // First, extract code from markdown code blocks if present
     const codeBlockRegex = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
