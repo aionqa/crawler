@@ -12314,7 +12314,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
             }
           } catch (nestedError) {
             console.error(`❌ Nested step ${nestedIdx + 1} failed in iteration ${iteration}: ${nestedError.message}`);
-            if (nestedStep.config?.critical) {
+            const nestedIdLower = String(nestedStep.id || '').toLowerCase();
+            const nestedNameLower = String(nestedStep.name || '').toLowerCase();
+            const isJourneyLoopCoreStep =
+              nestedStep.type === 'execute-code-from-variable' ||
+              nestedIdLower.includes('generate_journey_script') ||
+              nestedIdLower.includes('justify_journey') ||
+              nestedNameLower.includes('generate journey action script') ||
+              nestedNameLower.includes('justify journey') ||
+              nestedNameLower.includes('execute journey action script');
+            if (nestedStep.config?.critical || isJourneyLoopCoreStep) {
               throw nestedError;
             }
           }
