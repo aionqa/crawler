@@ -4279,7 +4279,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] stepPayload.legsToExecute: ${stepPayload.legsToExecute?.length || 0} items`);
       console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] stepPayload.legs_to_execute: ${stepPayload.legs_to_execute?.length || 0} items`);
       if (stepPayload.legsToExecute && stepPayload.legsToExecute.length > 0) {
-        console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] First leg/journey sample:`, JSON.stringify(stepPayload.legsToExecute[0], null, 2).substring(0, 500));
+        try {
+          const safeFirstLeg = this.makeJsonSafe(stepPayload.legsToExecute[0]);
+          console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] First leg/journey sample:`, JSON.stringify(safeFirstLeg, null, 2).substring(0, 500));
+        } catch (journeyDebugError) {
+          console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] First leg/journey sample unavailable: ${journeyDebugError.message}`);
+        }
       }
       if (workflowState.context?.legsToExecute) {
         console.log(`🔍 [JUSTIFY-JOURNEYS DEBUG] workflowState.context.legsToExecute: ${workflowState.context.legsToExecute.length} items`);
@@ -4291,7 +4296,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     // Log prompt usage with step information
     const currentStepIndex = contextInfo.stepIndex !== null ? contextInfo.stepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.id === step.id || s.name === step.name) ?? -1);
-    await this.logPromptUsage(promptIdentifier, promptSource, decoratedTemplate, stepPayload, {
+    await this.logPromptUsage(promptIdentifier, promptSource, decoratedTemplate, this.makeJsonSafe(stepPayload), {
       step: step,
       stepIndex: currentStepIndex >= 0 ? currentStepIndex : (this.workflowTemplate?.steps?.findIndex(s => s.type === step.type) ?? -1),
       totalSteps: this.workflowTemplate?.steps?.length
