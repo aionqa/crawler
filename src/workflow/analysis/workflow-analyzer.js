@@ -14264,9 +14264,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // If max iterations reached and status is still 'continue' or 'stuck', mark as failure
         // This indicates the action couldn't be completed within the iteration limit
         if (iteration >= maxIterations) {
-          finalLegStatus = 'failure';
-          finalLegResult = 'failure';
-          finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Action could not be completed: status was '${status}' after ${iteration} iterations`;
+          const executionSucceeded =
+            workflowState.lastExecutionResult?.success === true ||
+            (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType);
+          const completionText = `${lastDetermineCompletion?.reason || ''} ${lastDetermineCompletion?.what_happened || ''}`.toLowerCase();
+          const hasBlockingSignal = /(invalid|required|error|failed|failure|exception|timeout|blocked|captcha)/.test(completionText);
+          if (executionSucceeded && !hasBlockingSignal) {
+            // In single-iteration mode, AI can conservatively return "continue" despite successful script execution.
+            finalLegStatus = 'success';
+            finalLegResult = 'success';
+            finalLegError = null;
+          } else {
+            finalLegStatus = 'failure';
+            finalLegResult = 'failure';
+            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Action could not be completed: status was '${status}' after ${iteration} iterations`;
+          }
         } else if (loopExitedEarly) {
           // Loop exited early with condition=false, which typically means success
           // But if status is 'continue' or 'stuck', we need to check execution result
