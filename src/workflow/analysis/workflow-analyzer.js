@@ -4272,6 +4272,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     try {
       const isScriptGenerationStep = step.id === 'generate_journey_script' || step.id === 'generate_login_script' ||
         step.name?.includes('Generate Journey Action Script') || step.name?.includes('Generate Login Script');
+      const isPageSummaryStep = step.id === 'page_summary' || step.name?.includes('AI Page Intelligence');
 
       // Script-generation steps frequently fail with reasoning-only/incomplete outputs.
       // Force direct JSON generation for these steps by disabling reasoning overrides.
@@ -4293,6 +4294,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (workflowState.variablePool?.page) {
           delete workflowState.variablePool.page.legScriptToExecute;
           delete workflowState.variablePool.page.journeyScriptToExecute;
+        }
+      }
+
+      // Page-summary prompts can also return reasoning-only/incomplete payloads.
+      // Force direct JSON output mode for this step as well.
+      if (isPageSummaryStep) {
+        stepPayload.reasoning_enabled = false;
+        stepPayload.reasoning_effort = null;
+        stepPayload.websearch_enabled = false;
+        if (stepPayload.max_completion_tokens === undefined || stepPayload.max_completion_tokens === null) {
+          stepPayload.max_completion_tokens = 2500;
         }
       }
 
