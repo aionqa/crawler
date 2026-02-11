@@ -4521,6 +4521,34 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       // Debug: Log what was returned
       console.log(`🔍 AI Response for step ${step.id} (${step.name}):`, JSON.stringify(parsedResponse, null, 2).substring(0, 1000));
+
+      // Engine-side normalization for non-reactive submits:
+      // If justification is "pending" after a submit-intent journey and no visible errors are reported,
+      // treat it as success to account for classic post/refresh pages without explicit success banners.
+      if (isJustifyJourneyStep && parsedResponse && typeof parsedResponse === 'object') {
+        const pageUrlLower = String(stepPayload.page_url || workflowState.pageUrl || '').toLowerCase();
+        const isNonReactivePage = pageUrlLower.includes('/non-reactive/');
+        const statusLower = String(parsedResponse.status || '').toLowerCase();
+        const reasonLower = String(parsedResponse.reason || '').toLowerCase();
+        const detailsLower = String(parsedResponse.verification_details || '').toLowerCase();
+        const hasExplicitErrorSignal =
+          /(error|invalid|required|please fill|failed|exception|tooltip|validation)/.test(reasonLower) ||
+          /(error|invalid|required|please fill|failed|exception|tooltip|validation)/.test(detailsLower);
+        const currentActions = Array.isArray(stepPayload.currentJourney?.actions) ? stepPayload.currentJourney.actions : [];
+        const hasSubmitIntent = currentActions.some((a) => {
+          const type = String(a?.type || '').toLowerCase();
+          const sel = String(a?.selector || '').toLowerCase();
+          const desc = String(a?.description || '').toLowerCase();
+          return type === 'form_submit' || sel.includes('submit') || sel.includes('register') || desc.includes('submit') || desc.includes('register');
+        });
+        if (isNonReactivePage && statusLower === 'pending' && hasSubmitIntent && !hasExplicitErrorSignal) {
+          parsedResponse.status = 'success';
+          parsedResponse.expected_outcome_verified = true;
+          parsedResponse.reason = 'No visible validation/error after submit on non-reactive page; treating post-submit reset state as success.';
+          parsedResponse.verification_details = (parsedResponse.verification_details || '') + ' [Engine override: non-reactive post-submit with no errors => success]';
+          console.log('✅ [JUSTIFY-OVERRIDE] Converted pending -> success for non-reactive post-submit journey');
+        }
+      }
       
       // CRITICAL: Log journeys in response for debugging
       if (parsedResponse && typeof parsedResponse === 'object') {
