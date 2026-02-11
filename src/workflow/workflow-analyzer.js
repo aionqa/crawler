@@ -3772,6 +3772,62 @@ IMPORTANT OUTPUT REQUIREMENTS:
           promptConfig // Pass full config (required - no fallback to database)
         );
       } catch (aiError) {
+        const aiErrorText = String(aiError?.message || '');
+        const stepIdLower = String(step.id || '').toLowerCase();
+        const stepNameLower = String(step.name || '').toLowerCase();
+        const isLoginValidationStep =
+          stepIdLower.includes('validate_login') ||
+          stepIdLower.includes('determine_completion') ||
+          stepNameLower.includes('validate login') ||
+          stepNameLower.includes('determine login') ||
+          promptIdentifier === 'validate_login_success' ||
+          promptIdentifier === 'determine_completion';
+
+        // Some helpers run without local AI provider configured.
+        // For login validation steps, provide deterministic DOM-based fallback instead of hard-failing.
+        if (isLoginValidationStep && aiErrorText.includes('AI not configured')) {
+          let bodyText = '';
+          let hasPasswordField = false;
+          try {
+            bodyText = ((await page.textContent('body')) || '').toLowerCase();
+            hasPasswordField = !!(await page.$('input[type="password"]'));
+          } catch (fallbackReadError) {
+            // Keep fallback conservative if DOM inspection fails.
+          }
+
+          const currentUrl = String(page.url() || stepPayload.current_url || stepPayload.page_url || '').toLowerCase();
+          const hasErrorSignal = /(invalid|incorrect|error|failed|unauthorized|forbidden|required)/.test(bodyText);
+          const hasSuccessSignal = /(login successful|welcome|dashboard|logout|signed in|profile)/.test(bodyText);
+          const status = hasErrorSignal ? 'failure' : (hasSuccessSignal || !hasPasswordField ? 'success' : 'continue');
+          const isComplete = status === 'success' || status === 'failure';
+
+          aiResponse = {
+            status,
+            is_complete: isComplete,
+            reason: 'AI provider unavailable on runner helper; used deterministic DOM-based login validation fallback.',
+            what_happened: `URL=${currentUrl}, passwordFieldVisible=${hasPasswordField}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}`,
+            new_content_detected: status !== 'continue',
+            content_type: 'page',
+            needs_more_testing: !isComplete,
+            next_action_suggestion: isComplete ? null : 'Retry login interaction once AI provider is configured on helper.',
+            playwright_script: null,
+            completion_status: status === 'success' ? 'complete' : (status === 'failure' ? 'failed' : 'in_progress'),
+            confidence: hasSuccessSignal || hasErrorSignal ? 0.75 : 0.4,
+            page_changed: true,
+            should_collect_cookies: true,
+            captcha_status: { present: false, solved: false, notes: 'AI unavailable; fallback validator used' }
+          };
+
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `⚠️ AI unavailable for ${step.id || step.name}; using deterministic login validation fallback`,
+              'WORKFLOW-ANALYZER',
+              { status, current_url: currentUrl, has_password_field: hasPasswordField, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
+            );
+          }
+        } else {
         const errorMessage = `OpenAI API call failed for step "${step.name || step.id}": ${aiError.message}`;
         const fullContext = {
           step_id: step.id,
@@ -3789,6 +3845,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
         }
         throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+        }
       }
       
       // CRITICAL: Validate OpenAI response exists
