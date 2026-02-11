@@ -936,7 +936,8 @@ export class AIConversationLogger {
       const promptSlugStr = String(promptSlug || '');
       const isScriptPrompt = scriptPromptSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
       const isLargeJsonPrompt = largeJsonSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
-      const defaultMaxOut = isScriptPrompt ? scriptMaxOut : (isLargeJsonPrompt ? 4096 : 2048);
+      // Keep page_summary responses bounded to reduce 504 gateway timeouts on large pages.
+      const defaultMaxOut = isScriptPrompt ? scriptMaxOut : (isLargeJsonPrompt ? 2500 : 2048);
       openaiRequest.max_output_tokens = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? defaultMaxOut;
       
       // Add reasoning if enabled and supported
