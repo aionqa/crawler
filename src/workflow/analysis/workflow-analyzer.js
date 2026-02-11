@@ -4327,36 +4327,70 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.log(`📄 VAR_DUMP: executeAIPromptStep - stepPayload.input_credentials=${stepPayload.input_credentials ? JSON.stringify({username: stepPayload.input_credentials.username || 'MISSING', password: stepPayload.input_credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
       
       let aiResponse;
-      try {
-        aiResponse = await this.aiLogger.makeAICallWithPrompt(
-          promptIdentifier,
-          stepPayload,
-          jobId,
-          'workflow-step',
-          effectivePageUrl, // Use effectivePageUrl to ensure conversations are linked to correct page
-          null,
-          stepPayload,
-          promptConfig // Pass full config (required - no fallback to database)
-        );
-      } catch (aiError) {
-        const errorMessage = `OpenAI API call failed for step "${step.name || step.id}": ${aiError.message}`;
-        const fullContext = {
-          step_id: step.id,
-          step_name: step.name,
-          step_type: step.type,
-          prompt_identifier: promptIdentifier,
-          step_config: step.config,
-          step_payload_keys: Object.keys(stepPayload || {}),
-          error: aiError.message,
-          error_stack: aiError.stack
-        };
-        console.error(`❌ ${errorMessage}`);
-        console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
-        if (jobId && this.backendLogger) {
-          await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+      const isScriptGenerationStep = step.id === 'generate_journey_script' || step.id === 'generate_login_script' ||
+        step.name?.includes('Generate Journey Action Script') || step.name?.includes('Generate Login Script');
+      const configuredRetries = Number.isFinite(step.config?.maxRetries) ? step.config.maxRetries : 1;
+      const maxAttempts = Math.max(1, configuredRetries + 1);
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          aiResponse = await this.aiLogger.makeAICallWithPrompt(
+            promptIdentifier,
+            stepPayload,
+            jobId,
+            'workflow-step',
+            effectivePageUrl, // Use effectivePageUrl to ensure conversations are linked to correct page
+            null,
+            stepPayload,
+            promptConfig // Pass full config (required - no fallback to database)
+          );
+        } catch (aiError) {
+          const errorMessage = `OpenAI API call failed for step "${step.name || step.id}" (attempt ${attempt}/${maxAttempts}): ${aiError.message}`;
+          const fullContext = {
+            step_id: step.id,
+            step_name: step.name,
+            step_type: step.type,
+            prompt_identifier: promptIdentifier,
+            step_config: step.config,
+            step_payload_keys: Object.keys(stepPayload || {}),
+            attempt,
+            max_attempts: maxAttempts,
+            error: aiError.message,
+            error_stack: aiError.stack
+          };
+          console.error(`❌ ${errorMessage}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+          }
+          if (attempt < maxAttempts) {
+            continue;
+          }
+          throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
         }
-        // No fallbacks: fail the job immediately so there is no confusion
-        throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+
+        // Script generation can occasionally return a non-JSON/incomplete wrapper object.
+        // Retry immediately instead of continuing with an error-shaped payload.
+        const isIncompleteResponse = isScriptGenerationStep &&
+          aiResponse &&
+          typeof aiResponse === 'object' &&
+          aiResponse.success === false &&
+          typeof aiResponse.error === 'string' &&
+          (aiResponse.error.includes('OpenAI returned empty or undefined content') ||
+            aiResponse.error.includes('"status":"incomplete"'));
+
+        if (isIncompleteResponse && attempt < maxAttempts) {
+          const retryMessage = `⚠️ Incomplete OpenAI output for ${step.id || step.name} (attempt ${attempt}/${maxAttempts}) - retrying`;
+          console.warn(retryMessage);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn', retryMessage, 'WORKFLOW-ANALYZER', {
+              step_id: step.id,
+              attempt,
+              max_attempts: maxAttempts
+            });
+          }
+          continue;
+        }
+
+        break;
       }
       
       // CRITICAL: Validate OpenAI response exists
