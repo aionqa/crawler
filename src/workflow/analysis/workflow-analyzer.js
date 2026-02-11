@@ -4359,6 +4359,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // Runtime hardening: enforce deterministic dynamic-field handling even if older workflow templates are loaded.
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
           + '- Execute each listed action exactly once (no duplicate add/click actions unless explicitly repeated in currentJourney.actions).\n'
+          + '- Generate script body for the EXISTING Playwright page only (assume page is already available). Never import playwright/chromium, never create browser/context/newPage, never call browser.close.\n'
+          + '- Do not navigate to localhost/base URLs. Use current page state; only navigate if currentJourney explicitly requires a URL navigation action.\n'
           + '- For modal/wizard journeys: if target fields/buttons are not visible, first click the opener trigger (e.g., "Start", "Open", "Launch", "Begin") to display the modal/wizard, then continue actions.\n'
           + '- Every interaction statement MUST be awaited (await page.click/fill/check/selectOption/type/press) and must not use bare page.click(...) without await.\n'
           + '- If an action adds dynamic inputs (e.g., Add Email/Add Phone), ensure every visible required input is non-empty before submit.\n'
