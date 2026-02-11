@@ -4279,6 +4279,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepPayload.reasoning_enabled = false;
         stepPayload.reasoning_effort = null;
         stepPayload.websearch_enabled = false;
+        // Explicitly request larger output budget for generated scripts.
+        // This avoids nested prompt-slug default limits causing truncated empty responses.
+        stepPayload.max_completion_tokens = 8192;
+
+        // Prevent stale scripts from previous attempts/runs from being reused.
+        delete workflowState.legScriptToExecute;
+        delete workflowState.journeyScriptToExecute;
+        if (workflowState.context && typeof workflowState.context === 'object') {
+          delete workflowState.context.legScriptToExecute;
+          delete workflowState.context.journeyScriptToExecute;
+        }
+        if (workflowState.variablePool?.page) {
+          delete workflowState.variablePool.page.legScriptToExecute;
+          delete workflowState.variablePool.page.journeyScriptToExecute;
+        }
       }
 
       // Check if this is a determine_completion step and if current leg has an associated action with action_test_prompt
