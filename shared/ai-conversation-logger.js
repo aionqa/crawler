@@ -933,7 +933,10 @@ export class AIConversationLogger {
       const scriptPromptSlugs = ['generate_journey_script', 'generate_login_script', 'generate-workflow-script', 'generate-form-fill-script', 'generate-click-script', 'generate-navigation-script', 'generate-validation-script'];
       const largeJsonSlugs = ['page_summary'];
       const scriptMaxOut = 8192; // Multi-step wizards can produce long scripts
-      const defaultMaxOut = scriptPromptSlugs.includes(promptSlug) ? scriptMaxOut : (largeJsonSlugs.includes(promptSlug) ? 4096 : 2048);
+      const promptSlugStr = String(promptSlug || '');
+      const isScriptPrompt = scriptPromptSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
+      const isLargeJsonPrompt = largeJsonSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
+      const defaultMaxOut = isScriptPrompt ? scriptMaxOut : (isLargeJsonPrompt ? 4096 : 2048);
       openaiRequest.max_output_tokens = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? defaultMaxOut;
       
       // Add reasoning if enabled and supported
