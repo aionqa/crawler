@@ -957,11 +957,6 @@ export class AIConversationLogger {
           }
         }
       }
-      // IMPORTANT: when disabled, send explicit false so downstream services
-      // do not apply project/default reasoning settings implicitly.
-      if (!useReasoning && model.startsWith('gpt-5')) {
-        openaiRequest.reasoning = false;
-      }
       
       // Add web search if enabled and supported
       if (useWebsearch) {
