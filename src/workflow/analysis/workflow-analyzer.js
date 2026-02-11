@@ -10160,9 +10160,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
         console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
         const fn = new Function('page', 'wrapper', 'input_credentials', functionBody);
         console.log(`🚀 Executing script with wrapped page object...`);
-        const result = await fn(wrappedPage, wrappedPage, credentials);
+        const rawResult = await fn(wrappedPage, wrappedPage, credentials);
+        const result = (rawResult === undefined || rawResult === null)
+          ? { success: true, message: 'Script executed without explicit return value' }
+          : rawResult;
         console.log(`✅ Script execution completed, result.success=${result?.success}`);
-        console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
+        const resultPreview = (() => {
+          try {
+            const json = JSON.stringify(result);
+            if (typeof json === 'string') {
+              return json.substring(0, 200);
+            }
+            return String(result).substring(0, 200);
+          } catch (previewError) {
+            return String(result).substring(0, 200);
+          }
+        })();
+        console.log(`📄 VAR_DUMP: executeInNodeContext result:`, resultPreview);
         workflowState.lastExecutedActionLines = executedActionLines;
         return result;
       };
