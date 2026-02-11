@@ -8776,6 +8776,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
     cleaned = cleaned.replace(/page\.locator\(\s*text\s*=\s*'([^']+)'\s*\)/g, "page.locator('text=$1')");
     // Ensure direct page actions are awaited when generated without await.
     cleaned = cleaned.replace(/(^|\n)\s*(page\.(?:click|fill|check|uncheck|selectOption|type|press)\s*\()/g, '$1await $2');
+    // Normalize unquoted selector args in common page.* calls (e.g., page.fill(input[name="x"]))
+    cleaned = cleaned.replace(
+      /page\.(click|fill|check|uncheck|isVisible|waitForSelector)\(\s*([a-zA-Z][^'"`)\n]*(?:\[[^\)\n]+\]|:[^)\n]+)[^)\n]*)\s*\)/g,
+      (m, method, sel) => {
+        const selector = String(sel || '').trim();
+        return `page.${method}('${selector.replace(/'/g, "\\'")}')`;
+      }
+    );
+    // Fix malformed waitForSelector with multi-selector args not wrapped as one string.
+    cleaned = cleaned.replace(
+      /page\.waitForSelector\(\s*([^'"`][^)\n]*)\s*\)/g,
+      (m, raw) => {
+        const value = String(raw || '').trim();
+        if (!value || value.startsWith('{')) return m;
+        return `page.waitForSelector('${value.replace(/'/g, "\\'")}')`;
+      }
+    );
     
     // First, extract code from markdown code blocks if present
     const codeBlockRegex = /```[\w]*\s*\n?([\s\S]*?)\n?```/g;
