@@ -4276,6 +4276,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
       // Script-generation steps frequently fail with reasoning-only/incomplete outputs.
       // Force direct JSON generation for these steps by disabling reasoning overrides.
+      const isJustifyJourneyStep = step.id === 'justify_journey' || step.name?.includes('Justify Journey');
       if (isScriptGenerationStep) {
         stepPayload.reasoning_enabled = false;
         stepPayload.reasoning_effort = null;
@@ -4359,9 +4360,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
           + '- Execute each listed action exactly once (no duplicate add/click actions unless explicitly repeated in currentJourney.actions).\n'
           + '- For modal/wizard journeys: if target fields/buttons are not visible, first click the opener trigger (e.g., "Start", "Open", "Launch", "Begin") to display the modal/wizard, then continue actions.\n'
+          + '- Every interaction statement MUST be awaited (await page.click/fill/check/selectOption/type/press) and must not use bare page.click(...) without await.\n'
           + '- If an action adds dynamic inputs (e.g., Add Email/Add Phone), ensure every visible required input is non-empty before submit.\n'
           + '- Immediately before submit, handle browser validation safely: if any :invalid input exists, fill it with a valid realistic value and then submit.\n'
+          + '- After submit/click of primary action, wait for either URL/navigation change OR visible DOM state change before returning script completion.\n'
           + '- Never return success while required fields remain empty or browser validation messages are visible.\n';
+      }
+      if (isJustifyJourneyStep) {
+        effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
+          + '- If visible validation/error text exists, return status="failure".\n'
+          + '- If expected_outcome is visible in DOM, return status="success" and expected_outcome_verified=true.\n'
+          + '- For non-reactive form submit journeys: when submit was attempted and page is in clean initial state after submit with NO visible validation/error text, treat as status="success" (submit likely reloaded/reset page).\n'
+          + '- Use status="pending" only when there is genuinely insufficient evidence and no success/failure signal.\n';
       }
       const promptConfig = {
         user_message_template: effectiveTemplate,
