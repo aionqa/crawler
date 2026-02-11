@@ -8703,6 +8703,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     if (asyncIifePattern.test(cleaned)) {
       return cleaned;
     }
+    const plainAsyncIifePattern = /^\(async\s*\([^)]*\)\s*=>\s*\{/;
+    const plainAsyncFunctionIifePattern = /^\(async\s+function\s*\([^)]*\)\s*\{/;
+    if (plainAsyncIifePattern.test(cleaned) || plainAsyncFunctionIifePattern.test(cleaned)) {
+      return cleaned;
+    }
     
     // Extract function bodies instead of removing functions completely
     const extractFunctionBodies = (text) => {
@@ -8745,7 +8750,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Remove IIFE wrappers only when that won't leave invalid "return await " + try/catch
     const wouldLeaveBrokenReturn = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{/.test(cleaned.trim());
     if (!wouldLeaveBrokenReturn) {
-      cleaned = cleaned.replace(/\(async\s*\([^)]*\)\s*=>\s*\{/g, '');
       cleaned = cleaned.replace(/\(async\s+function\s*\([^)]*\)\s*\{[^}]*\}\)\s*\(\)/g, '');
       cleaned = cleaned.replace(/\(async\s*\(\)\s*=>\s*\{[^}]*\}\)\s*\(\)/g, '');
     }
@@ -8773,6 +8777,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Remove comments
     cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
     cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
+
+    // Repair helper wrapper corruption seen in generated modal scripts.
+    if (!/const\s+isVisible\s*=\s*async\s*\(/.test(cleaned) && /return\s+await\s+el\.evaluate\(\(e\)\s*=>\s*\{/.test(cleaned)) {
+      cleaned = cleaned.replace(
+        /return\s+await\s+el\.evaluate\(\(e\)\s*=>\s*\{/,
+        'const isVisible = async (el) => {\n    return await el.evaluate((e) => {'
+      );
+      cleaned = cleaned.replace(
+        /\n(\s*)const controls = await dialog\.\$\$\('input, textarea, select, button'\);/,
+        '\n$1};\n$1const controls = await dialog.$$(\'input, textarea, select, button\');'
+      );
+    }
+
+    // Repair truncated URL literal produced by occasional tokenization glitches.
+    cleaned = cleaned.replace(/value\s*=\s*['"]https:\s*$/gm, "value = 'https://example.com';");
     
     // Clean up extra whitespace
     cleaned = cleaned.replace(/\n\s*\n\s*\n/g, '\n');
