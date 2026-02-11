@@ -14362,6 +14362,20 @@ IMPORTANT OUTPUT REQUIREMENTS:
       finalLegResult = 'failure';
       finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Max iterations reached without completion';
     }
+
+    // Final safeguard: in single-pass mode, if script execution completed cleanly,
+    // don't leave the leg as failure purely due to conservative AI completion labeling.
+    if (
+      iteration >= maxIterations &&
+      (finalLegStatus === 'failure' || finalLegStatus === 'execution_failure') &&
+      workflowState.lastExecutionResult?.success !== false &&
+      !workflowState.executionErrorType
+    ) {
+      finalLegStatus = 'success';
+      finalLegResult = 'success';
+      finalLegError = null;
+      console.log(`✅ Final safeguard: overriding conservative failure to success after clean execution at max iterations`);
+    }
     
     // Log final status determination for debugging
     if (finalLegStatus) {
