@@ -265,10 +265,10 @@ export class AIConversationLogger {
       modelPricing = modelPrefix ? this.pricing[modelPrefix] : null;
     }
     
-    // Default to gpt-5-nano pricing if model not found
+    // Default to gpt-5-mini pricing if model not found
     if (!modelPricing) {
-      console.warn(`[AI-COST] Unknown model "${model}", using gpt-5-nano pricing as fallback`);
-      modelPricing = this.pricing['gpt-5-nano'];
+      console.warn(`[AI-COST] Unknown model "${model}", using gpt-5-mini pricing as fallback`);
+      modelPricing = this.pricing['gpt-5-mini'];
     }
     
     const inputTokens = usage.prompt_tokens ?? usage.input_tokens ?? 0;
@@ -888,25 +888,35 @@ export class AIConversationLogger {
         }
       }
       
-      // 6. Construct OpenAI request (use modelOverride if provided, then payload model, then project model, then default)
-      const model = modelOverride || payload?.model || projectModel || "gpt-5-nano";
+      // OpenAI-mode detection: gpt-5-nano default and 128K max_output only for AI services in OpenAI mode.
+      // Other modes (LM Studio, Ollama) keep gpt-5-mini default and conservative token limits.
+      const aiServicesForMode = this.context?.ai_services || payload?.ai_services || sourcePayload?.ai_services;
+      const primaryService = Array.isArray(aiServicesForMode) && aiServicesForMode.length > 0 ? aiServicesForMode[0] : null;
+      const primaryUrl = primaryService?.url ? String(primaryService.url) : '';
+      const isOpenAIMode = primaryService?.mode === 'openai' || (primaryUrl && primaryUrl.includes('api.openai.com'));
+
+      // Helper-level OpenAI options (from context when job runs on helper with OpenAI mode) override project
+      const helperOpenAIOptions = this.context?.openai_options;
+      // 6. Construct OpenAI request (modelOverride > payload > helper openai_options > project > default)
+      const defaultModel = isOpenAIMode ? 'gpt-5-nano' : 'gpt-5-mini';
+      const model = modelOverride || payload?.model || (helperOpenAIOptions?.model != null ? helperOpenAIOptions.model : null) || projectModel || defaultModel;
       
       // Debug logging to understand model selection
       if (attemptNumber === 1) {
         console.log(`[AI-CALL] 🔍 Model selection: modelOverride=${modelOverride}, payload.model=${payload?.model}, projectModel=${projectModel}, final=${model}`);
       }
       
-      // Get reasoning/websearch from parameters, payload, or project options (in that order).
-      // IMPORTANT: payload false must override project true, so do not use plain || chaining.
+      // Get reasoning/websearch: param > payload > helper openai_options > project. Reasoning disabled by default.
       const payloadReasoning = payload?.reasoning_enabled;
       const payloadWebsearch = payload?.websearch_enabled;
-      const useReasoning = reasoningEnabled || (payloadReasoning !== undefined ? payloadReasoning : (projectOptions.reasoning_enabled || false));
+      const helperReasoning = helperOpenAIOptions?.reasoning_enabled;
+      const useReasoning = reasoningEnabled || (payloadReasoning !== undefined ? payloadReasoning : (helperReasoning !== undefined ? helperReasoning : (projectOptions.reasoning_enabled || false)));
       const useWebsearch = websearchEnabled || (payloadWebsearch !== undefined ? payloadWebsearch : (projectOptions.websearch_enabled || false));
       
       // GPT-5 specific options (from payload, then project options, then defaults)
       // Use !== undefined check to properly handle null values (null means explicitly disabled)
       const textFormat = payload?.text_format !== undefined ? payload.text_format : (projectOptions.text_format || 'json_object');
-      const reasoningEffort = payload?.reasoning_effort !== undefined ? payload.reasoning_effort : (projectOptions.reasoning_effort || null);
+      const reasoningEffort = payload?.reasoning_effort !== undefined ? payload.reasoning_effort : (helperOpenAIOptions?.reasoning_effort ?? projectOptions.reasoning_effort ?? null);
       const verbosity = payload?.verbosity !== undefined ? payload.verbosity : (projectOptions.verbosity || null);
       const storeLogs = payload?.store_logs !== undefined ? payload.store_logs : (projectOptions.store_logs !== undefined ? projectOptions.store_logs : true);
       
@@ -929,21 +939,21 @@ export class AIConversationLogger {
         ensureStrictSchema(schema);
         openaiRequest.response_schema = schema;
       }
-      // max_output_tokens: use model max for GPT-5/GPT-4.1 (128K), avoid artificial caps that cause incomplete responses.
-      // GPT-5*, GPT-4.1* (incl. mini/nano) support 128K output; GPT-4.1 has 1M context + image support.
-      // LM Studio/Ollama often default low (~256) so we keep fallbacks for unknown models.
+      // max_output_tokens: use 128K for GPT-5/GPT-4.1 when reasoning enabled (reasoning consumes tokens first; 2500 causes incomplete).
+      // Also use 128K when OpenAI mode + GPT-5/4.1. Other modes keep conservative limits.
       const scriptPromptSlugs = ['generate_journey_script', 'generate_login_script', 'generate-workflow-script', 'generate-form-fill-script', 'generate-click-script', 'generate-navigation-script', 'generate-validation-script'];
       const largeJsonSlugs = ['page_summary'];
       const scriptMaxOut = 8192; // Multi-step wizards can produce long scripts
       const promptSlugStr = String(promptSlug || '');
       const isScriptPrompt = scriptPromptSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
       const isLargeJsonPrompt = largeJsonSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
+      const baseDefault = isScriptPrompt ? scriptMaxOut : (isLargeJsonPrompt ? 2500 : 2048);
       const modelLower = String(model || '').toLowerCase();
       const usesLargeOutputModel = modelLower.startsWith('gpt-5') || modelLower.startsWith('gpt-4.1') || modelLower.startsWith('o4');
-      const modelMaxOutput = 128000; // GPT-5, GPT-5-mini, GPT-5-nano, GPT-4.1* max output
-      const baseDefault = isScriptPrompt ? scriptMaxOut : (isLargeJsonPrompt ? 2500 : 2048);
-      const defaultMaxOut = usesLargeOutputModel ? modelMaxOutput : baseDefault;
-      const effectiveMaxOut = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? defaultMaxOut;
+      const modelMaxOutput = 128000; // GPT-5/GPT-4.1 max output
+      const needsLargeOutput = (useReasoning && usesLargeOutputModel) || (isOpenAIMode && usesLargeOutputModel);
+      const defaultMaxOut = needsLargeOutput ? modelMaxOutput : baseDefault;
+      const effectiveMaxOut = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? (helperOpenAIOptions?.max_completion_tokens != null ? helperOpenAIOptions.max_completion_tokens : null) ?? defaultMaxOut;
       openaiRequest.max_output_tokens = effectiveMaxOut;
       
       // Add reasoning if enabled and supported
