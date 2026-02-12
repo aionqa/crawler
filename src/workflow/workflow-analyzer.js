@@ -2473,8 +2473,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
         null;
       
       const loginStatus = determineResult?.status || determineResult?.completion_status || null;
+      const determineText = `${determineResult?.reason || ''} ${determineResult?.what_happened || ''}`.toLowerCase();
+      const hasBlockingSignal = /(invalid|incorrect|required|error|failed|failure|exception|timeout|blocked|captcha|unauthorized|forbidden)/.test(determineText);
+      const cleanExecution = workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType;
       const loginSuccess = loginStatus === 'success' || 
-                          (determineResult?.is_complete === true && loginStatus !== 'failure');
+                          (determineResult?.is_complete === true && loginStatus !== 'failure') ||
+                          (loginStatus === 'continue' && cleanExecution && !hasBlockingSignal);
       
       if (loginSuccess) {
         await this.sendLogToBackend(effectiveJobId, 'info', `✅ LOGIN SUCCESSFUL - Job will stop after saving results`, 'WORKFLOW-ANALYZER', {
