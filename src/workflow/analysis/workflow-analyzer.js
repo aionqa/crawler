@@ -4450,6 +4450,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             stepNameLower.includes('determine login') ||
             promptIdentifier === 'validate_login_success' ||
             promptIdentifier === 'determine_completion';
+          const isPageSummaryStep =
+            stepIdLower === 'page_summary' ||
+            stepNameLower.includes('page intelligence') ||
+            promptIdentifier === 'page_summary';
 
           // Runner helpers can occasionally execute without local AI provider configured.
           // For login validation steps, provide a deterministic page-state fallback instead of hard-failing the job.
@@ -4493,6 +4497,56 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 `⚠️ AI unavailable for ${step.id || step.name}; using deterministic login validation fallback`,
                 'WORKFLOW-ANALYZER',
                 { status, current_url: currentUrl, has_password_field: hasPasswordField, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
+              );
+            }
+            break;
+          }
+
+          // Deterministic fallback for page discovery when helper token/config is unavailable.
+          if (isPageSummaryStep && (aiErrorText.includes('AI not configured') || aiErrorText.includes('Invalid token'))) {
+            const interactive = Array.isArray(stepPayload?.interactive_elements) ? stepPayload.interactive_elements : [];
+            const forms = Array.isArray(stepPayload?.forms) ? stepPayload.forms : [];
+            const pageUrl = String(stepPayload?.page_url || page.url() || '');
+            const titleText = String(stepPayload?.page_title || '').trim();
+            const journeyId = `journey_0_${(pageUrl.split('/').pop() || 'page').replace(/[^a-zA-Z0-9]+/g, '_')}`.replace(/_+/g, '_').toLowerCase();
+            const actions = interactive.slice(0, 8).map((el, idx) => ({
+              action_id: `action_${idx + 1}`,
+              type: (String(el?.type || '').toLowerCase().includes('input') || String(el?.role || '').toLowerCase().includes('textbox')) ? 'input' : 'click',
+              selector: String(el?.selector || el?.css_selector || el?.xpath || ''),
+              description: String(el?.text || el?.label || el?.name || `Interact with element ${idx + 1}`),
+              order: idx
+            })).filter(action => action.selector);
+
+            aiResponse = {
+              page_summary: {
+                short_description: titleText || 'Page ready for automated interaction testing.',
+                primary_purpose: forms.length > 0 ? 'Form interaction and submission' : 'Interactive page validation',
+                forms_present: forms.length > 0
+              },
+              journeys: [{
+                journey_id: journeyId || 'journey_0',
+                description: forms.length > 0
+                  ? 'User fills required fields and submits the main form flow.'
+                  : 'User interacts with primary visible controls on the page.',
+                priority: 'high',
+                confidence: 0.6,
+                expected_outcome: forms.length > 0
+                  ? 'Form submission attempt completes without blocking validation errors.'
+                  : 'Primary interactions execute without runtime errors.',
+                test_instructions: forms.length > 0
+                  ? 'Fill visible required inputs with valid values and submit once.'
+                  : 'Click/trigger key visible interactive elements once.',
+                actions
+              }]
+            };
+
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(
+                jobId,
+                'warn',
+                `⚠️ AI unavailable for ${step.id || step.name}; using deterministic page-summary fallback`,
+                'WORKFLOW-ANALYZER',
+                { page_url: pageUrl, interactive_count: interactive.length, forms_count: forms.length, actions_built: actions.length }
               );
             }
             break;
