@@ -71,7 +71,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                     project_id: projectId,
                     job_id: jobId,
                     messages: params.messages,
-                    model: params.model || llmConfig.model || 'gpt-5-mini',
+                    model: params.model || llmConfig.model || 'gpt-5-nano',
                     temperature: params.temperature,
                     max_tokens: params.max_tokens,
                     ...params
@@ -142,7 +142,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                   job_id: jobId,
                   input: params.input || params.messages, // Support both formats
                   messages: params.messages,
-                  model: params.model || llmConfig.model || 'gpt-5-mini',
+                  model: params.model || llmConfig.model || 'gpt-5-nano',
                   temperature: params.temperature,
                   max_tokens: params.max_tokens,
                   ...params

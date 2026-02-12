@@ -2805,7 +2805,7 @@ Respond with JSON format:
       'unified-crawler',
       'auto_login_analysis',
       {
-        model: "gpt-5-mini",
+        model: "gpt-5-nano",
         messages: [{ role: "user", content: aiPrompt }],
       },
       screenshotResult?.screenshotId, // Pass screenshot ID to AI conversation logger
@@ -2933,7 +2933,7 @@ Respond with JSON format:
     'unified-crawler',
     'media_login_analysis',
     {
-      model: "gpt-5-mini",
+      model: "gpt-5-nano",
       messages: [{ role: "user", content: aiPrompt }],
       response_format: { type: "json_object" }
     },
@@ -3073,7 +3073,7 @@ Respond with JSON format:
     'unified-crawler',
     'text_login_analysis',
     {
-      model: "gpt-5-mini",
+      model: "gpt-5-nano",
       messages: [{ role: "user", content: aiPrompt }],
       response_format: { type: "json_object" }
     },
@@ -3224,7 +3224,7 @@ Respond with JSON format:
     'unified-crawler',
     'forms_login_analysis',
     {
-      model: "gpt-5-mini",
+      model: "gpt-5-nano",
       messages: [{ role: "user", content: aiPrompt }],
       response_format: { type: "json_object" }
     },
@@ -3831,7 +3831,7 @@ Respond with JSON format:
         'unified-crawler',
         `page_analysis_${approach}`,
         {
-          model: "gpt-5-mini",  // Use gpt-5-mini for all approaches as per requirement
+          model: "gpt-5-nano",
           messages: aiMessages,
           max_completion_tokens: approach === 'media' ? 500 : 300
         },
@@ -4931,7 +4931,7 @@ async function executeTextApproach(page, jobId, context, openaiClient) {
       'unified-crawler',
       'text_approach_action_list',
       {
-        model: "gpt-5-mini",
+        model: "gpt-5-nano",
         messages: [{ role: "user", content: listPrompt }],
       },
       null,
@@ -4988,7 +4988,7 @@ RESPOND WITH JSON:
         'unified-crawler',
         `text_approach_action_${i + 1}`,
         {
-          model: "gpt-5-mini",
+          model: "gpt-5-nano",
           messages: [{ role: "user", content: execPrompt }],
         },
         null,
@@ -5061,7 +5061,7 @@ RESPOND WITH THIS EXACT FORMAT:
       'unified-crawler',
       'media_approach_visual_analysis',
       {
-        model: "gpt-5-mini",
+        model: "gpt-5-nano",
         messages: [{
           role: "user",
           content: [
@@ -5131,7 +5131,7 @@ RESPOND WITH THIS EXACT FORMAT:
         'unified-crawler',
         `media_approach_locate_${i + 1}`,
         {
-          model: "gpt-5-mini",
+          model: "gpt-5-nano",
           messages: [{
             role: "user",
             content: [
@@ -5244,7 +5244,7 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
       'unified-crawler',
       'static_approach_script_generation',
       {
-        model: "gpt-5-mini",
+        model: "gpt-5-nano",
         messages: [{ role: "user", content: scriptPrompt }],
         max_completion_tokens: 2000
       },
@@ -5293,7 +5293,7 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
             parameters: scenario.parameters,
             generated_by: 'ai',
             ai_prompt: scriptPrompt,
-            ai_model: 'gpt-5-mini',
+            ai_model: 'gpt-5-nano',
             expected_outcome: scenario.expected_outcome,
             validation_rules: scenario.validation_rules || [],
             status: 'active'
@@ -5414,7 +5414,7 @@ RESPOND WITH JSON:
       'unified-crawler',
       'action_verification',
       {
-        model: "gpt-5-mini",
+        model: "gpt-5-nano",
         messages: messages,
       },
       null,
