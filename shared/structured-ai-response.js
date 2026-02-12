@@ -192,7 +192,7 @@ export class StructuredAIResponse {
         conversation_type: 'form_analysis',
         job_id: jobId,
         page_url: pageUrl,
-        model: 'gpt-5-mini'
+        model: 'gpt-5-nano'
       })
       .setContext({
         user_input: 'Analyze login form structure and identify input fields',
@@ -236,7 +236,7 @@ export class StructuredAIResponse {
         conversation_type: 'playwright_code_generation',
         job_id: jobId,
         page_url: pageUrl,
-        model: 'gpt-5-mini'
+        model: 'gpt-5-nano'
       })
       .setContext({
         user_input: 'Generate Playwright script for form interaction',
@@ -286,7 +286,7 @@ export class StructuredAIResponse {
         job_id: jobId,
         page_url: pageUrl,
         screenshot_id: screenshotId,
-        model: 'gpt-5-mini'
+        model: 'gpt-5-nano'
       })
       .setContext({
         user_input: 'Analyze page structure and extract interactive elements',
@@ -328,7 +328,7 @@ export class StructuredAIResponse {
         job_id: jobId,
         page_url: pageUrl,
         screenshot_id: screenshotId,
-        model: 'gpt-5-mini'
+        model: 'gpt-5-nano'
       })
       .setContext({
         user_input: 'Analyze if login was successful',
@@ -370,7 +370,7 @@ export class StructuredAIResponse {
         job_id: jobId,
         page_url: pageUrl,
         screenshot_id: screenshotId,
-        model: 'gpt-5-mini'
+        model: 'gpt-5-nano'
       })
       .setContext({
         user_input: 'AI analyzed conversation',
@@ -450,7 +450,7 @@ export class StructuredAIResponse {
         conversation_type: 'enhanced_conversation',
         job_id: jobId,
         page_url: pageUrl,
-        model: 'gpt-5-mini'
+        model: 'gpt-5-nano'
       })
       .setContext({
         user_input: 'Enhanced conversation with separate payload components',
@@ -485,7 +485,7 @@ export class StructuredAIResponse {
         conversation_type: 'conversation_flow',
         job_id: jobId,
         page_url: pageUrl,
-        model: 'gpt-5-mini'
+        model: 'gpt-5-nano'
       })
       .setContext({
         user_input: 'Conversation flow with step-by-step screenshots and actions',

@@ -265,10 +265,10 @@ export class AIConversationLogger {
       modelPricing = modelPrefix ? this.pricing[modelPrefix] : null;
     }
     
-    // Default to gpt-5-mini pricing if model not found
+    // Default to gpt-5-nano pricing if model not found
     if (!modelPricing) {
-      console.warn(`[AI-COST] Unknown model "${model}", using gpt-5-mini pricing as fallback`);
-      modelPricing = this.pricing['gpt-5-mini'];
+      console.warn(`[AI-COST] Unknown model "${model}", using gpt-5-nano pricing as fallback`);
+      modelPricing = this.pricing['gpt-5-nano'];
     }
     
     const inputTokens = usage.prompt_tokens ?? usage.input_tokens ?? 0;
@@ -889,7 +889,7 @@ export class AIConversationLogger {
       }
       
       // 6. Construct OpenAI request (use modelOverride if provided, then payload model, then project model, then default)
-      const model = modelOverride || payload?.model || projectModel || "gpt-5-mini";
+      const model = modelOverride || payload?.model || projectModel || "gpt-5-nano";
       
       // Debug logging to understand model selection
       if (attemptNumber === 1) {
@@ -929,16 +929,22 @@ export class AIConversationLogger {
         ensureStrictSchema(schema);
         openaiRequest.response_schema = schema;
       }
-      // Generous max_output_tokens so script/JSON responses are not truncated (LM Studio / Ollama default may be low)
+      // max_output_tokens: use model max for GPT-5/GPT-4.1 (128K), avoid artificial caps that cause incomplete responses.
+      // GPT-5*, GPT-4.1* (incl. mini/nano) support 128K output; GPT-4.1 has 1M context + image support.
+      // LM Studio/Ollama often default low (~256) so we keep fallbacks for unknown models.
       const scriptPromptSlugs = ['generate_journey_script', 'generate_login_script', 'generate-workflow-script', 'generate-form-fill-script', 'generate-click-script', 'generate-navigation-script', 'generate-validation-script'];
       const largeJsonSlugs = ['page_summary'];
       const scriptMaxOut = 8192; // Multi-step wizards can produce long scripts
       const promptSlugStr = String(promptSlug || '');
       const isScriptPrompt = scriptPromptSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
       const isLargeJsonPrompt = largeJsonSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
-      // Keep page_summary responses bounded to reduce 504 gateway timeouts on large pages.
-      const defaultMaxOut = isScriptPrompt ? scriptMaxOut : (isLargeJsonPrompt ? 2500 : 2048);
-      openaiRequest.max_output_tokens = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? defaultMaxOut;
+      const modelLower = String(model || '').toLowerCase();
+      const usesLargeOutputModel = modelLower.startsWith('gpt-5') || modelLower.startsWith('gpt-4.1') || modelLower.startsWith('o4');
+      const modelMaxOutput = 128000; // GPT-5, GPT-5-mini, GPT-5-nano, GPT-4.1* max output
+      const baseDefault = isScriptPrompt ? scriptMaxOut : (isLargeJsonPrompt ? 2500 : 2048);
+      const defaultMaxOut = usesLargeOutputModel ? modelMaxOutput : baseDefault;
+      const effectiveMaxOut = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? defaultMaxOut;
+      openaiRequest.max_output_tokens = effectiveMaxOut;
       
       // Add reasoning if enabled and supported
       if (useReasoning) {
@@ -1185,11 +1191,37 @@ export class AIConversationLogger {
             }
 
             // 8. Parse response with validation (LM Studio may return output in output[0].text or array content)
-            const rawContent = typeof response?.output_text === 'string'
+            // Responses API: output_text may be empty when status=incomplete (reasoning used all tokens).
+            // Output array can have: reasoning (no text), then message with content[].output_text.text.
+            let rawContent = typeof response?.output_text === 'string' && response.output_text.trim()
               ? response.output_text
-              : (Array.isArray(response?.output) && response.output[0]?.text != null ? String(response.output[0].text) : '');
+              : '';
+            if (!rawContent && Array.isArray(response?.output)) {
+              for (const item of response.output) {
+                if (item?.type === 'message' && Array.isArray(item.content)) {
+                  for (const part of item.content) {
+                    if (part?.type === 'output_text' && part.text != null) {
+                      rawContent = String(part.text).trim();
+                      if (rawContent) break;
+                    }
+                  }
+                }
+                if (rawContent) break;
+              }
+            }
+            if (!rawContent && Array.isArray(response?.output) && response.output[0]?.text != null) {
+              rawContent = String(response.output[0].text).trim();
+            }
             if (!rawContent || (typeof rawContent === 'string' && !rawContent.trim())) {
-              throw new Error(`OpenAI returned empty or undefined content. Response: ${JSON.stringify(response)}`);
+              const status = response?.status;
+              const reason = response?.incomplete_details?.reason;
+              const usage = response?.usage;
+              const reasoningTokens = usage?.output_tokens_details?.reasoning_tokens ?? 0;
+              let hint = '';
+              if (status === 'incomplete' || reason === 'max_output_tokens') {
+                hint = ' Reasoning models use output tokens for thinking first; the model ran out of tokens before producing visible output. Try increasing max_completion_tokens or disabling reasoning for this step.';
+              }
+              throw new Error(`OpenAI returned empty or undefined content. Response status: ${status || 'unknown'}, incomplete_reason: ${reason || 'n/a'}${reasoningTokens ? `, reasoning_tokens: ${reasoningTokens}` : ''}.${hint} Response: ${JSON.stringify(response)}`);
             }
 
             let jsonContent = rawContent.trim();
@@ -1780,7 +1812,7 @@ Request Preview: ${typeof textRequest === 'string' ? textRequest.substring(0, 20
 Respond with just a short description (1-2 sentences) of what the AI is being asked to do.`;
 
       const response = await this.openaiClient.responses.create({
-        model: "gpt-5-mini",
+        model: "gpt-5-nano",
         input: [
           {
             role: 'user',
@@ -1824,7 +1856,7 @@ Response Preview: ${typeof aiResponse === 'string' ? aiResponse.substring(0, 200
 Respond with just a short description (1-2 sentences) of what the AI accomplished or found.`;
 
       const response = await this.openaiClient.responses.create({
-        model: "gpt-5-mini",
+        model: "gpt-5-nano",
         input: [
           {
             role: 'user',
@@ -2434,7 +2466,7 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
         payload: sourcePayload || {}
       });
       const requestPayload = {
-        model: options?.model || "gpt-5-mini",
+        model: options?.model || "gpt-5-nano",
         input: messagesInput.length > 0 ? messagesInput : [{
           role: 'user',
           type: 'message',
@@ -2636,7 +2668,7 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
             Respond with valid JSON only.`;
 
       const analysisResponse = await this.openaiClient.responses.create({
-        model: "gpt-5-mini",
+        model: "gpt-5-nano",
         input: [
           {
             role: 'user',

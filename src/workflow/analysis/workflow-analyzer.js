@@ -16325,7 +16325,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         parameters: parsedResponse.parameters || {},
         generated_by: 'ai',
         ai_prompt: step.config?.user_message_template || step.config?.prompt || null,
-        ai_model: 'gpt-5-mini',
+        ai_model: 'gpt-5-nano',
         generation_date: new Date(),
         expected_outcome: parsedResponse.expected_result || parsedResponse.expected_outcome || null,
         validation_rules: parsedResponse.validation_rules || [],
