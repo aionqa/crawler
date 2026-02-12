@@ -4320,7 +4320,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepPayload.reasoning_effort = null;
         stepPayload.websearch_enabled = false;
         // Use a faster/stable non-reasoning model for script generation to reduce 504 timeouts.
-        stepPayload.model = 'gpt-4.1-mini';
+        stepPayload.model = 'gpt-5-nano';
         // Keep enough budget for complete scripts while avoiding oversized long-running generations.
         stepPayload.max_completion_tokens = 4096;
 
@@ -4344,7 +4344,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepPayload.reasoning_effort = null;
         stepPayload.websearch_enabled = false;
         // Use a stable non-reasoning model for page discovery to avoid reasoning-only incomplete outputs.
-        stepPayload.model = 'gpt-4.1-mini';
+        stepPayload.model = 'gpt-5-nano';
         if (stepPayload.max_completion_tokens === undefined || stepPayload.max_completion_tokens === null) {
           stepPayload.max_completion_tokens = 2500;
         }
