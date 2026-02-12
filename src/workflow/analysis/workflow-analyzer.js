@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { StaticNodeExecutor } from '../execution/static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../../step-requirements.js';
+import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
 
 /**
  * WorkflowAnalyzer - Updated 2025-10-15
@@ -2443,6 +2444,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             
           case 'cookie-collect':
             await this.executeCookieCollectStep(page, step, workflowState, jobId);
+            break;
+
+          case 'unlighthouse':
+            await this.executeUnlighthouseStep(page, step, workflowState, effectiveJobId);
             break;
             
           case 'job-configuration':
@@ -10931,6 +10936,48 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   /**
+   * Execute Unlighthouse/Lighthouse performance audit step.
+   */
+  async executeUnlighthouseStep(page, step, workflowState, jobId) {
+    const config = step.config || {};
+    const categories = Array.isArray(config.categories) && config.categories.length > 0
+      ? config.categories
+      : ['performance', 'accessibility', 'best-practices', 'seo'];
+    const device = typeof config.device === 'string' ? config.device : 'desktop';
+    const saveReport = config.saveReport !== false;
+    const pageUrl = page?.url?.() || workflowState?.effectivePageUrl || '';
+
+    await this.sendLogToBackend(jobId, 'info', `📊 Running Unlighthouse audit (${device})`, 'WORKFLOW-ANALYZER', {
+      step_id: step.id || null,
+      categories,
+      device,
+      save_report: saveReport,
+      page_url: pageUrl
+    });
+
+    const analysisResult = await analyzePageWithLighthouse(page, jobId, pageUrl, {
+      categories,
+      device,
+      saveReport
+    });
+
+    workflowState.unlighthouseResult = analysisResult;
+    this.storeStepResult(step, analysisResult, workflowState);
+
+    if (analysisResult?.success) {
+      await this.sendLogToBackend(jobId, 'info', `✅ Unlighthouse audit complete`, 'WORKFLOW-ANALYZER', {
+        metrics: analysisResult.metrics || null,
+        report_path: analysisResult.reportPath || null,
+        analysis_duration_ms: analysisResult.analysisDuration || null
+      });
+    } else {
+      await this.sendLogToBackend(jobId, 'warn', `⚠️ Unlighthouse audit failed`, 'WORKFLOW-ANALYZER', {
+        error: analysisResult?.error || 'Unknown unlighthouse error'
+      });
+    }
+  }
+
+  /**
    * Execute validate response step
    */
   async executeValidateResponseStep(step, workflowState) {
@@ -15538,6 +15585,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         break;
       case 'cookie-collect':
         await this.executeCookieCollectStep(page, step, workflowState, jobId);
+        break;
+      case 'unlighthouse':
+        await this.executeUnlighthouseStep(page, step, workflowState, jobId);
         break;
       case 'for-each':
         await this.executeForEachStep(page, step, workflowState, jobId);
