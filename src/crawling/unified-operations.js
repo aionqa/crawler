@@ -1756,16 +1756,18 @@ const modeHandlers = {
     const requestedMaxPages = context.options?.max_pages;
     const requestedMaxDepth = context.options?.max_depth;
 
-    // CRITICAL: Workflow execution is page-scoped. Domain crawling is backend-orchestrated by enqueueing
-    // many single-page crawl jobs so multiple runner containers can share work.
-    const maxPages = 1;
-    const maxDepth = 0;
-    const isSinglePageScan = true;
+    // Domain crawl: use backend max_pages/max_depth so this job recursively follows links page-by-page.
+    // Single-page: max_pages <= 1 and max_depth <= 0 → only the seed URL is analyzed.
+    const maxPages = (requestedMaxPages != null && requestedMaxPages > 0) ? Math.min(Number(requestedMaxPages), 500) : 1;
+    const maxDepth = (requestedMaxDepth != null && requestedMaxDepth >= 0) ? Math.min(Number(requestedMaxDepth), 10) : 0;
+    const isSinglePageScan = maxPages <= 1 && maxDepth <= 0;
 
     await sendLog(
       jobId,
       'info',
-      `🔄 WORKFLOW MODE: Single-page analysis (backend controls crawling). Requested max_pages=${requestedMaxPages ?? 'n/a'}, max_depth=${requestedMaxDepth ?? 'n/a'}`
+      isSinglePageScan
+        ? `🔄 WORKFLOW MODE: Single-page analysis. max_pages=${maxPages}, max_depth=${maxDepth}`
+        : `🔄 WORKFLOW MODE: Domain crawl (recursive). max_pages=${maxPages}, max_depth=${maxDepth} — will discover and analyze internal links page-by-page`
     );
     
     // Set AI logger context (incl. ai_services from helper config) so token-based service selection works
@@ -1799,7 +1801,8 @@ const modeHandlers = {
     context.workflow_capabilities = workflowCapabilities;
     const shouldRunPerformanceAnalysis = workflowCapabilities.usesPerformanceAudit === true;
     // CRITICAL: Disable link discovery for single-page scans
-    const shouldDiscoverLinks = isSinglePageScan ? false : (workflowCapabilities.usesLinkDiscovery === true);
+    // Domain crawl: always discover and queue internal links. Single-page: no link discovery.
+    const shouldDiscoverLinks = !isSinglePageScan;
     const hasAdvancedAnalysis = (workflowCapabilities.usesPlaywrightAnalysis === true) || (workflowCapabilities.usesAIModel === true);
     
     const visitedUrls = new Set();
