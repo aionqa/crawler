@@ -2383,72 +2383,74 @@ const modeHandlers = {
         
         // Step 3: Extract links from page for crawling (if not at max depth)
         if (shouldDiscoverLinks && depth < maxDepth) {
-          const links = await page.$$eval('a[href]', anchors => 
-            anchors
-              .map(a => a.href)
-              .filter(href => {
-                const isPureAnchor = href.startsWith('#') && !href.startsWith('http');
-                return href && 
-                       !href.startsWith('javascript:') && 
-                       !isPureAnchor && 
-                       !href.startsWith('mailto:');
-              })
-          );
-          
-          const baseUrl = new URL(currentUrl).origin;
-          const currentBaseUrl = currentUrl.split('#')[0];
-          const internalLinks = links.filter(link => link.startsWith(baseUrl));
-          
+          const linksData = await extractAllLinks(page, jobId, currentUrl);
+          const allInternal = Array.isArray(linksData?.internal) ? linksData.internal : [];
+          const anchors = [];
+          const crawlableInternalLinks = [];
+
+          const normalizePath = (value = '') => {
+            const normalized = String(value || '').replace(/\/+$/, '');
+            return normalized === '' ? '/' : normalized;
+          };
+
+          for (const link of allInternal) {
+            const href = link?.href || '';
+            if (!href) continue;
+            try {
+              const current = new URL(currentUrl);
+              const target = new URL(href, currentUrl);
+              const samePath = normalizePath(target.pathname) === normalizePath(current.pathname);
+              const isAnchor = Boolean(target.hash) && target.origin === current.origin && samePath;
+              if (isAnchor) {
+                anchors.push(link);
+              } else {
+                crawlableInternalLinks.push(link);
+              }
+            } catch {
+              const urlWithoutHash = (link?.urlWithoutHash || href.split('#')[0] || '').trim();
+              if (!urlWithoutHash) continue;
+              if (href.includes('#') && urlWithoutHash === currentUrl.split('#')[0]) {
+                anchors.push(link);
+              } else {
+                crawlableInternalLinks.push(link);
+              }
+            }
+          }
+
+          // Keep anchors separate from page links (anchors are not pages to crawl)
+          if (analysisResult && typeof analysisResult === 'object') {
+            analysisResult.anchors = anchors;
+            analysisResult.internal_links = crawlableInternalLinks;
+          }
+
           // CRITICAL: Only collect links if we haven't reached max_pages and depth limit
           // For single-page scans (max_pages=1, max_depth=0), don't collect links at all
           if (pagesAnalyzed < maxPages && depth < maxDepth) {
-            for (const link of internalLinks.slice(0, 20)) {
-              // Check if link has hash fragment (modal/popup on same page)
-              const hasHashFragment = link.includes('#') && link.split('#').length > 1;
-              const linkBaseUrl = hasHashFragment ? link.split('#')[0] : link;
-              const isHashBasedAction = hasHashFragment && linkBaseUrl === currentBaseUrl;
-              
-              if (isHashBasedAction) {
-                // Hash-based links are modal/popup actions - don't crawl as separate pages
-                // They will be converted to legs/actions by workflow analyzer
-                continue;
-              }
-              
-              // DEFAULT: Queue links for crawling (crawl jobs test everything)
-              // Only skip if this is explicitly configured as a login job
-              // Login jobs are configured via workflow configuration step, not by default
-              const isLoginJob = context?.jobType === 'login' || 
-                                context?.job_type === 'login' || 
-                                context?.isLoginJob === true ||
-                                context?.preventCrawling === true ||
-                                context?.preventLinkDiscovery === true;
-              
-              // DEFAULT BEHAVIOR: Queue links (crawl job)
-              // Only skip if explicitly configured as login job
-              if (!isLoginJob) {
-                // Regular link - use base URL (without hash) for deduplication
-                const urlToCheck = link.split('#')[0];
-                if (!visitedUrls.has(urlToCheck)) {
-                  urlQueue.push({ url: urlToCheck, depth: depth + 1 });
-                }
-              } else {
-                console.log(`[UNIFIED-OPERATIONS] 🔐 Login job detected - skipping link queuing (login-only mode)`);
-              }
-            }
-            
             // DEFAULT: Queue links for crawling (crawl jobs test everything)
             // Only skip if this is explicitly configured as a login job
-            const isLoginJob = context?.jobType === 'login' || 
-                              context?.job_type === 'login' || 
+            const isLoginJob = context?.jobType === 'login' ||
+                              context?.job_type === 'login' ||
                               context?.isLoginJob === true ||
                               context?.preventCrawling === true ||
                               context?.preventLinkDiscovery === true;
-            
+
+            let queuedCount = 0;
+            for (const link of crawlableInternalLinks.slice(0, 50)) {
+              // Regular link - use base URL (without hash) for deduplication
+              const urlToCheck = (link?.urlWithoutHash || link?.href || '').split('#')[0].trim();
+              if (!urlToCheck) continue;
+              if (!visitedUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
+                if (!isLoginJob) {
+                  urlQueue.push({ url: urlToCheck, depth: depth + 1 });
+                  queuedCount++;
+                }
+              }
+            }
+
             if (isLoginJob) {
-              await sendLog(jobId, 'info', `🔗 Found ${internalLinks.length} internal links (NOT queued - login-only job configured)`);
+              await sendLog(jobId, 'info', `🔗 Found ${crawlableInternalLinks.length} internal page links and ${anchors.length} anchors (NOT queued - login-only job configured)`);
             } else {
-              // DEFAULT BEHAVIOR: Queue links for crawling
-              await sendLog(jobId, 'info', `🔗 Found ${internalLinks.length} internal links, queued ${Math.min(20, internalLinks.length)} for crawling`);
+              await sendLog(jobId, 'info', `🔗 Found ${crawlableInternalLinks.length} internal page links and ${anchors.length} anchors; queued ${queuedCount} page links for crawling`);
             }
           } else {
             await sendLog(jobId, 'info', `⏭️ Skipping link collection (max_pages: ${maxPages}, current: ${pagesAnalyzed}, max_depth: ${maxDepth}, current: ${depth})`);
