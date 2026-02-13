@@ -939,39 +939,24 @@ export class AIConversationLogger {
         ensureStrictSchema(schema);
         openaiRequest.response_schema = schema;
       }
-      // max_output_tokens: use 128K for GPT-5/GPT-4.1 when reasoning enabled (reasoning consumes tokens first; 2500 causes incomplete).
-      // Also use 128K when OpenAI mode + GPT-5/4.1. Other modes keep conservative limits.
-      const scriptPromptSlugs = ['generate_journey_script', 'generate_login_script', 'generate-workflow-script', 'generate-form-fill-script', 'generate-click-script', 'generate-navigation-script', 'generate-validation-script'];
-      const largeJsonSlugs = ['page_summary'];
-      const scriptMaxOut = 8192; // Multi-step wizards can produce long scripts
-      const promptSlugStr = String(promptSlug || '');
-      const isScriptPrompt = scriptPromptSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
-      const isLargeJsonPrompt = largeJsonSlugs.some((slug) => promptSlugStr === slug || promptSlugStr.includes(slug));
-      const baseDefault = isScriptPrompt ? scriptMaxOut : (isLargeJsonPrompt ? 2500 : 2048);
+      // max_output_tokens: use 128K (GPT-5/GPT-4.1 max) for all requests.
       const modelLower = String(model || '').toLowerCase();
       const usesLargeOutputModel = modelLower.startsWith('gpt-5') || modelLower.startsWith('gpt-4.1') || modelLower.startsWith('o4');
-      const modelMaxOutput = 128000; // GPT-5/GPT-4.1 max output
-      const needsLargeOutput = (useReasoning && usesLargeOutputModel) || (isOpenAIMode && usesLargeOutputModel);
-      const defaultMaxOut = needsLargeOutput ? modelMaxOutput : baseDefault;
+      const defaultMaxOut = 128000;
       const effectiveMaxOut = payload?.max_completion_tokens ?? sourcePayload?.max_completion_tokens ?? (helperOpenAIOptions?.max_completion_tokens != null ? helperOpenAIOptions.max_completion_tokens : null) ?? defaultMaxOut;
       openaiRequest.max_output_tokens = effectiveMaxOut;
       
-      // Add reasoning if enabled and supported
+      // Add reasoning if enabled and supported. When disabled, GPT-5 still reasons by default;
+      // we must explicitly send reasoning: { effort: "none" } to prevent reasoning tokens.
       if (useReasoning) {
-        openaiRequest.reasoning = true;
-        // Add reasoning effort for GPT-5 models
-        // Use project setting unless workflow explicitly overrides it
+        openaiRequest.reasoning = { effort: reasoningEffort || 'medium' };
         if (model.startsWith('gpt-5')) {
-          // reasoningEffort comes from: workflow payload > project options > null
-          // If it's set (from either source), pass it to OpenAI
-          // If null/undefined, don't set it and let OpenAI use its default
-          if (reasoningEffort !== null && reasoningEffort !== undefined && reasoningEffort !== '') {
-            openaiRequest.reasoning_effort = reasoningEffort;
-            console.log(`[AI-CALL] ✅ Setting reasoning_effort to: ${reasoningEffort} (from ${payload?.reasoning_effort !== undefined ? 'workflow' : 'project settings'})`);
-          } else {
-            console.log(`[AI-CALL] ⚠️ No reasoning_effort specified - OpenAI will use default (medium)`);
-          }
+          console.log(`[AI-CALL] ✅ Reasoning enabled: effort=${reasoningEffort || 'medium'}`);
         }
+      } else if (usesLargeOutputModel) {
+        // Explicitly disable reasoning to avoid default reasoning consuming output tokens
+        openaiRequest.reasoning = { effort: 'none' };
+        console.log(`[AI-CALL] ✅ Reasoning disabled: effort=none (GPT-5/4.1/o4)`);
       }
       
       // Add web search if enabled and supported
@@ -1835,7 +1820,7 @@ Respond with just a short description (1-2 sentences) of what the AI is being as
         text: {
           format: { type: 'text' }
         },
-        max_output_tokens: 200
+        max_output_tokens: 128000
       });
 
       const content = response.output_text;
@@ -1879,7 +1864,7 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
         text: {
           format: { type: 'text' }
         },
-        max_output_tokens: 200
+        max_output_tokens: 128000
       });
 
       const content = response.output_text;

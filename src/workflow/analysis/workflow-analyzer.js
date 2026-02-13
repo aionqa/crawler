@@ -4321,8 +4321,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepPayload.websearch_enabled = false;
         // Use a faster/stable non-reasoning model for script generation to reduce 504 timeouts.
         stepPayload.model = 'gpt-5-nano';
-        // Keep enough budget for complete scripts while avoiding oversized long-running generations.
-        stepPayload.max_completion_tokens = 4096;
+        // Use max output tokens for complete scripts.
+        stepPayload.max_completion_tokens = 128000;
 
         // Prevent stale scripts from previous attempts/runs from being reused.
         delete workflowState.legScriptToExecute;
@@ -4345,8 +4345,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         stepPayload.websearch_enabled = false;
         // Use a stable non-reasoning model for page discovery to avoid reasoning-only incomplete outputs.
         stepPayload.model = 'gpt-5-nano';
+        // Use max output tokens for page_summary JSON.
         if (stepPayload.max_completion_tokens === undefined || stepPayload.max_completion_tokens === null) {
-          stepPayload.max_completion_tokens = 2500;
+          stepPayload.max_completion_tokens = 128000;
         }
       }
 
@@ -16325,7 +16326,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         parameters: parsedResponse.parameters || {},
         generated_by: 'ai',
         ai_prompt: step.config?.user_message_template || step.config?.prompt || null,
-        ai_model: 'gpt-5-nano',
+        ai_model: 'gpt-5-mini',
         generation_date: new Date(),
         expected_outcome: parsedResponse.expected_result || parsedResponse.expected_outcome || null,
         validation_rules: parsedResponse.validation_rules || [],
