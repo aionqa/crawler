@@ -4411,7 +4411,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
           + '- Use page.$/page.$$ with CSS-only selectors; for text use getByRole/getByText/locator("text=...") as standalone selectors only.\n'
           + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n'
           + '- Do not output placeholder identifiers (selector, sel, element, humanDelay, humanPause) unless you declare them first.\n'
+          + '- Never redeclare the same identifier in one script scope (for example, do not declare const el twice).\n'
           + '- Every selector must be a concrete string literal or a const initialized to a concrete string before use.\n'
+          + '- Do not click same-page hash anchors (href contains "#") unless currentJourney explicitly requires anchor navigation.\n'
+          + '- If no reliable actionable selector exists in current page evidence, return exactly: await page.waitForTimeout(300).\n'
           + '- Do not emit pseudo helpers; use only real Playwright API calls (e.g., page.waitForTimeout(300)).\n'
           + '- page.waitForSelector must always be called as page.waitForSelector(\"<valid selector>\", { ...options }).\n';
       }
@@ -14356,10 +14359,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
         });
         
       } catch (iterationError) {
-        console.error(`❌ Iteration ${iteration} failed: ${iterationError.message}`);
+        // Iteration miss is non-fatal for full crawl completion; keep visibility without raising error-level noise.
+        console.warn(`⚠️ Iteration ${iteration} failed: ${iterationError.message}`);
         
-        // Send error log to backend
-        await this.sendLogToBackend(jobId, 'error', `❌ Iteration ${iteration} failed: ${iterationError.message}`, 'WORKFLOW-ANALYZER', {
+        // Send warning log to backend
+        await this.sendLogToBackend(jobId, 'warn', `⚠️ Iteration ${iteration} failed: ${iterationError.message}`, 'WORKFLOW-ANALYZER', {
           step_id: step.id,
           step_name: step.name || step.type,
           step_type: 'while-loop',
@@ -15549,7 +15553,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         await new Promise(resolve => setTimeout(resolve, 1000));
         
       } catch (iterationError) {
-        console.error(`❌ Iteration ${iteration} failed: ${iterationError.message}`);
+        console.warn(`⚠️ Iteration ${iteration} failed: ${iterationError.message}`);
         
         // NOTE: Saving is now handled by workflow steps (save-data elements), not hardcoded here
         // This deprecated method should not be used - use while-loop workflow step instead
