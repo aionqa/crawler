@@ -3750,8 +3750,20 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
       
       // Use embedded template from step config (required - no fallback to database)
+      let effectiveTemplate = finalTemplate;
+      const isScriptGenerationStep =
+        promptIdentifier === 'generate_journey_script' ||
+        String(step.id || '').toLowerCase().includes('generate_journey_script') ||
+        String(step.name || '').toLowerCase().includes('generate journey action script');
+      if (isScriptGenerationStep) {
+        effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
+          + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
+          + '- Use page.$/page.$$ with CSS-only selectors; for text use getByRole/getByText/locator("text=...") as standalone selectors only.\n'
+          + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n'
+          + '- Generate valid JavaScript only (no markdown fences, no pseudo-code).\n';
+      }
       const promptConfig = {
-        user_message_template: finalTemplate,
+        user_message_template: effectiveTemplate,
         system_message: systemMessage,
         response_schema: responseSchema
       };
