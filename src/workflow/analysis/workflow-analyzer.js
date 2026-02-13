@@ -4406,7 +4406,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
           + '- If an action adds dynamic inputs (e.g., Add Email/Add Phone), ensure every visible required input is non-empty before submit.\n'
           + '- Immediately before submit, handle browser validation safely: if any :invalid input exists, fill it with a valid realistic value and then submit.\n'
           + '- After submit/click of primary action, wait for either URL/navigation change OR visible DOM state change before returning script completion.\n'
-          + '- Never return success while required fields remain empty or browser validation messages are visible.\n';
+          + '- Never return success while required fields remain empty or browser validation messages are visible.\n'
+          + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
+          + '- Use page.$/page.$$ with CSS-only selectors; for text use getByRole/getByText/locator("text=...") as standalone selectors only.\n'
+          + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n';
       }
       if (isJustifyJourneyStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
