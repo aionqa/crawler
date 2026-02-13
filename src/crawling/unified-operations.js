@@ -1806,12 +1806,29 @@ const modeHandlers = {
     const hasAdvancedAnalysis = (workflowCapabilities.usesPlaywrightAnalysis === true) || (workflowCapabilities.usesAIModel === true);
     
     const visitedUrls = new Set();
+    const analyzedPageUrls = new Set();
     // Ensure URL has a scheme (page.goto fails with "invalid URL" for e.g. "tests.aionqa.com")
     const ensureUrlHasScheme = (url) => {
       if (!url || typeof url !== 'string') return url;
       const t = url.trim();
       if (t.startsWith('http://') || t.startsWith('https://')) return t;
       return `https://${t}`;
+    };
+    const canonicalizeUrl = (url) => {
+      const withScheme = ensureUrlHasScheme(url);
+      if (!withScheme) return '';
+      try {
+        const u = new URL(withScheme);
+        u.hash = '';
+        if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) {
+          u.port = '';
+        }
+        const normalizedPath = u.pathname.replace(/\/+$/, '') || '/';
+        return `${u.protocol}//${u.host}${normalizedPath}${u.search}`;
+      } catch {
+        const noHash = String(withScheme).split('#')[0];
+        return noHash.replace(/\/+$/, '') || noHash;
+      }
     };
     // Get initial URL - handle case where page might navigate after cookies are loaded
     // IMPORTANT: Don't access page.url() immediately - page might not be ready or context might be destroyed
@@ -1838,7 +1855,7 @@ const modeHandlers = {
     }
     seedUrl = ensureUrlHasScheme(seedUrl);
     
-    const urlQueue = [{ url: seedUrl, depth: 0 }];
+    const urlQueue = [{ url: canonicalizeUrl(seedUrl), depth: 0 }];
     await sendLog(jobId, 'info', `📍 Starting workflow crawl from seed URL: ${seedUrl}`);
     let pagesAnalyzed = 0;
     const allWorkflows = [];
@@ -1846,7 +1863,7 @@ const modeHandlers = {
     try {
       while (urlQueue.length > 0 && pagesAnalyzed < maxPages) {
         const { url: rawUrl, depth } = urlQueue.shift();
-        const currentUrl = ensureUrlHasScheme(rawUrl) || rawUrl;
+        const currentUrl = canonicalizeUrl(rawUrl) || ensureUrlHasScheme(rawUrl) || rawUrl;
         
         // Skip if already visited or too deep
         if (visitedUrls.has(currentUrl) || depth > maxDepth) {
@@ -2037,7 +2054,12 @@ const modeHandlers = {
         }
         // Use project's start_url for domain filtering, not the current page URL
         const projectStartUrl = context.start_url || actualPageUrl; // Fallback to current URL if not provided
-        const pageResult = await sendBasicPageToBackend(jobId, actualPageUrl, pageTitle, projectId, projectStartUrl, lighthouseResults);
+        const actualPageUrlCanonical = canonicalizeUrl(actualPageUrl);
+        if (actualPageUrlCanonical && analyzedPageUrls.has(actualPageUrlCanonical)) {
+          await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrlCanonical} already analyzed in this job (in-memory dedupe), skipping duplicate analysis`);
+          continue;
+        }
+        const pageResult = await sendBasicPageToBackend(jobId, actualPageUrlCanonical || actualPageUrl, pageTitle, projectId, projectStartUrl, lighthouseResults);
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
         // CRITICAL: Check if this page has already been analyzed in this job to prevent duplicate workflows
@@ -2389,6 +2411,7 @@ const modeHandlers = {
           const allInternal = Array.isArray(linksData?.internal) ? linksData.internal : [];
           const anchors = [];
           const crawlableInternalLinks = [];
+          const uniqueCrawlableByCanonicalUrl = new Map();
 
           const normalizePath = (value = '') => {
             const normalized = String(value || '').replace(/\/+$/, '');
@@ -2401,12 +2424,21 @@ const modeHandlers = {
             try {
               const current = new URL(currentUrl);
               const target = new URL(href, currentUrl);
+              const targetCanonical = canonicalizeUrl(target.href);
               const samePath = normalizePath(target.pathname) === normalizePath(current.pathname);
               const isAnchor = Boolean(target.hash) && target.origin === current.origin && samePath;
               if (isAnchor) {
                 anchors.push(link);
               } else {
-                crawlableInternalLinks.push(link);
+                if (targetCanonical && targetCanonical !== currentUrl) {
+                  if (!uniqueCrawlableByCanonicalUrl.has(targetCanonical)) {
+                    uniqueCrawlableByCanonicalUrl.set(targetCanonical, {
+                      ...link,
+                      href: targetCanonical,
+                      urlWithoutHash: targetCanonical
+                    });
+                  }
+                }
               }
             } catch {
               const urlWithoutHash = (link?.urlWithoutHash || href.split('#')[0] || '').trim();
@@ -2414,10 +2446,20 @@ const modeHandlers = {
               if (href.includes('#') && urlWithoutHash === currentUrl.split('#')[0]) {
                 anchors.push(link);
               } else {
-                crawlableInternalLinks.push(link);
+                const targetCanonical = canonicalizeUrl(urlWithoutHash);
+                if (targetCanonical && targetCanonical !== currentUrl) {
+                  if (!uniqueCrawlableByCanonicalUrl.has(targetCanonical)) {
+                    uniqueCrawlableByCanonicalUrl.set(targetCanonical, {
+                      ...link,
+                      href: targetCanonical,
+                      urlWithoutHash: targetCanonical
+                    });
+                  }
+                }
               }
             }
           }
+          crawlableInternalLinks.push(...uniqueCrawlableByCanonicalUrl.values());
 
           // Keep anchors separate from page links (anchors are not pages to crawl)
           if (analysisResultForCurrentPage && typeof analysisResultForCurrentPage === 'object') {
@@ -2439,9 +2481,9 @@ const modeHandlers = {
             let queuedCount = 0;
             for (const link of crawlableInternalLinks.slice(0, 50)) {
               // Regular link - use base URL (without hash) for deduplication
-              const urlToCheck = (link?.urlWithoutHash || link?.href || '').split('#')[0].trim();
+              const urlToCheck = canonicalizeUrl((link?.urlWithoutHash || link?.href || '').split('#')[0].trim());
               if (!urlToCheck) continue;
-              if (!visitedUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
+              if (!visitedUrls.has(urlToCheck) && !analyzedPageUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
                 if (!isLoginJob) {
                   urlQueue.push({ url: urlToCheck, depth: depth + 1 });
                   queuedCount++;
@@ -2457,6 +2499,9 @@ const modeHandlers = {
           } else {
             await sendLog(jobId, 'info', `⏭️ Skipping link collection (max_pages: ${maxPages}, current: ${pagesAnalyzed}, max_depth: ${maxDepth}, current: ${depth})`);
           }
+        }
+        if (actualPageUrlCanonical) {
+          analyzedPageUrls.add(actualPageUrlCanonical);
         }
       }
       
@@ -3423,7 +3468,31 @@ async function extractAllLinks(page, jobId, baseUrl) {
       return links;
     }, baseUrl);
     
-    const internalLinks = links.filter(l => l.isInternal);
+    const normalizeUrlForDedup = (value) => {
+      try {
+        const u = new URL(String(value || ''));
+        u.hash = '';
+        const normalizedPath = u.pathname.replace(/\/+$/, '') || '/';
+        return `${u.protocol}//${u.host}${normalizedPath}${u.search}`;
+      } catch {
+        const raw = String(value || '').split('#')[0];
+        return raw.replace(/\/+$/, '') || raw;
+      }
+    };
+    const internalLinksRaw = links.filter(l => l.isInternal);
+    const uniqueInternalMap = new Map();
+    for (const link of internalLinksRaw) {
+      const dedupeKey = normalizeUrlForDedup(link?.urlWithoutHash || link?.href || '');
+      if (!dedupeKey) continue;
+      if (!uniqueInternalMap.has(dedupeKey)) {
+        uniqueInternalMap.set(dedupeKey, {
+          ...link,
+          href: dedupeKey,
+          urlWithoutHash: dedupeKey
+        });
+      }
+    }
+    const internalLinks = Array.from(uniqueInternalMap.values());
     const externalLinks = links.filter(l => !l.isInternal);
     
     await sendLog(jobId, 'info', `📊 Found ${links.length} unique links (${internalLinks.length} internal, ${externalLinks.length} external)`);
