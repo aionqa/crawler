@@ -3759,6 +3759,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
           + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
           + '- For modal openers, target explicit clickable elements (a/button/[role="button"][aria-haspopup]) and use click({ force: true }) when overlays can intercept pointer events.\n'
+          + '- Treat navigation/DOM-readiness waits as best-effort only: wrap waitForNavigation/waitForLoadState/non-critical waitForSelector in try/catch and continue on timeout.\n'
           + '- Use page.$/page.$$ with CSS-only selectors; for text use getByRole/getByText/locator("text=...") as standalone selectors only.\n'
           + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n'
           + '- Do not output placeholder identifiers (selector, sel, element, humanDelay, humanPause) unless you declare them first.\n'
