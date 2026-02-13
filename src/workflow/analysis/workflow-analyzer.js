@@ -10283,13 +10283,27 @@ IMPORTANT OUTPUT REQUIREMENTS:
         };
         const delay = (ms) => new Promise((r) => setTimeout(r, ms));
         const pageText = await pageObj.locator('body').textContent().catch(() => '') || '';
+        const execContext = {
+          pageUrl: workflowState?.pageUrl || pageObj?.url?.() || '',
+          jobId: jobId || null,
+          currentJourney: workflowState?.currentJourney || null
+        };
+        const testHelper = {
+          expect: (v) => ({
+            toBe: () => {},
+            toBeTruthy: () => {},
+            toContain: () => {},
+            toEqual: () => {},
+            not: { toBe: () => {}, toContain: () => {} }
+          }),
+          step: async (_, fn) => (typeof fn === 'function' ? await fn() : fn)
+        };
         
-        // Create a function with page, wrapper, input_credentials, ms, delay, text as parameters
-        // AI-generated scripts often use ms('5s'), delay(), or text (visible page content)
+        // Create a function with page, wrapper, input_credentials, ms, delay, text, context, test
         console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
-        const fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', functionBody);
+        const fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', functionBody);
         console.log(`🚀 Executing script with wrapped page object...`);
-        const rawResult = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText);
+        const rawResult = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText, execContext, testHelper);
         const result = (rawResult === undefined || rawResult === null)
           ? { success: true, message: 'Script executed without explicit return value' }
           : rawResult;

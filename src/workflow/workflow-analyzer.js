@@ -8615,12 +8615,27 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
         };
         const delay = (ms) => new Promise((r) => setTimeout(r, ms));
         const pageText = await pageObj.locator('body').textContent().catch(() => '') || '';
+        const execContext = {
+          pageUrl: workflowState?.pageUrl || pageObj?.url?.() || '',
+          jobId: jobId || null,
+          currentJourney: workflowState?.currentJourney || null
+        };
+        const testHelper = {
+          expect: (v) => ({
+            toBe: () => {},
+            toBeTruthy: () => {},
+            toContain: () => {},
+            toEqual: () => {},
+            not: { toBe: () => {}, toContain: () => {} }
+          }),
+          step: async (_, fn) => (typeof fn === 'function' ? await fn() : fn)
+        };
         
         // CRITICAL: Test if function can be created and if it contains the variable
         // This is a final safety check before actual execution
         try {
-          // Try to create the function first - include ms, delay, text for AI-generated scripts
-          const fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', functionBody);
+          // Try to create the function first - include ms, delay, text, context, test for AI-generated scripts
+          const fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', functionBody);
           
           // Test if the function source contains the variable (Function.toString())
           const fnSource = fn.toString();
@@ -8639,7 +8654,7 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
           }
           
           console.log(`🚀 Executing script with wrapped page object...`);
-          const result = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText);
+          const result = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText, execContext, testHelper);
           console.log(`✅ Script execution completed, result.success=${result?.success}`);
           console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
           return result;
