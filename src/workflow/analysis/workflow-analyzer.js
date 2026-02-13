@@ -4728,7 +4728,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         // CRITICAL: Log full response structure for debugging
-        const responsePreview = JSON.stringify(parsedResponse, null, 2).substring(0, 3000);
+        const responsePreviewRaw = JSON.stringify(parsedResponse, null, 2);
+        const responsePreview = (typeof responsePreviewRaw === 'string' ? responsePreviewRaw : String(responsePreviewRaw ?? '')).substring(0, 3000);
         console.log(`🔍 [AI-RESPONSE] Full response preview:\n${responsePreview}`);
         
         if (jobId && this.backendLogger) {
@@ -4820,7 +4821,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             page_summary_journeys_length: Array.isArray(parsedResponse.page_summary?.journeys) ? parsedResponse.page_summary.journeys.length : 0,
             has_legs: !!parsedResponse.legs,
             has_actions: !!parsedResponse.actions,
-            response_preview: JSON.stringify(parsedResponse).substring(0, 500)
+            response_preview: (() => {
+              const raw = JSON.stringify(parsedResponse);
+              return (typeof raw === 'string' ? raw : String(raw ?? '')).substring(0, 500);
+            })()
           });
         }
         
@@ -4996,7 +5000,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
               {
                 step_id: step.id,
                 response_keys: Object.keys(parsedResponse).join(', '),
-                response_preview: JSON.stringify(parsedResponse).substring(0, 500)
+                response_preview: (() => {
+                  const raw = JSON.stringify(parsedResponse);
+                  return (typeof raw === 'string' ? raw : String(raw ?? '')).substring(0, 500);
+                })()
               }
             );
           }
