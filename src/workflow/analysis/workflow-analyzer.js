@@ -5047,7 +5047,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (parsedResponse.journeys && Array.isArray(parsedResponse.journeys)) {
           journeys = parsedResponse.journeys;
           console.log(`✅ [JOURNEYS-EXTRACT] Found ${journeys.length} journeys in response`);
-          console.log(`🔍 [JOURNEYS-EXTRACT] First journey preview:`, JSON.stringify(journeys[0], null, 2).substring(0, 500));
+          const firstJourneyPreviewRaw = journeys.length > 0 ? JSON.stringify(journeys[0], null, 2) : '';
+          const firstJourneyPreview = (typeof firstJourneyPreviewRaw === 'string' ? firstJourneyPreviewRaw : String(firstJourneyPreviewRaw ?? '')).substring(0, 500);
+          console.log(`🔍 [JOURNEYS-EXTRACT] First journey preview:`, firstJourneyPreview || '[empty journeys array]');
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-EXTRACT] Found ${journeys.length} journeys in response`, 'WORKFLOW-ANALYZER', {
               journeys_count: journeys.length,
