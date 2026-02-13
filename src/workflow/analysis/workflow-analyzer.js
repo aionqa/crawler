@@ -5298,13 +5298,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
               console.warn(`⚠️ [JOURNEYS-IMMEDIATE] workflowState.pageId: ${workflowState.pageId}, context.page_id: ${this.context?.page_id}`);
             }
           } else {
-            // Empty journeys array - log warning but don't overwrite existing journeys
-            console.warn(`⚠️ [JOURNEYS] AI returned empty journeys array. Keeping existing journeys in workflowState to avoid data loss.`);
+            // Empty journeys are valid on informational pages; store an explicit empty array.
+            // This prevents stale journey reuse across pages and keeps for-each deterministic.
+            workflowState.journeys = [];
+            workflowState.journeysToExecute = [];
+            if (!workflowState.context) {
+              workflowState.context = {};
+            }
+            workflowState.context.journeysToExecute = [];
+            this.initializeVariablePool(workflowState);
+            this.saveVariable(workflowState, 'journeysToExecute', [], 'page', step);
+            console.log(`ℹ️ [JOURNEYS] AI returned empty journeys array; stored empty journeysToExecute for this page.`);
             if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI returned empty journeys array but ${formsCount} form(s) and ${interactiveElementsCount} significant interactive element(s) exist on page. Keeping existing journeys.`, 'WORKFLOW-ANALYZER', {
+              await this.backendLogger.appendJobLog(jobId, 'info', `ℹ️ AI returned empty journeys array; stored empty journeysToExecute for this page.`, 'WORKFLOW-ANALYZER', {
                 forms_count: formsCount,
                 interactive_elements_count: interactiveElementsCount,
-                existing_journeys_count: workflowState.journeys?.length || 0,
                 response_keys: Object.keys(parsedResponse).join(', '),
                 has_page_summary: !!parsedResponse.page_summary
               });
