@@ -10299,9 +10299,66 @@ IMPORTANT OUTPUT REQUIREMENTS:
           step: async (_, fn) => (typeof fn === 'function' ? await fn() : fn)
         };
         
+        const buildFallbackJourneyScript = () => {
+          const actions = workflowState?.currentJourney?.actions;
+          if (!Array.isArray(actions) || actions.length === 0) return null;
+
+          const lines = ['await page.waitForTimeout(500);'];
+          for (const action of actions) {
+            const selector =
+              action?.selector ||
+              action?.element_info?.selector ||
+              action?.element_info?.primary_selector;
+            if (!selector || typeof selector !== 'string') continue;
+
+            const actionType = String(action?.type || '').toLowerCase();
+            const safeSelector = JSON.stringify(selector);
+            if (actionType === 'input') {
+              const value =
+                action?.value ||
+                action?.input_value ||
+                action?.text ||
+                action?.element_info?.text ||
+                'test';
+              lines.push(`await page.fill(${safeSelector}, ${JSON.stringify(String(value))});`);
+            } else if (actionType === 'verify' || actionType === 'check') {
+              lines.push(`await page.waitForSelector(${safeSelector}, { timeout: 5000 });`);
+            } else {
+              lines.push(`await page.click(${safeSelector});`);
+              lines.push('await page.waitForTimeout(800);');
+            }
+          }
+
+          lines.push("return { success: true, message: 'Fallback journey script executed' };");
+          return lines.join('\n');
+        };
+
         // Create a function with page, wrapper, input_credentials, ms, delay, text, context, test
         console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
-        const fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', functionBody);
+        let executableBody = functionBody;
+        let fn;
+        try {
+          fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
+        } catch (syntaxError) {
+          const message = String(syntaxError?.message || '');
+          const isSyntaxLike = /unexpected end of input|invalid or unexpected token|unexpected token|missing\s+[\)\}]|unterminated/i.test(message);
+          if (!isSyntaxLike) throw syntaxError;
+
+          const fallbackScript = buildFallbackJourneyScript();
+          if (!fallbackScript) throw syntaxError;
+
+          executableBody = 'return (async function() {\n' + fallbackScript + '\n})();';
+          fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
+          console.warn(`⚠️ Falling back to deterministic journey script due to syntax error: ${message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn', `Fallback script used due to syntax error: ${message}`, 'WORKFLOW-ANALYZER', {
+              step_id: step?.id,
+              step_name: step?.name,
+              fallback_script_preview: fallbackScript.substring(0, 300)
+            });
+          }
+        }
+
         console.log(`🚀 Executing script with wrapped page object...`);
         const rawResult = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText, execContext, testHelper);
         const result = (rawResult === undefined || rawResult === null)
