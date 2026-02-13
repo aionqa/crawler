@@ -8873,6 +8873,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Replace undeclared pseudo-delay variables commonly emitted by LLMs.
     cleaned = cleaned.replace(/waitForTimeout\(\s*(humanDelay|humanPause|maxMs|max|delayMs)\s*\)/g, 'waitForTimeout(300)');
     cleaned = cleaned.replace(/timeout:\s*(humanDelay|humanPause|maxMs|max|delayMs)\b/g, 'timeout: 10000');
+    // Repair malformed quoted waitForSelector with selector variable + options packed into one string.
+    cleaned = cleaned.replace(
+      /page\.waitForSelector\(\s*(['"])([a-zA-Z_$][\w$]*)\s*,\s*(\{[\s\S]*?\})\1\s*\)/g,
+      'page.waitForSelector($2, $3)'
+    );
     // Ensure direct page actions are awaited when generated without await.
     cleaned = cleaned.replace(/(^|\n)\s*(page\.(?:click|fill|check|uncheck|selectOption|type|press)\s*\()/g, '$1await $2');
     // Normalize unquoted selector args in common page.* calls (e.g., page.fill(input[name="x"]))
