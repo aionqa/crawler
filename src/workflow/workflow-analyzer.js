@@ -8044,6 +8044,17 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
           return async function(...args) {
             console.log(`🔍 Wrapper called for method: ${methodName}`);
             await logAction(methodName, args);
+            if (methodName === 'waitForTimeout' && args.length > 0) {
+              const raw = args[0];
+              if (typeof raw === 'function') {
+                args[0] = 1000;
+              } else if (typeof raw === 'string') {
+                const n = parseInt(raw, 10);
+                args[0] = Number.isFinite(n) ? n : 1000;
+              } else if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+                args[0] = 1000;
+              }
+            }
             
             // Execute the original method
             const result = await originalMethod.apply(pageObj, args);
