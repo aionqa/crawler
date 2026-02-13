@@ -8616,7 +8616,7 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
         const delay = (ms) => new Promise((r) => setTimeout(r, ms));
         const pageText = await pageObj.locator('body').textContent().catch(() => '') || '';
         const execContext = {
-          pageUrl: workflowState?.pageUrl || pageObj?.url?.() || '',
+          pageUrl: (workflowState?.pageUrl) || (typeof pageObj?.url === 'function' ? pageObj.url() : '') || '',
           jobId: jobId || null,
           currentJourney: workflowState?.currentJourney || null
         };
