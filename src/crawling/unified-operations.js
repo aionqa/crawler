@@ -5823,10 +5823,11 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       const operationResult = await modeHandler(page, context, openaiClient, 'crawl');
       
       const workflowCaps = context.workflow_capabilities || {};
+      // Workflow mode already performs rich element discovery during analyzer execution.
+      // Skipping duplicate post-workflow extraction avoids late-run instability.
       const shouldExtractElements = mode !== 'workflow'
-        || workflowCaps.usesPlaywrightAnalysis === true
-        || workflowCaps.usesAIModel === true
-        || workflowCaps.usesLinkDiscovery === true;
+        || (workflowCaps.usesPlaywrightAnalysis === true
+          && context.options?.force_post_workflow_element_extraction === true);
       
       // Extract page elements for storage only when required
       let pageElements = { interactive: [], nonInteractive: [] };
