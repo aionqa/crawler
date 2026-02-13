@@ -4403,6 +4403,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           + '- Do not navigate to localhost/base URLs. Use current page state; only navigate if currentJourney explicitly requires a URL navigation action.\n'
           + '- For modal/wizard journeys: if target fields/buttons are not visible, first click the opener trigger (e.g., "Start", "Open", "Launch", "Begin") to display the modal/wizard, then continue actions.\n'
           + '- For modal openers, target explicit clickable elements (a/button/[role="button"][aria-haspopup]) and use click({ force: true }) when overlays can intercept pointer events.\n'
+          + '- Treat navigation/DOM-readiness waits as best-effort only: wrap waitForNavigation/waitForLoadState/non-critical waitForSelector in try/catch and continue on timeout.\n'
           + '- Every interaction statement MUST be awaited (await page.click/fill/check/selectOption/type/press) and must not use bare page.click(...) without await.\n'
           + '- If an action adds dynamic inputs (e.g., Add Email/Add Phone), ensure every visible required input is non-empty before submit.\n'
           + '- Immediately before submit, handle browser validation safely: if any :invalid input exists, fill it with a valid realistic value and then submit.\n'
