@@ -12528,6 +12528,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 
                 // CRITICAL: Validate status field is present - fail if missing
                 if (!normalizedResult.status && !normalizedResult.completion_status && normalizedResult.is_complete === undefined) {
+                  const safeNormalizedResult = this.makeJsonSafe(normalizedResult, 8);
+                  const safeStepResult = this.makeJsonSafe(stepResult, 8);
                   const errorMessage = `Missing required field "status" in determine_completion result for step "${nestedStep.name || nestedStep.id}" (iteration ${iteration})`;
                   const missingPath = `workflowState.determine_completion.result.status`;
                   const fullContext = {
@@ -12539,19 +12541,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
                     missing_field: 'status',
                     missing_path: missingPath,
                     available_keys: Object.keys(normalizedResult || {}),
-                    normalized_result: normalizedResult,
-                    step_result: stepResult,
-                    full_response: normalizedResult
+                    normalized_result: safeNormalizedResult,
+                    step_result: safeStepResult,
+                    full_response: safeNormalizedResult
                   };
                   console.error(`❌ ${errorMessage}`);
                   console.error(`❌ Missing JSON path: ${missingPath}`);
                   console.error(`❌ Available keys: ${Object.keys(normalizedResult || {}).join(', ')}`);
-                  console.error(`❌ Normalized result:`, JSON.stringify(normalizedResult, null, 2));
+                  console.error(`❌ Normalized result:`, JSON.stringify(safeNormalizedResult, null, 2));
                   console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
                   if (jobId && this.backendLogger) {
                     await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
                   }
-                  throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys: ${Object.keys(normalizedResult || {}).join(', ')}\nNormalized result: ${JSON.stringify(normalizedResult, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+                  throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys: ${Object.keys(normalizedResult || {}).join(', ')}\nNormalized result: ${JSON.stringify(safeNormalizedResult, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
                 }
                 
                 // Store in determine_completion/justify_journey for easy access
@@ -12627,6 +12629,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 const availableKeys = Object.keys(workflowState).filter(k => k.includes('determine') || k.includes('completion'));
                 const availableResultsKeys = workflowState.results ? Object.keys(workflowState.results).filter(k => k.includes('determine') || k.includes('completion')) : [];
                 const availableVarPoolKeys = workflowState.variablePool?.steps ? Object.keys(workflowState.variablePool.steps).filter(k => k.includes('determine') || k.includes('completion')) : [];
+                const safeWorkflowSample = this.makeJsonSafe(Object.fromEntries(Object.entries(workflowState).slice(0, 20)), 6);
                 const fullContext = {
                   step_id: nestedStep.id,
                   step_name: nestedStep.name,
@@ -12637,7 +12640,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   available_keys_workflowState: availableKeys,
                   available_keys_results: availableResultsKeys,
                   available_keys_variablePool_steps: availableVarPoolKeys,
-                  workflowState_sample: Object.fromEntries(Object.entries(workflowState).slice(0, 20))
+                  workflowState_sample: safeWorkflowSample
                 };
                 console.error(`❌ ${errorMessage}`);
                 console.error(`❌ Missing JSON path: ${missingPath}`);

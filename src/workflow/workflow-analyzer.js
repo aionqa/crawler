@@ -10955,6 +10955,8 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
                 
                 // CRITICAL: Validate status field is present - fail if missing
                 if (!normalizedResult.status && !normalizedResult.completion_status && normalizedResult.is_complete === undefined) {
+                  const safeNormalizedResult = this.makeJsonSafe(normalizedResult, 8);
+                  const safeStepResult = this.makeJsonSafe(stepResult, 8);
                   const errorMessage = `Missing required field "status" in determine_completion result for step "${nestedStep.name || nestedStep.id}" (iteration ${iteration})`;
                   const missingPath = `workflowState.determine_completion.result.status`;
                   const fullContext = {
@@ -10966,19 +10968,19 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
                     missing_field: 'status',
                     missing_path: missingPath,
                     available_keys: Object.keys(normalizedResult || {}),
-                    normalized_result: normalizedResult,
-                    step_result: stepResult,
-                    full_response: normalizedResult
+                    normalized_result: safeNormalizedResult,
+                    step_result: safeStepResult,
+                    full_response: safeNormalizedResult
                   };
                   console.error(`❌ ${errorMessage}`);
                   console.error(`❌ Missing JSON path: ${missingPath}`);
                   console.error(`❌ Available keys: ${Object.keys(normalizedResult || {}).join(', ')}`);
-                  console.error(`❌ Normalized result:`, JSON.stringify(normalizedResult, null, 2));
+                  console.error(`❌ Normalized result:`, JSON.stringify(safeNormalizedResult, null, 2));
                   console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
                   if (jobId && this.backendLogger) {
                     await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
                   }
-                  throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys: ${Object.keys(normalizedResult || {}).join(', ')}\nNormalized result: ${JSON.stringify(normalizedResult, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+                  throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys: ${Object.keys(normalizedResult || {}).join(', ')}\nNormalized result: ${JSON.stringify(safeNormalizedResult, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
                 }
                 
                 // Store in determine_completion for easy access
@@ -11022,6 +11024,7 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
                 const availableKeys = Object.keys(workflowState).filter(k => k.includes('determine') || k.includes('completion'));
                 const availableResultsKeys = workflowState.results ? Object.keys(workflowState.results).filter(k => k.includes('determine') || k.includes('completion')) : [];
                 const availableVarPoolKeys = workflowState.variablePool?.steps ? Object.keys(workflowState.variablePool.steps).filter(k => k.includes('determine') || k.includes('completion')) : [];
+                const safeWorkflowSample = this.makeJsonSafe(Object.fromEntries(Object.entries(workflowState).slice(0, 20)), 6);
                 const fullContext = {
                   step_id: nestedStep.id,
                   step_name: nestedStep.name,
@@ -11032,7 +11035,7 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
                   available_keys_workflowState: availableKeys,
                   available_keys_results: availableResultsKeys,
                   available_keys_variablePool_steps: availableVarPoolKeys,
-                  workflowState_sample: Object.fromEntries(Object.entries(workflowState).slice(0, 20))
+                  workflowState_sample: safeWorkflowSample
                 };
                 console.error(`❌ ${errorMessage}`);
                 console.error(`❌ Missing JSON path: ${missingPath}`);
@@ -12781,6 +12784,34 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
     };
 
     return { snapshot, scopes, statistics };
+  }
+
+  /**
+   * Create a JSON-safe clone by removing circular refs/functions.
+   */
+  makeJsonSafe(value, maxDepth = 10, _seen = new WeakSet(), _depth = 0) {
+    if (value === null || value === undefined) return value;
+    if (_depth > maxDepth) return '[MaxDepthExceeded]';
+    if (typeof value === 'function') return undefined;
+    if (typeof value !== 'object') return value;
+    if (value instanceof Date) return value.toISOString();
+    if (_seen.has(value)) return '[CircularReference]';
+
+    _seen.add(value);
+    let result;
+    if (Array.isArray(value)) {
+      result = value.map((item) => this.makeJsonSafe(item, maxDepth, _seen, _depth + 1));
+    } else {
+      result = {};
+      for (const [key, item] of Object.entries(value)) {
+        const cleaned = this.makeJsonSafe(item, maxDepth, _seen, _depth + 1);
+        if (cleaned !== undefined) {
+          result[key] = cleaned;
+        }
+      }
+    }
+    _seen.delete(value);
+    return result;
   }
 
   truncateForVarDump(value, options, depth = 0, seen = new WeakSet()) {
