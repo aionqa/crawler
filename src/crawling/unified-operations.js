@@ -2082,6 +2082,7 @@ const modeHandlers = {
         }
         
         // Check if we should skip AI analysis
+        let analysisResultForCurrentPage = null;
         const skipAIAnalysisOption = context.options?.skip_ai_analysis || false;
         const disableAICompletely = context.options?.disable_ai_completely || false;
         const hasWorkflowSteps = workflowAnalyzer.hasExecutableSteps();
@@ -2095,6 +2096,7 @@ const modeHandlers = {
           await sendLog(jobId, 'info', executionMessage);
 
           const analysisResult = await workflowAnalyzer.analyzePage(page, jobId, createdPageId, projectId);
+          analysisResultForCurrentPage = analysisResult;
 
           // CRITICAL: For login jobs, check if login was successful and stop immediately
           const isLoginJob = context?.jobType === 'login' || 
@@ -2418,9 +2420,9 @@ const modeHandlers = {
           }
 
           // Keep anchors separate from page links (anchors are not pages to crawl)
-          if (analysisResult && typeof analysisResult === 'object') {
-            analysisResult.anchors = anchors;
-            analysisResult.internal_links = crawlableInternalLinks;
+          if (analysisResultForCurrentPage && typeof analysisResultForCurrentPage === 'object') {
+            analysisResultForCurrentPage.anchors = anchors;
+            analysisResultForCurrentPage.internal_links = crawlableInternalLinks;
           }
 
           // CRITICAL: Only collect links if we haven't reached max_pages and depth limit
