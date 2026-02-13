@@ -8861,6 +8861,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Normalize common malformed locator syntax emitted by LLMs: page.locator(text="...") -> page.locator('text="..."')
     cleaned = cleaned.replace(/page\.locator\(\s*text\s*=\s*"([^"]+)"\s*\)/g, "page.locator('text=\"$1\"')");
     cleaned = cleaned.replace(/page\.locator\(\s*text\s*=\s*'([^']+)'\s*\)/g, "page.locator('text=$1')");
+    // Promote fragile text-only click targets to clickable elements when assigning locators.
+    cleaned = cleaned.replace(
+      /const\s+([a-zA-Z_$][\w$]*)\s*=\s*page\.locator\(\s*["']text=([^"']+)["']\s*\)\.first\(\)\s*;/g,
+      (m, varName, labelRaw) => {
+        const label = String(labelRaw || '').replace(/"/g, '\\"');
+        return `const ${varName} = page.locator('a:has-text("${label}"), button:has-text("${label}"), [role="button"]:has-text("${label}"), [aria-haspopup="dialog"]:has-text("${label}")').first();`;
+      }
+    );
     // Ensure direct page actions are awaited when generated without await.
     cleaned = cleaned.replace(/(^|\n)\s*(page\.(?:click|fill|check|uncheck|selectOption|type|press)\s*\()/g, '$1await $2');
     // Normalize unquoted selector args in common page.* calls (e.g., page.fill(input[name="x"]))
@@ -8871,12 +8879,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
         return `page.${method}('${selector.replace(/'/g, "\\'")}')`;
       }
     );
-    // Fix malformed waitForSelector with multi-selector args not wrapped as one string.
+    // Fix malformed waitForSelector. Keep valid multi-arg calls as-is, quote only bare CSS-like selectors.
     cleaned = cleaned.replace(
       /page\.waitForSelector\(\s*([^'"`][^)\n]*)\s*\)/g,
       (m, raw) => {
         const value = String(raw || '').trim();
         if (!value || value.startsWith('{')) return m;
+        if (value.includes(',')) {
+          return `page.waitForSelector(${value})`;
+        }
+        if (/^[a-zA-Z_$][\w$]*$/.test(value)) {
+          return `page.waitForSelector(${value})`;
+        }
         return `page.waitForSelector('${value.replace(/'/g, "\\'")}')`;
       }
     );
