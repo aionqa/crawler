@@ -954,9 +954,9 @@ export class AIConversationLogger {
           console.log(`[AI-CALL] ✅ Reasoning enabled: effort=${reasoningEffort || 'medium'}`);
         }
       } else if (usesLargeOutputModel) {
-        // Explicitly disable reasoning to avoid default reasoning consuming output tokens
-        openaiRequest.reasoning = { effort: 'none' };
-        console.log(`[AI-CALL] ✅ Reasoning disabled: effort=none (GPT-5/4.1/o4)`);
+        // Minimize reasoning: gpt-5-nano does not support 'none', use 'minimal' (lowest effort)
+        openaiRequest.reasoning = { effort: 'minimal' };
+        console.log(`[AI-CALL] ✅ Reasoning minimized: effort=minimal (GPT-5/4.1/o4)`);
       }
       
       // Add web search if enabled and supported
