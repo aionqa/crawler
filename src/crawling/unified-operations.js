@@ -1753,8 +1753,8 @@ const modeHandlers = {
     const jobId = context.job_id || 'unknown-job';
     const projectId = context.project_id || null;
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
-    const requestedMaxPages = context.options?.max_pages;
-    const requestedMaxDepth = context.options?.max_depth;
+    const requestedMaxPages = context.options?.max_pages ?? context.max_pages;
+    const requestedMaxDepth = context.options?.max_depth ?? context.max_depth;
 
     // Domain crawl: use backend max_pages/max_depth so this job recursively follows links page-by-page.
     // Single-page: max_pages <= 1 and max_depth <= 0 → only the seed URL is analyzed.
