@@ -4409,7 +4409,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
           + '- Never return success while required fields remain empty or browser validation messages are visible.\n'
           + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
           + '- Use page.$/page.$$ with CSS-only selectors; for text use getByRole/getByText/locator("text=...") as standalone selectors only.\n'
-          + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n';
+          + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n'
+          + '- Do not output placeholder identifiers (selector, sel, element, humanDelay, humanPause) unless you declare them first.\n'
+          + '- Every selector must be a concrete string literal or a const initialized to a concrete string before use.\n'
+          + '- Do not emit pseudo helpers; use only real Playwright API calls (e.g., page.waitForTimeout(300)).\n'
+          + '- page.waitForSelector must always be called as page.waitForSelector(\"<valid selector>\", { ...options }).\n';
       }
       if (isJustifyJourneyStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
