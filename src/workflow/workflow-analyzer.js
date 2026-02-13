@@ -4240,7 +4240,10 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
               {
                 step_id: step.id,
                 response_keys: Object.keys(parsedResponse).join(', '),
-                response_preview: JSON.stringify(parsedResponse).substring(0, 500)
+                response_preview: (() => {
+                  const raw = JSON.stringify(parsedResponse);
+                  return (typeof raw === 'string' ? raw : String(raw ?? '')).substring(0, 500);
+                })()
               }
             );
           }
