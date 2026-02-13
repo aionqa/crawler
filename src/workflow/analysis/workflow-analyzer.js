@@ -4402,6 +4402,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           + '- Generate script body for the EXISTING Playwright page only (assume page is already available). Never import playwright/chromium, never create browser/context/newPage, never call browser.close.\n'
           + '- Do not navigate to localhost/base URLs. Use current page state; only navigate if currentJourney explicitly requires a URL navigation action.\n'
           + '- For modal/wizard journeys: if target fields/buttons are not visible, first click the opener trigger (e.g., "Start", "Open", "Launch", "Begin") to display the modal/wizard, then continue actions.\n'
+          + '- For modal openers, target explicit clickable elements (a/button/[role="button"][aria-haspopup]) and use click({ force: true }) when overlays can intercept pointer events.\n'
           + '- Every interaction statement MUST be awaited (await page.click/fill/check/selectOption/type/press) and must not use bare page.click(...) without await.\n'
           + '- If an action adds dynamic inputs (e.g., Add Email/Add Phone), ensure every visible required input is non-empty before submit.\n'
           + '- Immediately before submit, handle browser validation safely: if any :invalid input exists, fill it with a valid realistic value and then submit.\n'
@@ -8869,6 +8870,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         return `const ${varName} = page.locator('a:has-text("${label}"), button:has-text("${label}"), [role="button"]:has-text("${label}"), [aria-haspopup="dialog"]:has-text("${label}")').first();`;
       }
     );
+    // Replace undeclared pseudo-delay variables commonly emitted by LLMs.
+    cleaned = cleaned.replace(/waitForTimeout\(\s*(humanDelay|humanPause|maxMs|max|delayMs)\s*\)/g, 'waitForTimeout(300)');
+    cleaned = cleaned.replace(/timeout:\s*(humanDelay|humanPause|maxMs|max|delayMs)\b/g, 'timeout: 10000');
     // Ensure direct page actions are awaited when generated without await.
     cleaned = cleaned.replace(/(^|\n)\s*(page\.(?:click|fill|check|uncheck|selectOption|type|press)\s*\()/g, '$1await $2');
     // Normalize unquoted selector args in common page.* calls (e.g., page.fill(input[name="x"]))
@@ -8893,6 +8897,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         return `page.waitForSelector('${value.replace(/'/g, "\\'")}')`;
       }
+    );
+    // Force opener clicks on modal/button triggers to avoid overlay interception.
+    cleaned = cleaned.replace(
+      /const\s+([a-zA-Z_$][\w$]*)\s*=\s*await\s+page\.locator\(\s*'([^']*(?:role="button"|aria-haspopup="dialog"|#popup)[^']*)'\s*\)\.first\(\)\s*;/g,
+      'const $1 = await page.locator(\'$2\').first();'
+    );
+    cleaned = cleaned.replace(
+      /await\s+([a-zA-Z_$][\w$]*)\.click\(\s*\)\s*;/g,
+      (m, varName) => (/^(open|opener|trigger|launch|start|modal|popup)/i.test(String(varName)) ? `await ${varName}.click({ force: true });` : m)
     );
     
     // First, extract code from markdown code blocks if present
