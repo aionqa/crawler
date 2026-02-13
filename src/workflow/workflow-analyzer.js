@@ -3766,7 +3766,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
           + '- Never redeclare the same identifier in one script scope (for example, do not declare const el twice).\n'
           + '- Every selector must be a concrete string literal or a const initialized to a concrete string before use.\n'
           + '- Do not click same-page hash anchors (href contains "#") unless currentJourney explicitly requires anchor navigation.\n'
-          + '- If no reliable actionable selector exists in current page evidence, return exactly: await page.waitForTimeout(300).\n'
           + '- Do not emit pseudo helpers; use only real Playwright API calls (e.g., page.waitForTimeout(300)).\n'
           + '- page.waitForSelector must always be called as page.waitForSelector(\"<valid selector>\", { ...options }).\n'
           + '- Generate valid JavaScript only (no markdown fences, no pseudo-code).\n';
