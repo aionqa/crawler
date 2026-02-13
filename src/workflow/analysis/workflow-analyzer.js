@@ -2810,9 +2810,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
             }
           }
         } catch (finalError) {
-          console.error(`❌ [JOURNEYS-FINAL] Failed to save journeys at workflow completion: ${finalError.message}`);
-          console.error(`❌ [JOURNEYS-FINAL] Error details:`, finalError.response?.data || finalError.message);
-          await this.sendLogToBackend(effectiveJobId, 'error', `❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`, 'WORKFLOW-ANALYZER', {
+          const finalErrMsg = String(finalError?.message || '');
+          const transientNetworkFailure = /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|timeout/i.test(finalErrMsg);
+          const level = transientNetworkFailure ? 'warn' : 'error';
+          const icon = transientNetworkFailure ? '⚠️' : '❌';
+          console.error(`${icon} [JOURNEYS-FINAL] Failed to save journeys at workflow completion: ${finalErrMsg}`);
+          console.error(`${icon} [JOURNEYS-FINAL] Error details:`, finalError.response?.data || finalErrMsg);
+          await this.sendLogToBackend(effectiveJobId, level, `${icon} [JOURNEYS-FINAL] Failed to save journeys: ${finalErrMsg}`, 'WORKFLOW-ANALYZER', {
             error: finalError.message,
             status: finalError.response?.status,
             error_data: finalError.response?.data
@@ -5288,10 +5292,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   });
                 }
               } catch (immediateError) {
-                console.error(`❌ [JOURNEYS-IMMEDIATE] Failed to save journeys immediately: ${immediateError.message}`);
-                console.error(`❌ [JOURNEYS-IMMEDIATE] Error details:`, immediateError.response?.data || immediateError.message);
+                const immediateErrMsg = String(immediateError?.message || '');
+                const transientNetworkFailure = /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|timeout/i.test(immediateErrMsg);
+                const level = transientNetworkFailure ? 'warn' : 'error';
+                const icon = transientNetworkFailure ? '⚠️' : '❌';
+                console.error(`${icon} [JOURNEYS-IMMEDIATE] Failed to save journeys immediately: ${immediateErrMsg}`);
+                console.error(`${icon} [JOURNEYS-IMMEDIATE] Error details:`, immediateError.response?.data || immediateErrMsg);
                 if (jobId && this.backendLogger) {
-                  await this.backendLogger.appendJobLog(jobId, 'error', `❌ [JOURNEYS-IMMEDIATE] Failed to save journeys: ${immediateError.message}`, 'WORKFLOW-ANALYZER', {
+                  await this.backendLogger.appendJobLog(jobId, level, `${icon} [JOURNEYS-IMMEDIATE] Failed to save journeys: ${immediateErrMsg}`, 'WORKFLOW-ANALYZER', {
                     error: immediateError.message,
                     status: immediateError.response?.status,
                     error_data: immediateError.response?.data

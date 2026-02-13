@@ -5,7 +5,7 @@
 
 import OpenAI from 'openai';
 import axios from 'axios';
-import { getAIServiceToken } from './ai-token-manager.js';
+import { getAIServiceToken, getAIServiceTokenInternal, invalidateAIServiceToken } from './ai-token-manager.js';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 // No default AI_SERVICE_URL - endpoint must come from context.llm_config.endpoint (set from helper config ai_services).
@@ -28,6 +28,12 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
   }
 
   console.log(`[OpenAI-Client] Using AI Service: ${aiServiceUrl} for project ${projectId}${jobId ? ` (job: ${jobId})` : ''}`);
+  const isInvalidTokenError = (error) => {
+    const status = error?.response?.status || error?.status;
+    const msg = String(error?.message || '');
+    const responseMsg = String(error?.response?.data?.error?.message || error?.response?.data?.error || '');
+    return status === 401 || /invalid token/i.test(msg) || /invalid token/i.test(responseMsg);
+  };
   
   // Create a custom OpenAI client that uses axios to call the AI service
   return new Proxy(new OpenAI({ apiKey: 'ai-service' }), {
@@ -64,26 +70,35 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                   console.log(`[OpenAI-Client] Using fallback token (project/job IDs not available)`);
                 }
                 
-                // Call the AI service endpoint
-                const response = await axios.post(
-                  `${aiServiceUrl}/api/ai/chat`,
-                  {
-                    project_id: projectId,
-                    job_id: jobId,
-                    messages: params.messages,
-                    model: params.model || llmConfig.model || 'gpt-5-nano',
-                    temperature: params.temperature,
-                    max_tokens: params.max_tokens,
-                    ...params
+                const requestBody = {
+                  project_id: projectId,
+                  job_id: jobId,
+                  messages: params.messages,
+                  model: params.model || llmConfig.model || 'gpt-5-mini',
+                  temperature: params.temperature,
+                  max_tokens: params.max_tokens,
+                  ...params
+                };
+                const requestConfig = (authToken) => ({
+                  headers: {
+                    'Content-Type': 'application/json',
+                    ...(authToken && { 'Authorization': `Bearer ${authToken}` })
                   },
-                  {
-                    headers: {
-                      'Content-Type': 'application/json',
-                      ...(token && { 'Authorization': `Bearer ${token}` })
-                    },
-                    timeout: 900000 // 15 minutes timeout for AI requests
+                  timeout: 900000 // 15 minutes timeout for AI requests
+                });
+                let response;
+                try {
+                  response = await axios.post(`${aiServiceUrl}/api/ai/chat`, requestBody, requestConfig(token));
+                } catch (requestError) {
+                  if (projectId && jobId && isInvalidTokenError(requestError)) {
+                    console.warn(`[OpenAI-Client] Invalid token detected, refreshing token and retrying once...`);
+                    invalidateAIServiceToken(jobId);
+                    token = await getAIServiceTokenInternal(projectId, jobId, true);
+                    response = await axios.post(`${aiServiceUrl}/api/ai/chat`, requestBody, requestConfig(token));
+                  } else {
+                    throw requestError;
                   }
-                );
+                }
                 
                 // Return in OpenAI format
                 return response.data;
@@ -134,27 +149,36 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                 console.log(`[OpenAI-Client] Using fallback token (project/job IDs not available)`);
               }
               
-              // Call the AI service endpoint
-              const response = await axios.post(
-                `${aiServiceUrl}/api/ai/chat`,
-                {
-                  project_id: projectId,
-                  job_id: jobId,
-                  input: params.input || params.messages, // Support both formats
-                  messages: params.messages,
-                  model: params.model || llmConfig.model || 'gpt-5-nano',
-                  temperature: params.temperature,
-                  max_tokens: params.max_tokens,
-                  ...params
+              const requestBody = {
+                project_id: projectId,
+                job_id: jobId,
+                input: params.input || params.messages, // Support both formats
+                messages: params.messages,
+                model: params.model || llmConfig.model || 'gpt-5-mini',
+                temperature: params.temperature,
+                max_tokens: params.max_tokens,
+                ...params
+              };
+              const requestConfig = (authToken) => ({
+                headers: {
+                  'Content-Type': 'application/json',
+                  ...(authToken && { 'Authorization': `Bearer ${authToken}` })
                 },
-                {
-                  headers: {
-                    'Content-Type': 'application/json',
-                    ...(token && { 'Authorization': `Bearer ${token}` })
-                  },
-                  timeout: 900000 // 15 minutes timeout for AI requests
+                timeout: 900000 // 15 minutes timeout for AI requests
+              });
+              let response;
+              try {
+                response = await axios.post(`${aiServiceUrl}/api/ai/chat`, requestBody, requestConfig(token));
+              } catch (requestError) {
+                if (projectId && jobId && isInvalidTokenError(requestError)) {
+                  console.warn(`[OpenAI-Client] Invalid token detected, refreshing token and retrying once...`);
+                  invalidateAIServiceToken(jobId);
+                  token = await getAIServiceTokenInternal(projectId, jobId, true);
+                  response = await axios.post(`${aiServiceUrl}/api/ai/chat`, requestBody, requestConfig(token));
+                } else {
+                  throw requestError;
                 }
-              );
+              }
               
               // Return in OpenAI format
               return response.data;

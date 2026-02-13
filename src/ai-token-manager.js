@@ -16,8 +16,26 @@ const tokenCache = new Map();
  * Requests from backend if not cached or expired
  */
 export async function getAIServiceToken(projectId, jobId) {
+  return getAIServiceTokenInternal(projectId, jobId, false);
+}
+
+/**
+ * Clear cached token for a job (forces re-issue on next call).
+ */
+export function invalidateAIServiceToken(jobId) {
+  if (!jobId) return;
+  tokenCache.delete(jobId);
+}
+
+/**
+ * Get AI service token for a job.
+ * @param {string} projectId
+ * @param {string} jobId
+ * @param {boolean} forceRefresh - when true, bypasses cache and requests a new token
+ */
+export async function getAIServiceTokenInternal(projectId, jobId, forceRefresh = false) {
   // Check cache first
-  const cached = tokenCache.get(jobId);
+  const cached = forceRefresh ? null : tokenCache.get(jobId);
   if (cached) {
     const expiresAt = new Date(cached.expires_at);
     // If token expires in more than 1 hour, use cached token
