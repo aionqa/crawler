@@ -8599,11 +8599,28 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
           console.warn(`⚠️ Rebuilt functionBody after final check replacement`);
         }
         
+        // ms: converts "5s", "1m", "2s" etc. to milliseconds (AI often uses ms('5s') from npm/ms)
+        const msHelper = (val) => {
+          if (typeof val === 'number' && !isNaN(val)) return Math.floor(val);
+          const s = String(val || '').trim();
+          const n = parseInt(s, 10);
+          if (isNaN(n)) return 1000;
+          if (/^\d+$/.test(s)) return n;
+          if (s.endsWith('ms')) return n;
+          if (s.endsWith('s')) return n * 1000;
+          if (s.endsWith('m')) return n * 60 * 1000;
+          if (s.endsWith('h')) return n * 60 * 60 * 1000;
+          if (s.endsWith('d')) return n * 24 * 60 * 60 * 1000;
+          return 1000;
+        };
+        const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+        const pageText = await pageObj.locator('body').textContent().catch(() => '') || '';
+        
         // CRITICAL: Test if function can be created and if it contains the variable
         // This is a final safety check before actual execution
         try {
-          // Try to create the function first
-          const fn = new Function('page', 'wrapper', 'input_credentials', functionBody);
+          // Try to create the function first - include ms, delay, text for AI-generated scripts
+          const fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', functionBody);
           
           // Test if the function source contains the variable (Function.toString())
           const fnSource = fn.toString();
@@ -8622,7 +8639,7 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
           }
           
           console.log(`🚀 Executing script with wrapped page object...`);
-          const result = await fn(wrappedPage, wrappedPage, credentials);
+          const result = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText);
           console.log(`✅ Script execution completed, result.success=${result?.success}`);
           console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
           return result;

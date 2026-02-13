@@ -10267,12 +10267,29 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // This allows the script code to contain backticks, ${}, etc. without problems
         const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
         
-        // Create a function with page, wrapper (alias for page), and input_credentials as parameters
-        // Some AI-generated scripts use 'wrapper' instead of 'page' - both refer to the same wrapped page
+        // ms: converts "5s", "1m", "2s" etc. to milliseconds (AI often uses ms('5s') from npm/ms)
+        const msHelper = (val) => {
+          if (typeof val === 'number' && !isNaN(val)) return Math.floor(val);
+          const s = String(val || '').trim();
+          const n = parseInt(s, 10);
+          if (isNaN(n)) return 1000;
+          if (/^\d+$/.test(s)) return n;
+          if (s.endsWith('ms')) return n;
+          if (s.endsWith('s')) return n * 1000;
+          if (s.endsWith('m')) return n * 60 * 1000;
+          if (s.endsWith('h')) return n * 60 * 60 * 1000;
+          if (s.endsWith('d')) return n * 24 * 60 * 60 * 1000;
+          return 1000;
+        };
+        const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+        const pageText = await pageObj.locator('body').textContent().catch(() => '') || '';
+        
+        // Create a function with page, wrapper, input_credentials, ms, delay, text as parameters
+        // AI-generated scripts often use ms('5s'), delay(), or text (visible page content)
         console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
-        const fn = new Function('page', 'wrapper', 'input_credentials', functionBody);
+        const fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', functionBody);
         console.log(`🚀 Executing script with wrapped page object...`);
-        const rawResult = await fn(wrappedPage, wrappedPage, credentials);
+        const rawResult = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText);
         const result = (rawResult === undefined || rawResult === null)
           ? { success: true, message: 'Script executed without explicit return value' }
           : rawResult;
