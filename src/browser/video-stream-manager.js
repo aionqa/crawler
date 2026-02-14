@@ -32,10 +32,25 @@ class VideoStreamManager {
 
     console.log(`[VIDEO-STREAM] Starting real-time stream for job ${jobId}`);
 
+    // Default to a safer interval than 200ms (5 FPS). Base64 JPEG frames are large and can
+    // cause backend OOM via JSON parsing + Socket.IO buffering under load.
+    const envIntervalMs = Number.parseInt(process.env.VIDEO_STREAM_INTERVAL_MS || '', 10);
+    const defaultIntervalMs = Number.isFinite(envIntervalMs) && envIntervalMs > 0 ? envIntervalMs : 1000;
+    const chosenIntervalMs = Number.isFinite(Number(options.interval)) && Number(options.interval) > 0
+      ? Number(options.interval)
+      : defaultIntervalMs;
+
+    const envQuality = Number.parseInt(process.env.VIDEO_STREAM_JPEG_QUALITY || '', 10);
+    const defaultQuality = Number.isFinite(envQuality) && envQuality >= 10 && envQuality <= 100 ? envQuality : 70;
+    const chosenQuality = Number.isFinite(Number(options.quality)) && Number(options.quality) >= 10 && Number(options.quality) <= 100
+      ? Number(options.quality)
+      : defaultQuality;
+
     const streamInfo = {
       jobId,
       page,
-      interval: options.interval || 200, // 5 FPS (200ms between frames)
+      interval: chosenIntervalMs,
+      quality: chosenQuality,
       isActive: true,
       frameCount: 0,
       startTime: Date.now()
@@ -79,7 +94,7 @@ class VideoStreamManager {
         // Capture frame
         const screenshot = await streamInfo.page.screenshot({
           type: 'jpeg',
-          quality: 70, // Balance between quality and size
+          quality: streamInfo.quality, // Balance between quality and size
           fullPage: false // Just viewport for performance
         });
         
