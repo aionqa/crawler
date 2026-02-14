@@ -2,6 +2,19 @@ import axios from 'axios';
 import { StaticNodeExecutor } from './static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../step-requirements.js';
 
+/** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
+function safeJsonClone(obj) {
+  const seen = new WeakSet();
+  const replacer = (key, val) => {
+    if (typeof val === 'object' && val !== null) {
+      if (seen.has(val)) return undefined;
+      seen.add(val);
+    }
+    return val;
+  };
+  return JSON.parse(JSON.stringify(obj, replacer));
+}
+
 /**
  * WorkflowAnalyzer - Updated 2025-10-15
  * Handles initial page analysis using Playwright + OpenAI
@@ -5033,7 +5046,7 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
     }
 
     try {
-      const legsPayload = JSON.parse(JSON.stringify(legs));
+      const legsPayload = safeJsonClone(legs);
 
       const response = await axios.post(
         `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,

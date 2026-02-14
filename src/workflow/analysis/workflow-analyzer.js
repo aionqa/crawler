@@ -3,6 +3,19 @@ import { StaticNodeExecutor } from '../execution/static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../../step-requirements.js';
 import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
 
+/** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
+function safeJsonClone(obj) {
+  const seen = new WeakSet();
+  const replacer = (key, val) => {
+    if (typeof val === 'object' && val !== null) {
+      if (seen.has(val)) return undefined;
+      seen.add(val);
+    }
+    return val;
+  };
+  return JSON.parse(JSON.stringify(obj, replacer));
+}
+
 /**
  * WorkflowAnalyzer - Updated 2025-10-15
  * Handles initial page analysis using Playwright + OpenAI
@@ -5055,7 +5068,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (parsedResponse.journeys && Array.isArray(parsedResponse.journeys)) {
           journeys = parsedResponse.journeys;
           console.log(`✅ [JOURNEYS-EXTRACT] Found ${journeys.length} journeys in response`);
-          const firstJourneyPreviewRaw = journeys.length > 0 ? JSON.stringify(journeys[0], null, 2) : '';
+          let firstJourneyPreviewRaw = '';
+          if (journeys.length > 0) {
+            try {
+              firstJourneyPreviewRaw = JSON.stringify(safeJsonClone(journeys[0]), null, 2);
+            } catch (e) {
+              firstJourneyPreviewRaw = `[Unable to serialize: ${e.message}]`;
+            }
+          }
           const firstJourneyPreview = (typeof firstJourneyPreviewRaw === 'string' ? firstJourneyPreviewRaw : String(firstJourneyPreviewRaw ?? '')).substring(0, 500);
           console.log(`🔍 [JOURNEYS-EXTRACT] First journey preview:`, firstJourneyPreview || '[empty journeys array]');
           if (jobId && this.backendLogger) {
@@ -5074,7 +5094,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
               totalActions += actionsCount;
               if (actionsCount === 0) {
                 console.error(`❌ [JOURNEYS-EXTRACT] Journey ${journey.journey_id || idx} has NO actions array or empty actions! Journey keys: ${Object.keys(journey).join(', ')}`);
-                console.error(`❌ [JOURNEYS-EXTRACT] Journey ${journey.journey_id || idx} full object:`, JSON.stringify(journey, null, 2).substring(0, 1000));
+                try {
+                  console.error(`❌ [JOURNEYS-EXTRACT] Journey ${journey.journey_id || idx} full object:`, JSON.stringify(safeJsonClone(journey), null, 2).substring(0, 1000));
+                } catch (e) {
+                  console.error(`❌ [JOURNEYS-EXTRACT] Journey serialization failed: ${e.message}`);
+                }
                 if (jobId && this.backendLogger) {
                   this.backendLogger.appendJobLog(jobId, 'error', `❌ [JOURNEYS-EXTRACT] Journey ${journey.journey_id || idx} has NO actions!`, 'WORKFLOW-ANALYZER', {
                     journey_id: journey.journey_id || idx,
@@ -6816,7 +6840,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
 
     try {
-      const legsPayload = JSON.parse(JSON.stringify(legs));
+      const legsPayload = safeJsonClone(legs);
 
       const response = await axios.post(
         `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
