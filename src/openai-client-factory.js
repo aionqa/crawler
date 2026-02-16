@@ -22,7 +22,18 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
   const projectId = context.project_id || context.projectId;
   const jobId = context.job_id || context.jobId;
 
-  const aiServiceUrl = llmConfig.endpoint && String(llmConfig.endpoint).trim();
+  // Prefer llm_config.endpoint, but support the newer context.ai_services shape.
+  // Backend injects ai_services for jobs running on a helper; older runners expect llm_config.endpoint.
+  const aiServiceUrl = (() => {
+    const explicit = llmConfig.endpoint && String(llmConfig.endpoint).trim();
+    if (explicit) return explicit;
+
+    const fromServices = Array.isArray(context.ai_services) ? context.ai_services : [];
+    const firstUrl = fromServices
+      .map((s) => (s && s.url) ? String(s.url).trim() : '')
+      .find(Boolean);
+    return firstUrl || '';
+  })();
   if (!aiServiceUrl) {
     throw new Error('AI not configured. Add at least one AI service in the helper config (e.g. OpenAI or LM Studio URL).');
   }

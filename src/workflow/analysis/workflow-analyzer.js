@@ -4494,24 +4494,34 @@ IMPORTANT OUTPUT REQUIREMENTS:
           if (isLoginValidationStep && aiErrorText.includes('AI not configured')) {
             let bodyText = '';
             let hasPasswordField = false;
+            let hasEmailField = false;
+            let hasSubmitLikeButton = false;
             try {
               bodyText = ((await page.textContent('body')) || '').toLowerCase();
               hasPasswordField = !!(await page.$('input[type="password"]'));
+              hasEmailField = !!(await page.$('input#email, input[name="email"], input[type="email"], input[name="username"]'));
+              hasSubmitLikeButton = (await page.locator('button:has-text("continue"), button:has-text("sign in"), button:has-text("log in"), button[type="submit"], #next-button').count()) > 0;
             } catch (fallbackReadError) {
               // Keep fallback conservative if DOM inspection fails.
             }
 
             const currentUrl = String(page.url() || stepPayload.current_url || stepPayload.page_url || '').toLowerCase();
             const hasErrorSignal = /(invalid|incorrect|error|failed|unauthorized|forbidden|required)/.test(bodyText);
-            const hasSuccessSignal = /(login successful|welcome|dashboard|logout|signed in|profile)/.test(bodyText);
-            const status = hasErrorSignal ? 'failure' : (hasSuccessSignal || !hasPasswordField ? 'success' : 'continue');
+            const hasSuccessSignal = /(login successful|successfully logged in|welcome|dashboard|signed in|profile)/.test(bodyText);
+            const onLoginUrl = /\/login\b/.test(currentUrl) || currentUrl.includes('auth');
+            const looksLikeLoginFlow = onLoginUrl || hasPasswordField || hasEmailField || hasSubmitLikeButton;
+            const status = hasErrorSignal
+              ? 'failure'
+              : (!looksLikeLoginFlow && hasSuccessSignal)
+                ? 'success'
+                : 'continue';
             const isComplete = status === 'success' || status === 'failure';
 
             aiResponse = {
               status,
               is_complete: isComplete,
               reason: 'AI provider unavailable on runner helper; used deterministic DOM-based login validation fallback.',
-              what_happened: `URL=${currentUrl}, passwordFieldVisible=${hasPasswordField}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}`,
+              what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}`,
               new_content_detected: status !== 'continue',
               content_type: 'page',
               needs_more_testing: !isComplete,
@@ -4530,7 +4540,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 'warn',
                 `⚠️ AI unavailable for ${step.id || step.name}; using deterministic login validation fallback`,
                 'WORKFLOW-ANALYZER',
-                { status, current_url: currentUrl, has_password_field: hasPasswordField, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
+                { status, current_url: currentUrl, has_email_field: hasEmailField, has_password_field: hasPasswordField, has_submit_like_button: hasSubmitLikeButton, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
               );
             }
             break;

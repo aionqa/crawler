@@ -3808,19 +3808,58 @@ IMPORTANT OUTPUT REQUIREMENTS:
 const usernameValue = (input_credentials && input_credentials.username) || (${forcedSpecificCreds ? "'testuser'" : "'testuser'"});
 const passwordValue = (input_credentials && input_credentials.password) || (${forcedSpecificCreds ? "'testpass123'" : "'testpass123'"});
 
-const usernameSelector = 'input[name="username"], input[name="email"], input[type="email"], input[type="text"]';
+// Avoid matching hidden/system inputs (e.g. captcha_token) by excluding known ids/names.
+const usernameSelector = [
+  'input#email',
+  'input[name="email"]',
+  'input[name="username"]',
+  'input[type="email"]',
+  'input[type="text"]:not(#captcha-token):not([name="captcha_token"])'
+].join(', ');
 const passwordSelector = 'input[name="password"], input[type="password"]';
-const submitSelector = 'button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Sign in"), button:has-text("Log in")';
+const continueSelector = [
+  'button#next-button',
+  'button:has-text("Continue")',
+  'button:has-text("Next")',
+  'button[type="submit"]',
+  'input[type="submit"]',
+  'button:has-text("Login")',
+  'button:has-text("Sign in")',
+  'button:has-text("Log in")'
+].join(', ');
 
-await page.waitForSelector(usernameSelector, { timeout: 10000 });
-await page.fill(usernameSelector, usernameValue);
-await page.fill(passwordSelector, passwordValue);
-if (await page.locator('input[type="checkbox"][name*="remember" i], input[type="checkbox"]#remember').first().isVisible().catch(() => false)) {
-  await page.locator('input[type="checkbox"][name*="remember" i], input[type="checkbox"]#remember').first().check().catch(() => {});
+const usernameField = page.locator(usernameSelector).first();
+const passwordField = page.locator(passwordSelector).first();
+
+// Multi-step logins can hide the username field on step 2 (password stage).
+// Be opportunistic: fill what is visible, don't hard-fail on missing fields.
+let hasUsernameField = await usernameField.isVisible().catch(() => false);
+let hasPasswordField = await passwordField.isVisible().catch(() => false);
+
+if (!hasUsernameField && !hasPasswordField) {
+  // Initial render might still be loading; wait once for username field.
+  await usernameField.waitFor({ state: 'visible', timeout: 10000 });
+  hasUsernameField = true;
 }
-await page.click(submitSelector);
+
+if (hasUsernameField) {
+  await usernameField.fill(usernameValue);
+}
+
+if (hasPasswordField) {
+  await passwordField.fill(passwordValue);
+  if (await page.locator('input[type="checkbox"][name*="remember" i], input[type="checkbox"]#remember').first().isVisible().catch(() => false)) {
+    await page.locator('input[type="checkbox"][name*="remember" i], input[type="checkbox"]#remember').first().check().catch(() => {});
+  }
+}
+
+const submitButton = page.locator(continueSelector).first();
+await submitButton.waitFor({ state: 'visible', timeout: 10000 });
+await submitButton.click();
+
+// Give multi-step login flows time to render the next stage (password/OTP/etc.)
 await page.waitForTimeout(1500);
-return { success: true, action: 'login_submitted', used_username: usernameValue ? 'set' : 'missing' };
+return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_step_submitted', used_username: usernameValue ? 'set' : 'missing' };
 `.trim();
         aiResponse = {
           playwright_script: deterministicScript,
@@ -3858,24 +3897,38 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
         if (isLoginValidationStep && aiErrorText.includes('AI not configured')) {
           let bodyText = '';
           let hasPasswordField = false;
+          let hasEmailField = false;
+          let hasSubmitLikeButton = false;
           try {
             bodyText = ((await page.textContent('body')) || '').toLowerCase();
             hasPasswordField = !!(await page.$('input[type="password"]'));
+            hasEmailField = !!(await page.$('input#email, input[name="email"], input[type="email"], input[name="username"]'));
+            hasSubmitLikeButton = (await page.locator('button:has-text("continue"), button:has-text("sign in"), button:has-text("log in"), button[type="submit"], #next-button').count()) > 0;
           } catch (fallbackReadError) {
             // Keep fallback conservative if DOM inspection fails.
           }
 
           const currentUrl = String(page.url() || stepPayload.current_url || stepPayload.page_url || '').toLowerCase();
           const hasErrorSignal = /(invalid|incorrect|error|failed|unauthorized|forbidden|required)/.test(bodyText);
-          const hasSuccessSignal = /(login successful|welcome|dashboard|logout|signed in|profile)/.test(bodyText);
-          const status = hasErrorSignal ? 'failure' : (hasSuccessSignal || !hasPasswordField ? 'success' : 'continue');
+          const hasSuccessSignal = /(login successful|successfully logged in|welcome|dashboard|signed in|profile)/.test(bodyText);
+          const onLoginUrl = /\/login\b/.test(currentUrl) || currentUrl.includes('auth');
+
+          // Without AI, be conservative:
+          // - if we're still clearly on a login flow (URL contains login/auth OR login fields/buttons exist) => continue
+          // - only mark success when we see strong success signals AND login controls are gone
+          const looksLikeLoginFlow = onLoginUrl || hasPasswordField || hasEmailField || hasSubmitLikeButton;
+          const status = hasErrorSignal
+            ? 'failure'
+            : (!looksLikeLoginFlow && hasSuccessSignal)
+              ? 'success'
+              : 'continue';
           const isComplete = status === 'success' || status === 'failure';
 
           aiResponse = {
             status,
             is_complete: isComplete,
             reason: 'AI provider unavailable on runner helper; used deterministic DOM-based login validation fallback.',
-            what_happened: `URL=${currentUrl}, passwordFieldVisible=${hasPasswordField}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}`,
+            what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}`,
             new_content_detected: status !== 'continue',
             content_type: 'page',
             needs_more_testing: !isComplete,
