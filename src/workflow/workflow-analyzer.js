@@ -3855,6 +3855,18 @@ if (hasPasswordField) {
 
 const submitButton = page.locator(continueSelector).first();
 await submitButton.waitFor({ state: 'visible', timeout: 10000 });
+
+// Some auth providers use a hidden captcha token field that is populated asynchronously.
+// If present, wait briefly for it to be filled to avoid server-side "invalid form" errors.
+const captchaTokenField = page.locator('#captcha-token, input[name="captcha_token"]').first();
+const hasCaptchaTokenField = await captchaTokenField.isVisible().catch(() => false);
+if (hasCaptchaTokenField) {
+  for (let i = 0; i < 20; i++) {
+    const tokenVal = await captchaTokenField.inputValue().catch(() => '');
+    if (tokenVal && String(tokenVal).trim().length > 10) break;
+    await page.waitForTimeout(500);
+  }
+}
 await submitButton.click();
 
 // Give multi-step login flows time to render the next stage (password/OTP/etc.)
