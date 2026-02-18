@@ -8770,6 +8770,10 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
         try {
           // Try to create the function first - include ms, delay, text, context, test for AI-generated scripts
           let executableBody = functionBody;
+          // Backward-compat: some generated scripts occasionally reference `input_input_credentials`
+          // (typo) instead of `input_credentials`. Provide an alias so logins don't silently use
+          // fallback placeholder credentials.
+          executableBody = `const input_input_credentials = input_credentials;\n${executableBody}`;
           let fn;
           try {
             fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);

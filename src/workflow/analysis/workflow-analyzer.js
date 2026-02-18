@@ -10448,6 +10448,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // Create a function with page, wrapper, input_credentials, ms, delay, text, context, test
         console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
         let executableBody = functionBody;
+        // Backward-compat: some generated scripts occasionally reference `input_input_credentials`
+        // (typo) instead of `input_credentials`. Provide an alias so logins don't silently use
+        // fallback placeholder credentials.
+        executableBody = `const input_input_credentials = input_credentials;\n${executableBody}`;
         let fn;
         try {
           fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
