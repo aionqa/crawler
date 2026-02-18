@@ -9699,6 +9699,39 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   /**
+   * Strip common TypeScript-only syntax from AI-generated scripts.
+   * These scripts are executed via `new Function(...)` as plain JS.
+   */
+  stripTypeScriptArtifacts(script) {
+    if (!script || typeof script !== 'string') return script;
+
+    let s = script;
+
+    // Remove common `as <type>` assertions that break JS execution.
+    s = s.replace(/\s+as\s+(any|unknown|never|boolean|number|string|object)\b/g, '');
+    s = s.replace(/\s+as\s+Record<[^>]+>/g, '');
+    s = s.replace(/\s+as\s+Array<[^>]+>/g, '');
+    s = s.replace(/\s+as\s+Promise<[^>]+>/g, '');
+    s = s.replace(/\s+as\s+HTML[A-Za-z0-9_]+Element\b/g, '');
+    s = s.replace(/\s+as\s+(HTMLElement|Element)\b/g, '');
+
+    // Remove type annotations in variable declarations: `const x: Foo = ...`
+    s = s.replace(/\b(const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*[^=;\n]+(?=\s*[=;])/g, '$1 $2');
+
+    // Remove simple type annotations in function params: `(a: string, b: number)`
+    s = s.replace(/([,(]\s*[A-Za-z_$][\w$]*)\s*:\s*[^,)\n]+/g, '$1');
+
+    // Remove non-null assertions: `el!.click()`
+    s = s.replace(/([A-Za-z_$][\w$]*)!\s*(?=[\.\[\(])/g, '$1');
+
+    // Drop standalone TS declarations if the model included them.
+    s = s.replace(/^\s*(interface|type)\s+[A-Za-z_$][\w$]*.*$/gm, '');
+    s = s.replace(/^\s*export\s+\{\s*\}\s*;?\s*$/gm, '');
+
+    return s;
+  }
+
+  /**
    * Execute code step (static code)
    */
   async executeCodeStep(page, step, workflowState, jobId = null, nextStep = null) {
@@ -10439,6 +10472,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     
     // Clean the code to remove markdown code blocks and function declarations
     code = this.cleanScript(code);
+    code = this.stripTypeScriptArtifacts(code);
     console.log(`🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
     
     if (!code || code.trim().length === 0) {
@@ -11079,7 +11113,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
         } catch (syntaxError) {
           const message = String(syntaxError?.message || '');
-          const isSyntaxLike = /unexpected end of input|invalid or unexpected token|unexpected token|missing\s+[\)\}]|unterminated/i.test(message);
+          const isSyntaxLike = /unexpected end of input|invalid or unexpected token|unexpected token|unexpected identifier|missing\s+[\)\}]|unterminated/i.test(message);
           if (!isSyntaxLike) throw syntaxError;
 
           const fallbackScript = buildFallbackJourneyScript();

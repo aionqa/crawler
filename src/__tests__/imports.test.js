@@ -6,7 +6,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join, extname } from 'path';
-import { glob } from 'glob';
+import globPkg from 'glob';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -75,8 +75,15 @@ describe('Unified Crawler Import Verification', () => {
   
   beforeAll(async () => {
     const patterns = ['unified-crawler/src/**/*.js'];
+    const globFn = globPkg?.glob || globPkg;
     for (const pattern of patterns) {
-      const matches = await glob(pattern, { cwd: projectRoot, absolute: true });
+      const matches = await new Promise((resolve, reject) => {
+        // Support CJS glob API consistently (callback style).
+        globFn(pattern, { cwd: projectRoot, absolute: true }, (err, m) => {
+          if (err) return reject(err);
+          return resolve(m || []);
+        });
+      });
       files.push(...matches.filter(f => !f.includes('__tests__')));
     }
   });
