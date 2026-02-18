@@ -225,8 +225,10 @@ function cleanLogMessage(message) {
   return message;
 }
 
-// Helper function to check if URL is within the same domain
-function isWithinDomain(pageUrl, baseUrl) {
+// Helper function to check if URL is within the same domain.
+// When allowSubdomains=true, treat sibling subdomains as internal as long as the
+// registrable domain (naively: last 2 labels) matches.
+function isWithinDomain(pageUrl, baseUrl, allowSubdomains = false) {
   try {
     const pageUrlObj = new URL(pageUrl);
     const baseUrlObj = new URL(baseUrl);
@@ -234,8 +236,18 @@ function isWithinDomain(pageUrl, baseUrl) {
     // Check if hostname matches (including www vs non-www)
     const pageHostname = pageUrlObj.hostname.replace(/^www\./, '');
     const baseHostname = baseUrlObj.hostname.replace(/^www\./, '');
-    
-    return pageHostname === baseHostname;
+
+    if (pageHostname === baseHostname) return true;
+
+    if (!allowSubdomains) return false;
+
+    const getBaseDomain = (hostname) => {
+      const parts = String(hostname || '').split('.').filter(Boolean);
+      if (parts.length < 2) return String(hostname || '');
+      return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+    };
+
+    return getBaseDomain(pageHostname) === getBaseDomain(baseHostname);
   } catch (error) {
     // If URL parsing fails, treat as external
     return false;
@@ -245,10 +257,10 @@ function isWithinDomain(pageUrl, baseUrl) {
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
-async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null) {
+async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null, allowSubdomains = false) {
   try {
     // Domain filtering: Only send internal pages to backend
-    if (baseUrl && !isWithinDomain(pageUrl, baseUrl)) {
+    if (baseUrl && !isWithinDomain(pageUrl, baseUrl, allowSubdomains)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageUrl}`);
       return null;
     }
@@ -318,10 +330,10 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
 
 // Send discovered page to backend immediately (incremental storage)
 // Returns the pageId from the backend
-async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null) {
+async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allowSubdomains = false) {
   try {
     // Domain filtering: Only send internal pages to backend
-    if (baseUrl && !isWithinDomain(pageData.url, baseUrl)) {
+    if (baseUrl && !isWithinDomain(pageData.url, baseUrl, allowSubdomains)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageData.url}`);
       return null;
     }
@@ -1706,6 +1718,7 @@ const modeHandlers = {
     const jobId = context.job_id || 'unknown-job';
     const projectId = context.project_id || null;
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const allowSubdomains = context?.allow_subdomains === true;
     
     await sendLog(jobId, 'info', `🚀 OPTIMIZED MODE: QA-like testing with minimal token usage`);
     
@@ -1716,7 +1729,7 @@ const modeHandlers = {
       // Get or create page ID
       const pageUrl = page.url();
       const pageTitle = await page.title();
-      const pageResult = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId, pageUrl);
+      const pageResult = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId, pageUrl, null, allowSubdomains);
       const pageId = pageResult?.pageId || pageResult;
       
       // Analyze page with optimized approach
@@ -1755,6 +1768,7 @@ const modeHandlers = {
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
     const requestedMaxPages = context.options?.max_pages ?? context.max_pages;
     const requestedMaxDepth = context.options?.max_depth ?? context.max_depth;
+    const allowSubdomains = context?.allow_subdomains === true;
 
     // Domain crawl: use backend max_pages/max_depth so this job recursively follows links page-by-page.
     // Single-page: max_pages <= 1 and max_depth <= 0 → only the seed URL is analyzed.
@@ -2059,7 +2073,15 @@ const modeHandlers = {
           await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrlCanonical} already analyzed in this job (in-memory dedupe), skipping duplicate analysis`);
           continue;
         }
-        const pageResult = await sendBasicPageToBackend(jobId, actualPageUrlCanonical || actualPageUrl, pageTitle, projectId, projectStartUrl, lighthouseResults);
+        const pageResult = await sendBasicPageToBackend(
+          jobId,
+          actualPageUrlCanonical || actualPageUrl,
+          pageTitle,
+          projectId,
+          projectStartUrl,
+          lighthouseResults,
+          allowSubdomains
+        );
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
         // CRITICAL: Check if this page has already been analyzed in this job to prevent duplicate workflows
@@ -2407,7 +2429,7 @@ const modeHandlers = {
         
         // Step 3: Extract links from page for crawling (if not at max depth)
         if (shouldDiscoverLinks && depth < maxDepth) {
-          const linksData = await extractAllLinks(page, jobId, currentUrl);
+          const linksData = await extractAllLinks(page, jobId, currentUrl, allowSubdomains);
           const allInternal = Array.isArray(linksData?.internal) ? linksData.internal : [];
           const anchors = [];
           const crawlableInternalLinks = [];
@@ -3407,13 +3429,20 @@ async function extractPageElements(page, jobId) {
 // performStaticLogin function completely removed - all login operations must use workflow templates (rule 95-remove-deprecated-immediately.mdc)
 
 // Comprehensive link extraction
-async function extractAllLinks(page, jobId, baseUrl) {
+async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
   try {
     await sendLog(jobId, 'info', '🔗 Extracting all links from page (comprehensive scan)...');
     
-    const links = await page.$$eval('a[href], area[href], [data-href], [data-url]', (elements, baseUrl) => {
+    const links = await page.$$eval('a[href], area[href], [data-href], [data-url]', (elements, baseUrl, allowSubdomains) => {
       const linkSet = new Set();
       const links = [];
+
+      const normalizeHost = (value) => String(value || '').toLowerCase().replace(/^www\./, '');
+      const getBaseDomain = (hostname) => {
+        const parts = normalizeHost(hostname).split('.').filter(Boolean);
+        if (parts.length < 2) return normalizeHost(hostname);
+        return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+      };
       
       elements.forEach(el => {
         const href = el.href || el.getAttribute('data-href') || el.getAttribute('data-url') || '';
@@ -3430,8 +3459,12 @@ async function extractAllLinks(page, jobId, baseUrl) {
           const linkUrl = new URL(href);
           const baseUrlObj = new URL(baseUrl);
           // Check both hostname and origin for more accurate domain matching
-          isInternal = linkUrl.hostname === baseUrlObj.hostname || 
-                       linkUrl.origin === baseUrlObj.origin;
+          const linkHost = normalizeHost(linkUrl.hostname);
+          const baseHost = normalizeHost(baseUrlObj.hostname);
+          isInternal =
+            linkHost === baseHost ||
+            linkUrl.origin === baseUrlObj.origin ||
+            (allowSubdomains && getBaseDomain(linkHost) === getBaseDomain(baseHost));
           fullUrl = linkUrl.href;
         } catch (e) {
           // Relative URL or invalid
@@ -3466,7 +3499,7 @@ async function extractAllLinks(page, jobId, baseUrl) {
       });
       
       return links;
-    }, baseUrl);
+    }, baseUrl, allowSubdomains);
     
     const normalizeUrlForDedup = (value) => {
       try {
@@ -3614,6 +3647,8 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
   } catch (error) {
     throw new Error(`Failed to get page info: ${error.message}`);
   }
+
+  const allowSubdomains = options?.allow_subdomains === true;
   
   // Generate unique conversation ID for this page's analysis
   const conversationId = `conv_${jobId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -3649,7 +3684,7 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
   await sendLog(jobId, 'info', `🔍 Step 2/6: Extracting links from page...`, pageContext);
   let linksData = { all: [], internal: [], external: [], total: 0 };
   try {
-    linksData = await extractAllLinks(page, jobId, currentUrl);
+    linksData = await extractAllLinks(page, jobId, currentUrl, allowSubdomains);
     await sendLog(jobId, 'info', `✓ Found ${linksData.total} links (${linksData.internal.length} internal, ${linksData.external.length} external)`, pageContext);
   } catch (error) {
     await sendLog(jobId, 'warn', `⚠️ Link extraction failed: ${error.message}`, pageContext);
@@ -3971,6 +4006,7 @@ Respond with JSON format:
 async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, options = {}) {
   const maxDepth = options.max_depth || 3;
   const maxPages = options.max_pages || 50;
+  const allowSubdomains = options?.allow_subdomains === true;
   
   const visitedUrls = new Set();
   const analyzedPages = [];
@@ -4091,7 +4127,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         }
         
         // Create basic page document in backend FIRST
-        let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, null, startUrl);
+        let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, null, startUrl, null, allowSubdomains);
         
         // Update page context with pageId for all subsequent logs
         if (pageId) {
@@ -4108,7 +4144,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         }
         
         // Check if this page is within the target domain before AI analysis
-        const isWithinTargetDomain = isWithinDomain(currentUrl, startUrl);
+        const isWithinTargetDomain = isWithinDomain(currentUrl, startUrl, allowSubdomains);
         
         if (!isWithinTargetDomain) {
           // Skip AI analysis for external domains - just collect basic info
@@ -4158,7 +4194,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         
         // Update the page with full analysis data
         if (pageId) {
-          await sendDiscoveredPageToBackend(jobId, pageAnalysis, startUrl);
+          await sendDiscoveredPageToBackend(jobId, pageAnalysis, startUrl, allowSubdomains);
           await sendLog(jobId, 'info', `✓ Page analysis complete and stored`, {
             ...currentPageContext,
             pageId: pageId,
@@ -4878,13 +4914,14 @@ async function executeCrawlFromAnalysis(page, analysis, context) {
 async function executeSimplifiedApproach(page, jobId, context, openaiClient) {
   const pageUrl = page.url();
   const pageTitle = await page.title();
+  const allowSubdomains = context?.allow_subdomains === true;
   
   await sendLog(jobId, 'info', '🎯 APPROACH 1: Simplified (Playwright JSON Analysis)', { page_url: pageUrl });
   
   try {
     // Step 1: Extract forms with Playwright
     const forms = await extractFormsAndLogicalGroups(page, jobId);
-    const links = await extractAllLinks(page, jobId, pageUrl);
+    const links = await extractAllLinks(page, jobId, pageUrl, allowSubdomains);
     
     // Step 2: Build structured JSON for OpenAI
     const structuredData = {
@@ -5657,6 +5694,37 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   try {
     // Use configured endpoint if available, otherwise fall back to direct OpenAI
     const openaiClient = createOpenAIClient(context, openaiApiKey);
+
+    // SSO flows often bounce across sibling subdomains (e.g. webapp.* -> auth.* -> app.*).
+    // When we detect that pattern, allow crawling across subdomains of the same base domain.
+    // This is best-effort and intentionally naive (last 2 labels).
+    let allowSubdomains = context?.allow_subdomains === true;
+    if (!allowSubdomains) {
+      try {
+        const startHost = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+        const loginHost = context?.login_url
+          ? new URL(context.login_url).hostname.replace(/^www\./, '').toLowerCase()
+          : null;
+        const baseOf = (host) => {
+          const parts = String(host || '').split('.').filter(Boolean);
+          if (parts.length < 2) return String(host || '');
+          return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+        };
+        if (loginHost && startHost !== loginHost && baseOf(startHost) === baseOf(loginHost)) {
+          allowSubdomains = true;
+        }
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    // Make the decision visible to all downstream helpers that only receive `context`/`options`.
+    if (context && typeof context === 'object') {
+      context.allow_subdomains = allowSubdomains;
+      if (context.options && typeof context.options === 'object') {
+        context.options.allow_subdomains = allowSubdomains;
+      }
+    }
     
     // Load workflow template to check for cookie-collect steps that need to run before navigation
     let preNavigationCookieSteps = [];
@@ -5693,7 +5761,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     }
     
     const result = await withBrowser(async ({ page, context: browserContext }) => {
-      await sendLog(jobId, 'info', 'Browser session started', { mode });
+      await sendLog(jobId, 'info', 'Browser session started', { mode, allowSubdomains });
       
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {
