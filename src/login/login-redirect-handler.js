@@ -98,6 +98,7 @@ export async function handleLoginRedirect(
   page,
   jobId,
   currentUrl,
+  intendedUrl,
   context,
   openaiClient,
   handleLoginRedirect = 'auto_retry'
@@ -105,6 +106,7 @@ export async function handleLoginRedirect(
   const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
   const projectId = context.project_id || context.projectId;
   const loginUrl = context.login_url || null;
+  const runnerToken = context.runner_token || null;
   
   // Detect if current page is a login page
   await sendLog(jobId, 'info', `🔍 Checking if page is a login page: ${currentUrl}`);
@@ -127,11 +129,49 @@ export async function handleLoginRedirect(
     await sendLog(jobId, 'info', `🔄 Auto-retry enabled - fetching latest login cookies and re-authenticating...`);
     
     // Get most recent login job cookies
-    const latestCookies = await getLatestLoginCookies(backendUrl, projectId, context.runner_token);
+    let latestCookies = await getLatestLoginCookies(backendUrl, projectId, runnerToken);
     
     if (!latestCookies || latestCookies.length === 0) {
-      await sendLog(jobId, 'error', `❌ No login cookies found - cannot re-authenticate`);
-      throw new Error(`Login page detected but no login cookies available for re-authentication`);
+      await sendLog(jobId, 'warn', `⚠️ No login cookies found - triggering a login job to refresh cookies...`);
+
+      // Ask backend to start a login job (runner-auth protected).
+      const axios = (await import('axios')).default;
+      const refreshResp = await axios.post(
+        `${backendUrl}/api/runner/jobs/${jobId}/refresh-login`,
+        { reason: 'login_redirect', intended_url: intendedUrl || null },
+        {
+          headers: runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {},
+          timeout: 10000
+        }
+      );
+
+      const loginJobId = refreshResp?.data?.login_job_id;
+      if (!loginJobId) {
+        throw new Error('Backend did not return login_job_id for refresh-login');
+      }
+
+      await sendLog(jobId, 'info', `⏳ Waiting for login job ${loginJobId} to complete...`);
+
+      // Poll login job status via runner-auth `/api/jobs/:id`
+      const deadline = Date.now() + 3 * 60 * 1000; // 3 minutes
+      while (Date.now() < deadline) {
+        const statusResp = await axios.get(`${backendUrl}/api/jobs/${loginJobId}`, {
+          headers: runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {},
+          timeout: 10000
+        });
+        const status = statusResp?.data?.status;
+        if (status === 'completed') break;
+        if (status === 'failed' || status === 'error' || status === 'cancelled') {
+          throw new Error(`Login refresh job ${loginJobId} ended with status=${status}`);
+        }
+        await new Promise(r => setTimeout(r, 2000));
+      }
+
+      // Re-fetch cookies after the login job completes
+      latestCookies = await getLatestLoginCookies(backendUrl, projectId, runnerToken);
+      if (!latestCookies || latestCookies.length === 0) {
+        throw new Error('Login refresh completed but no cookies found');
+      }
     }
     
     await sendLog(jobId, 'info', `🍪 Found ${latestCookies.length} cookies from most recent login job`);
@@ -144,12 +184,13 @@ export async function handleLoginRedirect(
       await sendLog(jobId, 'warn', `⚠️ Failed to set some cookies: ${cookieError.message}`);
     }
     
-    // Navigate to root path to restart crawl
-    const rootUrl = context.start_url || new URL(currentUrl).origin;
-    await sendLog(jobId, 'info', `🔄 Navigating to root path: ${rootUrl}`);
+    // Navigate back to the intended URL (preferred) or fall back to root.
+    const fallbackRoot = context.start_url || new URL(currentUrl).origin;
+    const returnUrl = intendedUrl || fallbackRoot;
+    await sendLog(jobId, 'info', `🔄 Navigating after re-authentication: ${returnUrl}`);
     
     try {
-      await page.goto(rootUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.goto(returnUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(2000); // Wait for page to stabilize
       

@@ -1964,7 +1964,7 @@ const modeHandlers = {
         if (!isLoginJob && handleLoginRedirect && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail')) {
           try {
             const { handleLoginRedirect: handleRedirect } = await import('../login/login-redirect-handler.js');
-            const redirectResult = await handleRedirect(page, jobId, finalUrl, context, openaiClient, handleLoginRedirect);
+            const redirectResult = await handleRedirect(page, jobId, finalUrl, currentUrl, context, openaiClient, handleLoginRedirect);
             
             if (redirectResult && redirectResult.reauthenticated) {
               // Re-authentication successful, update context and continue from root
