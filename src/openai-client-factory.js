@@ -8,7 +8,8 @@ import axios from 'axios';
 import { getAIServiceToken, getAIServiceTokenInternal, invalidateAIServiceToken } from './ai-token-manager.js';
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
-// No default AI_SERVICE_URL - endpoint must come from context.llm_config.endpoint (set from helper config ai_services).
+// Prefer context.ai_services (injected by backend / helper config).
+// For local Docker runs, we also support env AI_SERVICE_URL as a fallback.
 const AI_SERVICE_TOKEN = process.env.RUNNER_TOKEN || process.env.AI_SERVICE_TOKEN;
 
 /**
@@ -32,7 +33,12 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
     const firstUrl = fromServices
       .map((s) => (s && s.url) ? String(s.url).trim() : '')
       .find(Boolean);
-    return firstUrl || '';
+    if (firstUrl) return firstUrl;
+
+    // Local dev convenience: allow container env to define the AI service base URL.
+    // This is referenced by backend job enrichment comments and localDockerTaskService.
+    const fromEnv = process.env.AI_SERVICE_URL && String(process.env.AI_SERVICE_URL).trim();
+    return fromEnv || '';
   })();
   if (!aiServiceUrl) {
     throw new Error('AI not configured. Add at least one AI service in the helper config (e.g. OpenAI or LM Studio URL).');
