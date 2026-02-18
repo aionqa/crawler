@@ -4552,6 +4552,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
             stepIdLower === 'page_summary' ||
             stepNameLower.includes('page intelligence') ||
             promptIdentifier === 'page_summary';
+          const isSeoAssistantStep =
+            stepIdLower === 'seo_analysis' ||
+            stepIdLower.includes('seo_assistant') ||
+            stepNameLower.includes('seo assistant') ||
+            stepNameLower.includes('seo analysis');
+          const isContentOptimizerStep =
+            stepIdLower === 'content_optimization_analysis' ||
+            stepIdLower.includes('content_optimizer') ||
+            stepNameLower.includes('content optimizer') ||
+            stepNameLower.includes('content optimization');
+
+          const isAiUnavailableError =
+            aiErrorText.includes('AI not configured') ||
+            aiErrorText.toLowerCase().includes('openai api key') ||
+            aiErrorText.toLowerCase().includes('api key') ||
+            aiErrorText.toLowerCase().includes('not provided');
 
           // Runner helpers can occasionally execute without local AI provider configured.
           // For login validation steps, provide a deterministic page-state fallback instead of hard-failing the job.
@@ -4606,6 +4622,195 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 'WORKFLOW-ANALYZER',
                 { status, current_url: currentUrl, has_email_field: hasEmailField, has_password_field: hasPasswordField, has_submit_like_button: hasSubmitLikeButton, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
               );
+            }
+            break;
+          }
+
+          // SEO/content analysis should still be testable locally even when no AI provider is configured.
+          if (isSeoAssistantStep && isAiUnavailableError) {
+            const html = String(safeStepPayload.page_content || safeStepPayload.pageContent || '');
+            const titleFromHtml = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').trim();
+            const metaDesc = (html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+            const canonicalHref = (html.match(/<link[^>]+rel=["']canonical["'][^>]*href=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+            const robotsMeta = (html.match(/<meta[^>]+name=["']robots["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+
+            const h1Count = (html.match(/<h1\\b/gi) || []).length;
+            const h2Count = (html.match(/<h2\\b/gi) || []).length;
+            const h3Count = (html.match(/<h3\\b/gi) || []).length;
+
+            const imgTags = html.match(/<img\\b[^>]*>/gi) || [];
+            const totalImages = imgTags.length;
+            let imagesWithAlt = 0;
+            for (const img of imgTags) {
+              if (/\\balt\\s*=\\s*[\"'][^\"']*[\"']/i.test(img)) imagesWithAlt++;
+            }
+            const imagesWithoutAlt = Math.max(0, totalImages - imagesWithAlt);
+
+            const linksArray = Array.isArray(safeStepPayload.playwright_analysis?.links)
+              ? safeStepPayload.playwright_analysis.links
+              : [];
+            let internalLinkCount = 0;
+            let externalLinkCount = 0;
+            let origin = '';
+            try { origin = new URL(String(safeStepPayload.page_url || '')).origin; } catch (_) { origin = ''; }
+            for (const link of linksArray) {
+              const href = String(link?.href || link?.url || '');
+              if (!href) continue;
+              try {
+                const resolved = new URL(href, String(safeStepPayload.page_url || '')).href;
+                const linkOrigin = new URL(resolved).origin;
+                if (origin && linkOrigin === origin) internalLinkCount++;
+                else externalLinkCount++;
+              } catch (_) {}
+            }
+
+            const hasSchema = /application\\/ld\\+json/i.test(html) || /\\bitemscope\\b/i.test(html);
+            const hasCanonical = Boolean(canonicalHref);
+            const hasRobotsMeta = Boolean(robotsMeta);
+
+            const title = (String(safeStepPayload.page_title || '') || titleFromHtml).trim();
+            const titleOptimal = title.length >= 20 && title.length <= 60;
+            const descriptionOptimal = metaDesc.length >= 70 && metaDesc.length <= 160;
+
+            const opportunities = [];
+            const pushOpp = (priority, issue, recommendation) => opportunities.push({ priority, issue, recommendation });
+            if (!title) pushOpp('high', 'Missing <title> tag', 'Add a unique, descriptive title (20-60 chars) including the primary keyword.');
+            else if (!titleOptimal) pushOpp('medium', 'Title length not optimal', 'Adjust title to ~20-60 characters; keep it unique and keyword-relevant.');
+            if (!metaDesc) pushOpp('high', 'Missing meta description', 'Add a compelling meta description (70-160 chars) with primary keyword + value proposition + CTA.');
+            else if (!descriptionOptimal) pushOpp('medium', 'Meta description length not optimal', 'Adjust meta description to ~70-160 characters; avoid truncation and duplicates.');
+            if (h1Count !== 1) pushOpp('high', 'Heading structure: expected exactly one H1', 'Ensure exactly one H1 that matches page intent; use H2/H3 for sections.');
+            if (imagesWithoutAlt > 0) pushOpp('medium', 'Images missing alt text', 'Add descriptive alt text to meaningful images; leave decorative images empty alt (alt=\"\").');
+            if (!hasCanonical) pushOpp('medium', 'Canonical tag not detected', 'Add a canonical URL to reduce duplicate-content risk, especially for query-string variants.');
+            if (!hasRobotsMeta) pushOpp('low', 'Robots meta not detected', 'Confirm indexability policy; add robots meta only if needed (avoid accidental noindex).');
+            if (!hasSchema) pushOpp('low', 'Structured data not detected', 'Add JSON-LD schema where relevant (Organization, Article, Product, FAQ, BreadcrumbList).');
+            if (internalLinkCount < 3) pushOpp('low', 'Few internal links detected', 'Add contextual internal links to related pages and ensure key pages are reachable within 2-3 clicks.');
+
+            const prioRank = { low: 0, medium: 1, high: 2 };
+            opportunities.sort((a, b) => (prioRank[a.priority] ?? 0) - (prioRank[b.priority] ?? 0));
+
+            let score = 100;
+            score -= !title ? 20 : (!titleOptimal ? 8 : 0);
+            score -= !metaDesc ? 20 : (!descriptionOptimal ? 8 : 0);
+            score -= (h1Count !== 1) ? 15 : 0;
+            score -= !hasCanonical ? 5 : 0;
+            score -= imagesWithoutAlt > 0 ? Math.min(10, imagesWithoutAlt) : 0;
+            score -= !hasSchema ? 3 : 0;
+            score = Math.max(0, Math.min(100, score));
+
+            aiResponse = {
+              seo_analysis: {
+                overall_score: score,
+                summary: 'Deterministic SEO analysis fallback (AI provider not configured on local runner).',
+                meta_tags: {
+                  title: title || 'Missing',
+                  description: metaDesc || 'Missing',
+                  title_optimal: Boolean(title) && titleOptimal,
+                  description_optimal: Boolean(metaDesc) && descriptionOptimal,
+                  title_recommendation: !title ? 'Add a unique title tag.' : 'Refine title to be concise and keyword-focused.',
+                  description_recommendation: !metaDesc ? 'Add a meta description.' : 'Refine description to improve CTR.'
+                },
+                headings: { h1_count: h1Count, h2_count: h2Count, h3_count: h3Count },
+                links: {
+                  internal_link_count: internalLinkCount,
+                  external_link_count: externalLinkCount,
+                  internal_link_recommendations: internalLinkCount < 3 ? ['Add a few contextual internal links to related pages.'] : []
+                },
+                images: {
+                  total_images: totalImages,
+                  images_with_alt: imagesWithAlt,
+                  images_without_alt: imagesWithoutAlt,
+                  recommendations: imagesWithoutAlt > 0 ? ['Add alt text to non-decorative images.'] : []
+                },
+                technical_seo: {
+                  has_canonical: hasCanonical,
+                  canonical_url: canonicalHref || '',
+                  has_robots_meta: hasRobotsMeta,
+                  robots_content: robotsMeta || '',
+                  has_schema_markup: hasSchema,
+                  schema_types: [],
+                  technical_recommendations: [
+                    !hasCanonical ? 'Add a canonical link tag.' : null,
+                    !hasSchema ? 'Add JSON-LD schema markup where applicable.' : null
+                  ].filter(Boolean)
+                },
+                keyword_analysis: {
+                  primary_keyword: '',
+                  secondary_keywords: [],
+                  recommendations: [
+                    'Pick a primary keyword/topic for this page and align title, H1, and intro copy to it.',
+                    'Avoid keyword stuffing; focus on intent coverage and clear headings.'
+                  ]
+                },
+                optimization_opportunities: opportunities
+              }
+            };
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI unavailable for ${step.id || step.name}; using deterministic SEO assistant fallback`, 'WORKFLOW-ANALYZER', { score, opportunities: opportunities.length });
+            }
+            break;
+          }
+
+          if (isContentOptimizerStep && isAiUnavailableError) {
+            const html = String(safeStepPayload.page_content || safeStepPayload.pageContent || '');
+            const visible = String(safeStepPayload.visible_text || workflowState.visibleText || '');
+            const words = visible.split(/\\s+/).filter(Boolean);
+            const wordCount = words.length;
+            const readingTimeMinutes = Math.max(0, Math.round((wordCount / 200) * 10) / 10);
+            const hasLists = /<ul\\b|<ol\\b/i.test(html) || /(^|\\n)\\s*[-*]\\s+\\S/m.test(visible);
+            const h1Count = (html.match(/<h1\\b/gi) || []).length;
+            const hasClearHierarchy = h1Count === 1;
+            const hasCTA = /(get started|sign up|signup|book a demo|contact sales|start free trial|try it|buy now|learn more)/i.test(visible);
+
+            const opportunities = [];
+            const pushOpp = (priority, issue, recommendation) => opportunities.push({ priority, issue, recommendation });
+            if (wordCount < 150) pushOpp('high', 'Very low word count', 'Add more explanatory content (benefits, how it works, FAQs) to help users and search engines.');
+            if (!hasCTA) pushOpp('medium', 'CTA not detected', 'Add a clear call-to-action near the top and bottom (primary and secondary CTA).');
+            if (!hasLists) pushOpp('low', 'Scannability: few lists detected', 'Use bullet lists for features, steps, or FAQs to improve scannability.');
+            if (!hasClearHierarchy) pushOpp('high', 'Heading hierarchy unclear', 'Ensure exactly one H1 and use H2/H3 sections to structure the content.');
+
+            const prioRank = { low: 0, medium: 1, high: 2 };
+            opportunities.sort((a, b) => (prioRank[a.priority] ?? 0) - (prioRank[b.priority] ?? 0));
+
+            let score = 100;
+            score -= wordCount < 150 ? 25 : (wordCount < 300 ? 10 : 0);
+            score -= !hasCTA ? 10 : 0;
+            score -= !hasLists ? 5 : 0;
+            score -= !hasClearHierarchy ? 15 : 0;
+            score = Math.max(0, Math.min(100, score));
+
+            aiResponse = {
+              content_analysis: {
+                overall_score: score,
+                summary: 'Deterministic content optimization fallback (AI provider not configured on local runner).',
+                readability: {
+                  score: Math.max(0, Math.min(100, score)),
+                  reading_level: 'General',
+                  reading_time_minutes: readingTimeMinutes,
+                  word_count: wordCount,
+                  issues: [ wordCount < 150 ? 'Very short page copy' : null ].filter(Boolean),
+                  recommendations: [ wordCount < 300 ? 'Add more explanatory content and FAQs.' : null ].filter(Boolean)
+                },
+                engagement: {
+                  hook_quality: wordCount >= 150 ? 0.6 : 0.3,
+                  scannability_score: hasLists ? 0.7 : 0.45,
+                  call_to_action_presence: Boolean(hasCTA),
+                  call_to_action_quality: hasCTA ? 0.6 : 0.2
+                },
+                conversion_optimization: {
+                  value_proposition_clarity: wordCount >= 150 ? 0.55 : 0.25,
+                  trust_signals_count: 0,
+                  social_proof_presence: /(reviews|testimonials|trusted by|customers|case study)/i.test(visible)
+                },
+                content_structure: {
+                  has_clear_hierarchy: hasClearHierarchy,
+                  use_of_lists: Boolean(hasLists),
+                  content_flow_score: hasClearHierarchy ? 0.6 : 0.35
+                },
+                optimization_opportunities: opportunities.map(o => ({ priority: o.priority, issue: o.issue, recommendation: o.recommendation }))
+              }
+            };
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI unavailable for ${step.id || step.name}; using deterministic content optimizer fallback`, 'WORKFLOW-ANALYZER', { score, word_count: wordCount, opportunities: opportunities.length });
             }
             break;
           }
