@@ -4498,20 +4498,29 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 cache_expires_at: cached.cache_expires_at || null
               };
               console.log(`✅ [SCRIPTS-CACHE] Cache HIT for ${step.id} (${cacheBucket})`);
-              if (jobId && this.backendLogger) {
-                await this.backendLogger.appendJobLog(
-                  jobId,
-                  'info',
-                  `✅ [SCRIPTS-CACHE] Reused cached script for ${step.id}`,
-                  'WORKFLOW-ANALYZER',
-                  {
-                    step_id: step.id,
-                    cache_bucket: cacheBucket,
-                    cache_key: cacheKey,
-                    cached_script_id: cached._id,
-                    cache_expires_at: cached.cache_expires_at || null
-                  }
-                );
+              // Always report cache hits to backend logs so scripts are discoverable immediately.
+              if (jobId) {
+                try {
+                  await axios.post(
+                    `${this.backendUrl}/api/logs/jobs/append`,
+                    {
+                      jobId: String(jobId),
+                      level: 'info',
+                      message: `✅ [SCRIPTS-CACHE] Reused cached script -> /scripts/${cached._id}`,
+                      component: 'SCRIPTS',
+                      metadata: {
+                        step_id: step.id,
+                        cache_bucket: cacheBucket,
+                        cache_key: cacheKey,
+                        cached_script_id: cached._id,
+                        cache_expires_at: cached.cache_expires_at || null
+                      }
+                    },
+                    { headers: this.getAuthHeaders(), timeout: 8000 }
+                  );
+                } catch {
+                  // ignore
+                }
               }
             } else {
               console.log(`ℹ️ [SCRIPTS-CACHE] Cache MISS for ${step.id} (${cacheBucket})`);
@@ -17161,12 +17170,60 @@ IMPORTANT OUTPUT REQUIREMENTS:
    */
   async upsertScriptToCollection(scriptCode, parsedResponse, step, workflowState, jobId, stepContext = null) {
     try {
+      const appendJobLog = async (level, message, metadata = {}) => {
+        if (!jobId) return;
+        try {
+          await axios.post(
+            `${this.backendUrl}/api/logs/jobs/append`,
+            {
+              jobId: String(jobId),
+              level: level || 'info',
+              message,
+              component: 'SCRIPTS',
+              metadata
+            },
+            { headers: this.getAuthHeaders(), timeout: 8000 }
+          );
+        } catch {
+          // Don't block crawling if log append fails.
+        }
+      };
+
       // Get page_id and project_id from workflowState or context
       const pageId = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
       const projectId = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
+
+      // Compute "where we would save" deterministically for visibility/debugging.
+      const currentJourneyForKey =
+        workflowState.currentLeg ||
+        workflowState.currentJourney ||
+        workflowState.legsToExecute?.[workflowState.currentLegIndex] ||
+        null;
+      const journeyIdForKey = currentJourneyForKey?.journey_id || currentJourneyForKey?.leg_id || currentJourneyForKey?.id;
+      const actionIdForKey = currentJourneyForKey?.action_id || stepContext?.action_id;
+      const cacheBucket = `workflow-step:${step.id || step.name || 'unknown'}`;
+      const cacheKey = [
+        cacheBucket,
+        projectId ? String(projectId) : 'missing-project-id',
+        pageId ? String(pageId) : 'missing-page-id',
+        journeyIdForKey ? String(journeyIdForKey) : '',
+        actionIdForKey ? String(actionIdForKey) : ''
+      ].join(':');
       
       if (!pageId || !projectId) {
         console.warn(`⚠️ Cannot upsert script: missing pageId or projectId (pageId: ${pageId}, projectId: ${projectId})`);
+        await appendJobLog(
+          'warn',
+          `⚠️ [SCRIPTS] Script generated but NOT persisted (missing project_id/page_id). Would save to /scripts with cache_key=${cacheKey}`,
+          {
+            step_id: step?.id || null,
+            step_name: step?.name || null,
+            project_id: projectId || null,
+            page_id: pageId || null,
+            cache_bucket: cacheBucket,
+            cache_key: cacheKey
+          }
+        );
         return;
       }
 
@@ -17174,14 +17231,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.legsToExecute?.[workflowState.currentLegIndex];
       const journeyId = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id;
       const actionId = currentJourney?.action_id || stepContext?.action_id;
-      const cacheBucket = `workflow-step:${step.id || step.name || 'unknown'}`;
-      const cacheKey = [
-        cacheBucket,
-        String(projectId),
-        String(pageId),
-        journeyId ? String(journeyId) : '',
-        actionId ? String(actionId) : ''
-      ].join(':');
 
       // Build script name and description
       const scriptName = parsedResponse.name || 
@@ -17230,7 +17279,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
       );
 
       if (createOrUpdateRes?.data?._id) {
-        console.log(`✅ Upserted script in scripts collection: ${createOrUpdateRes.data._id}`);
+        const savedId = String(createOrUpdateRes.data._id);
+        console.log(`✅ Upserted script in scripts collection: ${savedId}`);
+        await appendJobLog(
+          'info',
+          `💾 [SCRIPTS] Saved script to /scripts/${savedId} (cache TTL applies)`,
+          {
+            script_id: savedId,
+            script_name: scriptName,
+            project_id: String(projectId),
+            page_id: String(pageId),
+            cache_bucket: cacheBucket,
+            cache_key: cacheKey,
+            cache_expires_at: createOrUpdateRes.data.cache_expires_at || null
+          }
+        );
       }
     } catch (error) {
       console.warn(`⚠️ Error upserting script to collection: ${error.message}`);
