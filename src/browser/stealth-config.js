@@ -146,6 +146,35 @@ export async function injectStealthScripts(page) {
       }
       return originalToString.call(this);
     };
+
+    // Compatibility polyfill:
+    // Some app bundles assume MediaQueryList supports addEventListener/removeEventListener.
+    // In some Chromium environments only addListener/removeListener exist, which can crash SPAs.
+    // Provide a minimal mapping (only for 'change') so code keeps running.
+    try {
+      if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+        const testMql = window.matchMedia('(min-width: 0px)');
+        if (testMql && typeof testMql.addEventListener !== 'function' && typeof testMql.addListener === 'function') {
+          const proto = Object.getPrototypeOf(testMql);
+          if (proto && typeof proto.addEventListener !== 'function') {
+            proto.addEventListener = function(type, listener) {
+              try {
+                if (type === 'change') return this.addListener(listener);
+              } catch (_) {}
+            };
+          }
+          if (proto && typeof proto.removeEventListener !== 'function' && typeof proto.removeListener === 'function') {
+            proto.removeEventListener = function(type, listener) {
+              try {
+                if (type === 'change') return this.removeListener(listener);
+              } catch (_) {}
+            };
+          }
+        }
+      }
+    } catch (_) {
+      // ignore
+    }
   });
 
   // Add realistic mouse and keyboard behavior
