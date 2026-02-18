@@ -4664,7 +4664,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
               } catch (_) {}
             }
 
-            const hasSchema = /application\\/ld\\+json/i.test(html) || /\\bitemscope\\b/i.test(html);
+            // NOTE: In a JS regex literal, escaping the slash must be `\/` (not `\\/`),
+            // otherwise the literal terminates early and the remainder is parsed as flags.
+            const hasSchema = /application\/ld\+json/i.test(html) || /\bitemscope\b/i.test(html);
             const hasCanonical = Boolean(canonicalHref);
             const hasRobotsMeta = Boolean(robotsMeta);
 
@@ -6392,6 +6394,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
             });
           }
           // Non-fatal: allow crawl workflow to continue even if accessibility persistence fails.
+        }
+      }
+
+      // Make specialized AI analysis available to later `save-data` steps.
+      // Some workflows key their persistence logic off `workflowState.*Analysis`.
+      if (parsedResponse && typeof parsedResponse === 'object') {
+        if (parsedResponse.seo_analysis) {
+          workflowState.seoAnalysis = parsedResponse.seo_analysis;
+          if (workflowState.context) workflowState.context.seoAnalysis = parsedResponse.seo_analysis;
+        }
+        if (parsedResponse.content_analysis) {
+          workflowState.contentAnalysis = parsedResponse.content_analysis;
+          if (workflowState.context) workflowState.context.contentAnalysis = parsedResponse.content_analysis;
+        }
+        if (parsedResponse.accessibility_analysis) {
+          workflowState.accessibilityAnalysis = parsedResponse.accessibility_analysis;
+          if (workflowState.context) workflowState.context.accessibilityAnalysis = parsedResponse.accessibility_analysis;
         }
       }
 
