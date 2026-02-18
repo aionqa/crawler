@@ -1059,6 +1059,25 @@ async function detectCaptcha(page, jobId) {
         });
         continue;
       }
+
+      // Heuristic: Some sites label the badge container generically as "captcha" (e.g. div[class*="captcha"])
+      // even though it's just the passive badge. Treat tiny widgets as non-blocking unless it's a real input/form.
+      const selectorIsActionableCaptcha =
+        selector.startsWith('input') ||
+        selector.startsWith('form') ||
+        selector.includes('#captcha-token') ||
+        selector.includes('captcha_token') ||
+        selector.includes('mailpoet');
+      if (!selectorIsActionableCaptcha && selector.includes('captcha') && bbox.width <= 270 && bbox.height <= 70) {
+        await sendLog(jobId, 'info', `ℹ️ Small captcha-labeled widget looks like passive badge (non-blocking)`, {
+          captcha_type: 'captcha badge',
+          selector,
+          page_url: page.url(),
+          action: 'captcha_badge_widget_detected',
+          bbox
+        });
+        continue;
+      }
         const captchaType = selector.includes('mailpoet') ? 'Mailpoet Captcha' :
                            selector.includes('recaptcha') ? 'reCAPTCHA' :
                            selector.includes('hcaptcha') ? 'hCaptcha' :
