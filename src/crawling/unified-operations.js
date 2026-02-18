@@ -1018,7 +1018,10 @@ async function detectCaptcha(page, jobId) {
       'div[id*="captcha"]',
       'div[class*="captcha"]',
       'img[src*="captcha"]',
-      'input[name*="captcha"]'
+      'input[name*="captcha"]',
+      // Some apps expose a hidden token field that must be populated (e.g. FMClarity)
+      '#captcha-token',
+      'input[name="captcha_token"]'
     ];
     
     for (const selector of captchaIndicators) {
@@ -1131,6 +1134,33 @@ async function handleCaptcha(page, jobId, captchaInfo) {
       }
     } catch (interactionError) {
       console.warn(`[CAPTCHA] Interaction attempt warning: ${interactionError.message}`);
+    }
+
+    // Some apps (including SSO wrappers) require a hidden captcha token field to be populated.
+    // This isn't a "solver" but we can wait for the token to appear (best-effort).
+    try {
+      if (captchaInfo.selector === '#captcha-token' || captchaInfo.selector === 'input[name="captcha_token"]') {
+        await sendLog(jobId, 'info', `⏳ Waiting for captcha token field to populate...`, {
+          action: 'captcha_token_wait',
+          selector: captchaInfo.selector
+        });
+        for (let i = 0; i < 30; i++) {
+          const token = await page.$eval(
+            captchaInfo.selector,
+            (el) => (el && 'value' in el ? String(el.value || '') : ''),
+          ).catch(() => '');
+          if (token && token.trim().length > 10) {
+            await sendLog(jobId, 'info', `✅ Captcha token populated (${token.trim().length} chars)`, {
+              action: 'captcha_token_ready',
+              selector: captchaInfo.selector
+            });
+            break;
+          }
+          await page.waitForTimeout(500);
+        }
+      }
+    } catch (tokenWaitError) {
+      console.warn(`[CAPTCHA] Token wait warning: ${tokenWaitError.message}`);
     }
     
     // Wait longer for potential automatic solving or manual intervention
@@ -4643,8 +4673,16 @@ async function safeSetSessionStorage(page, tokens) {
   }
 }
 
-// Export safe storage functions for use in other modules
-export { safeGetLocalStorage, safeGetSessionStorage, safeSetLocalStorage, safeSetSessionStorage, takeScreenshot };
+// Export safe storage + small shared utilities for use in other modules
+export {
+  safeGetLocalStorage,
+  safeGetSessionStorage,
+  safeSetLocalStorage,
+  safeSetSessionStorage,
+  takeScreenshot,
+  detectCaptcha,
+  handleCaptcha
+};
 
 /**
  * Collect all cookies from current page and send to backend

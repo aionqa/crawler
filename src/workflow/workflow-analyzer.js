@@ -7823,6 +7823,70 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
         console.warn(`⚠️ Failed to capture before screenshot: ${screenshotError.message}`);
       }
 
+      // If a captcha is present, capture a dedicated screenshot and attempt a best-effort solve.
+      // This makes it obvious in job logs what blocked login (user requested explicit evidence).
+      const captureCaptchaEvidence = async (screenshotType, note, captchaInfo = null) => {
+        try {
+          if (!jobId) return null;
+          const shot = await page.screenshot({ fullPage: true, type: 'png' });
+          const presigned = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
+            type: 'screenshot',
+            jobId: jobId,
+            contentType: 'image/png'
+          }, {
+            timeout: 10000,
+            headers: this.getAuthHeaders()
+          });
+          const { url: presignedUrl, key, publicUrl } = presigned.data || {};
+          if (presignedUrl && key) {
+            await axios.put(presignedUrl, shot, {
+              headers: { 'Content-Type': 'image/png' },
+              maxBodyLength: Infinity,
+              maxContentLength: Infinity,
+              timeout: 30000
+            });
+            await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+              jobId: jobId,
+              level: 'warn',
+              message: `🧩 CAPTCHA EVIDENCE: ${note}`,
+              component: 'CAPTCHA',
+              metadata: {
+                screenshot_type: screenshotType,
+                screenshot_key: key,
+                screenshot_file_id: key,
+                screenshot_url: publicUrl || null,
+                is_screenshot: true,
+                isScreenshot: true,
+                step_id: step.id,
+                step_name: step.name,
+                page_url: page.url(),
+                captcha_type: captchaInfo?.type || null,
+                captcha_selector: captchaInfo?.selector || null
+              }
+            }, { headers: this.getAuthHeaders(), timeout: 10000 });
+            return { key, publicUrl: publicUrl || null };
+          }
+        } catch (e) {
+          // never fail login because evidence logging failed
+          console.warn(`[CAPTCHA] Failed to capture evidence screenshot: ${e.message}`);
+        }
+        return null;
+      };
+
+      try {
+        if (jobId) {
+          const unifiedOps = await import('../crawling/unified-operations.js');
+          const captchaInfo = await unifiedOps.detectCaptcha(page, jobId);
+          if (captchaInfo?.detected) {
+            await captureCaptchaEvidence('captcha_detected_before_script', 'Captcha detected before executing login script', captchaInfo);
+            await unifiedOps.handleCaptcha(page, jobId, captchaInfo);
+            await captureCaptchaEvidence('captcha_after_attempt', 'After captcha handling attempt', captchaInfo);
+          }
+        }
+      } catch (captchaGuardError) {
+        console.warn(`[CAPTCHA] Captcha detection/handling guard failed: ${captchaGuardError.message}`);
+      }
+
       // Get visible text from workflow state (not from undefined resolvedVisibleText)
       const visibleText = workflowState.visible_text || 
                          workflowState.variablePool?.page?.visible_text?.value ||
@@ -8116,7 +8180,7 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             await pageObj.waitForTimeout(500);
             
             // Import takeScreenshot function
-            const unifiedOps = await import('../../crawling/unified-operations.js');
+            const unifiedOps = await import('../crawling/unified-operations.js');
             
             // Capture screenshot with action context
             const actionDisplay = methodName + (args.length > 0 ? `(${typeof args[0] === 'string' ? args[0].substring(0, 50) : '...'})` : '()');
