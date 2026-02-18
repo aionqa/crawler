@@ -9731,6 +9731,67 @@ IMPORTANT OUTPUT REQUIREMENTS:
     return s;
   }
 
+  sanitizeAiPlaywrightScript(script) {
+    if (!script || typeof script !== 'string') return script;
+
+    let s = script;
+
+    // LLMs sometimes emit a broken fragment of an ensureChecked helper at top-level,
+    // which crashes at runtime with ReferenceError: selector/shouldBeChecked.
+    // Remove the fragment if detected (we inject a proper helper instead).
+    const hasBrokenEnsureCheckedFragment =
+      /await\s+page\.click\(selector\)\s*;/.test(s) &&
+      /\bshouldBeChecked\b/.test(s) &&
+      !/\b(function\s+ensureChecked|const\s+ensureChecked|let\s+ensureChecked)\b/.test(s);
+
+    if (hasBrokenEnsureCheckedFragment) {
+      s = s.replace(
+        /try\s*\{\s*await\s+page\.click\(selector\)\s*;\s*\}\s*catch\s*\(\s*e\s*\)\s*\{\s*await\s+page\.click\(\s*'selector,\s*\{\s*force:\s*true\s*\}\s*'\s*\)\s*;\s*\}\s*const\s+isChecked\s*=\s*await\s+page\.isChecked\(selector\)\s*;\s*if\s*\(\s*isChecked\s*!==\s*shouldBeChecked\s*\)\s*\{\s*await\s+page\.click\(selector\)\s*;\s*\}\s*/m,
+        ''
+      );
+    }
+
+    const definesSafeClick = /\b(function\s+safeClick|const\s+safeClick|let\s+safeClick)\b/.test(s);
+    const definesEnsureChecked = /\b(function\s+ensureChecked|const\s+ensureChecked|let\s+ensureChecked)\b/.test(s);
+    const usesSafeClick = /\bsafeClick\s*\(/.test(s);
+    const usesEnsureChecked = /\bensureChecked\s*\(/.test(s);
+
+    if ((usesSafeClick && !definesSafeClick) || (usesEnsureChecked && !definesEnsureChecked) || hasBrokenEnsureCheckedFragment) {
+      const prelude = `
+const safeClick = async (selectorOrLocator, options = {}) => {
+  try {
+    if (typeof selectorOrLocator === 'string') {
+      await page.click(selectorOrLocator, options);
+    } else if (selectorOrLocator && typeof selectorOrLocator.click === 'function') {
+      await selectorOrLocator.click(options);
+    } else {
+      throw new Error('safeClick: invalid target');
+    }
+  } catch (e) {
+    if (typeof selectorOrLocator === 'string') {
+      await page.click(selectorOrLocator, { ...options, force: true });
+    } else if (selectorOrLocator && typeof selectorOrLocator.click === 'function') {
+      await selectorOrLocator.click({ ...options, force: true });
+    } else {
+      throw e;
+    }
+  }
+};
+
+const ensureChecked = async (selector, shouldBeChecked = true) => {
+  const isChecked = await page.isChecked(selector).catch(() => false);
+  if (isChecked !== shouldBeChecked) {
+    await page.click(selector, { force: true }).catch(() => page.click(selector));
+  }
+};
+`.trim();
+
+      s = `${prelude}\n\n${s}`;
+    }
+
+    return s;
+  }
+
   /**
    * Execute code step (static code)
    */
@@ -10473,6 +10534,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     // Clean the code to remove markdown code blocks and function declarations
     code = this.cleanScript(code);
     code = this.stripTypeScriptArtifacts(code);
+    code = this.sanitizeAiPlaywrightScript(code);
     console.log(`🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
     
     if (!code || code.trim().length === 0) {
