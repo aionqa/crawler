@@ -2022,7 +2022,28 @@ const modeHandlers = {
         let finalUrl = currentUrl;
         if (currentPageUrl !== currentUrl) {
           try {
-            await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            // Capture response status and retry transient 5xx (common with CDNs returning 503).
+            let response = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            let status = response ? response.status() : null;
+            if (status && status >= 500) {
+              await sendLog(jobId, 'warn', `⚠️ Navigation returned HTTP ${status} for ${currentUrl} — retrying once after backoff...`, {
+                component: 'CRAWLER-TEXT',
+                action: 'nav_retry_5xx',
+                url: currentUrl,
+                status
+              });
+              await page.waitForTimeout(3000);
+              response = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              status = response ? response.status() : null;
+              if (status && status >= 500) {
+                await sendLog(jobId, 'warn', `⚠️ Navigation still HTTP ${status} after retry`, {
+                  component: 'CRAWLER-TEXT',
+                  action: 'nav_retry_5xx_failed',
+                  url: currentUrl,
+                  status
+                });
+              }
+            }
             await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
               console.warn('Page DOM not fully loaded after 30s, continuing with analysis');
             });
@@ -5940,6 +5961,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         let consoleCount = 0;
         let pageErrorCount = 0;
         let requestFailCount = 0;
+        let responseCount = 0;
         const maxEach = 25;
 
         page.on('console', (msg) => {
@@ -5980,6 +6002,33 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
               method: req.method(),
               resource_type: req.resourceType(),
               page_url: (() => { try { return page.url(); } catch { return null; } })()
+            });
+          } catch (_) {
+            // ignore
+          }
+        });
+
+        // Log navigation/document responses (especially 5xx/4xx) to debug cases where screenshots show
+        // CDN errors (503) but we have no failed-request event (since response still exists).
+        page.on('response', (resp) => {
+          try {
+            if (responseCount >= maxEach) return;
+            const req = resp.request();
+            if (!req || !req.isNavigationRequest || !req.isNavigationRequest()) return;
+            if (req.resourceType && req.resourceType() !== 'document') return;
+            const status = resp.status();
+            if (status < 400) return;
+            responseCount++;
+            const headers = resp.headers ? resp.headers() : {};
+            void sendLog(jobId, status >= 500 ? 'warn' : 'warn', `📡 [NAV RESPONSE] ${status} ${resp.url()}`, {
+              component: 'BROWSER-DIAGNOSTICS',
+              status,
+              url: resp.url(),
+              server: headers?.server || null,
+              via: headers?.via || null,
+              'x-cache': headers?.['x-cache'] || null,
+              'cf-ray': headers?.['cf-ray'] || null,
+              'cf-cache-status': headers?.['cf-cache-status'] || null
             });
           } catch (_) {
             // ignore
