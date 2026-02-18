@@ -891,6 +891,8 @@ async function executeCrawlJob(job, streamInterval) {
     ...rawContext,
     execute_workflow: executeWorkflowFlag,
     single_action_only: Boolean(singleActionOnlyValue),
+    // Ensure redirect handling config is always present for unified-operations
+    handle_login_redirect: handleLoginRedirect,
     // CRITICAL: Ensure credentials are explicitly set in normalizedContext
     credentials: rawContext.credentials || (extractedCreds && extractedCreds.username !== 'MISSING' ? extractedCreds : undefined),
     // CRITICAL: For login jobs, ensure jobType is set in context so login redirect handler can skip them
@@ -902,7 +904,8 @@ async function executeCrawlJob(job, streamInterval) {
     options: {
       ...mergedOptions,
       execute_workflow: executeWorkflowFlag,
-      single_action_only: Boolean(singleActionOnlyValue)
+      single_action_only: Boolean(singleActionOnlyValue),
+      handle_login_redirect: handleLoginRedirect
     }
   };
   
