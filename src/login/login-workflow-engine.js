@@ -1,5 +1,6 @@
 import WorkflowAnalyzer from '../workflow/workflow-analyzer.js';
 import { AIConversationLogger } from '../../shared/ai-conversation-logger.js';
+import * as backendLogger from '../backend-logger.js';
 
 /**
  * Login Workflow Engine
@@ -13,6 +14,36 @@ import { AIConversationLogger } from '../../shared/ai-conversation-logger.js';
  */
 export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKey, workflowContext) {
   const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+
+  // Capture browser diagnostics to explain "client-side exception" screenshots.
+  // Keep best-effort and bounded to avoid log spam.
+  try {
+    if (page && !page.__aionqaDiagnosticsAttached) {
+      page.__aionqaDiagnosticsAttached = true;
+      let consoleCount = 0;
+      const maxConsole = 60;
+
+      page.on('pageerror', async (err) => {
+        try {
+          const msg = (err && (err.stack || err.message)) ? String(err.stack || err.message) : String(err);
+          await backendLogger.appendJobLog(jobId, 'error', `🧨 [PAGEERROR] ${msg}`.slice(0, 4000), 'BROWSER');
+        } catch (_) {}
+      });
+
+      page.on('console', async (msg) => {
+        try {
+          if (consoleCount >= maxConsole) return;
+          const type = msg.type();
+          if (!['error', 'warning'].includes(type)) return;
+          consoleCount++;
+          const text = msg.text();
+          await backendLogger.appendJobLog(jobId, type === 'error' ? 'error' : 'warn', `🗯️ [CONSOLE.${type}] ${text}`.slice(0, 2000), 'BROWSER');
+        } catch (_) {}
+      });
+    }
+  } catch (_) {
+    // never fail login because diagnostics hooking failed
+  }
 
   const context = (workflowContext && typeof workflowContext === 'object' && !Array.isArray(workflowContext))
     ? { ...workflowContext }

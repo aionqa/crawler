@@ -200,6 +200,25 @@ export async function handleLoginRedirect(
     await sendLog(jobId, 'info', `🍪 In-session login completed (success=${!!loginExec?.success}); cookies=${latestCookies.length}`, {
       action: 'in_session_login_complete'
     });
+
+    // If we land on a Next.js error shell (common when a chunk fails to load transiently),
+    // do one hard reload to recover and avoid "Application error: a client-side exception..." screenshots.
+    try {
+      const htmlId = await page.evaluate(() => document?.documentElement?.id || '').catch(() => '');
+      const bodyText = await page.textContent('body').catch(() => '');
+      const isNextError = htmlId === '__next_error__' || /client-side exception/i.test(String(bodyText || ''));
+      if (isNextError) {
+        await sendLog(jobId, 'warn', `♻️ Detected Next.js error page after login; reloading once to recover`, {
+          action: 'nextjs_error_reload',
+          html_id: htmlId,
+          page_url: page.url()
+        });
+        await page.reload({ waitUntil: 'networkidle', timeout: 45000 }).catch(() => page.reload().catch(() => {}));
+        await page.waitForTimeout(1500);
+      }
+    } catch (_) {
+      // ignore
+    }
     
     // Navigate back to the intended URL (preferred) or fall back to root.
     const fallbackRoot = context.start_url || new URL(currentUrl).origin;
