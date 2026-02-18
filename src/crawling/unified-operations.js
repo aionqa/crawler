@@ -3543,7 +3543,10 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
   try {
     await sendLog(jobId, 'info', '🔗 Extracting all links from page (comprehensive scan)...');
     
-    const links = await page.$$eval('a[href], area[href], [data-href], [data-url]', (elements, baseUrl, allowSubdomains) => {
+    // Playwright's $$eval only supports passing a single argument; wrap inputs.
+    const links = await page.$$eval('a[href], area[href], [data-href], [data-url]', (elements, opts) => {
+      const baseUrl = opts?.baseUrl || '';
+      const allowSubdomains = Boolean(opts?.allowSubdomains);
       const linkSet = new Set();
       const links = [];
 
@@ -3609,7 +3612,7 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
       });
       
       return links;
-    }, baseUrl, allowSubdomains);
+    }, { baseUrl, allowSubdomains });
     
     const normalizeUrlForDedup = (value) => {
       try {
