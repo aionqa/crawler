@@ -246,6 +246,88 @@ class WorkflowExecutor {
   }
 
   /**
+   * Resolve script_code via script_id from backend.
+   * This lets workflows store script references (single source of truth) and makes cache clearing/deletion effective.
+   */
+  async fetchScriptCodeById(scriptId, jobId, source = 'unknown') {
+    if (!scriptId) return null;
+    const id = String(scriptId);
+    try {
+      const res = await axios.get(
+        `${this.backendUrl}/api/scripts/${encodeURIComponent(id)}`,
+        {
+          headers: this.getAuthHeaders(),
+          timeout: 10000
+        }
+      );
+
+      const script = res?.data || null;
+      const code = script?.script_code;
+      if (!code || typeof code !== 'string' || code.trim().length === 0) {
+        return null;
+      }
+
+      // Enforce TTL semantics: only reuse cached scripts if not expired.
+      if (script?.cache_expires_at) {
+        const expiresAt = new Date(script.cache_expires_at);
+        if (!Number.isNaN(expiresAt.getTime()) && expiresAt <= new Date()) {
+          if (jobId && this.backendLogger?.appendJobLog) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'info',
+              `ℹ️ [SCRIPTS-CACHE] script_id exists but cache expired; will regenerate`,
+              'WORKFLOW-EXECUTOR',
+              { script_id: id, cache_expires_at: script.cache_expires_at, source }
+            );
+          }
+          return null;
+        }
+      }
+
+      if (jobId && this.backendLogger?.appendJobLog) {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'info',
+          `✅ [SCRIPTS-CACHE] Reused script by script_id`,
+          'WORKFLOW-EXECUTOR',
+          { script_id: id, cache_expires_at: script?.cache_expires_at || null, source }
+        );
+      }
+
+      return code;
+    } catch (e) {
+      if (jobId && this.backendLogger?.appendJobLog) {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'warn',
+          `⚠️ [SCRIPTS-CACHE] Failed to load script by script_id (${source}): ${e.message}`,
+          'WORKFLOW-EXECUTOR',
+          { script_id: id }
+        );
+      }
+      return null;
+    }
+  }
+
+  async resolvePlaywrightScriptFromScriptIds(leg, jobId) {
+    if (!leg) return null;
+
+    const legScriptId = leg.script_id || leg.scriptId || null;
+    const fromLeg = await this.fetchScriptCodeById(legScriptId, jobId, 'leg');
+    if (fromLeg) return fromLeg;
+
+    // Some workflows attach scripts at action level instead of leg level.
+    const actions = Array.isArray(leg.actions) ? leg.actions : [];
+    for (const action of actions) {
+      const actionScriptId = action?.script_id || action?.scriptId || null;
+      const fromAction = await this.fetchScriptCodeById(actionScriptId, jobId, 'action');
+      if (fromAction) return fromAction;
+    }
+
+    return null;
+  }
+
+  /**
    * Find any AI prompt step with embedded template
    * Prompts are embedded directly in workflow step configs
    */
@@ -786,6 +868,12 @@ class WorkflowExecutor {
         // Step 3: Ask OpenAI for Playwright script with FULL context
         let playwrightScript = leg.playwright_script;
         
+        // Prefer existing scripts by script_id (persisted during analysis or previous runs).
+        // This enables: "show scripts in Scripts page", reuse if cache not expired, and clean deletion/invalidation.
+        if (!playwrightScript) {
+          playwrightScript = await this.resolvePlaywrightScriptFromScriptIds(leg, jobId);
+        }
+
         if (!playwrightScript) {
           // No previous logs - single attempt only
           const previousLogs = '';
