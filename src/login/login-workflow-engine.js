@@ -22,11 +22,31 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
       page.__aionqaDiagnosticsAttached = true;
       let consoleCount = 0;
       const maxConsole = 60;
+      let netCount = 0;
+      const maxNet = 40;
+
+      const redact = (value) => {
+        try {
+          let s = String(value || '');
+          // Redact common token query params
+          s = s.replace(/(accessToken=)[^&\\s]+/gi, '$1[REDACTED]');
+          s = s.replace(/(token=)[^&\\s]+/gi, '$1[REDACTED]');
+          s = s.replace(/(id_token=)[^&\\s]+/gi, '$1[REDACTED]');
+          s = s.replace(/(refresh_token=)[^&\\s]+/gi, '$1[REDACTED]');
+          // Redact JWT-like strings
+          s = s.replace(/eyJ[a-zA-Z0-9_\\-]{20,}\\.[a-zA-Z0-9_\\-]{10,}\\.[a-zA-Z0-9_\\-]{10,}/g, '[REDACTED_JWT]');
+          // Redact bearer tokens
+          s = s.replace(/\\bBearer\\s+[a-zA-Z0-9._\\-]{20,}\\b/g, 'Bearer [REDACTED]');
+          return s;
+        } catch (_) {
+          return '[REDACTED]';
+        }
+      };
 
       page.on('pageerror', async (err) => {
         try {
           const msg = (err && (err.stack || err.message)) ? String(err.stack || err.message) : String(err);
-          await backendLogger.appendJobLog(jobId, 'error', `🧨 [PAGEERROR] ${msg}`.slice(0, 4000), 'BROWSER');
+          await backendLogger.appendJobLog(jobId, 'error', `🧨 [PAGEERROR] ${redact(msg)}`.slice(0, 4000), 'BROWSER');
         } catch (_) {}
       });
 
@@ -37,7 +57,36 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
           if (!['error', 'warning'].includes(type)) return;
           consoleCount++;
           const text = msg.text();
-          await backendLogger.appendJobLog(jobId, type === 'error' ? 'error' : 'warn', `🗯️ [CONSOLE.${type}] ${text}`.slice(0, 2000), 'BROWSER');
+          await backendLogger.appendJobLog(jobId, type === 'error' ? 'error' : 'warn', `🗯️ [CONSOLE.${type}] ${redact(text)}`.slice(0, 2000), 'BROWSER');
+        } catch (_) {}
+      });
+
+      // Network failures / blocked resources frequently explain Next.js "__next_error__".
+      page.on('requestfailed', async (req) => {
+        try {
+          if (netCount >= maxNet) return;
+          netCount++;
+          const url = redact(req.url());
+          const method = req.method();
+          const rt = req.resourceType();
+          const err = req.failure()?.errorText || 'requestfailed';
+          await backendLogger.appendJobLog(jobId, 'warn', `🌐 [REQUESTFAILED] ${method} ${rt} ${url} :: ${redact(err)}`.slice(0, 2000), 'BROWSER');
+        } catch (_) {}
+      });
+
+      page.on('response', async (resp) => {
+        try {
+          const status = resp.status();
+          if (status < 400) return;
+          if (netCount >= maxNet) return;
+          // Focus on likely-to-break-app resources
+          const req = resp.request();
+          const rt = req.resourceType();
+          if (!['script', 'xhr', 'fetch', 'document'].includes(rt)) return;
+          netCount++;
+          const url = redact(resp.url());
+          const ct = resp.headers()?.['content-type'] || '';
+          await backendLogger.appendJobLog(jobId, 'warn', `🚫 [HTTP ${status}] ${rt} ${url} (content-type=${redact(ct)})`.slice(0, 2000), 'BROWSER');
         } catch (_) {}
       });
     }
