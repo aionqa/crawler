@@ -10550,9 +10550,22 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   'button:has-text("Next")'
                 ].join(', ')
               ).first();
-              if (await submit.isVisible().catch(() => false)) {
-                await submit.click().catch(() => {});
-                await page.waitForTimeout(1500);
+              // Prefer submitting the form that owns the password input (avoids clicking unrelated buttons).
+              try {
+                const form = passwordLocator.locator('xpath=ancestor::form').first();
+                const formSubmit = form.locator('button, input[type=\"submit\"], input[type=\"button\"]').first();
+                if (await formSubmit.isVisible().catch(() => false)) {
+                  await formSubmit.click().catch(() => {});
+                  await page.waitForTimeout(1500);
+                } else if (await submit.isVisible().catch(() => false)) {
+                  await submit.click().catch(() => {});
+                  await page.waitForTimeout(1500);
+                }
+              } catch (_) {
+                if (await submit.isVisible().catch(() => false)) {
+                  await submit.click().catch(() => {});
+                  await page.waitForTimeout(1500);
+                }
               }
           }
         } catch (fallbackError) {
