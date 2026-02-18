@@ -696,6 +696,11 @@ export class AIConversationLogger {
 
   async ensureAiBudget(jobId) {
     if (!jobId || !this.backendUrl) return;
+    // Some internal automation paths (e.g., service-token started jobs) intentionally bypass
+    // the AI balance gate. This is controlled by backend job context.
+    if (this.context && this.context.skip_ai_budget_check === true) {
+      return;
+    }
     try {
       await axios.post(
         `${this.backendUrl}/jobs/${jobId}/ai-budget/check`,
