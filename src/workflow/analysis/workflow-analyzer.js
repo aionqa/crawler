@@ -4476,7 +4476,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           ].join(':');
           try {
             const cacheLookup = await axios.get(
-              `${this.backendUrl}/api/scripts/cache/lookup`,
+              `${this.backendUrl}/scripts/cache/lookup`,
               {
                 params: {
                   project_id: projectIdForCache,
@@ -4563,11 +4563,24 @@ IMPORTANT OUTPUT REQUIREMENTS:
             stepNameLower.includes('content optimizer') ||
             stepNameLower.includes('content optimization');
 
+          const aiErrorCode = String(aiError?.code || '');
+          const aiErrorTextLower = aiErrorText.toLowerCase();
           const isAiUnavailableError =
             aiErrorText.includes('AI not configured') ||
-            aiErrorText.toLowerCase().includes('openai api key') ||
-            aiErrorText.toLowerCase().includes('api key') ||
-            aiErrorText.toLowerCase().includes('not provided');
+            aiErrorTextLower.includes('openai api key') ||
+            aiErrorTextLower.includes('api key') ||
+            aiErrorTextLower.includes('not provided') ||
+            // Common transport errors when the AI service is down/unreachable locally.
+            aiErrorCode === 'ECONNREFUSED' ||
+            aiErrorCode === 'ENOTFOUND' ||
+            aiErrorCode === 'ETIMEDOUT' ||
+            aiErrorTextLower.includes('econnrefused') ||
+            aiErrorTextLower.includes('socket hang up') ||
+            aiErrorTextLower.includes('service unavailable') ||
+            aiErrorTextLower.includes('getaddrinfo') ||
+            aiErrorTextLower.includes('enotfound') ||
+            aiErrorTextLower.includes('timed out') ||
+            aiErrorTextLower.includes('timeout');
 
           // Runner helpers can occasionally execute without local AI provider configured.
           // For login validation steps, provide a deterministic page-state fallback instead of hard-failing the job.
@@ -6323,6 +6336,80 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
 
+      // If an AI step returns SEO analysis, persist it immediately.
+      // This is the "SEO assistant" step output (enabled in advanced workflows) and should be
+      // visible in the UI (SEO Assistant + Content Optimizer views).
+      const rawSeoAnalysis = parsedResponse?.seo_analysis;
+      if (rawSeoAnalysis && typeof rawSeoAnalysis === 'object' && !Array.isArray(rawSeoAnalysis)) {
+        const normalizeSeoPriority = (value) => {
+          const v = String(value || '').trim().toLowerCase();
+          if (v === 'high' || v === 'h') return 'high';
+          if (v === 'medium' || v === 'med' || v === 'm') return 'medium';
+          return 'low';
+        };
+        const priorityOrder = { low: 0, medium: 1, high: 2 };
+        const normalizedSeoAnalysis = safeJsonClone(rawSeoAnalysis);
+
+        // User request: list low -> high priority order.
+        if (Array.isArray(normalizedSeoAnalysis.optimization_opportunities)) {
+          normalizedSeoAnalysis.optimization_opportunities = normalizedSeoAnalysis.optimization_opportunities
+            .map((opp) => {
+              if (!opp || typeof opp !== 'object') return opp;
+              return {
+                ...opp,
+                priority: normalizeSeoPriority(opp.priority)
+              };
+            })
+            .sort((a, b) => (priorityOrder[normalizeSeoPriority(a?.priority)] ?? 0) - (priorityOrder[normalizeSeoPriority(b?.priority)] ?? 0));
+        }
+
+        workflowState.seoAnalysis = normalizedSeoAnalysis;
+        if (!workflowState.context || typeof workflowState.context !== 'object') {
+          workflowState.context = {};
+        }
+        workflowState.context.seoAnalysis = normalizedSeoAnalysis;
+
+        try {
+          const projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+          let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+          if (!pageIdToUse && projectIdToUse && workflowState.pageUrl) {
+            pageIdToUse = await this.ensurePageId(workflowState, jobId);
+          }
+
+          if (pageIdToUse) {
+            await axios.post(
+              `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+              {
+                saveLegs: false,
+                saveSeoData: true,
+                seoData: normalizedSeoAnalysis,
+                job_id: jobId
+              },
+              { headers: this.getAuthHeaders() }
+            );
+            console.log(`✅ [SEO-ASSISTANT] Saved seo_analysis to page ${pageIdToUse}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [SEO-ASSISTANT] Saved SEO analysis`, 'WORKFLOW-ANALYZER', {
+                page_id: pageIdToUse,
+                opportunities_count: Array.isArray(normalizedSeoAnalysis.optimization_opportunities)
+                  ? normalizedSeoAnalysis.optimization_opportunities.length
+                  : 0
+              });
+            }
+          } else {
+            console.warn(`⚠️ [SEO-ASSISTANT] Could not save SEO analysis (missing pageId)`);
+          }
+        } catch (saveSeoError) {
+          console.error(`❌ [SEO-ASSISTANT] Failed to save SEO analysis: ${saveSeoError.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [SEO-ASSISTANT] Failed to save SEO analysis: ${saveSeoError.message}`, 'WORKFLOW-ANALYZER', {
+              error: saveSeoError.message
+            });
+          }
+          // Non-fatal: allow crawl workflow to continue even if SEO persistence fails.
+        }
+      }
+
       // If an AI step returns accessibility analysis, persist it immediately.
       // This keeps "accessibility_analysis" working without needing a deprecated save-data step.
       const rawAccessibilityAnalysis = parsedResponse?.accessibility_analysis;
@@ -6400,15 +6487,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // Make specialized AI analysis available to later `save-data` steps.
       // Some workflows key their persistence logic off `workflowState.*Analysis`.
       if (parsedResponse && typeof parsedResponse === 'object') {
-        if (parsedResponse.seo_analysis) {
+        // Do not overwrite normalized versions that we already stored/sorted above.
+        if (parsedResponse.seo_analysis && !workflowState.seoAnalysis) {
           workflowState.seoAnalysis = parsedResponse.seo_analysis;
           if (workflowState.context) workflowState.context.seoAnalysis = parsedResponse.seo_analysis;
         }
-        if (parsedResponse.content_analysis) {
+        if (parsedResponse.content_analysis && !workflowState.contentAnalysis) {
           workflowState.contentAnalysis = parsedResponse.content_analysis;
           if (workflowState.context) workflowState.context.contentAnalysis = parsedResponse.content_analysis;
         }
-        if (parsedResponse.accessibility_analysis) {
+        if (parsedResponse.accessibility_analysis && !workflowState.accessibilityAnalysis) {
           workflowState.accessibilityAnalysis = parsedResponse.accessibility_analysis;
           if (workflowState.context) workflowState.context.accessibilityAnalysis = parsedResponse.accessibility_analysis;
         }
@@ -17037,94 +17125,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
         cache_bucket: cacheBucket,
         cache_key: cacheKey,
         tags: [step.id, step.name, cacheBucket, journeyId].filter(Boolean),
-        updated_at: new Date()
+        job_id: jobId || null
       };
 
-      // Try to find existing script by page_id, journey_id, and action_id
-      const findQuery = {
-        project_id: projectId,
-        page_id: pageId,
-        status: { $ne: 'archived' }
-      };
-      if (journeyId) {
-        findQuery['tags'] = { $in: [journeyId] };
-      }
-      if (actionId) {
-        findQuery.action_id = actionId;
-      }
-
-      // Use backend API to upsert script
-      const backendUrl = this.backendUrl || process.env.BACKEND_URL || 'http://back:4000';
-      
-      // First try to find existing script
-      const authHeaders = this.getAuthHeaders();
-      const findResponse = await fetch(`${backendUrl}/api/scripts?project_id=${projectId}&page_id=${pageId}`, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders
+      // IMPORTANT: Always go through POST /scripts with cache_key.
+      // The backend applies default cache TTL (3 days) for AI scripts and uses
+      // createOrUpdateScriptWithHistory() to keep provenance + history consistent.
+      const createOrUpdateRes = await axios.post(
+        `${this.backendUrl}/scripts`,
+        scriptData,
+        {
+          headers: this.getAuthHeaders(),
+          timeout: 10000
         }
-      });
+      );
 
-      let existingScript = null;
-      if (findResponse.ok) {
-        const scripts = await findResponse.json();
-        // Find script matching journey/action
-        existingScript = scripts.find(s => {
-          if (actionId && s.action_id?.toString() === actionId.toString()) return true;
-          if (journeyId && s.tags?.includes(journeyId)) return true;
-          if (s.name === scriptName) return true;
-          return false;
-        });
-      }
-
-      if (existingScript) {
-        // Update existing script
-        const updateResponse = await fetch(`${backendUrl}/api/scripts/${existingScript._id}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            ...authHeaders
-          },
-          body: JSON.stringify({
-            ...scriptData,
-            execution_count: existingScript.execution_count || 0,
-            last_executed_at: existingScript.last_executed_at,
-            last_result: existingScript.last_result,
-            success_rate: existingScript.success_rate || 0,
-            created_at: existingScript.created_at
-          })
-        });
-
-        if (updateResponse.ok) {
-          console.log(`✅ Updated existing script in collection: ${existingScript._id}`);
-        } else {
-          console.warn(`⚠️ Failed to update script: ${updateResponse.statusText}`);
-        }
-      } else {
-        // Create new script
-        scriptData.created_at = new Date();
-        scriptData.execution_count = 0;
-        scriptData.last_executed_at = null;
-        scriptData.last_result = null;
-        scriptData.success_rate = 0;
-
-        const createResponse = await fetch(`${backendUrl}/api/scripts`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...authHeaders
-          },
-          body: JSON.stringify(scriptData)
-        });
-
-        if (createResponse.ok) {
-          const newScript = await createResponse.json();
-          console.log(`✅ Created new script in collection: ${newScript._id}`);
-        } else {
-          const errorText = await createResponse.text();
-          console.warn(`⚠️ Failed to create script: ${createResponse.statusText} - ${errorText}`);
-        }
+      if (createOrUpdateRes?.data?._id) {
+        console.log(`✅ Upserted script in scripts collection: ${createOrUpdateRes.data._id}`);
       }
     } catch (error) {
       console.warn(`⚠️ Error upserting script to collection: ${error.message}`);

@@ -254,7 +254,7 @@ class WorkflowExecutor {
     const id = String(scriptId);
     try {
       const res = await axios.get(
-        `${this.backendUrl}/api/scripts/${encodeURIComponent(id)}`,
+        `${this.backendUrl}/scripts/${encodeURIComponent(id)}`,
         {
           headers: this.getAuthHeaders(),
           timeout: 10000

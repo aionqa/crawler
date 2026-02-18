@@ -21,6 +21,109 @@ export class OptimizedWorkflowAnalyzer {
     this.maxDepth = 6;
   }
 
+  getAuthHeaders() {
+    const headers = {};
+    if (this.context?.runner_token) {
+      headers['Authorization'] = `Bearer ${this.context.runner_token}`;
+    }
+    return headers;
+  }
+
+  async lookupCachedScript({ projectId, pageId, cacheKey, jobId, cacheBucket }) {
+    try {
+      const res = await axios.get(`${this.backendUrl}/scripts/cache/lookup`, {
+        params: {
+          project_id: String(projectId),
+          page_id: String(pageId),
+          cache_key: String(cacheKey)
+        },
+        headers: this.getAuthHeaders(),
+        timeout: 10000
+      });
+
+      const cached = res?.data?.hit ? res.data.script : null;
+      if (!cached?.script_code) {
+        return null;
+      }
+
+      if (jobId) {
+        await backendLogger.appendJobLog(
+          jobId,
+          'info',
+          `✅ [SCRIPTS-CACHE] Reused cached script (optimized)`,
+          'OPTIMIZED-WORKFLOW-ANALYZER',
+          {
+            cache_bucket: cacheBucket,
+            cache_key: cacheKey,
+            cached_script_id: cached._id,
+            cache_expires_at: cached.cache_expires_at || null
+          }
+        );
+      }
+
+      return cached;
+    } catch (e) {
+      if (jobId) {
+        await backendLogger.appendJobLog(
+          jobId,
+          'warn',
+          `⚠️ [SCRIPTS-CACHE] Cache lookup failed (optimized): ${e.message}`,
+          'OPTIMIZED-WORKFLOW-ANALYZER',
+          { cache_bucket: cacheBucket, cache_key: cacheKey }
+        );
+      }
+      return null;
+    }
+  }
+
+  async persistScriptToBackend({ projectId, pageId, jobId, depth, scriptCode, description, aiPrompt, cacheBucket, cacheKey }) {
+    if (!projectId || !pageId || !scriptCode) return null;
+
+    try {
+      const res = await axios.post(
+        `${this.backendUrl}/scripts`,
+        {
+          project_id: String(projectId),
+          page_id: String(pageId),
+          name: `Optimized QA (depth ${Number(depth) + 1})`,
+          description: description || 'AI-generated Playwright script (optimized mode).',
+          script_type: 'playwright',
+          script_code: scriptCode,
+          parameters: {
+            depth: Number(depth),
+            generator: 'optimized-workflow-analyzer'
+          },
+          generated_by: 'ai',
+          ai_prompt: aiPrompt || 'analyze-interactive-elements',
+          ai_model: 'gpt-5-mini',
+          status: 'active',
+          tags: ['optimized-qa', `depth:${Number(depth)}`],
+          job_id: jobId || null,
+          cache_bucket: cacheBucket,
+          cache_key: cacheKey
+          // cache_expires_at intentionally omitted -> backend defaults to 3 days for AI scripts
+        },
+        {
+          headers: this.getAuthHeaders(),
+          timeout: 10000
+        }
+      );
+
+      return res?.data || null;
+    } catch (e) {
+      if (jobId) {
+        await backendLogger.appendJobLog(
+          jobId,
+          'warn',
+          `⚠️ [SCRIPTS-CACHE] Failed to persist optimized script: ${e.message}`,
+          'OPTIMIZED-WORKFLOW-ANALYZER',
+          { cache_bucket: cacheBucket, cache_key: cacheKey }
+        );
+      }
+      return null;
+    }
+  }
+
   /**
    * Analyze page with optimized data collection and QA-like testing
    * NOTE: This is deprecated - workflow mode uses WorkflowAnalyzer/WorkflowExecutor instead
@@ -101,6 +204,7 @@ export class OptimizedWorkflowAnalyzer {
     const conversationHistory = [];
     let currentDepth = 0;
     let currentPageData = initialPageData;
+    const cacheBucket = 'optimized-qa';
     
     console.log(`[OptimizedWorkflowAnalyzer] 🧪 Starting QA testing iterations (max depth: ${this.maxDepth})`);
     
@@ -119,19 +223,56 @@ export class OptimizedWorkflowAnalyzer {
           additional_prompt_text: (this.context && this.context.additional_prompt_text) || ''
         };
         
-        // Send to OpenAI for analysis and action generation
-        if (!this.aiLogger) {
-          throw new Error('AIConversationLogger is required but not provided');
+        const cacheKey = [
+          cacheBucket,
+          String(projectId),
+          String(pageId),
+          String(currentDepth)
+        ].join(':');
+
+        // Cache reuse: if we already generated a script for this page+depth recently, reuse it.
+        const cached = await this.lookupCachedScript({ projectId, pageId, cacheKey, jobId, cacheBucket });
+
+        let aiResponse;
+        if (cached) {
+          aiResponse = {
+            conversation_description: 'Cached script reused (not expired).',
+            response_description: cached.description || 'Cached optimized QA script reused.',
+            playwright_script: cached.script_code,
+            cache_hit: true,
+            cached_script_id: cached._id,
+            cache_expires_at: cached.cache_expires_at || null
+          };
+        } else {
+          // Send to OpenAI for analysis and action generation
+          if (!this.aiLogger) {
+            throw new Error('AIConversationLogger is required but not provided');
+          }
+          aiResponse = await this.aiLogger.makeAICallWithPrompt(
+            'analyze-interactive-elements',
+            optimizedPayload,
+            jobId,
+            'qa-analyzer',
+            currentPageData.page_url,
+            null,
+            optimizedPayload
+          );
+
+          // Persist script so it shows in Scripts UI and can be reused via cache.
+          if (aiResponse?.playwright_script && typeof aiResponse.playwright_script === 'string') {
+            await this.persistScriptToBackend({
+              projectId,
+              pageId,
+              jobId,
+              depth: currentDepth,
+              scriptCode: this.cleanScript(aiResponse.playwright_script),
+              description: aiResponse.response_description || aiResponse.conversation_description || null,
+              aiPrompt: 'analyze-interactive-elements',
+              cacheBucket,
+              cacheKey
+            });
+          }
         }
-        const aiResponse = await this.aiLogger.makeAICallWithPrompt(
-          'analyze-interactive-elements',
-          optimizedPayload,
-          jobId,
-          'qa-analyzer',
-          currentPageData.page_url,
-          null,
-          optimizedPayload
-        );
         
         // Store conversation in history
         conversationHistory.push({

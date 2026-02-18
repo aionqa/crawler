@@ -5422,7 +5422,7 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
     // Cache reuse: if we already generated scripts for this page recently, reuse them.
     try {
       const cachedRes = await fetch(
-        `${backendUrl}/api/scripts/cache/list?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}&cache_bucket=${encodeURIComponent(cacheBucket)}`,
+        `${backendUrl}/scripts/cache/list?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}&cache_bucket=${encodeURIComponent(cacheBucket)}`,
         {
           method: 'GET',
           headers: {
@@ -5552,7 +5552,7 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
           String(scenario.name || '').trim()
         ].join(':');
 
-        const scriptResponse = await fetch(`${backendUrl}/api/scripts`, {
+        const scriptResponse = await fetch(`${backendUrl}/scripts`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

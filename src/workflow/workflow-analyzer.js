@@ -3826,7 +3826,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           ].join(':');
           try {
             const cacheLookup = await axios.get(
-              `${this.backendUrl}/api/scripts/cache/lookup`,
+              `${this.backendUrl}/scripts/cache/lookup`,
               {
                 params: {
                   project_id: projectIdForCache,
@@ -4715,7 +4715,7 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
                   ].join(':');
 
                   await axios.post(
-                    `${this.backendUrl}/api/scripts`,
+                    `${this.backendUrl}/scripts`,
                     {
                       project_id: projectIdForCache,
                       page_id: pageIdForCache,
