@@ -21,7 +21,11 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install Node.js dependencies
-RUN npm install
+# Self-hosted runners can have occasional registry network resets; increase retries/timeouts.
+RUN npm config set fetch-retries 5 \
+  && npm config set fetch-retry-mintimeout 20000 \
+  && npm config set fetch-retry-maxtimeout 120000 \
+  && npm ci --no-audit --no-fund
 
 # Install Playwright browsers and system dependencies (including ffmpeg for video recording)
 # This is required for video recording even when using remote browsers
