@@ -5411,6 +5411,41 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
   await sendLog(jobId, 'info', '🎯 APPROACH 4: Static (AI Script Generation for QA Automation)', { page_url: pageUrl });
   
   try {
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const runnerToken = context?.runner_token || process.env.RUNNER_TOKEN || null;
+    const authHeaders = runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {};
+    const cacheBucket = 'static-approach';
+
+    // Cache reuse: if we already generated scripts for this page recently, reuse them.
+    try {
+      const cachedRes = await fetch(
+        `${backendUrl}/api/scripts/cache/list?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}&cache_bucket=${encodeURIComponent(cacheBucket)}`,
+        {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders
+          }
+        }
+      );
+      if (cachedRes.ok) {
+        const cachedScripts = await cachedRes.json();
+        if (Array.isArray(cachedScripts) && cachedScripts.length > 0) {
+          await sendLog(jobId, 'info', `✅ [SCRIPTS-CACHE] Reused ${cachedScripts.length} cached static script(s)`, { page_url: pageUrl });
+          return {
+            success: true,
+            approach: 'static',
+            cache_hit: true,
+            saved_scripts: cachedScripts,
+            metadata: null,
+            common_selectors: []
+          };
+        }
+      }
+    } catch (cacheErr) {
+      await sendLog(jobId, 'warn', `⚠️ [SCRIPTS-CACHE] Static cache lookup failed: ${cacheErr.message}`, { page_url: pageUrl });
+    }
+
     // Step 1: Extract metadata ONLY (no deep analysis)
     const metadata = await page.evaluate(() => {
       return {
@@ -5503,14 +5538,23 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
     }
     
     // Step 4: Save each script to scripts collection
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
     const savedScripts = [];
     
     for (const scenario of (aiResponse.scenarios || [])) {
       try {
-        const scriptResponse = await fetch(`${backendUrl}/scripts`, {
+        const scenarioCacheKey = [
+          cacheBucket,
+          String(projectId),
+          String(pageId),
+          String(scenario.name || '').trim()
+        ].join(':');
+
+        const scriptResponse = await fetch(`${backendUrl}/api/scripts`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders
+          },
           body: JSON.stringify({
             project_id: projectId,
             page_id: pageId,
@@ -5524,7 +5568,10 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
             ai_model: 'gpt-5-mini',
             expected_outcome: scenario.expected_outcome,
             validation_rules: scenario.validation_rules || [],
-            status: 'active'
+            status: 'active',
+            cache_bucket: cacheBucket,
+            cache_key: scenarioCacheKey,
+            tags: ['static-approach']
           })
         });
         
@@ -5534,9 +5581,12 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
           await sendLog(jobId, 'info', `  ✓ Script saved: ${scenario.name} (ID: ${savedScript._id})`, { page_url: pageUrl });
           
           // Step 5: Create action record
-          const actionResponse = await fetch(`${backendUrl}/actions`, {
+          const actionResponse = await fetch(`${backendUrl}/api/actions`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...authHeaders
+            },
             body: JSON.stringify({
               project_id: projectId,
               page_id: pageId,

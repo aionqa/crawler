@@ -4458,10 +4458,74 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const safeStepPayload = this.makeJsonSafe(stepPayload);
       
       let aiResponse;
+      const isCacheableScriptStep = step.id === 'generate_login_script' || step.id === 'generate_journey_script';
+      if (isCacheableScriptStep) {
+        const projectIdForCache = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
+        const pageIdForCache = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
+        const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.currentItem;
+        const journeyIdForCache = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id || null;
+        const actionIdForCache = currentJourney?.action_id || stepContext?.action_id || null;
+        if (projectIdForCache && pageIdForCache) {
+          const cacheBucket = `workflow-step:${step.id}`;
+          const cacheKey = [
+            cacheBucket,
+            String(projectIdForCache),
+            String(pageIdForCache),
+            journeyIdForCache ? String(journeyIdForCache) : '',
+            actionIdForCache ? String(actionIdForCache) : ''
+          ].join(':');
+          try {
+            const cacheLookup = await axios.get(
+              `${this.backendUrl}/api/scripts/cache/lookup`,
+              {
+                params: {
+                  project_id: projectIdForCache,
+                  page_id: pageIdForCache,
+                  cache_key: cacheKey
+                },
+                headers: this.getAuthHeaders(),
+                timeout: 10000
+              }
+            );
+            const cached = cacheLookup?.data?.hit ? cacheLookup.data.script : null;
+            if (cached && cached.script_code) {
+              aiResponse = {
+                playwright_script: cached.script_code,
+                description: cached.description || 'Cached script reused (not expired).',
+                expected_result: cached.expected_outcome || cached.expected_result || null,
+                cache_hit: true,
+                cached_script_id: cached._id,
+                cache_expires_at: cached.cache_expires_at || null
+              };
+              console.log(`✅ [SCRIPTS-CACHE] Cache HIT for ${step.id} (${cacheBucket})`);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(
+                  jobId,
+                  'info',
+                  `✅ [SCRIPTS-CACHE] Reused cached script for ${step.id}`,
+                  'WORKFLOW-ANALYZER',
+                  {
+                    step_id: step.id,
+                    cache_bucket: cacheBucket,
+                    cache_key: cacheKey,
+                    cached_script_id: cached._id,
+                    cache_expires_at: cached.cache_expires_at || null
+                  }
+                );
+              }
+            } else {
+              console.log(`ℹ️ [SCRIPTS-CACHE] Cache MISS for ${step.id} (${cacheBucket})`);
+            }
+          } catch (cacheErr) {
+            console.warn(`⚠️ [SCRIPTS-CACHE] Cache lookup failed for ${step.id}: ${cacheErr.message}`);
+          }
+        }
+      }
+
       // Reuse step classification for retry behavior
       const configuredRetries = Number.isFinite(step.config?.maxRetries) ? step.config.maxRetries : 1;
       const maxAttempts = Math.max(1, configuredRetries + 1);
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      for (let attempt = 1; !aiResponse && attempt <= maxAttempts; attempt += 1) {
         try {
           aiResponse = await this.aiLogger.makeAICallWithPrompt(
             promptIdentifier,
@@ -5978,6 +6042,154 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
       
+      // If an AI step returns content analysis, persist it immediately.
+      // The save-data step type is deprecated in this workflow engine, so AI-produced analysis
+      // must be saved as part of the step execution.
+      const rawContentAnalysis = parsedResponse?.content_analysis;
+      if (rawContentAnalysis && typeof rawContentAnalysis === 'object' && !Array.isArray(rawContentAnalysis)) {
+        const normalizePriority = (value) => {
+          const v = String(value || '').trim().toLowerCase();
+          if (v === 'high' || v === 'h') return 'high';
+          if (v === 'medium' || v === 'med' || v === 'm') return 'medium';
+          return 'low';
+        };
+        const priorityOrder = { low: 0, medium: 1, high: 2 };
+        const normalizedContentAnalysis = safeJsonClone(rawContentAnalysis);
+        if (Array.isArray(normalizedContentAnalysis.optimization_opportunities)) {
+          normalizedContentAnalysis.optimization_opportunities = normalizedContentAnalysis.optimization_opportunities
+            .map((opp) => {
+              if (!opp || typeof opp !== 'object') return opp;
+              return {
+                ...opp,
+                priority: normalizePriority(opp.priority)
+              };
+            })
+            // UI request: list low -> high priority (not high -> low).
+            .sort((a, b) => (priorityOrder[normalizePriority(a?.priority)] ?? 0) - (priorityOrder[normalizePriority(b?.priority)] ?? 0));
+        }
+
+        // Store on workflowState for downstream steps and log visibility.
+        workflowState.contentAnalysis = normalizedContentAnalysis;
+        if (!workflowState.context || typeof workflowState.context !== 'object') {
+          workflowState.context = {};
+        }
+        workflowState.context.contentAnalysis = normalizedContentAnalysis;
+
+        try {
+          const projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+          let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+          if (!pageIdToUse && projectIdToUse && workflowState.pageUrl) {
+            pageIdToUse = await this.ensurePageId(workflowState, jobId);
+          }
+
+          if (pageIdToUse) {
+            await axios.post(
+              `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+              {
+                saveLegs: false,
+                saveContentData: true,
+                contentData: normalizedContentAnalysis,
+                job_id: jobId
+              },
+              { headers: this.getAuthHeaders() }
+            );
+            console.log(`✅ [CONTENT-OPTIMIZER] Saved content_analysis to page ${pageIdToUse}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [CONTENT-OPTIMIZER] Saved content analysis`, 'WORKFLOW-ANALYZER', {
+                page_id: pageIdToUse,
+                opportunities_count: Array.isArray(normalizedContentAnalysis.optimization_opportunities)
+                  ? normalizedContentAnalysis.optimization_opportunities.length
+                  : 0
+              });
+            }
+          } else {
+            console.warn(`⚠️ [CONTENT-OPTIMIZER] Could not save content analysis (missing pageId)`);
+          }
+        } catch (saveContentError) {
+          console.error(`❌ [CONTENT-OPTIMIZER] Failed to save content analysis: ${saveContentError.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [CONTENT-OPTIMIZER] Failed to save content analysis: ${saveContentError.message}`, 'WORKFLOW-ANALYZER', {
+              error: saveContentError.message
+            });
+          }
+          // Non-fatal: allow crawl workflow to continue even if content analysis persistence fails.
+        }
+      }
+
+      // If an AI step returns accessibility analysis, persist it immediately.
+      // This keeps "accessibility_analysis" working without needing a deprecated save-data step.
+      const rawAccessibilityAnalysis = parsedResponse?.accessibility_analysis;
+      if (rawAccessibilityAnalysis && typeof rawAccessibilityAnalysis === 'object' && !Array.isArray(rawAccessibilityAnalysis)) {
+        const normalizeSeverity = (value) => {
+          const v = String(value || '').trim().toLowerCase();
+          if (v === 'critical' || v === 'crit' || v === 'c') return 'critical';
+          if (v === 'high' || v === 'h') return 'high';
+          if (v === 'medium' || v === 'med' || v === 'm') return 'medium';
+          return 'low';
+        };
+        const severityOrder = { low: 0, medium: 1, high: 2, critical: 3 };
+        const normalizedAccessibility = safeJsonClone(rawAccessibilityAnalysis);
+
+        // UI request: list low -> high priority (not high -> low).
+        if (Array.isArray(normalizedAccessibility.accessibility_issues)) {
+          normalizedAccessibility.accessibility_issues = normalizedAccessibility.accessibility_issues
+            .map((issue) => {
+              if (!issue || typeof issue !== 'object') return issue;
+              return {
+                ...issue,
+                severity: normalizeSeverity(issue.severity)
+              };
+            })
+            .sort((a, b) => (severityOrder[normalizeSeverity(a?.severity)] ?? 0) - (severityOrder[normalizeSeverity(b?.severity)] ?? 0));
+        }
+
+        workflowState.accessibilityAnalysis = normalizedAccessibility;
+        if (!workflowState.context || typeof workflowState.context !== 'object') {
+          workflowState.context = {};
+        }
+        workflowState.context.accessibilityAnalysis = normalizedAccessibility;
+
+        try {
+          const projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+          let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+          if (!pageIdToUse && projectIdToUse && workflowState.pageUrl) {
+            pageIdToUse = await this.ensurePageId(workflowState, jobId);
+          }
+
+          if (pageIdToUse) {
+            await axios.post(
+              `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+              {
+                saveLegs: false,
+                saveAccessibilityData: true,
+                accessibilityData: normalizedAccessibility,
+                job_id: jobId
+              },
+              { headers: this.getAuthHeaders() }
+            );
+            console.log(`✅ [ACCESSIBILITY] Saved accessibility_analysis to page ${pageIdToUse}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [ACCESSIBILITY] Saved accessibility analysis`, 'WORKFLOW-ANALYZER', {
+                page_id: pageIdToUse,
+                issues_count: Array.isArray(normalizedAccessibility.accessibility_issues)
+                  ? normalizedAccessibility.accessibility_issues.length
+                  : 0
+              });
+            }
+          } else {
+            console.warn(`⚠️ [ACCESSIBILITY] Could not save accessibility analysis (missing pageId)`);
+          }
+        } catch (saveAccessibilityError) {
+          console.error(`❌ [ACCESSIBILITY] Failed to save accessibility analysis: ${saveAccessibilityError.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [ACCESSIBILITY] Failed to save accessibility analysis: ${saveAccessibilityError.message}`, 'WORKFLOW-ANALYZER', {
+              error: saveAccessibilityError.message
+            });
+          }
+          // Non-fatal: allow crawl workflow to continue even if accessibility persistence fails.
+        }
+      }
+
       // Store result - storeStepResult will structure it according to schema
       this.storeStepResult(step, parsedResponse, workflowState);
       
@@ -16561,6 +16773,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.legsToExecute?.[workflowState.currentLegIndex];
       const journeyId = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id;
       const actionId = currentJourney?.action_id || stepContext?.action_id;
+      const cacheBucket = `workflow-step:${step.id || step.name || 'unknown'}`;
+      const cacheKey = [
+        cacheBucket,
+        String(projectId),
+        String(pageId),
+        journeyId ? String(journeyId) : '',
+        actionId ? String(actionId) : ''
+      ].join(':');
 
       // Build script name and description
       const scriptName = parsedResponse.name || 
@@ -16577,6 +16797,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         project_id: projectId,
         page_id: pageId,
         action_id: actionId || null,
+        journey_id: journeyId || null,
         name: scriptName,
         description: scriptDescription,
         script_type: 'playwright',
@@ -16589,7 +16810,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         expected_outcome: parsedResponse.expected_result || parsedResponse.expected_outcome || null,
         validation_rules: parsedResponse.validation_rules || [],
         status: 'active',
-        tags: [step.id, step.name].filter(Boolean),
+        cache_bucket: cacheBucket,
+        cache_key: cacheKey,
+        tags: [step.id, step.name, cacheBucket, journeyId].filter(Boolean),
         updated_at: new Date()
       };
 

@@ -3803,6 +3803,60 @@ IMPORTANT OUTPUT REQUIREMENTS:
         String(step.id || '').toLowerCase().includes('generate_login_script') ||
         String(step.name || '').toLowerCase().includes('generate login script') ||
         promptIdentifier === 'generate_login_script';
+
+      const isCacheableScriptStep =
+        isGenerateLoginScriptStep ||
+        promptIdentifier === 'generate_journey_script' ||
+        String(step.id || '').toLowerCase().includes('generate_journey_script');
+
+      if (isCacheableScriptStep) {
+        const projectIdForCache = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
+        const pageIdForCache = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
+        const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.currentItem;
+        const journeyIdForCache = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id || null;
+        const actionIdForCache = currentJourney?.action_id || stepContext?.action_id || null;
+        if (projectIdForCache && pageIdForCache) {
+          const cacheBucket = `workflow-step:${step.id || promptIdentifier || 'ai-prompt'}`;
+          const cacheKey = [
+            cacheBucket,
+            String(projectIdForCache),
+            String(pageIdForCache),
+            journeyIdForCache ? String(journeyIdForCache) : '',
+            actionIdForCache ? String(actionIdForCache) : ''
+          ].join(':');
+          try {
+            const cacheLookup = await axios.get(
+              `${this.backendUrl}/api/scripts/cache/lookup`,
+              {
+                params: {
+                  project_id: projectIdForCache,
+                  page_id: pageIdForCache,
+                  cache_key: cacheKey
+                },
+                headers: this.getAuthHeaders(),
+                timeout: 10000
+              }
+            );
+            const cached = cacheLookup?.data?.hit ? cacheLookup.data.script : null;
+            if (cached && cached.script_code) {
+              aiResponse = {
+                playwright_script: cached.script_code,
+                reason: 'Cached script reused (not expired).',
+                confidence: 0.85,
+                cache_hit: true,
+                cached_script_id: cached._id,
+                cache_expires_at: cached.cache_expires_at || null
+              };
+              console.log(`✅ [SCRIPTS-CACHE] Cache HIT for ${String(step.id || promptIdentifier)}`);
+            } else {
+              console.log(`ℹ️ [SCRIPTS-CACHE] Cache MISS for ${String(step.id || promptIdentifier)}`);
+            }
+          } catch (cacheErr) {
+            console.warn(`⚠️ [SCRIPTS-CACHE] Cache lookup failed for ${String(step.id || promptIdentifier)}: ${cacheErr.message}`);
+          }
+        }
+      }
+
       if (isGenerateLoginScriptStep) {
         const currentUrl = String(stepPayload.page_url || effectivePageUrl || page.url() || '').toLowerCase();
         const forcedSpecificCreds = currentUrl.includes('specific-credentials');
@@ -3908,11 +3962,13 @@ if (!hasPasswordField) {
 
 return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_step_submitted', used_username: usernameValue ? 'set' : 'missing' };
 `.trim();
-        aiResponse = {
-          playwright_script: deterministicScript,
-          reason: 'Deterministic login script generated to ensure stable credential-based submission.',
-          confidence: 0.8
-        };
+        if (!aiResponse) {
+          aiResponse = {
+            playwright_script: deterministicScript,
+            reason: 'Deterministic login script generated to ensure stable credential-based submission.',
+            confidence: 0.8
+          };
+        }
       }
       try {
         if (!aiResponse) {
@@ -3938,6 +3994,16 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           stepNameLower.includes('determine login') ||
           promptIdentifier === 'validate_login_success' ||
           promptIdentifier === 'determine_completion';
+        const isSeoAssistantStep =
+          stepIdLower === 'seo_analysis' ||
+          stepIdLower.includes('seo_assistant') ||
+          stepNameLower.includes('seo assistant') ||
+          stepNameLower.includes('seo analysis');
+        const isContentOptimizerStep =
+          stepIdLower === 'content_optimization_analysis' ||
+          stepIdLower.includes('content_optimizer') ||
+          stepNameLower.includes('content optimizer') ||
+          stepNameLower.includes('content optimization');
 
         // Some helpers run without local AI provider configured.
         // For login validation steps, provide deterministic DOM-based fallback instead of hard-failing.
@@ -4030,6 +4096,230 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             );
           }
         } else {
+        // SEO assistant is useful even without an AI provider; provide a deterministic best-effort analysis.
+        // This keeps local scans testable when OPENAI_API_KEY is not configured.
+        const isAiUnavailableError =
+          aiErrorText.includes('AI not configured') ||
+          aiErrorText.toLowerCase().includes('openai api key') ||
+          aiErrorText.toLowerCase().includes('api key') ||
+          aiErrorText.toLowerCase().includes('not provided');
+
+        if (isSeoAssistantStep && isAiUnavailableError) {
+          const html = String(stepPayload.page_content || stepPayload.pageContent || '');
+          const titleFromHtml = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').trim();
+          const metaDesc = (html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+          const canonicalHref = (html.match(/<link[^>]+rel=["']canonical["'][^>]*href=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+          const robotsMeta = (html.match(/<meta[^>]+name=["']robots["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+
+          const h1Count = (html.match(/<h1\b/gi) || []).length;
+          const h2Count = (html.match(/<h2\b/gi) || []).length;
+          const h3Count = (html.match(/<h3\b/gi) || []).length;
+
+          const imgTags = html.match(/<img\b[^>]*>/gi) || [];
+          const totalImages = imgTags.length;
+          let imagesWithAlt = 0;
+          for (const img of imgTags) {
+            if (/\balt\s*=\s*["'][^"']*["']/i.test(img)) {
+              imagesWithAlt++;
+            }
+          }
+          const imagesWithoutAlt = Math.max(0, totalImages - imagesWithAlt);
+
+          // Prefer link counts from Playwright analysis when available.
+          const linksArray = Array.isArray(stepPayload.playwright_analysis?.links)
+            ? stepPayload.playwright_analysis.links
+            : (Array.isArray(workflowState.playwrightAnalysis?.links) ? workflowState.playwrightAnalysis.links : []);
+          let internalLinkCount = 0;
+          let externalLinkCount = 0;
+          let origin = '';
+          try {
+            origin = new URL(String(stepPayload.page_url || '')).origin;
+          } catch (_) {
+            origin = '';
+          }
+          for (const link of linksArray) {
+            const href = String(link?.href || link?.url || '');
+            if (!href) continue;
+            try {
+              const resolved = new URL(href, String(stepPayload.page_url || '')).href;
+              const linkOrigin = new URL(resolved).origin;
+              if (origin && linkOrigin === origin) internalLinkCount++;
+              else externalLinkCount++;
+            } catch (_) {
+              // ignore unparseable
+            }
+          }
+
+          const hasSchema = /application\/ld\+json/i.test(html) || /\bitemscope\b/i.test(html);
+          const hasCanonical = Boolean(canonicalHref);
+          const hasRobotsMeta = Boolean(robotsMeta);
+
+          const title = (String(stepPayload.page_title || '') || titleFromHtml).trim();
+          const titleOptimal = title.length >= 20 && title.length <= 60;
+          const descriptionOptimal = metaDesc.length >= 70 && metaDesc.length <= 160;
+
+          const opportunities = [];
+          const pushOpp = (priority, issue, recommendation) => opportunities.push({ priority, issue, recommendation });
+
+          if (!title) pushOpp('high', 'Missing <title> tag', 'Add a unique, descriptive title (20-60 chars) including the primary keyword.');
+          else if (!titleOptimal) pushOpp('medium', 'Title length not optimal', 'Adjust title to ~20-60 characters; keep it unique and keyword-relevant.');
+          if (!metaDesc) pushOpp('high', 'Missing meta description', 'Add a compelling meta description (70-160 chars) with primary keyword + value proposition + CTA.');
+          else if (!descriptionOptimal) pushOpp('medium', 'Meta description length not optimal', 'Adjust meta description to ~70-160 characters; avoid truncation and duplicates.');
+          if (h1Count !== 1) pushOpp('high', 'Heading structure: expected exactly one H1', 'Ensure exactly one H1 that matches page intent; use H2/H3 for sections.');
+          if (imagesWithoutAlt > 0) pushOpp('medium', 'Images missing alt text', 'Add descriptive alt text to meaningful images; leave decorative images empty alt (alt="").');
+          if (!hasCanonical) pushOpp('medium', 'Canonical tag not detected', 'Add a canonical URL to reduce duplicate-content risk, especially for query-string variants.');
+          if (!hasRobotsMeta) pushOpp('low', 'Robots meta not detected', 'Confirm indexability policy; add robots meta only if needed (avoid accidental noindex).');
+          if (!hasSchema) pushOpp('low', 'Structured data not detected', 'Add JSON-LD schema where relevant (Organization, Article, Product, FAQ, BreadcrumbList).');
+          if (internalLinkCount < 3) pushOpp('low', 'Few internal links detected', 'Add contextual internal links to related pages and ensure key pages are reachable within 2-3 clicks.');
+
+          // Sort low -> medium -> high (as requested).
+          const prioRank = { low: 0, medium: 1, high: 2 };
+          opportunities.sort((a, b) => (prioRank[a.priority] ?? 0) - (prioRank[b.priority] ?? 0));
+
+          let score = 100;
+          score -= !title ? 20 : (!titleOptimal ? 8 : 0);
+          score -= !metaDesc ? 20 : (!descriptionOptimal ? 8 : 0);
+          score -= (h1Count !== 1) ? 15 : 0;
+          score -= !hasCanonical ? 5 : 0;
+          score -= imagesWithoutAlt > 0 ? Math.min(10, imagesWithoutAlt) : 0;
+          score -= !hasSchema ? 3 : 0;
+          score = Math.max(0, Math.min(100, score));
+
+          aiResponse = {
+            seo_analysis: {
+              overall_score: score,
+              summary: 'Deterministic SEO analysis fallback (AI provider not configured on local runner).',
+              meta_tags: {
+                title: title || 'Missing',
+                description: metaDesc || 'Missing',
+                title_optimal: Boolean(title) && titleOptimal,
+                description_optimal: Boolean(metaDesc) && descriptionOptimal,
+                title_recommendation: !title ? 'Add a unique title tag.' : 'Refine title to be concise and keyword-focused.',
+                description_recommendation: !metaDesc ? 'Add a meta description.' : 'Refine description to improve CTR.'
+              },
+              headings: { h1_count: h1Count, h2_count: h2Count, h3_count: h3Count },
+              links: {
+                internal_link_count: internalLinkCount,
+                external_link_count: externalLinkCount,
+                internal_link_recommendations: internalLinkCount < 3 ? ['Add a few contextual internal links to related pages.'] : []
+              },
+              images: {
+                total_images: totalImages,
+                images_with_alt: imagesWithAlt,
+                images_without_alt: imagesWithoutAlt,
+                recommendations: imagesWithoutAlt > 0 ? ['Add alt text to non-decorative images.'] : []
+              },
+              technical_seo: {
+                has_canonical: hasCanonical,
+                canonical_url: canonicalHref || '',
+                has_robots_meta: hasRobotsMeta,
+                robots_content: robotsMeta || '',
+                has_schema_markup: hasSchema,
+                schema_types: [],
+                technical_recommendations: [
+                  !hasCanonical ? 'Add a canonical link tag.' : null,
+                  !hasSchema ? 'Add JSON-LD schema markup where applicable.' : null
+                ].filter(Boolean)
+              },
+              keyword_analysis: {
+                primary_keyword: '',
+                secondary_keywords: [],
+                recommendations: [
+                  'Pick a primary keyword/topic for this page and align title, H1, and intro copy to it.',
+                  'Avoid keyword stuffing; focus on intent coverage and clear headings.'
+                ]
+              },
+              optimization_opportunities: opportunities
+            }
+          };
+
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `⚠️ AI unavailable for ${step.id || step.name}; using deterministic SEO assistant fallback`,
+              'WORKFLOW-ANALYZER',
+              { score, opportunities: opportunities.length }
+            );
+          }
+        } else if (isContentOptimizerStep && isAiUnavailableError) {
+          const html = String(stepPayload.page_content || stepPayload.pageContent || '');
+          const visible = String(stepPayload.visible_text || workflowState.visibleText || '');
+          const words = visible.split(/\s+/).filter(Boolean);
+          const wordCount = words.length;
+          const readingTimeMinutes = Math.max(0, Math.round((wordCount / 200) * 10) / 10);
+          const hasLists = /<ul\b|<ol\b/i.test(html) || /(^|\n)\s*[-*]\s+\S/m.test(visible);
+          const h1Count = (html.match(/<h1\b/gi) || []).length;
+          const hasClearHierarchy = h1Count === 1;
+          const hasCTA = /(get started|sign up|signup|book a demo|contact sales|start free trial|try it|buy now|learn more)/i.test(visible);
+
+          const opportunities = [];
+          const pushOpp = (priority, issue, recommendation) => opportunities.push({ priority, issue, recommendation });
+          if (wordCount < 150) pushOpp('high', 'Very low word count', 'Add more explanatory content (benefits, how it works, FAQs) to help users and search engines.');
+          if (!hasCTA) pushOpp('medium', 'CTA not detected', 'Add a clear call-to-action near the top and bottom (primary and secondary CTA).');
+          if (!hasLists) pushOpp('low', 'Scannability: few lists detected', 'Use bullet lists for features, steps, or FAQs to improve scannability.');
+          if (!hasClearHierarchy) pushOpp('high', 'Heading hierarchy unclear', 'Ensure exactly one H1 and use H2/H3 sections to structure the content.');
+
+          const prioRank = { low: 0, medium: 1, high: 2 };
+          opportunities.sort((a, b) => (prioRank[a.priority] ?? 0) - (prioRank[b.priority] ?? 0));
+
+          let score = 100;
+          score -= wordCount < 150 ? 25 : (wordCount < 300 ? 10 : 0);
+          score -= !hasCTA ? 10 : 0;
+          score -= !hasLists ? 5 : 0;
+          score -= !hasClearHierarchy ? 15 : 0;
+          score = Math.max(0, Math.min(100, score));
+
+          aiResponse = {
+            content_analysis: {
+              overall_score: score,
+              summary: 'Deterministic content optimization fallback (AI provider not configured on local runner).',
+              readability: {
+                score: Math.max(0, Math.min(100, score)),
+                reading_level: 'General',
+                reading_time_minutes: readingTimeMinutes,
+                word_count: wordCount,
+                issues: [
+                  wordCount < 150 ? 'Very short page copy' : null,
+                ].filter(Boolean),
+                recommendations: [
+                  wordCount < 300 ? 'Add more explanatory content and FAQs.' : null,
+                ].filter(Boolean)
+              },
+              engagement: {
+                hook_quality: wordCount >= 150 ? 0.6 : 0.3,
+                scannability_score: hasLists ? 0.7 : 0.45,
+                call_to_action_presence: Boolean(hasCTA),
+                call_to_action_quality: hasCTA ? 0.6 : 0.2
+              },
+              conversion_optimization: {
+                value_proposition_clarity: wordCount >= 150 ? 0.55 : 0.25,
+                trust_signals_count: 0,
+                social_proof_presence: /(reviews|testimonials|trusted by|customers|case study)/i.test(visible)
+              },
+              content_structure: {
+                has_clear_hierarchy: hasClearHierarchy,
+                use_of_lists: Boolean(hasLists),
+                content_flow_score: hasClearHierarchy ? 0.6 : 0.35
+              },
+              optimization_opportunities: opportunities.map(o => ({
+                priority: o.priority,
+                issue: o.issue,
+                recommendation: o.recommendation
+              }))
+            }
+          };
+
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `⚠️ AI unavailable for ${step.id || step.name}; using deterministic content optimizer fallback`,
+              'WORKFLOW-ANALYZER',
+              { score, word_count: wordCount, opportunities: opportunities.length }
+            );
+          }
+        } else {
         const errorMessage = `OpenAI API call failed for step "${step.name || step.id}": ${aiError.message}`;
         const fullContext = {
           step_id: step.id,
@@ -4047,6 +4337,7 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
         }
         throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+        }
         }
       }
       
@@ -4403,6 +4694,58 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             this.initializeVariablePool(workflowState);
             this.saveVariable(workflowState, 'legScriptToExecute', cleanedScript, 'page', step);
             console.log(`✅ Stored playwright_script as legScriptToExecute in workflowState, context, and variablePool: ${cleanedScript.length} chars`);
+
+            // Persist the script in backend so it shows up in Scripts UI and can be reused via cache.
+            // Skip persistence on cache hits to avoid noisy history spam.
+            if (!parsedResponse?.cache_hit) {
+              try {
+                const projectIdForCache = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
+                const pageIdForCache = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
+                const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.currentItem;
+                const journeyIdForCache = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id || null;
+                const actionIdForCache = currentJourney?.action_id || stepContext?.action_id || null;
+                if (projectIdForCache && pageIdForCache) {
+                  const cacheBucket = `workflow-step:${step.id || promptIdentifier || 'ai-prompt'}`;
+                  const cacheKey = [
+                    cacheBucket,
+                    String(projectIdForCache),
+                    String(pageIdForCache),
+                    journeyIdForCache ? String(journeyIdForCache) : '',
+                    actionIdForCache ? String(actionIdForCache) : ''
+                  ].join(':');
+
+                  await axios.post(
+                    `${this.backendUrl}/api/scripts`,
+                    {
+                      project_id: projectIdForCache,
+                      page_id: pageIdForCache,
+                      name: step.name || step.id || promptIdentifier || 'AI Script',
+                      description: parsedResponse.reason || parsedResponse.description || null,
+                      script_type: 'playwright',
+                      script_code: cleanedScript,
+                      parameters: parsedResponse.parameters || {},
+                      generated_by: 'ai',
+                      ai_prompt: promptIdentifier || step.id || step.name || null,
+                      ai_model: 'gpt-5-mini',
+                      expected_outcome: parsedResponse.expected_result || parsedResponse.expected_outcome || null,
+                      validation_rules: parsedResponse.validation_rules || [],
+                      status: 'active',
+                      tags: [step.id, step.name, cacheBucket].filter(Boolean),
+                      job_id: jobId || null,
+                      cache_bucket: cacheBucket,
+                      cache_key: cacheKey
+                      // cache_expires_at intentionally omitted -> backend defaults to 3 days for AI scripts
+                    },
+                    {
+                      headers: this.getAuthHeaders(),
+                      timeout: 10000
+                    }
+                  );
+                }
+              } catch (persistErr) {
+                console.warn(`⚠️ [SCRIPTS-CACHE] Failed to persist script to backend: ${persistErr.message}`);
+              }
+            }
           } else {
             console.warn(`⚠️ Cleaned script is empty after cleaning`);
           }
@@ -4611,6 +4954,26 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           console.log(`✅ Extracted playwright_script to page namespace, workflowState, and legScriptToExecute: ${scriptValue.substring(0, 100)}...`);
         } else {
           console.warn(`⚠️ playwright_script not found in generate_login_script result. Keys: ${Object.keys(parsedResponse || {}).join(', ')}`);
+        }
+      }
+
+      // Persist common analysis outputs in well-known workflowState fields so save-data can store them.
+      // This makes JSON workflow templates simpler: any ai-prompt can output seo/content/a11y analysis.
+      if (parsedResponse && typeof parsedResponse === 'object') {
+        if (parsedResponse.seo_analysis && !workflowState.seoAnalysis) {
+          workflowState.seoAnalysis = parsedResponse.seo_analysis;
+          workflowState.context = workflowState.context || {};
+          workflowState.context.seoAnalysis = parsedResponse.seo_analysis;
+        }
+        if (parsedResponse.content_analysis && !workflowState.contentAnalysis) {
+          workflowState.contentAnalysis = parsedResponse.content_analysis;
+          workflowState.context = workflowState.context || {};
+          workflowState.context.contentAnalysis = parsedResponse.content_analysis;
+        }
+        if (parsedResponse.accessibility_analysis && !workflowState.accessibilityAnalysis) {
+          workflowState.accessibilityAnalysis = parsedResponse.accessibility_analysis;
+          workflowState.context = workflowState.context || {};
+          workflowState.context.accessibilityAnalysis = parsedResponse.accessibility_analysis;
         }
       }
       
@@ -6016,13 +6379,17 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
    * Saves variables according to step configuration
    */
   processVariableOutputs(step, workflowState, stepResult) {
-    if (!step.config?.variableOutputs || !Array.isArray(step.config.variableOutputs)) {
+    const outputs = Array.isArray(step?.config?.variableOutputs)
+      ? step.config.variableOutputs
+      : (Array.isArray(step?.variableOutputs) ? step.variableOutputs : null);
+
+    if (!outputs) {
       return;
     }
 
     this.initializeVariablePool(workflowState);
 
-    for (const output of step.config.variableOutputs) {
+    for (const output of outputs) {
       if (!output.variableName || !output.sourcePath) {
         continue;
       }
@@ -6045,6 +6412,11 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           // Auto-detect: if in cycle, use cycle, otherwise page
           namespace = workflowState.cycleDepth > 0 ? 'cycle' : 'page';
         }
+        // Template JSON historically uses "step" as a namespace. We don't have a dedicated
+        // "step variables" store (step results live under variablePool.steps), so treat it as page.
+        if (namespace === 'step') {
+          namespace = workflowState.cycleDepth > 0 ? 'cycle' : 'page';
+        }
 
         this.saveVariable(workflowState, output.variableName, value, namespace, step);
         console.log(`💾 Saved variable "${output.variableName}" to namespace "${namespace}" from path "${output.sourcePath}"`);
@@ -6059,14 +6431,18 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
    * Reads variables and makes them available in workflowState context
    */
   processVariableInputs(step, workflowState) {
-    if (!step.config?.variableInputs || !Array.isArray(step.config.variableInputs)) {
+    const inputsConfig = Array.isArray(step?.config?.variableInputs)
+      ? step.config.variableInputs
+      : (Array.isArray(step?.variableInputs) ? step.variableInputs : null);
+
+    if (!inputsConfig) {
       return {};
     }
 
     this.initializeVariablePool(workflowState);
     const inputs = {};
 
-    for (const input of step.config.variableInputs) {
+    for (const input of inputsConfig) {
       if (!input.variableName || !input.targetPath) {
         continue;
       }
