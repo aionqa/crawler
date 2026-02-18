@@ -70,6 +70,22 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
         console.warn(`[LOGIN-REDIRECT] Invalid login URL format: ${loginUrl}`);
       }
     }
+
+    // Fallback (best-effort): if login_url is missing from job context, still detect common SSO login pages.
+    // This prevents us from silently skipping re-auth on crawls when backend didn't include login_url.
+    try {
+      const u = new URL(pageUrl);
+      const path = (u.pathname || '').toLowerCase();
+      const host = (u.hostname || '').toLowerCase();
+      if (path === '/login' && (host.startsWith('auth.') || host.includes('.auth.') || host.includes('auth'))) {
+        const hasLoginForm = await page.locator('#login-form, form[id*=\"login\"], input#email, input[name=\"email\"], #next-button').first().isVisible().catch(() => false);
+        if (hasLoginForm) {
+          return { isLoginPage: true, confidence: 'low', reason: 'Fallback login detection (/login on auth host with login form)' };
+        }
+      }
+    } catch (_) {
+      // ignore
+    }
     
     // No hardcoded detection - return false if no configured login URL matches
     return { isLoginPage: false, confidence: 'low', reason: 'No configured login URL match' };
