@@ -2076,6 +2076,12 @@ const modeHandlers = {
         const handleLoginRedirect = context.handle_login_redirect;
         if (!isLoginJob && handleLoginRedirect && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail')) {
           try {
+            await sendLog(jobId, 'info', `🔐 [LOGIN-REDIRECT] handler check: handle_login_redirect=${handleLoginRedirect}`, {
+              final_url: finalUrl,
+              intended_url: currentUrl,
+              login_url: context?.login_url || null,
+              job_type: context?.jobType || context?.job_type || null
+            });
             const { handleLoginRedirect: handleRedirect } = await import('../login/login-redirect-handler.js');
             const redirectResult = await handleRedirect(page, jobId, finalUrl, currentUrl, context, openaiClient, handleLoginRedirect);
             
@@ -2099,6 +2105,11 @@ const modeHandlers = {
               pagesAnalyzed = 0; // Reset page counter
               await sendLog(jobId, 'info', `🔄 Restarting crawl from root path with fresh authentication`);
               continue; // Skip current page and start fresh
+            } else {
+              await sendLog(jobId, 'info', `🔐 [LOGIN-REDIRECT] handler did not reauthenticate (continuing)`, {
+                final_url: finalUrl,
+                intended_url: currentUrl
+              });
             }
           } catch (redirectError) {
             // If handleLoginRedirect is 'fail', the error is already thrown
