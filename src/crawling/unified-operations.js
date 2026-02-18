@@ -1046,6 +1046,19 @@ async function detectCaptcha(page, jobId) {
       if (!bbox || bbox.width < 8 || bbox.height < 8) {
         continue;
       }
+
+      // Heuristic: reCAPTCHA v3 renders a small badge in the bottom-right corner, often via an iframe.
+      // That badge is not a "challenge" and should not trigger captcha handling.
+      if (selector.includes('recaptcha') && selector.startsWith('iframe') && bbox.width <= 270 && bbox.height <= 70) {
+        await sendLog(jobId, 'info', `ℹ️ reCAPTCHA iframe looks like v3 badge (non-blocking)`, {
+          captcha_type: 'reCAPTCHA badge iframe',
+          selector,
+          page_url: page.url(),
+          action: 'captcha_badge_iframe_detected',
+          bbox
+        });
+        continue;
+      }
         const captchaType = selector.includes('mailpoet') ? 'Mailpoet Captcha' :
                            selector.includes('recaptcha') ? 'reCAPTCHA' :
                            selector.includes('hcaptcha') ? 'hCaptcha' :
