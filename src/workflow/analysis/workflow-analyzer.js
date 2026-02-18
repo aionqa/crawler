@@ -6486,6 +6486,89 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
 
+      // If an AI step returns compliance analysis, persist it immediately.
+      // Compliance is a superset: modern web standards + accessibility (WCAG/WAI-ARIA) + cross-browser/mobile considerations.
+      const rawComplianceAnalysis = parsedResponse?.compliance_analysis ?? parsedResponse?.result?.compliance_analysis;
+      if (rawComplianceAnalysis && typeof rawComplianceAnalysis === 'object' && !Array.isArray(rawComplianceAnalysis)) {
+        const normalizeSeverity = (value) => {
+          const v = String(value || '').trim().toLowerCase();
+          if (v === 'critical' || v === 'crit' || v === 'c') return 'critical';
+          if (v === 'high' || v === 'h') return 'high';
+          if (v === 'medium' || v === 'med' || v === 'm') return 'medium';
+          return 'low';
+        };
+        const severityOrder = { low: 0, medium: 1, high: 2, critical: 3 };
+        const normalizedCompliance = safeJsonClone(rawComplianceAnalysis);
+
+        const sortFindings = (findings) => {
+          if (!Array.isArray(findings)) return findings;
+          return findings
+            .map((f) => {
+              if (!f || typeof f !== 'object') return f;
+              return { ...f, severity: normalizeSeverity(f.severity) };
+            })
+            // User request: list low -> high -> critical order.
+            .sort((a, b) => (severityOrder[normalizeSeverity(a?.severity)] ?? 0) - (severityOrder[normalizeSeverity(b?.severity)] ?? 0));
+        };
+
+        normalizedCompliance.overall_findings = sortFindings(normalizedCompliance.overall_findings);
+        if (Array.isArray(normalizedCompliance.groups)) {
+          normalizedCompliance.groups = normalizedCompliance.groups.map((g) => ({
+            ...g,
+            findings: sortFindings(g?.findings)
+          }));
+        }
+
+        workflowState.complianceAnalysis = normalizedCompliance;
+        if (!workflowState.context || typeof workflowState.context !== 'object') {
+          workflowState.context = {};
+        }
+        workflowState.context.complianceAnalysis = normalizedCompliance;
+
+        try {
+          const projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+          let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+          if (!pageIdToUse && projectIdToUse && workflowState.pageUrl) {
+            pageIdToUse = await this.ensurePageId(workflowState, jobId);
+          }
+
+          if (pageIdToUse) {
+            await axios.post(
+              `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+              {
+                saveLegs: false,
+                saveComplianceData: true,
+                complianceData: normalizedCompliance,
+                job_id: jobId
+              },
+              { headers: this.getAuthHeaders() }
+            );
+            console.log(`✅ [COMPLIANCE] Saved compliance_analysis to page ${pageIdToUse}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [COMPLIANCE] Saved compliance analysis`, 'WORKFLOW-ANALYZER', {
+                page_id: pageIdToUse,
+                findings_count: Array.isArray(normalizedCompliance.overall_findings)
+                  ? normalizedCompliance.overall_findings.length
+                  : 0,
+                groups_count: Array.isArray(normalizedCompliance.groups)
+                  ? normalizedCompliance.groups.length
+                  : 0
+              });
+            }
+          } else {
+            console.warn(`⚠️ [COMPLIANCE] Could not save compliance analysis (missing pageId)`);
+          }
+        } catch (saveComplianceError) {
+          console.error(`❌ [COMPLIANCE] Failed to save compliance analysis: ${saveComplianceError.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [COMPLIANCE] Failed to save compliance analysis: ${saveComplianceError.message}`, 'WORKFLOW-ANALYZER', {
+              error: saveComplianceError.message
+            });
+          }
+          // Non-fatal: allow crawl workflow to continue even if compliance persistence fails.
+        }
+      }
+
       // Make specialized AI analysis available to later `save-data` steps.
       // Some workflows key their persistence logic off `workflowState.*Analysis`.
       if (parsedResponse && typeof parsedResponse === 'object') {
@@ -6501,6 +6584,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         if (parsedResponse.accessibility_analysis && !workflowState.accessibilityAnalysis) {
           workflowState.accessibilityAnalysis = parsedResponse.accessibility_analysis;
           if (workflowState.context) workflowState.context.accessibilityAnalysis = parsedResponse.accessibility_analysis;
+        }
+        if (parsedResponse.compliance_analysis && !workflowState.complianceAnalysis) {
+          workflowState.complianceAnalysis = parsedResponse.compliance_analysis;
+          if (workflowState.context) workflowState.context.complianceAnalysis = parsedResponse.compliance_analysis;
         }
       }
 

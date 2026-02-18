@@ -4975,6 +4975,11 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           workflowState.context = workflowState.context || {};
           workflowState.context.accessibilityAnalysis = parsedResponse.accessibility_analysis;
         }
+        if (parsedResponse.compliance_analysis && !workflowState.complianceAnalysis) {
+          workflowState.complianceAnalysis = parsedResponse.compliance_analysis;
+          workflowState.context = workflowState.context || {};
+          workflowState.context.complianceAnalysis = parsedResponse.compliance_analysis;
+        }
       }
       
       // Store result - storeStepResult will structure it according to schema
@@ -5620,6 +5625,7 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
     const saveSeoData = config.saveSeoData === true;
     const saveContentData = config.saveContentData === true;
     const saveAccessibilityData = config.saveAccessibilityData === true;
+    const saveComplianceData = config.saveComplianceData === true;
     
     // Collect data from workflowState
     // CRITICAL: Use legsToExecute if available (the active legs array), otherwise fall back to legs
@@ -5653,12 +5659,21 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
                                    (workflowState.stepResults?.accessibility_analysis?.accessibility_analysis) ||
                                    (workflowState.stepResults?.accessibility_analysis?.result?.accessibility_analysis) ||
                                    null;
+
+    // Get Compliance analysis from workflowState
+    const complianceAnalysis = workflowState.complianceAnalysis ||
+                              workflowState.context?.complianceAnalysis ||
+                              (workflowState.variablePool?.step?.complianceAnalysis?.value) ||
+                              (workflowState.stepResults?.compliance_analysis?.compliance_analysis) ||
+                              (workflowState.stepResults?.compliance_analysis?.result?.compliance_analysis) ||
+                              null;
     
     const dataTypes = [];
     if (saveLegs && legs.length > 0) dataTypes.push(`${legs.length} legs`);
     if (saveSeoData && seoAnalysis) dataTypes.push('SEO data');
     if (saveContentData && contentAnalysis) dataTypes.push('Content data');
     if (saveAccessibilityData && accessibilityAnalysis) dataTypes.push('Accessibility data');
+    if (saveComplianceData && complianceAnalysis) dataTypes.push('Compliance data');
     
     console.log(`💾 Save-data step: saving ${dataTypes.join(', ')}`);
     
@@ -5683,6 +5698,7 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
       saveSeoData,
       saveContentData,
       saveAccessibilityData,
+      saveComplianceData,
       legs: saveLegs ? legs : [],
       interactiveElements: saveInteractiveElements ? interactiveElements : [],
       nonInteractiveElements: saveNonInteractiveElements ? nonInteractiveElements : [],
@@ -5691,6 +5707,7 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
       seoData: saveSeoData && seoAnalysis ? seoAnalysis : null,
       contentData: saveContentData && contentAnalysis ? contentAnalysis : null,
       accessibilityData: saveAccessibilityData && accessibilityAnalysis ? accessibilityAnalysis : null,
+      complianceData: saveComplianceData && complianceAnalysis ? complianceAnalysis : null,
       job_id: jobId
     };
     
@@ -5712,7 +5729,8 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
         cookies: results.cookies,
         seo: results.seo,
         content: results.content,
-        accessibility: results.accessibility
+        accessibility: results.accessibility,
+        compliance: results.compliance
       });
       
       this.storeStepResult(step, {
@@ -5730,6 +5748,7 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
       if (results.seo?.saved) savedItems.push('SEO data');
       if (results.content?.saved) savedItems.push('Content data');
       if (results.accessibility?.saved) savedItems.push('Accessibility data');
+      if (results.compliance?.saved) savedItems.push('Compliance data');
       
       const logMessage = `💾 [SAVE-DATA] Saved ${savedItems.join(', ')}`;
       
