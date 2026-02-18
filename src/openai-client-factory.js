@@ -20,6 +20,7 @@ const AI_SERVICE_TOKEN = process.env.RUNNER_TOKEN || process.env.AI_SERVICE_TOKE
  */
 export function createOpenAIClient(context = {}, fallbackApiKey = null) {
   const llmConfig = context.llm_config || {};
+  const openaiOptions = (context.openai_options && typeof context.openai_options === 'object') ? context.openai_options : {};
   const projectId = context.project_id || context.projectId;
   const jobId = context.job_id || context.jobId;
 
@@ -91,7 +92,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                   project_id: projectId,
                   job_id: jobId,
                   messages: params.messages,
-                  model: params.model || llmConfig.model || 'gpt-5-mini',
+                  model: params.model || llmConfig.model || openaiOptions.model || 'gpt-5-mini',
                   temperature: params.temperature,
                   max_tokens: params.max_tokens,
                   ...params
@@ -171,7 +172,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                 job_id: jobId,
                 input: params.input || params.messages, // Support both formats
                 messages: params.messages,
-                model: params.model || llmConfig.model || 'gpt-5-mini',
+                model: params.model || llmConfig.model || openaiOptions.model || 'gpt-5-mini',
                 temperature: params.temperature,
                 max_tokens: params.max_tokens,
                 ...params
