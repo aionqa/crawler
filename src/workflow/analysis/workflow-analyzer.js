@@ -6339,7 +6339,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // If an AI step returns SEO analysis, persist it immediately.
       // This is the "SEO assistant" step output (enabled in advanced workflows) and should be
       // visible in the UI (SEO Assistant + Content Optimizer views).
-      const rawSeoAnalysis = parsedResponse?.seo_analysis;
+      // Some AI clients return a top-level object, others nest under `result`.
+      // Accept both so the SEO assistant step always persists its output.
+      const rawSeoAnalysis = parsedResponse?.seo_analysis ?? parsedResponse?.result?.seo_analysis;
       if (rawSeoAnalysis && typeof rawSeoAnalysis === 'object' && !Array.isArray(rawSeoAnalysis)) {
         const normalizeSeoPriority = (value) => {
           const v = String(value || '').trim().toLowerCase();
