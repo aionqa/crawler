@@ -8877,6 +8877,9 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
                   'button:has-text("Sign in")',
                   'button:has-text("Log in")',
                   'button:has-text("Login")',
+                  'button#submit',
+                  'input#submit',
+                  'button:has-text("Submit")',
                   'button:has-text("Continue")',
                   'button:has-text("Next")'
                 ].join(', ')
