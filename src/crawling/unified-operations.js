@@ -995,6 +995,18 @@ async function recordPageVideo(page, jobId, pageUrl, action) {
 // Detect captcha on page
 async function detectCaptcha(page, jobId) {
   try {
+    // reCAPTCHA v3 often shows only the "protected by reCAPTCHA" badge.
+    // That is not an interactive challenge and should not be treated as a blocker.
+    const recaptchaBadgeVisible = await page.locator('.grecaptcha-badge').first().isVisible().catch(() => false);
+    if (recaptchaBadgeVisible) {
+      await sendLog(jobId, 'info', `ℹ️ reCAPTCHA badge detected (likely v3) — not treating as a blocking captcha`, {
+        captcha_type: 'reCAPTCHA badge',
+        selector: '.grecaptcha-badge',
+        page_url: page.url(),
+        action: 'captcha_badge_detected'
+      });
+    }
+
     // Common captcha selectors and indicators
     const captchaIndicators = [
       // Mailpoet Captcha (specific detection)
@@ -1025,8 +1037,15 @@ async function detectCaptcha(page, jobId) {
     ];
     
     for (const selector of captchaIndicators) {
-      const element = await page.$(selector);
-      if (element) {
+      const loc = page.locator(selector).first();
+      const visible = await loc.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      const bbox = await loc.boundingBox().catch(() => null);
+      if (!bbox || bbox.width < 8 || bbox.height < 8) {
+        continue;
+      }
         const captchaType = selector.includes('mailpoet') ? 'Mailpoet Captcha' :
                            selector.includes('recaptcha') ? 'reCAPTCHA' :
                            selector.includes('hcaptcha') ? 'hCaptcha' :
@@ -1037,15 +1056,18 @@ async function detectCaptcha(page, jobId) {
           captcha_type: captchaType,
           selector: selector,
           page_url: page.url(),
-          action: 'captcha_detection'
+          action: 'captcha_detection',
+          visible: true,
+          bbox
         });
         
         return {
           detected: true,
           type: captchaType,
-          selector: selector
+          selector: selector,
+          visible: true,
+          bbox
         };
-      }
     }
     
     return { detected: false };
@@ -1058,6 +1080,16 @@ async function detectCaptcha(page, jobId) {
 // Attempt to handle captcha with human-like behavior
 async function handleCaptcha(page, jobId, captchaInfo) {
   try {
+    // If it's not visible, it's not actionable. Avoid claiming "captcha still present".
+    if (captchaInfo && captchaInfo.visible === false) {
+      await sendLog(jobId, 'info', `ℹ️ Captcha indicator not visible — skipping captcha handling`, {
+        captcha_type: captchaInfo.type,
+        selector: captchaInfo.selector,
+        action: 'captcha_not_visible_skip'
+      });
+      return { passed: true, skipped: true };
+    }
+
     await sendLog(jobId, 'info', `🔐 Attempting to handle ${captchaInfo.type} with human-like behavior...`, {
       captcha_type: captchaInfo.type,
       action: 'captcha_handling'
@@ -1084,14 +1116,15 @@ async function handleCaptcha(page, jobId, captchaInfo) {
     try {
       // For reCAPTCHA, try clicking the checkbox
       if (captchaInfo.type.includes('reCAPTCHA') || captchaInfo.selector.includes('recaptcha')) {
-        const recaptchaCheckbox = await page.$('iframe[src*="recaptcha"]').catch(() => null);
-        if (recaptchaCheckbox) {
+        const recaptchaFrame = page.locator('iframe[src*="recaptcha"]').first();
+        const isVisible = await recaptchaFrame.isVisible().catch(() => false);
+        if (isVisible) {
           await sendLog(jobId, 'info', `🖱️ Attempting to interact with reCAPTCHA checkbox...`, {
             action: 'captcha_interaction'
           });
           
-          // Click the iframe (this might trigger the challenge)
-          const box = await recaptchaCheckbox.boundingBox();
+          // Click the iframe region (best-effort; iframe contents are cross-origin)
+          const box = await recaptchaFrame.boundingBox().catch(() => null);
           if (box) {
             // Move mouse to checkbox with human-like delay
             await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
@@ -1168,7 +1201,7 @@ async function handleCaptcha(page, jobId, captchaInfo) {
     await page.waitForTimeout(8000 + Math.random() * 4000);
     
     // Check if captcha is still present
-    const stillPresent = await page.$(captchaInfo.selector).catch(() => null);
+    const stillPresent = await page.locator(captchaInfo.selector).first().isVisible().catch(() => false);
     
     if (!stillPresent) {
       await sendLog(jobId, 'info', `✅ CAPTCHA PASSED: ${captchaInfo.type} was resolved`, {
@@ -1179,8 +1212,12 @@ async function handleCaptcha(page, jobId, captchaInfo) {
       return { passed: true };
     } else {
       // Check if CAPTCHA challenge appeared (iframe might have loaded)
-      const challengeIframe = await page.$('iframe[src*="recaptcha"][src*="bframe"], iframe[src*="hcaptcha"][src*="challenges"]').catch(() => null);
-      if (challengeIframe) {
+      const challengeIframeVisible = await page
+        .locator('iframe[src*="recaptcha"][src*="bframe"], iframe[src*="hcaptcha"][src*="challenges"]')
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (challengeIframeVisible) {
         await sendLog(jobId, 'info', `⏳ CAPTCHA challenge appeared, waiting for resolution...`, {
           action: 'captcha_challenge_waiting'
         });
@@ -1188,7 +1225,7 @@ async function handleCaptcha(page, jobId, captchaInfo) {
         await page.waitForTimeout(15000 + Math.random() * 10000);
       }
       
-      const stillPresentAfterWait = await page.$(captchaInfo.selector).catch(() => null);
+      const stillPresentAfterWait = await page.locator(captchaInfo.selector).first().isVisible().catch(() => false);
       if (!stillPresentAfterWait) {
         await sendLog(jobId, 'info', `✅ CAPTCHA PASSED after challenge: ${captchaInfo.type} was resolved`, {
           captcha_type: captchaInfo.type,

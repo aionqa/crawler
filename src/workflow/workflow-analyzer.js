@@ -3871,6 +3871,39 @@ await submitButton.click();
 
 // Give multi-step login flows time to render the next stage (password/OTP/etc.)
 await page.waitForTimeout(1500);
+
+// If this was the "email/username first" stage, try to complete the password stage in the same script.
+if (!hasPasswordField) {
+  // Wait for a password field to appear after Continue/Next
+  const pw = page.locator(passwordSelector).first();
+  const pwVisible = await pw.isVisible().catch(() => false);
+  if (!pwVisible) {
+    await pw.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+  }
+
+  const pwNowVisible = await pw.isVisible().catch(() => false);
+  if (pwNowVisible) {
+    await pw.fill(passwordValue);
+
+    // Wait for captcha token if present (same logic as above)
+    const captchaTokenField2 = page.locator('#captcha-token, input[name="captcha_token"]').first();
+    const hasCaptchaTokenField2 = await captchaTokenField2.isVisible().catch(() => false);
+    if (hasCaptchaTokenField2) {
+      for (let i = 0; i < 20; i++) {
+        const tokenVal = await captchaTokenField2.inputValue().catch(() => '');
+        if (tokenVal && String(tokenVal).trim().length > 10) break;
+        await page.waitForTimeout(500);
+      }
+    }
+
+    const submit2 = page.locator(continueSelector).first();
+    await submit2.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+    await submit2.click().catch(() => {});
+    await page.waitForTimeout(1500);
+    return { success: true, action: 'login_submitted_after_password', used_username: usernameValue ? 'set' : 'missing' };
+  }
+}
+
 return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_step_submitted', used_username: usernameValue ? 'set' : 'missing' };
 `.trim();
         aiResponse = {
