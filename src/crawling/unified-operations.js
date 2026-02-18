@@ -6207,10 +6207,44 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       const cookiesBeforeNav = await browserContext.cookies();
       await sendLog(jobId, 'info', `🍪 Browser context has ${cookiesBeforeNav.length} cookie(s) before navigation`);
       
-      await page.goto(url, { 
-        waitUntil: 'domcontentloaded', 
-        timeout: 30000 
+      // Workflow-mode navigation: be resilient to transient CDN/origin 5xx (common on dev envs).
+      // We log the status explicitly because a 503 returns a response (no requestfailed event).
+      let navResponse = await page.goto(url, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000
       });
+      let navStatus = navResponse ? navResponse.status() : null;
+      if (navStatus && navStatus >= 500) {
+        await sendLog(jobId, 'warn', `⚠️ Initial navigation returned HTTP ${navStatus} for ${url} — retrying with backoff...`, {
+          component: 'CRAWLER-TEXT',
+          action: 'startcrawl_nav_retry_5xx',
+          url,
+          status: navStatus
+        });
+        // Two retries with increasing wait.
+        const delays = [3000, 7000];
+        for (const d of delays) {
+          await page.waitForTimeout(d);
+          navResponse = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+          navStatus = navResponse ? navResponse.status() : null;
+          if (!navStatus || navStatus < 500) break;
+        }
+        if (navStatus && navStatus >= 500) {
+          await sendLog(jobId, 'warn', `⚠️ Navigation still HTTP ${navStatus} after retries`, {
+            component: 'CRAWLER-TEXT',
+            action: 'startcrawl_nav_retry_5xx_failed',
+            url,
+            status: navStatus
+          });
+        } else {
+          await sendLog(jobId, 'info', `✅ Navigation recovered after retry (status=${navStatus ?? 'unknown'})`, {
+            component: 'CRAWLER-TEXT',
+            action: 'startcrawl_nav_retry_recovered',
+            url,
+            status: navStatus ?? null
+          });
+        }
+      }
       
       // Check if navigation redirected (cookies might have caused redirect)
       const finalUrl = page.url();
