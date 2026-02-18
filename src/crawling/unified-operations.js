@@ -5930,6 +5930,62 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     
     const result = await withBrowser(async ({ page, context: browserContext }) => {
       await sendLog(jobId, 'info', 'Browser session started', { mode, allowSubdomains });
+
+      // Diagnostics: capture runtime JS errors and failed requests so we can explain
+      // "Application error: a client-side exception has occurred" screenshots.
+      try {
+        let consoleCount = 0;
+        let pageErrorCount = 0;
+        let requestFailCount = 0;
+        const maxEach = 25;
+
+        page.on('console', (msg) => {
+          try {
+            const type = msg.type();
+            if (!['error', 'warning'].includes(type)) return;
+            if (consoleCount >= maxEach) return;
+            consoleCount++;
+            void sendLog(jobId, type === 'error' ? 'error' : 'warn', `🧾 [BROWSER CONSOLE] ${msg.text()}`, {
+              component: 'BROWSER-DIAGNOSTICS',
+              console_type: type,
+              page_url: (() => { try { return page.url(); } catch { return null; } })()
+            });
+          } catch (_) {
+            // ignore
+          }
+        });
+
+        page.on('pageerror', (err) => {
+          try {
+            if (pageErrorCount >= maxEach) return;
+            pageErrorCount++;
+            void sendLog(jobId, 'error', `💥 [PAGE ERROR] ${String(err?.message || err)}`, {
+              component: 'BROWSER-DIAGNOSTICS',
+              page_url: (() => { try { return page.url(); } catch { return null; } })()
+            });
+          } catch (_) {
+            // ignore
+          }
+        });
+
+        page.on('requestfailed', (req) => {
+          try {
+            if (requestFailCount >= maxEach) return;
+            requestFailCount++;
+            void sendLog(jobId, 'warn', `🌐 [REQUEST FAILED] ${req.url()} (${req.failure()?.errorText || 'unknown'})`, {
+              component: 'BROWSER-DIAGNOSTICS',
+              method: req.method(),
+              resource_type: req.resourceType(),
+              page_url: (() => { try { return page.url(); } catch { return null; } })()
+            });
+          } catch (_) {
+            // ignore
+          }
+        });
+      } catch (diagErr) {
+        // never fail crawl due to diagnostics wiring
+        console.warn(`[BROWSER-DIAGNOSTICS] Failed to attach diagnostics: ${diagErr.message}`);
+      }
       
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {

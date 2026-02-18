@@ -229,6 +229,23 @@ export async function handleLoginRedirect(
       await page.goto(returnUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(2000); // Wait for page to stabilize
+
+      // Next.js sometimes lands on a client-side exception screen in automation even though the app works manually.
+      // If we detect that exact screen, do a one-time reload and re-check.
+      const nextJsClientError = await page
+        .locator('text=Application error: a client-side exception has occurred')
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (nextJsClientError) {
+        await sendLog(jobId, 'warn', `⚠️ Detected Next.js client-side exception screen after login; reloading once...`, {
+          component: 'LOGIN-REDIRECT-HANDLER',
+          action: 'nextjs_client_error_reload',
+          page_url: page.url()
+        });
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+      }
       
       const newUrl = page.url();
       await sendLog(jobId, 'info', `✅ Navigated to ${newUrl} with fresh cookies`);
