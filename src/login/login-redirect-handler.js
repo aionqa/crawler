@@ -4,6 +4,7 @@
  */
 
 import * as backendLogger from '../backend-logger.js';
+import { executeLoginWithWorkflow } from './login-workflow-engine.js';
 
 /**
  * Send log to backend (wrapper for backendLogger)
@@ -132,56 +133,57 @@ export async function handleLoginRedirect(
   
   // Auto-retry: Get latest login job cookies and re-authenticate
   if (handleLoginRedirect === 'auto_retry') {
-    await sendLog(jobId, 'info', `🔄 Auto-retry enabled - login page detected, triggering a login job to refresh cookies...`);
-
-    // Ask backend to start a login job (runner-auth protected).
     const axios = (await import('axios')).default;
-    const refreshResp = await axios.post(
-      `${backendUrl}/api/runner/jobs/${jobId}/refresh-login`,
-      { reason: 'login_redirect', intended_url: intendedUrl || null },
-      {
-        headers: runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {},
-        timeout: 10000
-      }
+    await sendLog(jobId, 'info', `🔄 Auto-retry enabled - login page detected, attempting in-session login workflow...`);
+
+    if (!runnerToken) {
+      throw new Error('runner_token missing from crawl context; cannot fetch login config');
+    }
+    if (!projectId) {
+      throw new Error('project_id missing from crawl context; cannot fetch login config');
+    }
+
+    // Fetch login config (credentials + workflow id) from backend (runner-auth).
+    const loginConfigResp = await axios.get(`${backendUrl}/api/runner/projects/${projectId}/login-config`, {
+      headers: { 'Authorization': `Bearer ${runnerToken}` },
+      timeout: 10000
+    });
+    const loginConfig = loginConfigResp?.data || {};
+    const creds = loginConfig?.credentials;
+    const loginWorkflowId =
+      loginConfig?.login_workflow_id ||
+      context.login_workflow_id ||
+      context.login_workflow_template_id ||
+      'json-login-default-login-workflow';
+
+    if (!creds?.username || !creds?.password) {
+      throw new Error('Backend did not return credentials for login-config');
+    }
+
+    // Run login workflow inside the SAME browser session. This is required for SSO flows
+    // that depend on local/session storage and redirect state.
+    const openaiApiKey = context.openai_api_key || process.env.OPENAI_API_KEY || null;
+    const loginContext = {
+      ...context,
+      project_id: projectId,
+      login_url: loginConfig?.login_url || context.login_url || null,
+      workflow_template_id: loginWorkflowId,
+      runner_token: runnerToken,
+      credentials: { username: creds.username, password: creds.password }
+    };
+
+    const loginExec = await executeLoginWithWorkflow(
+      page,
+      jobId,
+      currentUrl,
+      openaiApiKey,
+      loginContext
     );
 
-    const loginJobId = refreshResp?.data?.login_job_id;
-    if (!loginJobId) {
-      throw new Error('Backend did not return login_job_id for refresh-login');
-    }
-
-    await sendLog(jobId, 'info', `⏳ Waiting for login job ${loginJobId} to complete...`);
-
-    // Poll login job status via runner-auth `/api/jobs/:id`
-    const deadline = Date.now() + 3 * 60 * 1000; // 3 minutes
-    while (Date.now() < deadline) {
-      const statusResp = await axios.get(`${backendUrl}/api/jobs/${loginJobId}`, {
-        headers: runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {},
-        timeout: 10000
-      });
-      const status = statusResp?.data?.status;
-      if (status === 'completed') break;
-      if (status === 'failed' || status === 'error' || status === 'cancelled') {
-        throw new Error(`Login refresh job ${loginJobId} ended with status=${status}`);
-      }
-      await new Promise(r => setTimeout(r, 2000));
-    }
-
-    // Fetch cookies after the login job completes
-    const latestCookies = await getLatestLoginCookies(backendUrl, projectId, runnerToken);
-    if (!latestCookies || latestCookies.length === 0) {
-      throw new Error('Login refresh completed but no cookies found');
-    }
-    
-    await sendLog(jobId, 'info', `🍪 Found ${latestCookies.length} cookies from most recent login job`);
-    
-    // Set cookies in browser context
-    try {
-      await page.context().addCookies(latestCookies);
-      await sendLog(jobId, 'info', `✅ Set ${latestCookies.length} cookies in browser context`);
-    } catch (cookieError) {
-      await sendLog(jobId, 'warn', `⚠️ Failed to set some cookies: ${cookieError.message}`);
-    }
+    const latestCookies = Array.isArray(loginExec?.cookies) ? loginExec.cookies : [];
+    await sendLog(jobId, 'info', `🍪 In-session login completed (success=${!!loginExec?.success}); cookies=${latestCookies.length}`, {
+      action: 'in_session_login_complete'
+    });
     
     // Navigate back to the intended URL (preferred) or fall back to root.
     const fallbackRoot = context.start_url || new URL(currentUrl).origin;
