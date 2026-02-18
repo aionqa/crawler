@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Avoid installing browsers into /root/.cache (can be flaky on some Docker backends).
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # Set working directory
 WORKDIR /app
 
@@ -22,7 +25,7 @@ RUN npm install
 
 # Install Playwright browsers and system dependencies (including ffmpeg for video recording)
 # This is required for video recording even when using remote browsers
-RUN npx playwright install --with-deps chromium
+RUN mkdir -p /ms-playwright && npx playwright install --with-deps chromium
 
 # Copy source code
 # Works when build context is the unified-crawler/ directory (AWS) or project root (docker-compose)
