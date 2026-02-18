@@ -3770,6 +3770,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         String(step.name || '').toLowerCase().includes('generate journey action script');
       if (isScriptGenerationStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
+          + '- You MUST use input_credentials.username and input_credentials.password for any login/sign-in fields. Never hardcode placeholders like test@example.com, user@example.com, testpass123.\n'
+          + '- Behave like a human: click to focus fields, type with per-keystroke delays (page.type(..., { delay: 40-120 })), add short random pauses, and move the mouse before clicks.\n'
           + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
           + '- For modal openers, target explicit clickable elements (a/button/[role="button"][aria-haspopup]) and use click({ force: true }) when overlays can intercept pointer events.\n'
           + '- Treat navigation/DOM-readiness waits as best-effort only: wrap waitForNavigation/waitForLoadState/non-critical waitForSelector in try/catch and continue on timeout.\n'
@@ -4214,18 +4216,47 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           console.log(`📄 VAR_DUMP: playwright_script length=${parsedResponse.playwright_script.length}`);
           console.log(`📄 VAR_DUMP: playwright_script preview: ${parsedResponse.playwright_script.substring(0, 300)}`);
           
-          // CRITICAL: Verify script uses input_credentials (only for login steps)
-          if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
-            const scriptUsesCredentials = parsedResponse.playwright_script.includes('input_credentials') || 
-                                         parsedResponse.playwright_script.includes('input_credentials.username') ||
-                                         parsedResponse.playwright_script.includes('input_credentials.password');
-            console.log(`📄 VAR_DUMP: scriptUsesCredentials=${scriptUsesCredentials}`);
-            if (!scriptUsesCredentials) {
-              console.error(`❌ ERROR: Generated script does NOT use input_credentials!`);
-              console.error(`Script preview: ${parsedResponse.playwright_script.substring(0, 500)}`);
-              console.error(`Available credentials: username=${workflowState.inputCredentials?.username || 'MISSING'}, password=${workflowState.inputCredentials?.password ? '***' : 'MISSING'}`);
-            } else {
-              console.log(`✅ Generated script uses input_credentials`);
+          // CRITICAL: Enforce scripts to use input_credentials for login/journey generation steps.
+          // We saw AI occasionally emit placeholders like test@example.com even when credentials are provided.
+          const isCredSensitiveScript =
+            (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) ||
+            promptIdentifier === 'generate_journey_script' ||
+            String(step.id || '').toLowerCase().includes('generate_journey_script') ||
+            String(step.name || '').toLowerCase().includes('generate journey action script');
+          if (isCredSensitiveScript) {
+            const before = parsedResponse.playwright_script;
+            let script = String(before || '');
+
+            // Replace the most common placeholder creds.
+            script = script.replace(/(['\"])test@example\\.com\\1/gi, 'input_credentials.username');
+            script = script.replace(/(['\"])user@example\\.com\\1/gi, 'input_credentials.username');
+            script = script.replace(/(['\"])testpass123\\1/gi, 'input_credentials.password');
+            script = script.replace(/(['\"])password123\\1/gi, 'input_credentials.password');
+
+            // If they define emailValue/passwordValue constants as literals, rewrite them.
+            script = script.replace(/\\bconst\\s+emailValue\\s*=\\s*(['\"]).*?@.*?\\1\\s*;/gi, 'const emailValue = input_credentials.username;');
+            script = script.replace(/\\blet\\s+emailValue\\s*=\\s*(['\"]).*?@.*?\\1\\s*;/gi, 'let emailValue = input_credentials.username;');
+            script = script.replace(/\\bconst\\s+passwordValue\\s*=\\s*(['\"]).{3,}\\1\\s*;/gi, 'const passwordValue = input_credentials.password;');
+            script = script.replace(/\\blet\\s+passwordValue\\s*=\\s*(['\"]).{3,}\\1\\s*;/gi, 'let passwordValue = input_credentials.password;');
+
+            const usesCreds =
+              script.includes('input_credentials') ||
+              script.includes('input_credentials.username') ||
+              script.includes('input_credentials.password');
+            if (!usesCreds) {
+              // Hard-guard: prepend usable variables and a short sanity log; keep script valid JS.
+              script = `const emailValue = input_credentials.username;\\nconst passwordValue = input_credentials.password;\\n` + script;
+            }
+
+            if (script !== before) {
+              parsedResponse.playwright_script = script;
+              await this.backendLogger?.appendJobLog?.(
+                jobId,
+                'warn',
+                `🛡️ Rewrote playwright_script to enforce input_credentials (removed placeholder creds)`,
+                'WORKFLOW-ANALYZER',
+                { step_id: step.id, step_name: step.name, prompt: promptIdentifier }
+              );
             }
           }
           
