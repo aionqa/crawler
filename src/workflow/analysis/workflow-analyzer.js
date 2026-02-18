@@ -4458,10 +4458,74 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const safeStepPayload = this.makeJsonSafe(stepPayload);
       
       let aiResponse;
+      const isCacheableScriptStep = step.id === 'generate_login_script' || step.id === 'generate_journey_script';
+      if (isCacheableScriptStep) {
+        const projectIdForCache = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
+        const pageIdForCache = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
+        const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.currentItem;
+        const journeyIdForCache = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id || null;
+        const actionIdForCache = currentJourney?.action_id || stepContext?.action_id || null;
+        if (projectIdForCache && pageIdForCache) {
+          const cacheBucket = `workflow-step:${step.id}`;
+          const cacheKey = [
+            cacheBucket,
+            String(projectIdForCache),
+            String(pageIdForCache),
+            journeyIdForCache ? String(journeyIdForCache) : '',
+            actionIdForCache ? String(actionIdForCache) : ''
+          ].join(':');
+          try {
+            const cacheLookup = await axios.get(
+              `${this.backendUrl}/api/scripts/cache/lookup`,
+              {
+                params: {
+                  project_id: projectIdForCache,
+                  page_id: pageIdForCache,
+                  cache_key: cacheKey
+                },
+                headers: this.getAuthHeaders(),
+                timeout: 10000
+              }
+            );
+            const cached = cacheLookup?.data?.hit ? cacheLookup.data.script : null;
+            if (cached && cached.script_code) {
+              aiResponse = {
+                playwright_script: cached.script_code,
+                description: cached.description || 'Cached script reused (not expired).',
+                expected_result: cached.expected_outcome || cached.expected_result || null,
+                cache_hit: true,
+                cached_script_id: cached._id,
+                cache_expires_at: cached.cache_expires_at || null
+              };
+              console.log(`✅ [SCRIPTS-CACHE] Cache HIT for ${step.id} (${cacheBucket})`);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(
+                  jobId,
+                  'info',
+                  `✅ [SCRIPTS-CACHE] Reused cached script for ${step.id}`,
+                  'WORKFLOW-ANALYZER',
+                  {
+                    step_id: step.id,
+                    cache_bucket: cacheBucket,
+                    cache_key: cacheKey,
+                    cached_script_id: cached._id,
+                    cache_expires_at: cached.cache_expires_at || null
+                  }
+                );
+              }
+            } else {
+              console.log(`ℹ️ [SCRIPTS-CACHE] Cache MISS for ${step.id} (${cacheBucket})`);
+            }
+          } catch (cacheErr) {
+            console.warn(`⚠️ [SCRIPTS-CACHE] Cache lookup failed for ${step.id}: ${cacheErr.message}`);
+          }
+        }
+      }
+
       // Reuse step classification for retry behavior
       const configuredRetries = Number.isFinite(step.config?.maxRetries) ? step.config.maxRetries : 1;
       const maxAttempts = Math.max(1, configuredRetries + 1);
-      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      for (let attempt = 1; !aiResponse && attempt <= maxAttempts; attempt += 1) {
         try {
           aiResponse = await this.aiLogger.makeAICallWithPrompt(
             promptIdentifier,
@@ -4488,30 +4552,56 @@ IMPORTANT OUTPUT REQUIREMENTS:
             stepIdLower === 'page_summary' ||
             stepNameLower.includes('page intelligence') ||
             promptIdentifier === 'page_summary';
+          const isSeoAssistantStep =
+            stepIdLower === 'seo_analysis' ||
+            stepIdLower.includes('seo_assistant') ||
+            stepNameLower.includes('seo assistant') ||
+            stepNameLower.includes('seo analysis');
+          const isContentOptimizerStep =
+            stepIdLower === 'content_optimization_analysis' ||
+            stepIdLower.includes('content_optimizer') ||
+            stepNameLower.includes('content optimizer') ||
+            stepNameLower.includes('content optimization');
+
+          const isAiUnavailableError =
+            aiErrorText.includes('AI not configured') ||
+            aiErrorText.toLowerCase().includes('openai api key') ||
+            aiErrorText.toLowerCase().includes('api key') ||
+            aiErrorText.toLowerCase().includes('not provided');
 
           // Runner helpers can occasionally execute without local AI provider configured.
           // For login validation steps, provide a deterministic page-state fallback instead of hard-failing the job.
           if (isLoginValidationStep && aiErrorText.includes('AI not configured')) {
             let bodyText = '';
             let hasPasswordField = false;
+            let hasEmailField = false;
+            let hasSubmitLikeButton = false;
             try {
               bodyText = ((await page.textContent('body')) || '').toLowerCase();
               hasPasswordField = !!(await page.$('input[type="password"]'));
+              hasEmailField = !!(await page.$('input#email, input[name="email"], input[type="email"], input[name="username"]'));
+              hasSubmitLikeButton = (await page.locator('button:has-text("continue"), button:has-text("sign in"), button:has-text("log in"), button[type="submit"], #next-button').count()) > 0;
             } catch (fallbackReadError) {
               // Keep fallback conservative if DOM inspection fails.
             }
 
             const currentUrl = String(page.url() || stepPayload.current_url || stepPayload.page_url || '').toLowerCase();
             const hasErrorSignal = /(invalid|incorrect|error|failed|unauthorized|forbidden|required)/.test(bodyText);
-            const hasSuccessSignal = /(login successful|welcome|dashboard|logout|signed in|profile)/.test(bodyText);
-            const status = hasErrorSignal ? 'failure' : (hasSuccessSignal || !hasPasswordField ? 'success' : 'continue');
+            const hasSuccessSignal = /(login successful|successfully logged in|welcome|dashboard|signed in|profile)/.test(bodyText);
+            const onLoginUrl = /\/login\b/.test(currentUrl) || currentUrl.includes('auth');
+            const looksLikeLoginFlow = onLoginUrl || hasPasswordField || hasEmailField || hasSubmitLikeButton;
+            const status = hasErrorSignal
+              ? 'failure'
+              : (!looksLikeLoginFlow && hasSuccessSignal)
+                ? 'success'
+                : 'continue';
             const isComplete = status === 'success' || status === 'failure';
 
             aiResponse = {
               status,
               is_complete: isComplete,
               reason: 'AI provider unavailable on runner helper; used deterministic DOM-based login validation fallback.',
-              what_happened: `URL=${currentUrl}, passwordFieldVisible=${hasPasswordField}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}`,
+              what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}`,
               new_content_detected: status !== 'continue',
               content_type: 'page',
               needs_more_testing: !isComplete,
@@ -4530,8 +4620,199 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 'warn',
                 `⚠️ AI unavailable for ${step.id || step.name}; using deterministic login validation fallback`,
                 'WORKFLOW-ANALYZER',
-                { status, current_url: currentUrl, has_password_field: hasPasswordField, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
+                { status, current_url: currentUrl, has_email_field: hasEmailField, has_password_field: hasPasswordField, has_submit_like_button: hasSubmitLikeButton, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
               );
+            }
+            break;
+          }
+
+          // SEO/content analysis should still be testable locally even when no AI provider is configured.
+          if (isSeoAssistantStep && isAiUnavailableError) {
+            const html = String(safeStepPayload.page_content || safeStepPayload.pageContent || '');
+            const titleFromHtml = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').trim();
+            const metaDesc = (html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+            const canonicalHref = (html.match(/<link[^>]+rel=["']canonical["'][^>]*href=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+            const robotsMeta = (html.match(/<meta[^>]+name=["']robots["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+
+            const h1Count = (html.match(/<h1\\b/gi) || []).length;
+            const h2Count = (html.match(/<h2\\b/gi) || []).length;
+            const h3Count = (html.match(/<h3\\b/gi) || []).length;
+
+            const imgTags = html.match(/<img\\b[^>]*>/gi) || [];
+            const totalImages = imgTags.length;
+            let imagesWithAlt = 0;
+            for (const img of imgTags) {
+              if (/\\balt\\s*=\\s*[\"'][^\"']*[\"']/i.test(img)) imagesWithAlt++;
+            }
+            const imagesWithoutAlt = Math.max(0, totalImages - imagesWithAlt);
+
+            const linksArray = Array.isArray(safeStepPayload.playwright_analysis?.links)
+              ? safeStepPayload.playwright_analysis.links
+              : [];
+            let internalLinkCount = 0;
+            let externalLinkCount = 0;
+            let origin = '';
+            try { origin = new URL(String(safeStepPayload.page_url || '')).origin; } catch (_) { origin = ''; }
+            for (const link of linksArray) {
+              const href = String(link?.href || link?.url || '');
+              if (!href) continue;
+              try {
+                const resolved = new URL(href, String(safeStepPayload.page_url || '')).href;
+                const linkOrigin = new URL(resolved).origin;
+                if (origin && linkOrigin === origin) internalLinkCount++;
+                else externalLinkCount++;
+              } catch (_) {}
+            }
+
+            // NOTE: In a JS regex literal, escaping the slash must be `\/` (not `\\/`),
+            // otherwise the literal terminates early and the remainder is parsed as flags.
+            const hasSchema = /application\/ld\+json/i.test(html) || /\bitemscope\b/i.test(html);
+            const hasCanonical = Boolean(canonicalHref);
+            const hasRobotsMeta = Boolean(robotsMeta);
+
+            const title = (String(safeStepPayload.page_title || '') || titleFromHtml).trim();
+            const titleOptimal = title.length >= 20 && title.length <= 60;
+            const descriptionOptimal = metaDesc.length >= 70 && metaDesc.length <= 160;
+
+            const opportunities = [];
+            const pushOpp = (priority, issue, recommendation) => opportunities.push({ priority, issue, recommendation });
+            if (!title) pushOpp('high', 'Missing <title> tag', 'Add a unique, descriptive title (20-60 chars) including the primary keyword.');
+            else if (!titleOptimal) pushOpp('medium', 'Title length not optimal', 'Adjust title to ~20-60 characters; keep it unique and keyword-relevant.');
+            if (!metaDesc) pushOpp('high', 'Missing meta description', 'Add a compelling meta description (70-160 chars) with primary keyword + value proposition + CTA.');
+            else if (!descriptionOptimal) pushOpp('medium', 'Meta description length not optimal', 'Adjust meta description to ~70-160 characters; avoid truncation and duplicates.');
+            if (h1Count !== 1) pushOpp('high', 'Heading structure: expected exactly one H1', 'Ensure exactly one H1 that matches page intent; use H2/H3 for sections.');
+            if (imagesWithoutAlt > 0) pushOpp('medium', 'Images missing alt text', 'Add descriptive alt text to meaningful images; leave decorative images empty alt (alt=\"\").');
+            if (!hasCanonical) pushOpp('medium', 'Canonical tag not detected', 'Add a canonical URL to reduce duplicate-content risk, especially for query-string variants.');
+            if (!hasRobotsMeta) pushOpp('low', 'Robots meta not detected', 'Confirm indexability policy; add robots meta only if needed (avoid accidental noindex).');
+            if (!hasSchema) pushOpp('low', 'Structured data not detected', 'Add JSON-LD schema where relevant (Organization, Article, Product, FAQ, BreadcrumbList).');
+            if (internalLinkCount < 3) pushOpp('low', 'Few internal links detected', 'Add contextual internal links to related pages and ensure key pages are reachable within 2-3 clicks.');
+
+            const prioRank = { low: 0, medium: 1, high: 2 };
+            opportunities.sort((a, b) => (prioRank[a.priority] ?? 0) - (prioRank[b.priority] ?? 0));
+
+            let score = 100;
+            score -= !title ? 20 : (!titleOptimal ? 8 : 0);
+            score -= !metaDesc ? 20 : (!descriptionOptimal ? 8 : 0);
+            score -= (h1Count !== 1) ? 15 : 0;
+            score -= !hasCanonical ? 5 : 0;
+            score -= imagesWithoutAlt > 0 ? Math.min(10, imagesWithoutAlt) : 0;
+            score -= !hasSchema ? 3 : 0;
+            score = Math.max(0, Math.min(100, score));
+
+            aiResponse = {
+              seo_analysis: {
+                overall_score: score,
+                summary: 'Deterministic SEO analysis fallback (AI provider not configured on local runner).',
+                meta_tags: {
+                  title: title || 'Missing',
+                  description: metaDesc || 'Missing',
+                  title_optimal: Boolean(title) && titleOptimal,
+                  description_optimal: Boolean(metaDesc) && descriptionOptimal,
+                  title_recommendation: !title ? 'Add a unique title tag.' : 'Refine title to be concise and keyword-focused.',
+                  description_recommendation: !metaDesc ? 'Add a meta description.' : 'Refine description to improve CTR.'
+                },
+                headings: { h1_count: h1Count, h2_count: h2Count, h3_count: h3Count },
+                links: {
+                  internal_link_count: internalLinkCount,
+                  external_link_count: externalLinkCount,
+                  internal_link_recommendations: internalLinkCount < 3 ? ['Add a few contextual internal links to related pages.'] : []
+                },
+                images: {
+                  total_images: totalImages,
+                  images_with_alt: imagesWithAlt,
+                  images_without_alt: imagesWithoutAlt,
+                  recommendations: imagesWithoutAlt > 0 ? ['Add alt text to non-decorative images.'] : []
+                },
+                technical_seo: {
+                  has_canonical: hasCanonical,
+                  canonical_url: canonicalHref || '',
+                  has_robots_meta: hasRobotsMeta,
+                  robots_content: robotsMeta || '',
+                  has_schema_markup: hasSchema,
+                  schema_types: [],
+                  technical_recommendations: [
+                    !hasCanonical ? 'Add a canonical link tag.' : null,
+                    !hasSchema ? 'Add JSON-LD schema markup where applicable.' : null
+                  ].filter(Boolean)
+                },
+                keyword_analysis: {
+                  primary_keyword: '',
+                  secondary_keywords: [],
+                  recommendations: [
+                    'Pick a primary keyword/topic for this page and align title, H1, and intro copy to it.',
+                    'Avoid keyword stuffing; focus on intent coverage and clear headings.'
+                  ]
+                },
+                optimization_opportunities: opportunities
+              }
+            };
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI unavailable for ${step.id || step.name}; using deterministic SEO assistant fallback`, 'WORKFLOW-ANALYZER', { score, opportunities: opportunities.length });
+            }
+            break;
+          }
+
+          if (isContentOptimizerStep && isAiUnavailableError) {
+            const html = String(safeStepPayload.page_content || safeStepPayload.pageContent || '');
+            const visible = String(safeStepPayload.visible_text || workflowState.visibleText || '');
+            const words = visible.split(/\\s+/).filter(Boolean);
+            const wordCount = words.length;
+            const readingTimeMinutes = Math.max(0, Math.round((wordCount / 200) * 10) / 10);
+            const hasLists = /<ul\\b|<ol\\b/i.test(html) || /(^|\\n)\\s*[-*]\\s+\\S/m.test(visible);
+            const h1Count = (html.match(/<h1\\b/gi) || []).length;
+            const hasClearHierarchy = h1Count === 1;
+            const hasCTA = /(get started|sign up|signup|book a demo|contact sales|start free trial|try it|buy now|learn more)/i.test(visible);
+
+            const opportunities = [];
+            const pushOpp = (priority, issue, recommendation) => opportunities.push({ priority, issue, recommendation });
+            if (wordCount < 150) pushOpp('high', 'Very low word count', 'Add more explanatory content (benefits, how it works, FAQs) to help users and search engines.');
+            if (!hasCTA) pushOpp('medium', 'CTA not detected', 'Add a clear call-to-action near the top and bottom (primary and secondary CTA).');
+            if (!hasLists) pushOpp('low', 'Scannability: few lists detected', 'Use bullet lists for features, steps, or FAQs to improve scannability.');
+            if (!hasClearHierarchy) pushOpp('high', 'Heading hierarchy unclear', 'Ensure exactly one H1 and use H2/H3 sections to structure the content.');
+
+            const prioRank = { low: 0, medium: 1, high: 2 };
+            opportunities.sort((a, b) => (prioRank[a.priority] ?? 0) - (prioRank[b.priority] ?? 0));
+
+            let score = 100;
+            score -= wordCount < 150 ? 25 : (wordCount < 300 ? 10 : 0);
+            score -= !hasCTA ? 10 : 0;
+            score -= !hasLists ? 5 : 0;
+            score -= !hasClearHierarchy ? 15 : 0;
+            score = Math.max(0, Math.min(100, score));
+
+            aiResponse = {
+              content_analysis: {
+                overall_score: score,
+                summary: 'Deterministic content optimization fallback (AI provider not configured on local runner).',
+                readability: {
+                  score: Math.max(0, Math.min(100, score)),
+                  reading_level: 'General',
+                  reading_time_minutes: readingTimeMinutes,
+                  word_count: wordCount,
+                  issues: [ wordCount < 150 ? 'Very short page copy' : null ].filter(Boolean),
+                  recommendations: [ wordCount < 300 ? 'Add more explanatory content and FAQs.' : null ].filter(Boolean)
+                },
+                engagement: {
+                  hook_quality: wordCount >= 150 ? 0.6 : 0.3,
+                  scannability_score: hasLists ? 0.7 : 0.45,
+                  call_to_action_presence: Boolean(hasCTA),
+                  call_to_action_quality: hasCTA ? 0.6 : 0.2
+                },
+                conversion_optimization: {
+                  value_proposition_clarity: wordCount >= 150 ? 0.55 : 0.25,
+                  trust_signals_count: 0,
+                  social_proof_presence: /(reviews|testimonials|trusted by|customers|case study)/i.test(visible)
+                },
+                content_structure: {
+                  has_clear_hierarchy: hasClearHierarchy,
+                  use_of_lists: Boolean(hasLists),
+                  content_flow_score: hasClearHierarchy ? 0.6 : 0.35
+                },
+                optimization_opportunities: opportunities.map(o => ({ priority: o.priority, issue: o.issue, recommendation: o.recommendation }))
+              }
+            };
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ AI unavailable for ${step.id || step.name}; using deterministic content optimizer fallback`, 'WORKFLOW-ANALYZER', { score, word_count: wordCount, opportunities: opportunities.length });
             }
             break;
           }
@@ -5968,6 +6249,171 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
       
+      // If an AI step returns content analysis, persist it immediately.
+      // The save-data step type is deprecated in this workflow engine, so AI-produced analysis
+      // must be saved as part of the step execution.
+      const rawContentAnalysis = parsedResponse?.content_analysis;
+      if (rawContentAnalysis && typeof rawContentAnalysis === 'object' && !Array.isArray(rawContentAnalysis)) {
+        const normalizePriority = (value) => {
+          const v = String(value || '').trim().toLowerCase();
+          if (v === 'high' || v === 'h') return 'high';
+          if (v === 'medium' || v === 'med' || v === 'm') return 'medium';
+          return 'low';
+        };
+        const priorityOrder = { low: 0, medium: 1, high: 2 };
+        const normalizedContentAnalysis = safeJsonClone(rawContentAnalysis);
+        if (Array.isArray(normalizedContentAnalysis.optimization_opportunities)) {
+          normalizedContentAnalysis.optimization_opportunities = normalizedContentAnalysis.optimization_opportunities
+            .map((opp) => {
+              if (!opp || typeof opp !== 'object') return opp;
+              return {
+                ...opp,
+                priority: normalizePriority(opp.priority)
+              };
+            })
+            // UI request: list low -> high priority (not high -> low).
+            .sort((a, b) => (priorityOrder[normalizePriority(a?.priority)] ?? 0) - (priorityOrder[normalizePriority(b?.priority)] ?? 0));
+        }
+
+        // Store on workflowState for downstream steps and log visibility.
+        workflowState.contentAnalysis = normalizedContentAnalysis;
+        if (!workflowState.context || typeof workflowState.context !== 'object') {
+          workflowState.context = {};
+        }
+        workflowState.context.contentAnalysis = normalizedContentAnalysis;
+
+        try {
+          const projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+          let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+          if (!pageIdToUse && projectIdToUse && workflowState.pageUrl) {
+            pageIdToUse = await this.ensurePageId(workflowState, jobId);
+          }
+
+          if (pageIdToUse) {
+            await axios.post(
+              `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+              {
+                saveLegs: false,
+                saveContentData: true,
+                contentData: normalizedContentAnalysis,
+                job_id: jobId
+              },
+              { headers: this.getAuthHeaders() }
+            );
+            console.log(`✅ [CONTENT-OPTIMIZER] Saved content_analysis to page ${pageIdToUse}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [CONTENT-OPTIMIZER] Saved content analysis`, 'WORKFLOW-ANALYZER', {
+                page_id: pageIdToUse,
+                opportunities_count: Array.isArray(normalizedContentAnalysis.optimization_opportunities)
+                  ? normalizedContentAnalysis.optimization_opportunities.length
+                  : 0
+              });
+            }
+          } else {
+            console.warn(`⚠️ [CONTENT-OPTIMIZER] Could not save content analysis (missing pageId)`);
+          }
+        } catch (saveContentError) {
+          console.error(`❌ [CONTENT-OPTIMIZER] Failed to save content analysis: ${saveContentError.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [CONTENT-OPTIMIZER] Failed to save content analysis: ${saveContentError.message}`, 'WORKFLOW-ANALYZER', {
+              error: saveContentError.message
+            });
+          }
+          // Non-fatal: allow crawl workflow to continue even if content analysis persistence fails.
+        }
+      }
+
+      // If an AI step returns accessibility analysis, persist it immediately.
+      // This keeps "accessibility_analysis" working without needing a deprecated save-data step.
+      const rawAccessibilityAnalysis = parsedResponse?.accessibility_analysis;
+      if (rawAccessibilityAnalysis && typeof rawAccessibilityAnalysis === 'object' && !Array.isArray(rawAccessibilityAnalysis)) {
+        const normalizeSeverity = (value) => {
+          const v = String(value || '').trim().toLowerCase();
+          if (v === 'critical' || v === 'crit' || v === 'c') return 'critical';
+          if (v === 'high' || v === 'h') return 'high';
+          if (v === 'medium' || v === 'med' || v === 'm') return 'medium';
+          return 'low';
+        };
+        const severityOrder = { low: 0, medium: 1, high: 2, critical: 3 };
+        const normalizedAccessibility = safeJsonClone(rawAccessibilityAnalysis);
+
+        // UI request: list low -> high priority (not high -> low).
+        if (Array.isArray(normalizedAccessibility.accessibility_issues)) {
+          normalizedAccessibility.accessibility_issues = normalizedAccessibility.accessibility_issues
+            .map((issue) => {
+              if (!issue || typeof issue !== 'object') return issue;
+              return {
+                ...issue,
+                severity: normalizeSeverity(issue.severity)
+              };
+            })
+            .sort((a, b) => (severityOrder[normalizeSeverity(a?.severity)] ?? 0) - (severityOrder[normalizeSeverity(b?.severity)] ?? 0));
+        }
+
+        workflowState.accessibilityAnalysis = normalizedAccessibility;
+        if (!workflowState.context || typeof workflowState.context !== 'object') {
+          workflowState.context = {};
+        }
+        workflowState.context.accessibilityAnalysis = normalizedAccessibility;
+
+        try {
+          const projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
+          let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
+          if (!pageIdToUse && projectIdToUse && workflowState.pageUrl) {
+            pageIdToUse = await this.ensurePageId(workflowState, jobId);
+          }
+
+          if (pageIdToUse) {
+            await axios.post(
+              `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+              {
+                saveLegs: false,
+                saveAccessibilityData: true,
+                accessibilityData: normalizedAccessibility,
+                job_id: jobId
+              },
+              { headers: this.getAuthHeaders() }
+            );
+            console.log(`✅ [ACCESSIBILITY] Saved accessibility_analysis to page ${pageIdToUse}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'info', `✅ [ACCESSIBILITY] Saved accessibility analysis`, 'WORKFLOW-ANALYZER', {
+                page_id: pageIdToUse,
+                issues_count: Array.isArray(normalizedAccessibility.accessibility_issues)
+                  ? normalizedAccessibility.accessibility_issues.length
+                  : 0
+              });
+            }
+          } else {
+            console.warn(`⚠️ [ACCESSIBILITY] Could not save accessibility analysis (missing pageId)`);
+          }
+        } catch (saveAccessibilityError) {
+          console.error(`❌ [ACCESSIBILITY] Failed to save accessibility analysis: ${saveAccessibilityError.message}`);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [ACCESSIBILITY] Failed to save accessibility analysis: ${saveAccessibilityError.message}`, 'WORKFLOW-ANALYZER', {
+              error: saveAccessibilityError.message
+            });
+          }
+          // Non-fatal: allow crawl workflow to continue even if accessibility persistence fails.
+        }
+      }
+
+      // Make specialized AI analysis available to later `save-data` steps.
+      // Some workflows key their persistence logic off `workflowState.*Analysis`.
+      if (parsedResponse && typeof parsedResponse === 'object') {
+        if (parsedResponse.seo_analysis) {
+          workflowState.seoAnalysis = parsedResponse.seo_analysis;
+          if (workflowState.context) workflowState.context.seoAnalysis = parsedResponse.seo_analysis;
+        }
+        if (parsedResponse.content_analysis) {
+          workflowState.contentAnalysis = parsedResponse.content_analysis;
+          if (workflowState.context) workflowState.context.contentAnalysis = parsedResponse.content_analysis;
+        }
+        if (parsedResponse.accessibility_analysis) {
+          workflowState.accessibilityAnalysis = parsedResponse.accessibility_analysis;
+          if (workflowState.context) workflowState.context.accessibilityAnalysis = parsedResponse.accessibility_analysis;
+        }
+      }
+
       // Store result - storeStepResult will structure it according to schema
       this.storeStepResult(step, parsedResponse, workflowState);
       
@@ -10438,6 +10884,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // Create a function with page, wrapper, input_credentials, ms, delay, text, context, test
         console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
         let executableBody = functionBody;
+        // Backward-compat: some generated scripts occasionally reference `input_input_credentials`
+        // (typo) instead of `input_credentials`. Provide an alias so logins don't silently use
+        // fallback placeholder credentials.
+        executableBody = `const input_input_credentials = input_credentials;\n${executableBody}`;
         let fn;
         try {
           fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
@@ -10508,6 +10958,56 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState.lastDialogMessage = dialogMessage;
       
       const executionTime = Date.now() - executionStartTime;
+
+      // Best-effort fallback for common two-step login flows (email -> password).
+      // If the script clicked "Continue"/"Next" and we land on a password-only stage,
+      // opportunistically fill the password and submit once more.
+      if (isLoginJob && inputCredentials && inputCredentials.password) {
+        try {
+          const passwordLocator = page.locator('input[type="password"], input[name="password"]').first();
+          const isPwdVisible = await passwordLocator.isVisible().catch(() => false);
+          if (isPwdVisible) {
+            const currentVal = await passwordLocator.inputValue().catch(() => '');
+            if (!currentVal) {
+              await passwordLocator.fill(String(inputCredentials.password));
+            }
+              const submit = page.locator(
+                [
+                  'button[type="submit"]',
+                  'input[type="submit"]',
+                  'button#next-button',
+                  'button:has-text("Sign in")',
+                  'button:has-text("Log in")',
+                  'button:has-text("Login")',
+                  'button#submit',
+                  'input#submit',
+                  'button:has-text("Submit")',
+                  'button:has-text("Continue")',
+                  'button:has-text("Next")'
+                ].join(', ')
+              ).first();
+              // Prefer submitting the form that owns the password input (avoids clicking unrelated buttons).
+              try {
+                const form = passwordLocator.locator('xpath=ancestor::form').first();
+                const formSubmit = form.locator('button, input[type=\"submit\"], input[type=\"button\"]').first();
+                if (await formSubmit.isVisible().catch(() => false)) {
+                  await formSubmit.click().catch(() => {});
+                  await page.waitForTimeout(1500);
+                } else if (await submit.isVisible().catch(() => false)) {
+                  await submit.click().catch(() => {});
+                  await page.waitForTimeout(1500);
+                }
+              } catch (_) {
+                if (await submit.isVisible().catch(() => false)) {
+                  await submit.click().catch(() => {});
+                  await page.waitForTimeout(1500);
+                }
+              }
+          }
+        } catch (fallbackError) {
+          console.warn(`⚠️ Post-login fallback (password stage) failed: ${fallbackError.message}`);
+        }
+      }
       
       // CRITICAL: Check URL after execution to detect navigation
       const urlAfterAction = page.url();
@@ -16497,6 +16997,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.legsToExecute?.[workflowState.currentLegIndex];
       const journeyId = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id;
       const actionId = currentJourney?.action_id || stepContext?.action_id;
+      const cacheBucket = `workflow-step:${step.id || step.name || 'unknown'}`;
+      const cacheKey = [
+        cacheBucket,
+        String(projectId),
+        String(pageId),
+        journeyId ? String(journeyId) : '',
+        actionId ? String(actionId) : ''
+      ].join(':');
 
       // Build script name and description
       const scriptName = parsedResponse.name || 
@@ -16513,6 +17021,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         project_id: projectId,
         page_id: pageId,
         action_id: actionId || null,
+        journey_id: journeyId || null,
         name: scriptName,
         description: scriptDescription,
         script_type: 'playwright',
@@ -16525,7 +17034,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
         expected_outcome: parsedResponse.expected_result || parsedResponse.expected_outcome || null,
         validation_rules: parsedResponse.validation_rules || [],
         status: 'active',
-        tags: [step.id, step.name].filter(Boolean),
+        cache_bucket: cacheBucket,
+        cache_key: cacheKey,
+        tags: [step.id, step.name, cacheBucket, journeyId].filter(Boolean),
         updated_at: new Date()
       };
 

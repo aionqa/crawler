@@ -3770,6 +3770,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         String(step.name || '').toLowerCase().includes('generate journey action script');
       if (isScriptGenerationStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
+          + '- You MUST use input_credentials.username and input_credentials.password for any login/sign-in fields. Never hardcode placeholders like test@example.com, user@example.com, testpass123.\n'
+          + '- Behave like a human: click to focus fields, type with per-keystroke delays (page.type(..., { delay: 40-120 })), add short random pauses, and move the mouse before clicks.\n'
           + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
           + '- For modal openers, target explicit clickable elements (a/button/[role="button"][aria-haspopup]) and use click({ force: true }) when overlays can intercept pointer events.\n'
           + '- Treat navigation/DOM-readiness waits as best-effort only: wrap waitForNavigation/waitForLoadState/non-critical waitForSelector in try/catch and continue on timeout.\n'
@@ -3801,6 +3803,60 @@ IMPORTANT OUTPUT REQUIREMENTS:
         String(step.id || '').toLowerCase().includes('generate_login_script') ||
         String(step.name || '').toLowerCase().includes('generate login script') ||
         promptIdentifier === 'generate_login_script';
+
+      const isCacheableScriptStep =
+        isGenerateLoginScriptStep ||
+        promptIdentifier === 'generate_journey_script' ||
+        String(step.id || '').toLowerCase().includes('generate_journey_script');
+
+      if (isCacheableScriptStep) {
+        const projectIdForCache = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
+        const pageIdForCache = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
+        const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.currentItem;
+        const journeyIdForCache = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id || null;
+        const actionIdForCache = currentJourney?.action_id || stepContext?.action_id || null;
+        if (projectIdForCache && pageIdForCache) {
+          const cacheBucket = `workflow-step:${step.id || promptIdentifier || 'ai-prompt'}`;
+          const cacheKey = [
+            cacheBucket,
+            String(projectIdForCache),
+            String(pageIdForCache),
+            journeyIdForCache ? String(journeyIdForCache) : '',
+            actionIdForCache ? String(actionIdForCache) : ''
+          ].join(':');
+          try {
+            const cacheLookup = await axios.get(
+              `${this.backendUrl}/api/scripts/cache/lookup`,
+              {
+                params: {
+                  project_id: projectIdForCache,
+                  page_id: pageIdForCache,
+                  cache_key: cacheKey
+                },
+                headers: this.getAuthHeaders(),
+                timeout: 10000
+              }
+            );
+            const cached = cacheLookup?.data?.hit ? cacheLookup.data.script : null;
+            if (cached && cached.script_code) {
+              aiResponse = {
+                playwright_script: cached.script_code,
+                reason: 'Cached script reused (not expired).',
+                confidence: 0.85,
+                cache_hit: true,
+                cached_script_id: cached._id,
+                cache_expires_at: cached.cache_expires_at || null
+              };
+              console.log(`✅ [SCRIPTS-CACHE] Cache HIT for ${String(step.id || promptIdentifier)}`);
+            } else {
+              console.log(`ℹ️ [SCRIPTS-CACHE] Cache MISS for ${String(step.id || promptIdentifier)}`);
+            }
+          } catch (cacheErr) {
+            console.warn(`⚠️ [SCRIPTS-CACHE] Cache lookup failed for ${String(step.id || promptIdentifier)}: ${cacheErr.message}`);
+          }
+        }
+      }
+
       if (isGenerateLoginScriptStep) {
         const currentUrl = String(stepPayload.page_url || effectivePageUrl || page.url() || '').toLowerCase();
         const forcedSpecificCreds = currentUrl.includes('specific-credentials');
@@ -3808,25 +3864,111 @@ IMPORTANT OUTPUT REQUIREMENTS:
 const usernameValue = (input_credentials && input_credentials.username) || (${forcedSpecificCreds ? "'testuser'" : "'testuser'"});
 const passwordValue = (input_credentials && input_credentials.password) || (${forcedSpecificCreds ? "'testpass123'" : "'testpass123'"});
 
-const usernameSelector = 'input[name="username"], input[name="email"], input[type="email"], input[type="text"]';
+// Avoid matching hidden/system inputs (e.g. captcha_token) by excluding known ids/names.
+const usernameSelector = [
+  'input#email',
+  'input[name="email"]',
+  'input[name="username"]',
+  'input[type="email"]',
+  'input[type="text"]:not(#captcha-token):not([name="captcha_token"])'
+].join(', ');
 const passwordSelector = 'input[name="password"], input[type="password"]';
-const submitSelector = 'button[type="submit"], input[type="submit"], button:has-text("Login"), button:has-text("Sign in"), button:has-text("Log in")';
+const continueSelector = [
+  'button#next-button',
+  'button:has-text("Continue")',
+  'button:has-text("Next")',
+  'button[type="submit"]',
+  'input[type="submit"]',
+  'button:has-text("Login")',
+  'button:has-text("Sign in")',
+  'button:has-text("Log in")'
+].join(', ');
 
-await page.waitForSelector(usernameSelector, { timeout: 10000 });
-await page.fill(usernameSelector, usernameValue);
-await page.fill(passwordSelector, passwordValue);
-if (await page.locator('input[type="checkbox"][name*="remember" i], input[type="checkbox"]#remember').first().isVisible().catch(() => false)) {
-  await page.locator('input[type="checkbox"][name*="remember" i], input[type="checkbox"]#remember').first().check().catch(() => {});
+const usernameField = page.locator(usernameSelector).first();
+const passwordField = page.locator(passwordSelector).first();
+
+// Multi-step logins can hide the username field on step 2 (password stage).
+// Be opportunistic: fill what is visible, don't hard-fail on missing fields.
+let hasUsernameField = await usernameField.isVisible().catch(() => false);
+let hasPasswordField = await passwordField.isVisible().catch(() => false);
+
+if (!hasUsernameField && !hasPasswordField) {
+  // Initial render might still be loading; wait once for username field.
+  await usernameField.waitFor({ state: 'visible', timeout: 10000 });
+  hasUsernameField = true;
 }
-await page.click(submitSelector);
+
+if (hasUsernameField) {
+  await usernameField.fill(usernameValue);
+}
+
+if (hasPasswordField) {
+  await passwordField.fill(passwordValue);
+  if (await page.locator('input[type="checkbox"][name*="remember" i], input[type="checkbox"]#remember').first().isVisible().catch(() => false)) {
+    await page.locator('input[type="checkbox"][name*="remember" i], input[type="checkbox"]#remember').first().check().catch(() => {});
+  }
+}
+
+const submitButton = page.locator(continueSelector).first();
+await submitButton.waitFor({ state: 'visible', timeout: 10000 });
+
+// Some auth providers use a hidden captcha token field that is populated asynchronously.
+// If present, wait briefly for it to be filled to avoid server-side "invalid form" errors.
+const captchaTokenField = page.locator('#captcha-token, input[name="captcha_token"]').first();
+const hasCaptchaTokenField = await captchaTokenField.isVisible().catch(() => false);
+if (hasCaptchaTokenField) {
+  for (let i = 0; i < 20; i++) {
+    const tokenVal = await captchaTokenField.inputValue().catch(() => '');
+    if (tokenVal && String(tokenVal).trim().length > 10) break;
+    await page.waitForTimeout(500);
+  }
+}
+await submitButton.click();
+
+// Give multi-step login flows time to render the next stage (password/OTP/etc.)
 await page.waitForTimeout(1500);
-return { success: true, action: 'login_submitted', used_username: usernameValue ? 'set' : 'missing' };
+
+// If this was the "email/username first" stage, try to complete the password stage in the same script.
+if (!hasPasswordField) {
+  // Wait for a password field to appear after Continue/Next
+  const pw = page.locator(passwordSelector).first();
+  const pwVisible = await pw.isVisible().catch(() => false);
+  if (!pwVisible) {
+    await pw.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+  }
+
+  const pwNowVisible = await pw.isVisible().catch(() => false);
+  if (pwNowVisible) {
+    await pw.fill(passwordValue);
+
+    // Wait for captcha token if present (same logic as above)
+    const captchaTokenField2 = page.locator('#captcha-token, input[name="captcha_token"]').first();
+    const hasCaptchaTokenField2 = await captchaTokenField2.isVisible().catch(() => false);
+    if (hasCaptchaTokenField2) {
+      for (let i = 0; i < 20; i++) {
+        const tokenVal = await captchaTokenField2.inputValue().catch(() => '');
+        if (tokenVal && String(tokenVal).trim().length > 10) break;
+        await page.waitForTimeout(500);
+      }
+    }
+
+    const submit2 = page.locator(continueSelector).first();
+    await submit2.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
+    await submit2.click().catch(() => {});
+    await page.waitForTimeout(1500);
+    return { success: true, action: 'login_submitted_after_password', used_username: usernameValue ? 'set' : 'missing' };
+  }
+}
+
+return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_step_submitted', used_username: usernameValue ? 'set' : 'missing' };
 `.trim();
-        aiResponse = {
-          playwright_script: deterministicScript,
-          reason: 'Deterministic login script generated to ensure stable credential-based submission.',
-          confidence: 0.8
-        };
+        if (!aiResponse) {
+          aiResponse = {
+            playwright_script: deterministicScript,
+            reason: 'Deterministic login script generated to ensure stable credential-based submission.',
+            confidence: 0.8
+          };
+        }
       }
       try {
         if (!aiResponse) {
@@ -3852,30 +3994,86 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
           stepNameLower.includes('determine login') ||
           promptIdentifier === 'validate_login_success' ||
           promptIdentifier === 'determine_completion';
+        const isSeoAssistantStep =
+          stepIdLower === 'seo_analysis' ||
+          stepIdLower.includes('seo_assistant') ||
+          stepNameLower.includes('seo assistant') ||
+          stepNameLower.includes('seo analysis');
+        const isContentOptimizerStep =
+          stepIdLower === 'content_optimization_analysis' ||
+          stepIdLower.includes('content_optimizer') ||
+          stepNameLower.includes('content optimizer') ||
+          stepNameLower.includes('content optimization');
 
         // Some helpers run without local AI provider configured.
         // For login validation steps, provide deterministic DOM-based fallback instead of hard-failing.
         if (isLoginValidationStep && aiErrorText.includes('AI not configured')) {
           let bodyText = '';
           let hasPasswordField = false;
+          let hasEmailField = false;
+          let hasSubmitLikeButton = false;
+          let cookies = [];
           try {
             bodyText = ((await page.textContent('body')) || '').toLowerCase();
             hasPasswordField = !!(await page.$('input[type="password"]'));
+            hasEmailField = !!(await page.$('input#email, input[name="email"], input[type="email"], input[name="username"]'));
+            hasSubmitLikeButton = (await page.locator('button:has-text("continue"), button:has-text("sign in"), button:has-text("log in"), button[type="submit"], #next-button').count()) > 0;
+            cookies = await page.context().cookies().catch(() => []);
           } catch (fallbackReadError) {
             // Keep fallback conservative if DOM inspection fails.
           }
 
           const currentUrl = String(page.url() || stepPayload.current_url || stepPayload.page_url || '').toLowerCase();
           const hasErrorSignal = /(invalid|incorrect|error|failed|unauthorized|forbidden|required)/.test(bodyText);
-          const hasSuccessSignal = /(login successful|welcome|dashboard|logout|signed in|profile)/.test(bodyText);
-          const status = hasErrorSignal ? 'failure' : (hasSuccessSignal || !hasPasswordField ? 'success' : 'continue');
+          const hasSuccessSignal = /(login successful|successfully logged in|welcome|dashboard|signed in|profile)/.test(bodyText);
+          const onLoginUrl = /\/login\b/.test(currentUrl) || currentUrl.includes('auth');
+
+          // FMClarity-specific: successful SSO can land briefly on a non-app URL (even an error shell),
+          // but still set the real auth cookies we need for subsequent authorized crawling.
+          // If we have strong auth cookies and we're no longer on the auth/login host, treat as success.
+          let fmclarityCookieAuth = false;
+          try {
+            const u = new URL(currentUrl);
+            const host = (u.hostname || '').toLowerCase();
+            const isFmclarity = host.endsWith('fmclarity.com');
+            const isAuthHost = host.startsWith('auth.') || host.includes('auth.');
+            if (isFmclarity && !isAuthHost && !/\/login\b/.test(u.pathname || '')) {
+              const strongTokenNames = new Set([
+                'fmc_token_v2',
+                'fmc_refresh_token_v2',
+                'fmc_id_token_v2',
+                'fmc_token',
+                'session_token',
+                'fmc_session'
+              ]);
+              fmclarityCookieAuth = Array.isArray(cookies) && cookies.some(c =>
+                strongTokenNames.has(String(c?.name || '')) &&
+                typeof c?.value === 'string' &&
+                c.value.length >= 20
+              );
+            }
+          } catch (_) {
+            // ignore
+          }
+
+          // Without AI, be conservative:
+          // - if we're still clearly on a login flow (URL contains login/auth OR login fields/buttons exist) => continue
+          // - only mark success when we see strong success signals AND login controls are gone
+          const looksLikeLoginFlow = onLoginUrl || hasPasswordField || hasEmailField || hasSubmitLikeButton;
+          const status = fmclarityCookieAuth
+            ? 'success'
+            : hasErrorSignal
+              ? 'failure'
+              : (!looksLikeLoginFlow && hasSuccessSignal)
+                ? 'success'
+                : 'continue';
           const isComplete = status === 'success' || status === 'failure';
 
           aiResponse = {
             status,
             is_complete: isComplete,
             reason: 'AI provider unavailable on runner helper; used deterministic DOM-based login validation fallback.',
-            what_happened: `URL=${currentUrl}, passwordFieldVisible=${hasPasswordField}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}`,
+            what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}, fmclarityCookieAuth=${fmclarityCookieAuth}, cookies=${Array.isArray(cookies) ? cookies.length : 0}`,
             new_content_detected: status !== 'continue',
             content_type: 'page',
             needs_more_testing: !isComplete,
@@ -3898,6 +4096,230 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
             );
           }
         } else {
+        // SEO assistant is useful even without an AI provider; provide a deterministic best-effort analysis.
+        // This keeps local scans testable when OPENAI_API_KEY is not configured.
+        const isAiUnavailableError =
+          aiErrorText.includes('AI not configured') ||
+          aiErrorText.toLowerCase().includes('openai api key') ||
+          aiErrorText.toLowerCase().includes('api key') ||
+          aiErrorText.toLowerCase().includes('not provided');
+
+        if (isSeoAssistantStep && isAiUnavailableError) {
+          const html = String(stepPayload.page_content || stepPayload.pageContent || '');
+          const titleFromHtml = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').trim();
+          const metaDesc = (html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+          const canonicalHref = (html.match(/<link[^>]+rel=["']canonical["'][^>]*href=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+          const robotsMeta = (html.match(/<meta[^>]+name=["']robots["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
+
+          const h1Count = (html.match(/<h1\b/gi) || []).length;
+          const h2Count = (html.match(/<h2\b/gi) || []).length;
+          const h3Count = (html.match(/<h3\b/gi) || []).length;
+
+          const imgTags = html.match(/<img\b[^>]*>/gi) || [];
+          const totalImages = imgTags.length;
+          let imagesWithAlt = 0;
+          for (const img of imgTags) {
+            if (/\balt\s*=\s*["'][^"']*["']/i.test(img)) {
+              imagesWithAlt++;
+            }
+          }
+          const imagesWithoutAlt = Math.max(0, totalImages - imagesWithAlt);
+
+          // Prefer link counts from Playwright analysis when available.
+          const linksArray = Array.isArray(stepPayload.playwright_analysis?.links)
+            ? stepPayload.playwright_analysis.links
+            : (Array.isArray(workflowState.playwrightAnalysis?.links) ? workflowState.playwrightAnalysis.links : []);
+          let internalLinkCount = 0;
+          let externalLinkCount = 0;
+          let origin = '';
+          try {
+            origin = new URL(String(stepPayload.page_url || '')).origin;
+          } catch (_) {
+            origin = '';
+          }
+          for (const link of linksArray) {
+            const href = String(link?.href || link?.url || '');
+            if (!href) continue;
+            try {
+              const resolved = new URL(href, String(stepPayload.page_url || '')).href;
+              const linkOrigin = new URL(resolved).origin;
+              if (origin && linkOrigin === origin) internalLinkCount++;
+              else externalLinkCount++;
+            } catch (_) {
+              // ignore unparseable
+            }
+          }
+
+          const hasSchema = /application\/ld\+json/i.test(html) || /\bitemscope\b/i.test(html);
+          const hasCanonical = Boolean(canonicalHref);
+          const hasRobotsMeta = Boolean(robotsMeta);
+
+          const title = (String(stepPayload.page_title || '') || titleFromHtml).trim();
+          const titleOptimal = title.length >= 20 && title.length <= 60;
+          const descriptionOptimal = metaDesc.length >= 70 && metaDesc.length <= 160;
+
+          const opportunities = [];
+          const pushOpp = (priority, issue, recommendation) => opportunities.push({ priority, issue, recommendation });
+
+          if (!title) pushOpp('high', 'Missing <title> tag', 'Add a unique, descriptive title (20-60 chars) including the primary keyword.');
+          else if (!titleOptimal) pushOpp('medium', 'Title length not optimal', 'Adjust title to ~20-60 characters; keep it unique and keyword-relevant.');
+          if (!metaDesc) pushOpp('high', 'Missing meta description', 'Add a compelling meta description (70-160 chars) with primary keyword + value proposition + CTA.');
+          else if (!descriptionOptimal) pushOpp('medium', 'Meta description length not optimal', 'Adjust meta description to ~70-160 characters; avoid truncation and duplicates.');
+          if (h1Count !== 1) pushOpp('high', 'Heading structure: expected exactly one H1', 'Ensure exactly one H1 that matches page intent; use H2/H3 for sections.');
+          if (imagesWithoutAlt > 0) pushOpp('medium', 'Images missing alt text', 'Add descriptive alt text to meaningful images; leave decorative images empty alt (alt="").');
+          if (!hasCanonical) pushOpp('medium', 'Canonical tag not detected', 'Add a canonical URL to reduce duplicate-content risk, especially for query-string variants.');
+          if (!hasRobotsMeta) pushOpp('low', 'Robots meta not detected', 'Confirm indexability policy; add robots meta only if needed (avoid accidental noindex).');
+          if (!hasSchema) pushOpp('low', 'Structured data not detected', 'Add JSON-LD schema where relevant (Organization, Article, Product, FAQ, BreadcrumbList).');
+          if (internalLinkCount < 3) pushOpp('low', 'Few internal links detected', 'Add contextual internal links to related pages and ensure key pages are reachable within 2-3 clicks.');
+
+          // Sort low -> medium -> high (as requested).
+          const prioRank = { low: 0, medium: 1, high: 2 };
+          opportunities.sort((a, b) => (prioRank[a.priority] ?? 0) - (prioRank[b.priority] ?? 0));
+
+          let score = 100;
+          score -= !title ? 20 : (!titleOptimal ? 8 : 0);
+          score -= !metaDesc ? 20 : (!descriptionOptimal ? 8 : 0);
+          score -= (h1Count !== 1) ? 15 : 0;
+          score -= !hasCanonical ? 5 : 0;
+          score -= imagesWithoutAlt > 0 ? Math.min(10, imagesWithoutAlt) : 0;
+          score -= !hasSchema ? 3 : 0;
+          score = Math.max(0, Math.min(100, score));
+
+          aiResponse = {
+            seo_analysis: {
+              overall_score: score,
+              summary: 'Deterministic SEO analysis fallback (AI provider not configured on local runner).',
+              meta_tags: {
+                title: title || 'Missing',
+                description: metaDesc || 'Missing',
+                title_optimal: Boolean(title) && titleOptimal,
+                description_optimal: Boolean(metaDesc) && descriptionOptimal,
+                title_recommendation: !title ? 'Add a unique title tag.' : 'Refine title to be concise and keyword-focused.',
+                description_recommendation: !metaDesc ? 'Add a meta description.' : 'Refine description to improve CTR.'
+              },
+              headings: { h1_count: h1Count, h2_count: h2Count, h3_count: h3Count },
+              links: {
+                internal_link_count: internalLinkCount,
+                external_link_count: externalLinkCount,
+                internal_link_recommendations: internalLinkCount < 3 ? ['Add a few contextual internal links to related pages.'] : []
+              },
+              images: {
+                total_images: totalImages,
+                images_with_alt: imagesWithAlt,
+                images_without_alt: imagesWithoutAlt,
+                recommendations: imagesWithoutAlt > 0 ? ['Add alt text to non-decorative images.'] : []
+              },
+              technical_seo: {
+                has_canonical: hasCanonical,
+                canonical_url: canonicalHref || '',
+                has_robots_meta: hasRobotsMeta,
+                robots_content: robotsMeta || '',
+                has_schema_markup: hasSchema,
+                schema_types: [],
+                technical_recommendations: [
+                  !hasCanonical ? 'Add a canonical link tag.' : null,
+                  !hasSchema ? 'Add JSON-LD schema markup where applicable.' : null
+                ].filter(Boolean)
+              },
+              keyword_analysis: {
+                primary_keyword: '',
+                secondary_keywords: [],
+                recommendations: [
+                  'Pick a primary keyword/topic for this page and align title, H1, and intro copy to it.',
+                  'Avoid keyword stuffing; focus on intent coverage and clear headings.'
+                ]
+              },
+              optimization_opportunities: opportunities
+            }
+          };
+
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `⚠️ AI unavailable for ${step.id || step.name}; using deterministic SEO assistant fallback`,
+              'WORKFLOW-ANALYZER',
+              { score, opportunities: opportunities.length }
+            );
+          }
+        } else if (isContentOptimizerStep && isAiUnavailableError) {
+          const html = String(stepPayload.page_content || stepPayload.pageContent || '');
+          const visible = String(stepPayload.visible_text || workflowState.visibleText || '');
+          const words = visible.split(/\s+/).filter(Boolean);
+          const wordCount = words.length;
+          const readingTimeMinutes = Math.max(0, Math.round((wordCount / 200) * 10) / 10);
+          const hasLists = /<ul\b|<ol\b/i.test(html) || /(^|\n)\s*[-*]\s+\S/m.test(visible);
+          const h1Count = (html.match(/<h1\b/gi) || []).length;
+          const hasClearHierarchy = h1Count === 1;
+          const hasCTA = /(get started|sign up|signup|book a demo|contact sales|start free trial|try it|buy now|learn more)/i.test(visible);
+
+          const opportunities = [];
+          const pushOpp = (priority, issue, recommendation) => opportunities.push({ priority, issue, recommendation });
+          if (wordCount < 150) pushOpp('high', 'Very low word count', 'Add more explanatory content (benefits, how it works, FAQs) to help users and search engines.');
+          if (!hasCTA) pushOpp('medium', 'CTA not detected', 'Add a clear call-to-action near the top and bottom (primary and secondary CTA).');
+          if (!hasLists) pushOpp('low', 'Scannability: few lists detected', 'Use bullet lists for features, steps, or FAQs to improve scannability.');
+          if (!hasClearHierarchy) pushOpp('high', 'Heading hierarchy unclear', 'Ensure exactly one H1 and use H2/H3 sections to structure the content.');
+
+          const prioRank = { low: 0, medium: 1, high: 2 };
+          opportunities.sort((a, b) => (prioRank[a.priority] ?? 0) - (prioRank[b.priority] ?? 0));
+
+          let score = 100;
+          score -= wordCount < 150 ? 25 : (wordCount < 300 ? 10 : 0);
+          score -= !hasCTA ? 10 : 0;
+          score -= !hasLists ? 5 : 0;
+          score -= !hasClearHierarchy ? 15 : 0;
+          score = Math.max(0, Math.min(100, score));
+
+          aiResponse = {
+            content_analysis: {
+              overall_score: score,
+              summary: 'Deterministic content optimization fallback (AI provider not configured on local runner).',
+              readability: {
+                score: Math.max(0, Math.min(100, score)),
+                reading_level: 'General',
+                reading_time_minutes: readingTimeMinutes,
+                word_count: wordCount,
+                issues: [
+                  wordCount < 150 ? 'Very short page copy' : null,
+                ].filter(Boolean),
+                recommendations: [
+                  wordCount < 300 ? 'Add more explanatory content and FAQs.' : null,
+                ].filter(Boolean)
+              },
+              engagement: {
+                hook_quality: wordCount >= 150 ? 0.6 : 0.3,
+                scannability_score: hasLists ? 0.7 : 0.45,
+                call_to_action_presence: Boolean(hasCTA),
+                call_to_action_quality: hasCTA ? 0.6 : 0.2
+              },
+              conversion_optimization: {
+                value_proposition_clarity: wordCount >= 150 ? 0.55 : 0.25,
+                trust_signals_count: 0,
+                social_proof_presence: /(reviews|testimonials|trusted by|customers|case study)/i.test(visible)
+              },
+              content_structure: {
+                has_clear_hierarchy: hasClearHierarchy,
+                use_of_lists: Boolean(hasLists),
+                content_flow_score: hasClearHierarchy ? 0.6 : 0.35
+              },
+              optimization_opportunities: opportunities.map(o => ({
+                priority: o.priority,
+                issue: o.issue,
+                recommendation: o.recommendation
+              }))
+            }
+          };
+
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `⚠️ AI unavailable for ${step.id || step.name}; using deterministic content optimizer fallback`,
+              'WORKFLOW-ANALYZER',
+              { score, word_count: wordCount, opportunities: opportunities.length }
+            );
+          }
+        } else {
         const errorMessage = `OpenAI API call failed for step "${step.name || step.id}": ${aiError.message}`;
         const fullContext = {
           step_id: step.id,
@@ -3915,6 +4337,7 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
           await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
         }
         throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+        }
         }
       }
       
@@ -4084,18 +4507,47 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
           console.log(`📄 VAR_DUMP: playwright_script length=${parsedResponse.playwright_script.length}`);
           console.log(`📄 VAR_DUMP: playwright_script preview: ${parsedResponse.playwright_script.substring(0, 300)}`);
           
-          // CRITICAL: Verify script uses input_credentials (only for login steps)
-          if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
-            const scriptUsesCredentials = parsedResponse.playwright_script.includes('input_credentials') || 
-                                         parsedResponse.playwright_script.includes('input_credentials.username') ||
-                                         parsedResponse.playwright_script.includes('input_credentials.password');
-            console.log(`📄 VAR_DUMP: scriptUsesCredentials=${scriptUsesCredentials}`);
-            if (!scriptUsesCredentials) {
-              console.error(`❌ ERROR: Generated script does NOT use input_credentials!`);
-              console.error(`Script preview: ${parsedResponse.playwright_script.substring(0, 500)}`);
-              console.error(`Available credentials: username=${workflowState.inputCredentials?.username || 'MISSING'}, password=${workflowState.inputCredentials?.password ? '***' : 'MISSING'}`);
-            } else {
-              console.log(`✅ Generated script uses input_credentials`);
+          // CRITICAL: Enforce scripts to use input_credentials for login/journey generation steps.
+          // We saw AI occasionally emit placeholders like test@example.com even when credentials are provided.
+          const isCredSensitiveScript =
+            (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) ||
+            promptIdentifier === 'generate_journey_script' ||
+            String(step.id || '').toLowerCase().includes('generate_journey_script') ||
+            String(step.name || '').toLowerCase().includes('generate journey action script');
+          if (isCredSensitiveScript) {
+            const before = parsedResponse.playwright_script;
+            let script = String(before || '');
+
+            // Replace the most common placeholder creds.
+            script = script.replace(/(['\"])test@example\\.com\\1/gi, 'input_credentials.username');
+            script = script.replace(/(['\"])user@example\\.com\\1/gi, 'input_credentials.username');
+            script = script.replace(/(['\"])testpass123\\1/gi, 'input_credentials.password');
+            script = script.replace(/(['\"])password123\\1/gi, 'input_credentials.password');
+
+            // If they define emailValue/passwordValue constants as literals, rewrite them.
+            script = script.replace(/\\bconst\\s+emailValue\\s*=\\s*(['\"]).*?@.*?\\1\\s*;/gi, 'const emailValue = input_credentials.username;');
+            script = script.replace(/\\blet\\s+emailValue\\s*=\\s*(['\"]).*?@.*?\\1\\s*;/gi, 'let emailValue = input_credentials.username;');
+            script = script.replace(/\\bconst\\s+passwordValue\\s*=\\s*(['\"]).{3,}\\1\\s*;/gi, 'const passwordValue = input_credentials.password;');
+            script = script.replace(/\\blet\\s+passwordValue\\s*=\\s*(['\"]).{3,}\\1\\s*;/gi, 'let passwordValue = input_credentials.password;');
+
+            const usesCreds =
+              script.includes('input_credentials') ||
+              script.includes('input_credentials.username') ||
+              script.includes('input_credentials.password');
+            if (!usesCreds) {
+              // Hard-guard: prepend usable variables and a short sanity log; keep script valid JS.
+              script = `const emailValue = input_credentials.username;\\nconst passwordValue = input_credentials.password;\\n` + script;
+            }
+
+            if (script !== before) {
+              parsedResponse.playwright_script = script;
+              await this.backendLogger?.appendJobLog?.(
+                jobId,
+                'warn',
+                `🛡️ Rewrote playwright_script to enforce input_credentials (removed placeholder creds)`,
+                'WORKFLOW-ANALYZER',
+                { step_id: step.id, step_name: step.name, prompt: promptIdentifier }
+              );
             }
           }
           
@@ -4242,6 +4694,58 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
             this.initializeVariablePool(workflowState);
             this.saveVariable(workflowState, 'legScriptToExecute', cleanedScript, 'page', step);
             console.log(`✅ Stored playwright_script as legScriptToExecute in workflowState, context, and variablePool: ${cleanedScript.length} chars`);
+
+            // Persist the script in backend so it shows up in Scripts UI and can be reused via cache.
+            // Skip persistence on cache hits to avoid noisy history spam.
+            if (!parsedResponse?.cache_hit) {
+              try {
+                const projectIdForCache = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
+                const pageIdForCache = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
+                const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.currentItem;
+                const journeyIdForCache = currentJourney?.journey_id || currentJourney?.leg_id || currentJourney?.id || null;
+                const actionIdForCache = currentJourney?.action_id || stepContext?.action_id || null;
+                if (projectIdForCache && pageIdForCache) {
+                  const cacheBucket = `workflow-step:${step.id || promptIdentifier || 'ai-prompt'}`;
+                  const cacheKey = [
+                    cacheBucket,
+                    String(projectIdForCache),
+                    String(pageIdForCache),
+                    journeyIdForCache ? String(journeyIdForCache) : '',
+                    actionIdForCache ? String(actionIdForCache) : ''
+                  ].join(':');
+
+                  await axios.post(
+                    `${this.backendUrl}/api/scripts`,
+                    {
+                      project_id: projectIdForCache,
+                      page_id: pageIdForCache,
+                      name: step.name || step.id || promptIdentifier || 'AI Script',
+                      description: parsedResponse.reason || parsedResponse.description || null,
+                      script_type: 'playwright',
+                      script_code: cleanedScript,
+                      parameters: parsedResponse.parameters || {},
+                      generated_by: 'ai',
+                      ai_prompt: promptIdentifier || step.id || step.name || null,
+                      ai_model: 'gpt-5-mini',
+                      expected_outcome: parsedResponse.expected_result || parsedResponse.expected_outcome || null,
+                      validation_rules: parsedResponse.validation_rules || [],
+                      status: 'active',
+                      tags: [step.id, step.name, cacheBucket].filter(Boolean),
+                      job_id: jobId || null,
+                      cache_bucket: cacheBucket,
+                      cache_key: cacheKey
+                      // cache_expires_at intentionally omitted -> backend defaults to 3 days for AI scripts
+                    },
+                    {
+                      headers: this.getAuthHeaders(),
+                      timeout: 10000
+                    }
+                  );
+                }
+              } catch (persistErr) {
+                console.warn(`⚠️ [SCRIPTS-CACHE] Failed to persist script to backend: ${persistErr.message}`);
+              }
+            }
           } else {
             console.warn(`⚠️ Cleaned script is empty after cleaning`);
           }
@@ -4450,6 +4954,26 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
           console.log(`✅ Extracted playwright_script to page namespace, workflowState, and legScriptToExecute: ${scriptValue.substring(0, 100)}...`);
         } else {
           console.warn(`⚠️ playwright_script not found in generate_login_script result. Keys: ${Object.keys(parsedResponse || {}).join(', ')}`);
+        }
+      }
+
+      // Persist common analysis outputs in well-known workflowState fields so save-data can store them.
+      // This makes JSON workflow templates simpler: any ai-prompt can output seo/content/a11y analysis.
+      if (parsedResponse && typeof parsedResponse === 'object') {
+        if (parsedResponse.seo_analysis && !workflowState.seoAnalysis) {
+          workflowState.seoAnalysis = parsedResponse.seo_analysis;
+          workflowState.context = workflowState.context || {};
+          workflowState.context.seoAnalysis = parsedResponse.seo_analysis;
+        }
+        if (parsedResponse.content_analysis && !workflowState.contentAnalysis) {
+          workflowState.contentAnalysis = parsedResponse.content_analysis;
+          workflowState.context = workflowState.context || {};
+          workflowState.context.contentAnalysis = parsedResponse.content_analysis;
+        }
+        if (parsedResponse.accessibility_analysis && !workflowState.accessibilityAnalysis) {
+          workflowState.accessibilityAnalysis = parsedResponse.accessibility_analysis;
+          workflowState.context = workflowState.context || {};
+          workflowState.context.accessibilityAnalysis = parsedResponse.accessibility_analysis;
         }
       }
       
@@ -5855,13 +6379,17 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
    * Saves variables according to step configuration
    */
   processVariableOutputs(step, workflowState, stepResult) {
-    if (!step.config?.variableOutputs || !Array.isArray(step.config.variableOutputs)) {
+    const outputs = Array.isArray(step?.config?.variableOutputs)
+      ? step.config.variableOutputs
+      : (Array.isArray(step?.variableOutputs) ? step.variableOutputs : null);
+
+    if (!outputs) {
       return;
     }
 
     this.initializeVariablePool(workflowState);
 
-    for (const output of step.config.variableOutputs) {
+    for (const output of outputs) {
       if (!output.variableName || !output.sourcePath) {
         continue;
       }
@@ -5884,6 +6412,11 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
           // Auto-detect: if in cycle, use cycle, otherwise page
           namespace = workflowState.cycleDepth > 0 ? 'cycle' : 'page';
         }
+        // Template JSON historically uses "step" as a namespace. We don't have a dedicated
+        // "step variables" store (step results live under variablePool.steps), so treat it as page.
+        if (namespace === 'step') {
+          namespace = workflowState.cycleDepth > 0 ? 'cycle' : 'page';
+        }
 
         this.saveVariable(workflowState, output.variableName, value, namespace, step);
         console.log(`💾 Saved variable "${output.variableName}" to namespace "${namespace}" from path "${output.sourcePath}"`);
@@ -5898,14 +6431,18 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
    * Reads variables and makes them available in workflowState context
    */
   processVariableInputs(step, workflowState) {
-    if (!step.config?.variableInputs || !Array.isArray(step.config.variableInputs)) {
+    const inputsConfig = Array.isArray(step?.config?.variableInputs)
+      ? step.config.variableInputs
+      : (Array.isArray(step?.variableInputs) ? step.variableInputs : null);
+
+    if (!inputsConfig) {
       return {};
     }
 
     this.initializeVariablePool(workflowState);
     const inputs = {};
 
-    for (const input of step.config.variableInputs) {
+    for (const input of inputsConfig) {
       if (!input.variableName || !input.targetPath) {
         continue;
       }
@@ -7758,6 +8295,70 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
         console.warn(`⚠️ Failed to capture before screenshot: ${screenshotError.message}`);
       }
 
+      // If a captcha is present, capture a dedicated screenshot and attempt a best-effort solve.
+      // This makes it obvious in job logs what blocked login (user requested explicit evidence).
+      const captureCaptchaEvidence = async (screenshotType, note, captchaInfo = null) => {
+        try {
+          if (!jobId) return null;
+          const shot = await page.screenshot({ fullPage: true, type: 'png' });
+          const presigned = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
+            type: 'screenshot',
+            jobId: jobId,
+            contentType: 'image/png'
+          }, {
+            timeout: 10000,
+            headers: this.getAuthHeaders()
+          });
+          const { url: presignedUrl, key, publicUrl } = presigned.data || {};
+          if (presignedUrl && key) {
+            await axios.put(presignedUrl, shot, {
+              headers: { 'Content-Type': 'image/png' },
+              maxBodyLength: Infinity,
+              maxContentLength: Infinity,
+              timeout: 30000
+            });
+            await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+              jobId: jobId,
+              level: 'warn',
+              message: `🧩 CAPTCHA EVIDENCE: ${note}`,
+              component: 'CAPTCHA',
+              metadata: {
+                screenshot_type: screenshotType,
+                screenshot_key: key,
+                screenshot_file_id: key,
+                screenshot_url: publicUrl || null,
+                is_screenshot: true,
+                isScreenshot: true,
+                step_id: step.id,
+                step_name: step.name,
+                page_url: page.url(),
+                captcha_type: captchaInfo?.type || null,
+                captcha_selector: captchaInfo?.selector || null
+              }
+            }, { headers: this.getAuthHeaders(), timeout: 10000 });
+            return { key, publicUrl: publicUrl || null };
+          }
+        } catch (e) {
+          // never fail login because evidence logging failed
+          console.warn(`[CAPTCHA] Failed to capture evidence screenshot: ${e.message}`);
+        }
+        return null;
+      };
+
+      try {
+        if (jobId) {
+          const unifiedOps = await import('../crawling/unified-operations.js');
+          const captchaInfo = await unifiedOps.detectCaptcha(page, jobId);
+          if (captchaInfo?.detected) {
+            await captureCaptchaEvidence('captcha_detected_before_script', 'Captcha detected before executing login script', captchaInfo);
+            await unifiedOps.handleCaptcha(page, jobId, captchaInfo);
+            await captureCaptchaEvidence('captcha_after_attempt', 'After captcha handling attempt', captchaInfo);
+          }
+        }
+      } catch (captchaGuardError) {
+        console.warn(`[CAPTCHA] Captcha detection/handling guard failed: ${captchaGuardError.message}`);
+      }
+
       // Get visible text from workflow state (not from undefined resolvedVisibleText)
       const visibleText = workflowState.visible_text || 
                          workflowState.variablePool?.page?.visible_text?.value ||
@@ -8051,7 +8652,7 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
             await pageObj.waitForTimeout(500);
             
             // Import takeScreenshot function
-            const unifiedOps = await import('../../crawling/unified-operations.js');
+            const unifiedOps = await import('../crawling/unified-operations.js');
             
             // Capture screenshot with action context
             const actionDisplay = methodName + (args.length > 0 ? `(${typeof args[0] === 'string' ? args[0].substring(0, 50) : '...'})` : '()');
@@ -8717,6 +9318,10 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
         try {
           // Try to create the function first - include ms, delay, text, context, test for AI-generated scripts
           let executableBody = functionBody;
+          // Backward-compat: some generated scripts occasionally reference `input_input_credentials`
+          // (typo) instead of `input_credentials`. Provide an alias so logins don't silently use
+          // fallback placeholder credentials.
+          executableBody = `const input_input_credentials = input_credentials;\n${executableBody}`;
           let fn;
           try {
             fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
@@ -8800,6 +9405,56 @@ return { success: true, action: 'login_submitted', used_username: usernameValue 
       ]);
       
       const executionTime = Date.now() - executionStartTime;
+
+      // Best-effort fallback for common two-step login flows (email -> password).
+      // If the script clicked "Continue"/"Next" and we land on a password-only stage,
+      // opportunistically fill the password and submit once more.
+      if (isLoginJob && inputCredentials && inputCredentials.password) {
+        try {
+          const passwordLocator = page.locator('input[type="password"], input[name="password"]').first();
+          const isPwdVisible = await passwordLocator.isVisible().catch(() => false);
+          if (isPwdVisible) {
+            const currentVal = await passwordLocator.inputValue().catch(() => '');
+            if (!currentVal) {
+              await passwordLocator.fill(String(inputCredentials.password));
+            }
+              const submit = page.locator(
+                [
+                  'button[type="submit"]',
+                  'input[type="submit"]',
+                  'button#next-button',
+                  'button:has-text("Sign in")',
+                  'button:has-text("Log in")',
+                  'button:has-text("Login")',
+                  'button#submit',
+                  'input#submit',
+                  'button:has-text("Submit")',
+                  'button:has-text("Continue")',
+                  'button:has-text("Next")'
+                ].join(', ')
+              ).first();
+              // Prefer submitting the form that owns the password input (avoids clicking unrelated buttons).
+              try {
+                const form = passwordLocator.locator('xpath=ancestor::form').first();
+                const formSubmit = form.locator('button, input[type=\"submit\"], input[type=\"button\"]').first();
+                if (await formSubmit.isVisible().catch(() => false)) {
+                  await formSubmit.click().catch(() => {});
+                  await page.waitForTimeout(1500);
+                } else if (await submit.isVisible().catch(() => false)) {
+                  await submit.click().catch(() => {});
+                  await page.waitForTimeout(1500);
+                }
+              } catch (_) {
+                if (await submit.isVisible().catch(() => false)) {
+                  await submit.click().catch(() => {});
+                  await page.waitForTimeout(1500);
+                }
+              }
+          }
+        } catch (fallbackError) {
+          console.warn(`⚠️ Post-login fallback (password stage) failed: ${fallbackError.message}`);
+        }
+      }
       
       // CRITICAL: Check URL after execution to detect navigation
       const urlAfterAction = page.url();

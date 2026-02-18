@@ -225,8 +225,10 @@ function cleanLogMessage(message) {
   return message;
 }
 
-// Helper function to check if URL is within the same domain
-function isWithinDomain(pageUrl, baseUrl) {
+// Helper function to check if URL is within the same domain.
+// When allowSubdomains=true, treat sibling subdomains as internal as long as the
+// registrable domain (naively: last 2 labels) matches.
+function isWithinDomain(pageUrl, baseUrl, allowSubdomains = false) {
   try {
     const pageUrlObj = new URL(pageUrl);
     const baseUrlObj = new URL(baseUrl);
@@ -234,8 +236,18 @@ function isWithinDomain(pageUrl, baseUrl) {
     // Check if hostname matches (including www vs non-www)
     const pageHostname = pageUrlObj.hostname.replace(/^www\./, '');
     const baseHostname = baseUrlObj.hostname.replace(/^www\./, '');
-    
-    return pageHostname === baseHostname;
+
+    if (pageHostname === baseHostname) return true;
+
+    if (!allowSubdomains) return false;
+
+    const getBaseDomain = (hostname) => {
+      const parts = String(hostname || '').split('.').filter(Boolean);
+      if (parts.length < 2) return String(hostname || '');
+      return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+    };
+
+    return getBaseDomain(pageHostname) === getBaseDomain(baseHostname);
   } catch (error) {
     // If URL parsing fails, treat as external
     return false;
@@ -245,10 +257,10 @@ function isWithinDomain(pageUrl, baseUrl) {
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
-async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null) {
+async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null, allowSubdomains = false) {
   try {
     // Domain filtering: Only send internal pages to backend
-    if (baseUrl && !isWithinDomain(pageUrl, baseUrl)) {
+    if (baseUrl && !isWithinDomain(pageUrl, baseUrl, allowSubdomains)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageUrl}`);
       return null;
     }
@@ -318,10 +330,10 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
 
 // Send discovered page to backend immediately (incremental storage)
 // Returns the pageId from the backend
-async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null) {
+async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allowSubdomains = false) {
   try {
     // Domain filtering: Only send internal pages to backend
-    if (baseUrl && !isWithinDomain(pageData.url, baseUrl)) {
+    if (baseUrl && !isWithinDomain(pageData.url, baseUrl, allowSubdomains)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageData.url}`);
       return null;
     }
@@ -983,6 +995,18 @@ async function recordPageVideo(page, jobId, pageUrl, action) {
 // Detect captcha on page
 async function detectCaptcha(page, jobId) {
   try {
+    // reCAPTCHA v3 often shows only the "protected by reCAPTCHA" badge.
+    // That is not an interactive challenge and should not be treated as a blocker.
+    const recaptchaBadgeVisible = await page.locator('.grecaptcha-badge').first().isVisible().catch(() => false);
+    if (recaptchaBadgeVisible) {
+      await sendLog(jobId, 'info', `ℹ️ reCAPTCHA badge detected (likely v3) — not treating as a blocking captcha`, {
+        captcha_type: 'reCAPTCHA badge',
+        selector: '.grecaptcha-badge',
+        page_url: page.url(),
+        action: 'captcha_badge_detected'
+      });
+    }
+
     // Common captcha selectors and indicators
     const captchaIndicators = [
       // Mailpoet Captcha (specific detection)
@@ -1006,12 +1030,54 @@ async function detectCaptcha(page, jobId) {
       'div[id*="captcha"]',
       'div[class*="captcha"]',
       'img[src*="captcha"]',
-      'input[name*="captcha"]'
+      'input[name*="captcha"]',
+      // Some apps expose a hidden token field that must be populated (e.g. FMClarity)
+      '#captcha-token',
+      'input[name="captcha_token"]'
     ];
     
     for (const selector of captchaIndicators) {
-      const element = await page.$(selector);
-      if (element) {
+      const loc = page.locator(selector).first();
+      const visible = await loc.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      const bbox = await loc.boundingBox().catch(() => null);
+      if (!bbox || bbox.width < 8 || bbox.height < 8) {
+        continue;
+      }
+
+      // Heuristic: reCAPTCHA v3 renders a small badge in the bottom-right corner (often iframe or div).
+      // That badge is not a "challenge" and should not trigger captcha handling.
+      if (selector.includes('recaptcha') && bbox.width <= 270 && bbox.height <= 70) {
+        await sendLog(jobId, 'info', `ℹ️ reCAPTCHA widget looks like v3 badge (non-blocking)`, {
+          captcha_type: 'reCAPTCHA badge',
+          selector,
+          page_url: page.url(),
+          action: 'captcha_badge_widget_detected',
+          bbox
+        });
+        continue;
+      }
+
+      // Heuristic: Some sites label the badge container generically as "captcha" (e.g. div[class*="captcha"])
+      // even though it's just the passive badge. Treat tiny widgets as non-blocking unless it's a real input/form.
+      const selectorIsActionableCaptcha =
+        selector.startsWith('input') ||
+        selector.startsWith('form') ||
+        selector.includes('#captcha-token') ||
+        selector.includes('captcha_token') ||
+        selector.includes('mailpoet');
+      if (!selectorIsActionableCaptcha && selector.includes('captcha') && bbox.width <= 270 && bbox.height <= 70) {
+        await sendLog(jobId, 'info', `ℹ️ Small captcha-labeled widget looks like passive badge (non-blocking)`, {
+          captcha_type: 'captcha badge',
+          selector,
+          page_url: page.url(),
+          action: 'captcha_badge_widget_detected',
+          bbox
+        });
+        continue;
+      }
         const captchaType = selector.includes('mailpoet') ? 'Mailpoet Captcha' :
                            selector.includes('recaptcha') ? 'reCAPTCHA' :
                            selector.includes('hcaptcha') ? 'hCaptcha' :
@@ -1022,15 +1088,18 @@ async function detectCaptcha(page, jobId) {
           captcha_type: captchaType,
           selector: selector,
           page_url: page.url(),
-          action: 'captcha_detection'
+          action: 'captcha_detection',
+          visible: true,
+          bbox
         });
         
         return {
           detected: true,
           type: captchaType,
-          selector: selector
+          selector: selector,
+          visible: true,
+          bbox
         };
-      }
     }
     
     return { detected: false };
@@ -1043,6 +1112,16 @@ async function detectCaptcha(page, jobId) {
 // Attempt to handle captcha with human-like behavior
 async function handleCaptcha(page, jobId, captchaInfo) {
   try {
+    // If it's not visible, it's not actionable. Avoid claiming "captcha still present".
+    if (captchaInfo && captchaInfo.visible === false) {
+      await sendLog(jobId, 'info', `ℹ️ Captcha indicator not visible — skipping captcha handling`, {
+        captcha_type: captchaInfo.type,
+        selector: captchaInfo.selector,
+        action: 'captcha_not_visible_skip'
+      });
+      return { passed: true, skipped: true };
+    }
+
     await sendLog(jobId, 'info', `🔐 Attempting to handle ${captchaInfo.type} with human-like behavior...`, {
       captcha_type: captchaInfo.type,
       action: 'captcha_handling'
@@ -1069,14 +1148,15 @@ async function handleCaptcha(page, jobId, captchaInfo) {
     try {
       // For reCAPTCHA, try clicking the checkbox
       if (captchaInfo.type.includes('reCAPTCHA') || captchaInfo.selector.includes('recaptcha')) {
-        const recaptchaCheckbox = await page.$('iframe[src*="recaptcha"]').catch(() => null);
-        if (recaptchaCheckbox) {
+        const recaptchaFrame = page.locator('iframe[src*="recaptcha"]').first();
+        const isVisible = await recaptchaFrame.isVisible().catch(() => false);
+        if (isVisible) {
           await sendLog(jobId, 'info', `🖱️ Attempting to interact with reCAPTCHA checkbox...`, {
             action: 'captcha_interaction'
           });
           
-          // Click the iframe (this might trigger the challenge)
-          const box = await recaptchaCheckbox.boundingBox();
+          // Click the iframe region (best-effort; iframe contents are cross-origin)
+          const box = await recaptchaFrame.boundingBox().catch(() => null);
           if (box) {
             // Move mouse to checkbox with human-like delay
             await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 10 });
@@ -1120,13 +1200,40 @@ async function handleCaptcha(page, jobId, captchaInfo) {
     } catch (interactionError) {
       console.warn(`[CAPTCHA] Interaction attempt warning: ${interactionError.message}`);
     }
+
+    // Some apps (including SSO wrappers) require a hidden captcha token field to be populated.
+    // This isn't a "solver" but we can wait for the token to appear (best-effort).
+    try {
+      if (captchaInfo.selector === '#captcha-token' || captchaInfo.selector === 'input[name="captcha_token"]') {
+        await sendLog(jobId, 'info', `⏳ Waiting for captcha token field to populate...`, {
+          action: 'captcha_token_wait',
+          selector: captchaInfo.selector
+        });
+        for (let i = 0; i < 30; i++) {
+          const token = await page.$eval(
+            captchaInfo.selector,
+            (el) => (el && 'value' in el ? String(el.value || '') : ''),
+          ).catch(() => '');
+          if (token && token.trim().length > 10) {
+            await sendLog(jobId, 'info', `✅ Captcha token populated (${token.trim().length} chars)`, {
+              action: 'captcha_token_ready',
+              selector: captchaInfo.selector
+            });
+            break;
+          }
+          await page.waitForTimeout(500);
+        }
+      }
+    } catch (tokenWaitError) {
+      console.warn(`[CAPTCHA] Token wait warning: ${tokenWaitError.message}`);
+    }
     
     // Wait longer for potential automatic solving or manual intervention
     // Increased wait time to give more chance for CAPTCHA to be solved
     await page.waitForTimeout(8000 + Math.random() * 4000);
     
     // Check if captcha is still present
-    const stillPresent = await page.$(captchaInfo.selector).catch(() => null);
+    const stillPresent = await page.locator(captchaInfo.selector).first().isVisible().catch(() => false);
     
     if (!stillPresent) {
       await sendLog(jobId, 'info', `✅ CAPTCHA PASSED: ${captchaInfo.type} was resolved`, {
@@ -1137,8 +1244,12 @@ async function handleCaptcha(page, jobId, captchaInfo) {
       return { passed: true };
     } else {
       // Check if CAPTCHA challenge appeared (iframe might have loaded)
-      const challengeIframe = await page.$('iframe[src*="recaptcha"][src*="bframe"], iframe[src*="hcaptcha"][src*="challenges"]').catch(() => null);
-      if (challengeIframe) {
+      const challengeIframeVisible = await page
+        .locator('iframe[src*="recaptcha"][src*="bframe"], iframe[src*="hcaptcha"][src*="challenges"]')
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (challengeIframeVisible) {
         await sendLog(jobId, 'info', `⏳ CAPTCHA challenge appeared, waiting for resolution...`, {
           action: 'captcha_challenge_waiting'
         });
@@ -1146,7 +1257,7 @@ async function handleCaptcha(page, jobId, captchaInfo) {
         await page.waitForTimeout(15000 + Math.random() * 10000);
       }
       
-      const stillPresentAfterWait = await page.$(captchaInfo.selector).catch(() => null);
+      const stillPresentAfterWait = await page.locator(captchaInfo.selector).first().isVisible().catch(() => false);
       if (!stillPresentAfterWait) {
         await sendLog(jobId, 'info', `✅ CAPTCHA PASSED after challenge: ${captchaInfo.type} was resolved`, {
           captcha_type: captchaInfo.type,
@@ -1706,6 +1817,7 @@ const modeHandlers = {
     const jobId = context.job_id || 'unknown-job';
     const projectId = context.project_id || null;
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const allowSubdomains = context?.allow_subdomains === true;
     
     await sendLog(jobId, 'info', `🚀 OPTIMIZED MODE: QA-like testing with minimal token usage`);
     
@@ -1716,7 +1828,7 @@ const modeHandlers = {
       // Get or create page ID
       const pageUrl = page.url();
       const pageTitle = await page.title();
-      const pageResult = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId, pageUrl);
+      const pageResult = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId, pageUrl, null, allowSubdomains);
       const pageId = pageResult?.pageId || pageResult;
       
       // Analyze page with optimized approach
@@ -1755,6 +1867,7 @@ const modeHandlers = {
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
     const requestedMaxPages = context.options?.max_pages ?? context.max_pages;
     const requestedMaxDepth = context.options?.max_depth ?? context.max_depth;
+    const allowSubdomains = context?.allow_subdomains === true;
 
     // Domain crawl: use backend max_pages/max_depth so this job recursively follows links page-by-page.
     // Single-page: max_pages <= 1 and max_depth <= 0 → only the seed URL is analyzed.
@@ -1960,11 +2073,17 @@ const modeHandlers = {
         
         // Only check for login redirects if explicitly configured (not default)
         // AND only for crawl jobs (not login jobs)
-        const handleLoginRedirect = context.handle_login_redirect;
+        const handleLoginRedirect = context.handle_login_redirect ?? context?.options?.handle_login_redirect;
         if (!isLoginJob && handleLoginRedirect && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail')) {
           try {
+            await sendLog(jobId, 'info', `🔐 [LOGIN-REDIRECT] handler check: handle_login_redirect=${handleLoginRedirect}`, {
+              final_url: finalUrl,
+              intended_url: currentUrl,
+              login_url: context?.login_url || null,
+              job_type: context?.jobType || context?.job_type || null
+            });
             const { handleLoginRedirect: handleRedirect } = await import('../login/login-redirect-handler.js');
-            const redirectResult = await handleRedirect(page, jobId, finalUrl, context, openaiClient, handleLoginRedirect);
+            const redirectResult = await handleRedirect(page, jobId, finalUrl, currentUrl, context, openaiClient, handleLoginRedirect);
             
             if (redirectResult && redirectResult.reauthenticated) {
               // Re-authentication successful, update context and continue from root
@@ -1986,6 +2105,11 @@ const modeHandlers = {
               pagesAnalyzed = 0; // Reset page counter
               await sendLog(jobId, 'info', `🔄 Restarting crawl from root path with fresh authentication`);
               continue; // Skip current page and start fresh
+            } else {
+              await sendLog(jobId, 'info', `🔐 [LOGIN-REDIRECT] handler did not reauthenticate (continuing)`, {
+                final_url: finalUrl,
+                intended_url: currentUrl
+              });
             }
           } catch (redirectError) {
             // If handleLoginRedirect is 'fail', the error is already thrown
@@ -2059,7 +2183,15 @@ const modeHandlers = {
           await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrlCanonical} already analyzed in this job (in-memory dedupe), skipping duplicate analysis`);
           continue;
         }
-        const pageResult = await sendBasicPageToBackend(jobId, actualPageUrlCanonical || actualPageUrl, pageTitle, projectId, projectStartUrl, lighthouseResults);
+        const pageResult = await sendBasicPageToBackend(
+          jobId,
+          actualPageUrlCanonical || actualPageUrl,
+          pageTitle,
+          projectId,
+          projectStartUrl,
+          lighthouseResults,
+          allowSubdomains
+        );
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
         // CRITICAL: Check if this page has already been analyzed in this job to prevent duplicate workflows
@@ -2407,7 +2539,7 @@ const modeHandlers = {
         
         // Step 3: Extract links from page for crawling (if not at max depth)
         if (shouldDiscoverLinks && depth < maxDepth) {
-          const linksData = await extractAllLinks(page, jobId, currentUrl);
+          const linksData = await extractAllLinks(page, jobId, currentUrl, allowSubdomains);
           const allInternal = Array.isArray(linksData?.internal) ? linksData.internal : [];
           const anchors = [];
           const crawlableInternalLinks = [];
@@ -3407,13 +3539,20 @@ async function extractPageElements(page, jobId) {
 // performStaticLogin function completely removed - all login operations must use workflow templates (rule 95-remove-deprecated-immediately.mdc)
 
 // Comprehensive link extraction
-async function extractAllLinks(page, jobId, baseUrl) {
+async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
   try {
     await sendLog(jobId, 'info', '🔗 Extracting all links from page (comprehensive scan)...');
     
-    const links = await page.$$eval('a[href], area[href], [data-href], [data-url]', (elements, baseUrl) => {
+    const links = await page.$$eval('a[href], area[href], [data-href], [data-url]', (elements, baseUrl, allowSubdomains) => {
       const linkSet = new Set();
       const links = [];
+
+      const normalizeHost = (value) => String(value || '').toLowerCase().replace(/^www\./, '');
+      const getBaseDomain = (hostname) => {
+        const parts = normalizeHost(hostname).split('.').filter(Boolean);
+        if (parts.length < 2) return normalizeHost(hostname);
+        return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+      };
       
       elements.forEach(el => {
         const href = el.href || el.getAttribute('data-href') || el.getAttribute('data-url') || '';
@@ -3430,8 +3569,12 @@ async function extractAllLinks(page, jobId, baseUrl) {
           const linkUrl = new URL(href);
           const baseUrlObj = new URL(baseUrl);
           // Check both hostname and origin for more accurate domain matching
-          isInternal = linkUrl.hostname === baseUrlObj.hostname || 
-                       linkUrl.origin === baseUrlObj.origin;
+          const linkHost = normalizeHost(linkUrl.hostname);
+          const baseHost = normalizeHost(baseUrlObj.hostname);
+          isInternal =
+            linkHost === baseHost ||
+            linkUrl.origin === baseUrlObj.origin ||
+            (allowSubdomains && getBaseDomain(linkHost) === getBaseDomain(baseHost));
           fullUrl = linkUrl.href;
         } catch (e) {
           // Relative URL or invalid
@@ -3466,7 +3609,7 @@ async function extractAllLinks(page, jobId, baseUrl) {
       });
       
       return links;
-    }, baseUrl);
+    }, baseUrl, allowSubdomains);
     
     const normalizeUrlForDedup = (value) => {
       try {
@@ -3614,6 +3757,8 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
   } catch (error) {
     throw new Error(`Failed to get page info: ${error.message}`);
   }
+
+  const allowSubdomains = options?.allow_subdomains === true;
   
   // Generate unique conversation ID for this page's analysis
   const conversationId = `conv_${jobId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -3649,7 +3794,7 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
   await sendLog(jobId, 'info', `🔍 Step 2/6: Extracting links from page...`, pageContext);
   let linksData = { all: [], internal: [], external: [], total: 0 };
   try {
-    linksData = await extractAllLinks(page, jobId, currentUrl);
+    linksData = await extractAllLinks(page, jobId, currentUrl, allowSubdomains);
     await sendLog(jobId, 'info', `✓ Found ${linksData.total} links (${linksData.internal.length} internal, ${linksData.external.length} external)`, pageContext);
   } catch (error) {
     await sendLog(jobId, 'warn', `⚠️ Link extraction failed: ${error.message}`, pageContext);
@@ -3971,6 +4116,7 @@ Respond with JSON format:
 async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, options = {}) {
   const maxDepth = options.max_depth || 3;
   const maxPages = options.max_pages || 50;
+  const allowSubdomains = options?.allow_subdomains === true;
   
   const visitedUrls = new Set();
   const analyzedPages = [];
@@ -4091,7 +4237,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         }
         
         // Create basic page document in backend FIRST
-        let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, null, startUrl);
+        let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, null, startUrl, null, allowSubdomains);
         
         // Update page context with pageId for all subsequent logs
         if (pageId) {
@@ -4108,7 +4254,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         }
         
         // Check if this page is within the target domain before AI analysis
-        const isWithinTargetDomain = isWithinDomain(currentUrl, startUrl);
+        const isWithinTargetDomain = isWithinDomain(currentUrl, startUrl, allowSubdomains);
         
         if (!isWithinTargetDomain) {
           // Skip AI analysis for external domains - just collect basic info
@@ -4158,7 +4304,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         
         // Update the page with full analysis data
         if (pageId) {
-          await sendDiscoveredPageToBackend(jobId, pageAnalysis, startUrl);
+          await sendDiscoveredPageToBackend(jobId, pageAnalysis, startUrl, allowSubdomains);
           await sendLog(jobId, 'info', `✓ Page analysis complete and stored`, {
             ...currentPageContext,
             pageId: pageId,
@@ -4607,8 +4753,16 @@ async function safeSetSessionStorage(page, tokens) {
   }
 }
 
-// Export safe storage functions for use in other modules
-export { safeGetLocalStorage, safeGetSessionStorage, safeSetLocalStorage, safeSetSessionStorage, takeScreenshot };
+// Export safe storage + small shared utilities for use in other modules
+export {
+  safeGetLocalStorage,
+  safeGetSessionStorage,
+  safeSetLocalStorage,
+  safeSetSessionStorage,
+  takeScreenshot,
+  detectCaptcha,
+  handleCaptcha
+};
 
 /**
  * Collect all cookies from current page and send to backend
@@ -4878,13 +5032,14 @@ async function executeCrawlFromAnalysis(page, analysis, context) {
 async function executeSimplifiedApproach(page, jobId, context, openaiClient) {
   const pageUrl = page.url();
   const pageTitle = await page.title();
+  const allowSubdomains = context?.allow_subdomains === true;
   
   await sendLog(jobId, 'info', '🎯 APPROACH 1: Simplified (Playwright JSON Analysis)', { page_url: pageUrl });
   
   try {
     // Step 1: Extract forms with Playwright
     const forms = await extractFormsAndLogicalGroups(page, jobId);
-    const links = await extractAllLinks(page, jobId, pageUrl);
+    const links = await extractAllLinks(page, jobId, pageUrl, allowSubdomains);
     
     // Step 2: Build structured JSON for OpenAI
     const structuredData = {
@@ -5256,6 +5411,41 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
   await sendLog(jobId, 'info', '🎯 APPROACH 4: Static (AI Script Generation for QA Automation)', { page_url: pageUrl });
   
   try {
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const runnerToken = context?.runner_token || process.env.RUNNER_TOKEN || null;
+    const authHeaders = runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {};
+    const cacheBucket = 'static-approach';
+
+    // Cache reuse: if we already generated scripts for this page recently, reuse them.
+    try {
+      const cachedRes = await fetch(
+        `${backendUrl}/api/scripts/cache/list?project_id=${encodeURIComponent(projectId)}&page_id=${encodeURIComponent(pageId)}&cache_bucket=${encodeURIComponent(cacheBucket)}`,
+        {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders
+          }
+        }
+      );
+      if (cachedRes.ok) {
+        const cachedScripts = await cachedRes.json();
+        if (Array.isArray(cachedScripts) && cachedScripts.length > 0) {
+          await sendLog(jobId, 'info', `✅ [SCRIPTS-CACHE] Reused ${cachedScripts.length} cached static script(s)`, { page_url: pageUrl });
+          return {
+            success: true,
+            approach: 'static',
+            cache_hit: true,
+            saved_scripts: cachedScripts,
+            metadata: null,
+            common_selectors: []
+          };
+        }
+      }
+    } catch (cacheErr) {
+      await sendLog(jobId, 'warn', `⚠️ [SCRIPTS-CACHE] Static cache lookup failed: ${cacheErr.message}`, { page_url: pageUrl });
+    }
+
     // Step 1: Extract metadata ONLY (no deep analysis)
     const metadata = await page.evaluate(() => {
       return {
@@ -5348,14 +5538,23 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
     }
     
     // Step 4: Save each script to scripts collection
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
     const savedScripts = [];
     
     for (const scenario of (aiResponse.scenarios || [])) {
       try {
-        const scriptResponse = await fetch(`${backendUrl}/scripts`, {
+        const scenarioCacheKey = [
+          cacheBucket,
+          String(projectId),
+          String(pageId),
+          String(scenario.name || '').trim()
+        ].join(':');
+
+        const scriptResponse = await fetch(`${backendUrl}/api/scripts`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders
+          },
           body: JSON.stringify({
             project_id: projectId,
             page_id: pageId,
@@ -5369,7 +5568,10 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
             ai_model: 'gpt-5-mini',
             expected_outcome: scenario.expected_outcome,
             validation_rules: scenario.validation_rules || [],
-            status: 'active'
+            status: 'active',
+            cache_bucket: cacheBucket,
+            cache_key: scenarioCacheKey,
+            tags: ['static-approach']
           })
         });
         
@@ -5379,9 +5581,12 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
           await sendLog(jobId, 'info', `  ✓ Script saved: ${scenario.name} (ID: ${savedScript._id})`, { page_url: pageUrl });
           
           // Step 5: Create action record
-          const actionResponse = await fetch(`${backendUrl}/actions`, {
+          const actionResponse = await fetch(`${backendUrl}/api/actions`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...authHeaders
+            },
             body: JSON.stringify({
               project_id: projectId,
               page_id: pageId,
@@ -5657,6 +5862,37 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   try {
     // Use configured endpoint if available, otherwise fall back to direct OpenAI
     const openaiClient = createOpenAIClient(context, openaiApiKey);
+
+    // SSO flows often bounce across sibling subdomains (e.g. webapp.* -> auth.* -> app.*).
+    // When we detect that pattern, allow crawling across subdomains of the same base domain.
+    // This is best-effort and intentionally naive (last 2 labels).
+    let allowSubdomains = context?.allow_subdomains === true;
+    if (!allowSubdomains) {
+      try {
+        const startHost = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+        const loginHost = context?.login_url
+          ? new URL(context.login_url).hostname.replace(/^www\./, '').toLowerCase()
+          : null;
+        const baseOf = (host) => {
+          const parts = String(host || '').split('.').filter(Boolean);
+          if (parts.length < 2) return String(host || '');
+          return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+        };
+        if (loginHost && startHost !== loginHost && baseOf(startHost) === baseOf(loginHost)) {
+          allowSubdomains = true;
+        }
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    // Make the decision visible to all downstream helpers that only receive `context`/`options`.
+    if (context && typeof context === 'object') {
+      context.allow_subdomains = allowSubdomains;
+      if (context.options && typeof context.options === 'object') {
+        context.options.allow_subdomains = allowSubdomains;
+      }
+    }
     
     // Load workflow template to check for cookie-collect steps that need to run before navigation
     let preNavigationCookieSteps = [];
@@ -5693,7 +5929,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     }
     
     const result = await withBrowser(async ({ page, context: browserContext }) => {
-      await sendLog(jobId, 'info', 'Browser session started', { mode });
+      await sendLog(jobId, 'info', 'Browser session started', { mode, allowSubdomains });
       
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {

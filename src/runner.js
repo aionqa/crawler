@@ -891,6 +891,8 @@ async function executeCrawlJob(job, streamInterval) {
     ...rawContext,
     execute_workflow: executeWorkflowFlag,
     single_action_only: Boolean(singleActionOnlyValue),
+    // Ensure redirect handling config is always present for unified-operations
+    handle_login_redirect: handleLoginRedirect,
     // CRITICAL: Ensure credentials are explicitly set in normalizedContext
     credentials: rawContext.credentials || (extractedCreds && extractedCreds.username !== 'MISSING' ? extractedCreds : undefined),
     // CRITICAL: For login jobs, ensure jobType is set in context so login redirect handler can skip them
@@ -902,7 +904,8 @@ async function executeCrawlJob(job, streamInterval) {
     options: {
       ...mergedOptions,
       execute_workflow: executeWorkflowFlag,
-      single_action_only: Boolean(singleActionOnlyValue)
+      single_action_only: Boolean(singleActionOnlyValue),
+      handle_login_redirect: handleLoginRedirect
     }
   };
   
@@ -922,10 +925,11 @@ async function executeCrawlJob(job, streamInterval) {
     { username: normalizedContext.credentials.username, password: normalizedContext.credentials.password ? '***' : 'MISSING' } : 
     'MISSING');
 
-  const openaiApiKey = normalizedContext.openai_api_key || process.env.OPENAI_API_KEY;
-
+  // Crawl jobs can run without OpenAI configured (deterministic workflows / fallbacks).
+  // Login jobs still require an AI provider, but crawl jobs should degrade gracefully.
+  const openaiApiKey = normalizedContext.openai_api_key || process.env.OPENAI_API_KEY || null;
   if (!openaiApiKey) {
-    throw new Error('OpenAI API key not provided');
+    console.warn(`⚠️ OpenAI API key not provided for crawl job ${job.id} - continuing without AI provider`);
   }
 
   // Track final video info so we can log once
