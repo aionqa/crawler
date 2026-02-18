@@ -58,6 +58,12 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
             currentUrlObj.pathname === loginUrlObj.pathname) {
           return { isLoginPage: true, confidence: 'high', reason: 'URL matches configured login URL' };
         }
+
+        // Some apps bounce between subdomains (e.g. webapp.* -> auth.*) but keep the same login path.
+        // Treat "same pathname as configured login_url" as a login-page hit as well.
+        if (currentUrlObj.pathname === loginUrlObj.pathname) {
+          return { isLoginPage: true, confidence: 'medium', reason: 'Pathname matches configured login URL (origin differs)' };
+        }
       } catch (urlError) {
         // Invalid URL format, skip
         console.warn(`[LOGIN-REDIRECT] Invalid login URL format: ${loginUrl}`);
