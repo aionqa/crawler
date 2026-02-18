@@ -2073,7 +2073,7 @@ const modeHandlers = {
         
         // Only check for login redirects if explicitly configured (not default)
         // AND only for crawl jobs (not login jobs)
-        const handleLoginRedirect = context.handle_login_redirect;
+        const handleLoginRedirect = context.handle_login_redirect ?? context?.options?.handle_login_redirect;
         if (!isLoginJob && handleLoginRedirect && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail')) {
           try {
             await sendLog(jobId, 'info', `🔐 [LOGIN-REDIRECT] handler check: handle_login_redirect=${handleLoginRedirect}`, {
