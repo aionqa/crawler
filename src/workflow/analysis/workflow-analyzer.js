@@ -10522,6 +10522,40 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState.lastDialogMessage = dialogMessage;
       
       const executionTime = Date.now() - executionStartTime;
+
+      // Best-effort fallback for common two-step login flows (email -> password).
+      // If the script clicked "Continue"/"Next" and we land on a password-only stage,
+      // opportunistically fill the password and submit once more.
+      if (isLoginJob && inputCredentials && inputCredentials.password) {
+        try {
+          const passwordLocator = page.locator('input[type="password"], input[name="password"]').first();
+          const isPwdVisible = await passwordLocator.isVisible().catch(() => false);
+          if (isPwdVisible) {
+            const currentVal = await passwordLocator.inputValue().catch(() => '');
+            if (!currentVal) {
+              await passwordLocator.fill(String(inputCredentials.password));
+              const submit = page.locator(
+                [
+                  'button[type="submit"]',
+                  'input[type="submit"]',
+                  'button#next-button',
+                  'button:has-text("Sign in")',
+                  'button:has-text("Log in")',
+                  'button:has-text("Login")',
+                  'button:has-text("Continue")',
+                  'button:has-text("Next")'
+                ].join(', ')
+              ).first();
+              if (await submit.isVisible().catch(() => false)) {
+                await submit.click().catch(() => {});
+                await page.waitForTimeout(1500);
+              }
+            }
+          }
+        } catch (fallbackError) {
+          console.warn(`⚠️ Post-login fallback (password stage) failed: ${fallbackError.message}`);
+        }
+      }
       
       // CRITICAL: Check URL after execution to detect navigation
       const urlAfterAction = page.url();
