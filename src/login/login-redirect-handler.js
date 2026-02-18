@@ -126,52 +126,45 @@ export async function handleLoginRedirect(
   
   // Auto-retry: Get latest login job cookies and re-authenticate
   if (handleLoginRedirect === 'auto_retry') {
-    await sendLog(jobId, 'info', `🔄 Auto-retry enabled - fetching latest login cookies and re-authenticating...`);
-    
-    // Get most recent login job cookies
-    let latestCookies = await getLatestLoginCookies(backendUrl, projectId, runnerToken);
-    
+    await sendLog(jobId, 'info', `🔄 Auto-retry enabled - login page detected, triggering a login job to refresh cookies...`);
+
+    // Ask backend to start a login job (runner-auth protected).
+    const axios = (await import('axios')).default;
+    const refreshResp = await axios.post(
+      `${backendUrl}/api/runner/jobs/${jobId}/refresh-login`,
+      { reason: 'login_redirect', intended_url: intendedUrl || null },
+      {
+        headers: runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {},
+        timeout: 10000
+      }
+    );
+
+    const loginJobId = refreshResp?.data?.login_job_id;
+    if (!loginJobId) {
+      throw new Error('Backend did not return login_job_id for refresh-login');
+    }
+
+    await sendLog(jobId, 'info', `⏳ Waiting for login job ${loginJobId} to complete...`);
+
+    // Poll login job status via runner-auth `/api/jobs/:id`
+    const deadline = Date.now() + 3 * 60 * 1000; // 3 minutes
+    while (Date.now() < deadline) {
+      const statusResp = await axios.get(`${backendUrl}/api/jobs/${loginJobId}`, {
+        headers: runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {},
+        timeout: 10000
+      });
+      const status = statusResp?.data?.status;
+      if (status === 'completed') break;
+      if (status === 'failed' || status === 'error' || status === 'cancelled') {
+        throw new Error(`Login refresh job ${loginJobId} ended with status=${status}`);
+      }
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    // Fetch cookies after the login job completes
+    const latestCookies = await getLatestLoginCookies(backendUrl, projectId, runnerToken);
     if (!latestCookies || latestCookies.length === 0) {
-      await sendLog(jobId, 'warn', `⚠️ No login cookies found - triggering a login job to refresh cookies...`);
-
-      // Ask backend to start a login job (runner-auth protected).
-      const axios = (await import('axios')).default;
-      const refreshResp = await axios.post(
-        `${backendUrl}/api/runner/jobs/${jobId}/refresh-login`,
-        { reason: 'login_redirect', intended_url: intendedUrl || null },
-        {
-          headers: runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {},
-          timeout: 10000
-        }
-      );
-
-      const loginJobId = refreshResp?.data?.login_job_id;
-      if (!loginJobId) {
-        throw new Error('Backend did not return login_job_id for refresh-login');
-      }
-
-      await sendLog(jobId, 'info', `⏳ Waiting for login job ${loginJobId} to complete...`);
-
-      // Poll login job status via runner-auth `/api/jobs/:id`
-      const deadline = Date.now() + 3 * 60 * 1000; // 3 minutes
-      while (Date.now() < deadline) {
-        const statusResp = await axios.get(`${backendUrl}/api/jobs/${loginJobId}`, {
-          headers: runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {},
-          timeout: 10000
-        });
-        const status = statusResp?.data?.status;
-        if (status === 'completed') break;
-        if (status === 'failed' || status === 'error' || status === 'cancelled') {
-          throw new Error(`Login refresh job ${loginJobId} ended with status=${status}`);
-        }
-        await new Promise(r => setTimeout(r, 2000));
-      }
-
-      // Re-fetch cookies after the login job completes
-      latestCookies = await getLatestLoginCookies(backendUrl, projectId, runnerToken);
-      if (!latestCookies || latestCookies.length === 0) {
-        throw new Error('Login refresh completed but no cookies found');
-      }
+      throw new Error('Login refresh completed but no cookies found');
     }
     
     await sendLog(jobId, 'info', `🍪 Found ${latestCookies.length} cookies from most recent login job`);
