@@ -10534,6 +10534,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             const currentVal = await passwordLocator.inputValue().catch(() => '');
             if (!currentVal) {
               await passwordLocator.fill(String(inputCredentials.password));
+            }
               const submit = page.locator(
                 [
                   'button[type="submit"]',
@@ -10553,7 +10554,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 await submit.click().catch(() => {});
                 await page.waitForTimeout(1500);
               }
-            }
           }
         } catch (fallbackError) {
           console.warn(`⚠️ Post-login fallback (password stage) failed: ${fallbackError.message}`);
