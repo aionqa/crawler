@@ -6245,6 +6245,16 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
           });
         }
       }
+
+      // Fail fast on persistent 5xx to avoid wasting AI tokens analyzing an upstream error page.
+      if (navStatus && navStatus >= 500) {
+        let serverHeader = null;
+        try {
+          const h = navResponse?.headers ? navResponse.headers() : null;
+          serverHeader = h?.server || null;
+        } catch (_) {}
+        throw new Error(`Start URL returned HTTP ${navStatus}${serverHeader ? ` (server=${serverHeader})` : ''}`);
+      }
       
       // Check if navigation redirected (cookies might have caused redirect)
       const finalUrl = page.url();
