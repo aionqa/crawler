@@ -9854,6 +9854,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
       /waitForSelector\(\s*'selectors\.([A-Za-z_$][\w$]*)\s*,\s*\{\s*timeout\s*:\s*(\d+)\s*\}\s*'\s*\)/g,
       'waitForSelector(selectors.$1, { timeout: $2 })'
     );
+    // More generic variant: page.waitForSelector('nameSelector, { timeout: 5000 }')
+    // where nameSelector is a variable holding a selector string.
+    s = s.replace(
+      /waitForSelector\(\s*'([A-Za-z_$][\w$]*)\s*,\s*\{\s*timeout\s*:\s*(\d+)\s*\}\s*'\s*\)/g,
+      'waitForSelector($1, { timeout: $2 })'
+    );
+    s = s.replace(
+      /waitForSelector\(\s*"([A-Za-z_$][\w$]*)\s*,\s*\{\s*timeout\s*:\s*(\d+)\s*\}\s*"\s*\)/g,
+      'waitForSelector($1, { timeout: $2 })'
+    );
 
     // LLMs sometimes emit a broken fragment of an ensureChecked helper at top-level,
     // which crashes at runtime with ReferenceError: selector/shouldBeChecked.
