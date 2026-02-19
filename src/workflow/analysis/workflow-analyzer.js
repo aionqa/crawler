@@ -3808,6 +3808,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const contextInfo = this.resolveStepContext(step, stepContext, this.workflowTemplate?.steps);
     const requirementText = contextInfo.requirementText;
     const decoratedTemplate = appendRequirementToTemplate(customTemplate, requirementText);
+
+    // JSON.stringify can throw on circular refs (we store structured values in variablePool/results).
+    // AI prompt payload should never crash just because a preview can't be stringified.
+    const safeJsonPreview = (value, maxLen = 200) => {
+      try {
+        return JSON.stringify(value).substring(0, maxLen);
+      } catch (e) {
+        return `[unserializable: ${String(e?.message || e).substring(0, 180)}]`;
+      }
+    };
     
     // Prepare payload based on step configuration
     const stepPayload = {
@@ -3951,7 +3961,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             has_result: true,
             result_type: typeof result,
             keys: Object.keys(result).slice(0, 10), // Limit to first 10 keys
-            preview: JSON.stringify(result).substring(0, 200) // Preview of result
+            preview: safeJsonPreview(result, 200) // Preview of result
           };
         }
       }
@@ -3978,7 +3988,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             contextSummary[key] = {
               type: 'object',
               keys: Object.keys(value).slice(0, 10),
-              preview: JSON.stringify(value).substring(0, 200)
+              preview: safeJsonPreview(value, 200)
             };
           }
         }
