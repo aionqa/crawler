@@ -9588,6 +9588,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
         return `page.${method}('${selector.replace(/'/g, "\\'")}')`;
       }
     );
+
+    // Repair missing value argument in page.fill(...) calls.
+    // LLMs sometimes emit `page.fill('input[name=\"x\"]')` (1 arg) or even `page.fill(input[name=\"x\"])`.
+    // Playwright requires fill(selector, value). Use a safe placeholder so the journey can proceed.
+    cleaned = cleaned.replace(/page\.fill\(\s*([^,\n\)]+?)\s*\)/g, "page.fill($1, 'test')");
     // Fix malformed waitForSelector. Keep valid multi-arg calls as-is, quote only bare CSS-like selectors.
     cleaned = cleaned.replace(
       /page\.waitForSelector\(\s*([^'"`][^)\n]*)\s*\)/g,
