@@ -4260,8 +4260,18 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           throw error;
         }
         
-        // Create basic page document in backend FIRST
-        let pageId = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, null, startUrl, null, allowSubdomains);
+        // Create basic page document in backend FIRST.
+        // IMPORTANT: Always pass project_id when available so pages are attributed to the job's project,
+        // not auto-created "domain projects" (SSO redirects frequently cross subdomains).
+        let pageId = await sendBasicPageToBackend(
+          jobId,
+          pageUrl,
+          pageTitle,
+          context?.project_id || null,
+          startUrl,
+          null,
+          allowSubdomains
+        );
         
         // Update page context with pageId for all subsequent logs
         if (pageId) {
