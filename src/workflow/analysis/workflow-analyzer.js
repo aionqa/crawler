@@ -16321,6 +16321,7 @@ const humanDelay = async (minMs = 80, maxMs = 220) => {
     let finalResult = null;
     let executionErrorType = null; // Track if error is execution-related
     let forceRegenerateScript = false;
+    let lastIterationResult = null; // success | failure | execution_failure | inconclusive | in_progress
     
     console.log(
       `🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id} (maxIterations=${maxIterations})`
@@ -16609,12 +16610,16 @@ const humanDelay = async (minMs = 80, maxMs = 220) => {
               // Mark as inconclusive (retryable) so UI doesn't go red for crawler/LLM brittleness.
               const execErr = String(lastExecutionResult?.error || '');
               const execErrLower = execErr.toLowerCase();
-              const looksLikeCodeBug =
+              // "selector is not defined", SyntaxError, etc. are AI-script bugs (NOT proven product failures).
+              const looksLikeAiScriptBug =
                 execErrLower.includes('syntaxerror') ||
                 execErrLower.includes('referenceerror') ||
                 execErrLower.includes('unexpected token') ||
                 execErrLower.includes('cannot use import') ||
-                execErrLower.includes('is not a function');
+                execErrLower.includes('is not a function') ||
+                execErrLower.includes(' is not defined') ||
+                execErrLower.includes('unsupported token') ||
+                execErrLower.includes('while parsing css selector');
               const looksLikeSelectorOrTiming =
                 execErrLower.includes('timeout') ||
                 execErrLower.includes('waiting for locator') ||
@@ -16631,7 +16636,7 @@ const humanDelay = async (minMs = 80, maxMs = 220) => {
                 executionErrorType === 'execution' ||
                 (lastExecutionResult && (lastExecutionResult.error_type === 'execution' || lastExecutionResult.execution_failed));
 
-              if (hasExecutionError && looksLikeSelectorOrTiming && !looksLikeCodeBug) {
+              if (hasExecutionError && (looksLikeSelectorOrTiming || looksLikeAiScriptBug)) {
                 iterationResult = 'inconclusive';
               } else if (hasExecutionError) {
                 iterationResult = 'execution_failure';
@@ -16672,6 +16677,8 @@ const humanDelay = async (minMs = 80, maxMs = 220) => {
               timestamp: new Date().toISOString()
             };
             
+            lastIterationResult = iterationResult;
+
             // Store execution error type for final status determination
             if (executionErrorType) {
               workflowState.executionErrorType = executionErrorType;
@@ -16781,6 +16788,13 @@ const humanDelay = async (minMs = 80, maxMs = 220) => {
         }
         
         if (legFailed) {
+          // If this was an AI-script/exec issue we marked as inconclusive, keep retrying (bounded).
+          if (lastIterationResult === 'inconclusive' && iteration < maxIterations) {
+            console.log(`🟡 Leg marked failed by AI but execution was inconclusive; regenerating script and retrying (iteration ${iteration}/${maxIterations})`);
+            forceRegenerateScript = true;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            continue;
+          }
           console.log(`❌ Leg testing failed after ${iteration} iterations. Reason: ${completionResult.reason || 'AI determined failure'}`);
           finalResult = {
             success: false,
