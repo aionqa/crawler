@@ -11500,15 +11500,57 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
       } catch (screenshotError) {
         console.warn(`⚠️ Failed to capture after screenshot: ${screenshotError.message}`);
       }
-      
+
+      // Deterministic post-action validation check:
+      // If the page shows HTML5 invalid controls or obvious inline validation errors, treat execution as not successful
+      // even if the script didn't throw. This prevents false "success" on incomplete form submissions.
+      let validationCheck = null;
+      try {
+        validationCheck = await page.evaluate(() => {
+          const invalidEls = Array.from(document.querySelectorAll(':invalid'));
+          const ariaInvalidEls = Array.from(document.querySelectorAll('[aria-invalid="true"]'));
+
+          const sampleInvalid = invalidEls.slice(0, 6).map((el) => ({
+            tag: String(el.tagName || '').toLowerCase(),
+            id: el.id || null,
+            name: el.getAttribute('name') || null,
+            type: el.getAttribute('type') || null,
+            validationMessage: el.validationMessage || null,
+          }));
+
+          const sampleErrors = Array.from(
+            document.querySelectorAll('.error, .errors, .invalid-feedback, [role="alert"], [aria-live="assertive"]')
+          )
+            .slice(0, 6)
+            .map((el) => (el.textContent || '').trim())
+            .filter(Boolean);
+
+          return {
+            invalid_count: invalidEls.length,
+            aria_invalid_count: ariaInvalidEls.length,
+            invalid_samples: sampleInvalid,
+            error_text_samples: sampleErrors,
+          };
+        });
+      } catch {
+        // Best-effort only.
+      }
+
+      const hasBlockingValidation =
+        (validationCheck?.invalid_count || 0) > 0 ||
+        (validationCheck?.aria_invalid_count || 0) > 0 ||
+        (validationCheck?.error_text_samples || []).some((t) => /(error|failed|invalid|required|please)/i.test(String(t || '')));
+
       const executionResult = {
         ...result,
-        success: true, // Explicit so final-status logic can override justify 'failure' when script ran OK
+        // success means: script executed AND we have no obvious client-side validation blockers.
+        success: !hasBlockingValidation,
         urlBeforeAction,
         urlAfterAction,
         pageChanged,
         screenshotBeforeKey,
-        screenshotAfterKey
+        screenshotAfterKey,
+        validation: validationCheck
       };
       
       try {
