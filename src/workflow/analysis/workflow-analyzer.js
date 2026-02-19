@@ -9874,16 +9874,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const definesEnsureChecked = /\b(function\s+ensureChecked|const\s+ensureChecked|let\s+ensureChecked)\b/.test(s);
     const definesSafeFill = /\b(function\s+safeFill|const\s+safeFill|let\s+safeFill)\b/.test(s);
     const definesSafeType = /\b(function\s+safeType|const\s+safeType|let\s+safeType)\b/.test(s);
+    const definesHumanDelay = /\b(function\s+humanDelay|const\s+humanDelay|let\s+humanDelay)\b/.test(s);
     const usesSafeClick = /\bsafeClick\s*\(/.test(s);
     const usesEnsureChecked = /\bensureChecked\s*\(/.test(s);
     const usesSafeFill = /\bsafeFill\s*\(/.test(s);
     const usesSafeType = /\bsafeType\s*\(/.test(s);
+    const usesHumanDelay = /\bhumanDelay\s*\(/.test(s);
 
     if (
       (usesSafeClick && !definesSafeClick) ||
       (usesEnsureChecked && !definesEnsureChecked) ||
       (usesSafeFill && !definesSafeFill) ||
       (usesSafeType && !definesSafeType) ||
+      (usesHumanDelay && !definesHumanDelay) ||
       hasBrokenEnsureCheckedFragment
     ) {
       const prelude = `
@@ -9960,6 +9963,16 @@ const safeType = async (selectorOrLocator, value, options = {}) => {
   } catch (e) {
     await safeFill(selectorOrLocator, val, options);
   }
+};
+
+// Small human-like delay helper used by some model-generated scripts.
+const humanDelay = async (minMs = 80, maxMs = 220) => {
+  const min = Number.isFinite(minMs) ? Math.max(0, Math.floor(minMs)) : 80;
+  const max = Number.isFinite(maxMs) ? Math.max(min, Math.floor(maxMs)) : 220;
+  const jitter = max > min ? Math.floor(Math.random() * (max - min + 1)) : 0;
+  const delay = min + jitter;
+  await page.waitForTimeout(delay);
+  return delay;
 };
 `.trim();
 
