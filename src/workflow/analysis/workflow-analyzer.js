@@ -14208,10 +14208,13 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
                     expected_outcome_verified: journey.expected_outcome_verified !== undefined ? journey.expected_outcome_verified : undefined,
                     verification_details: journey.verification_details || null
                   };
+
+                  // Prevent axios/JSON serialization from crashing on circular refs inside journey objects.
+                  const safeJourneyToSave = this.makeJsonSafe(journeyToSave, 8);
                   
                   const payload = {
                     saveLegs: false,
-                    journeys: [journeyToSave],
+                    journeys: [safeJourneyToSave],
                     job_id: jobId
                   };
                   console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Saving journey ${journeyId} with ${journey.iterations.length} iteration(s) BEFORE condition check`);
@@ -15846,10 +15849,12 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
               expected_outcome_verified: journey.expected_outcome_verified !== undefined ? journey.expected_outcome_verified : (finalExpectedOutcomeVerified !== undefined ? finalExpectedOutcomeVerified : undefined),
               verification_details: journey.verification_details || null
             };
+
+            const safeJourneyToSave = this.makeJsonSafe(journeyToSave, 8);
             
             const payload = {
               saveLegs: false,
-              journeys: [journeyToSave],
+              journeys: [safeJourneyToSave],
               job_id: jobId
             };
             console.log(`💾 [WHILE-LOOP-COMPLETE] Saving journey ${journeyId} with final justification_status=${journeyToSave.justification_status || 'N/A'}, ai_justification=${journeyToSave.ai_justification ? `YES (${journeyToSave.ai_justification.length} chars)` : 'NO'} to page ${workflowState.pageId}`);
@@ -15894,11 +15899,12 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
         if (journey && journey.iterations && journey.iterations.length > 0) {
           try {
             console.log(`💾 [WHILE-LOOP-FINAL] Saving ${journey.iterations.length} iteration(s) for journey ${journeyId} at end of while-loop`);
+            const safeJourney = this.makeJsonSafe(journey, 8);
             await axios.post(
               `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
               {
                 saveLegs: false,
-                journeys: [journey],
+                journeys: [safeJourney],
                 job_id: jobId
               },
               { headers: this.getAuthHeaders() }
