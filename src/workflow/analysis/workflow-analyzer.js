@@ -13343,7 +13343,15 @@ const humanDelay = async (minMs = 80, maxMs = 220) => {
             // Get the final status from the while-loop result if available
             const iterationSummary = iterationSummaries[idx];
             const whileLoopResult = iterationSummary?.stepResults?.find(sr => sr.stepId?.includes('test_journey_iteratively') || sr.stepId?.includes('test-journey-iteratively'));
-            const finalStatus = whileLoopResult?.result?.finalLegStatus || journey.justification_status || journey.status || 'discovered';
+            // IMPORTANT: expected_outcome_verified is the primary signal for success/failure.
+            // Some AI responses can be internally inconsistent (e.g. status="failure" but expected_outcome_verified=true).
+            // Do not persist those inconsistencies; normalize to success/failure here.
+            let finalStatus = whileLoopResult?.result?.finalLegStatus || journey.justification_status || journey.status || 'discovered';
+            if (journey.expected_outcome_verified === true) {
+              finalStatus = 'success';
+            } else if (journey.expected_outcome_verified === false) {
+              finalStatus = 'failure';
+            }
             
             // CRITICAL: Use iterations from journey (which was updated by while-loop with all iterations)
             // The while-loop saves iterations to journey.iterations, so use that directly
