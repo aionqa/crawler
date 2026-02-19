@@ -339,15 +339,36 @@ async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allo
     }
     
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
-    console.log(`[INCREMENTAL-STORAGE] Sending page to backend: ${pageData.url}`);
-    const response = await fetch(`${backendUrl}/jobs/${jobId}/discovered-page`, {
+    console.log(`[INCREMENTAL-STORAGE] Sending analyzed page to backend: ${pageData.url}`);
+
+    // Prefer /api/pages/discover for both "basic" and "analyzed" updates.
+    // It supports project_id attribution and works consistently across redirects/SSO.
+    const requestBody = {
+      project_id: pageData.project_id || null,
+      job_id: jobId,
+      url: pageData.url,
+      title: pageData.title,
+      content: pageData.content,
+      forms: pageData.forms,
+      links: pageData.links || pageData.internal_links || [],
+      interactive_elements: pageData.interactive_elements || pageData.interactiveElements || [],
+      non_interactive_elements: pageData.non_interactive_elements || pageData.nonInteractiveElements || [],
+      screenshot_file_id: pageData.screenshot_file_id || null,
+      video_file_id: pageData.video_file_id || null,
+      ai_analysis: pageData.ai_analysis || null,
+      analyzed: true,
+      // Redirect/SSO metadata (optional)
+      requested_url: pageData.requested_url || null,
+      final_url: pageData.final_url || pageData.url || null
+    };
+
+    const response = await fetch(`${backendUrl}/api/pages/discover`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        jobId,
-        page: pageData
+        ...requestBody
       })
     });
     if (!response.ok) {
@@ -355,8 +376,9 @@ async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allo
       return null;
     } else {
       const result = await response.json();
-      console.log(`[INCREMENTAL-STORAGE] ✅ Page stored: ${pageData.url} (ID: ${result.pageId})`);
-      return result.pageId; // Return the MongoDB page ID
+      const pageId = result.page?._id || null;
+      console.log(`[INCREMENTAL-STORAGE] ✅ Page updated: ${pageData.url} (ID: ${pageId || 'unknown'})`);
+      return pageId;
     }
   } catch (error) {
     console.error(`[INCREMENTAL-STORAGE] Failed to send discovered page to backend: ${error.message}`);
@@ -4307,6 +4329,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
             requested_url: pageUrl,
             // final_url is redundant with url but keeps the intent explicit for downstream storage.
             final_url: currentUrl,
+            project_id: context?.project_id || null,
             title: pageTitle,
             pageId: pageId,
             isExternal: true,
@@ -4328,6 +4351,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         // even if we were redirected to a different host/path during navigation (common with SSO).
         pageAnalysis.requested_url = pageUrl;
         pageAnalysis.final_url = currentUrl;
+        pageAnalysis.project_id = context?.project_id || null;
         
         return { pageAnalysis, pageId, pageTitle, pageUrl };
       });
