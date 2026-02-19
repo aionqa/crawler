@@ -9753,6 +9753,50 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     let s = script;
 
+    // Some models wrap the script in an async IIFE:
+    //   (async () => { ... })();
+    // If we execute that as a statement inside our own async wrapper without awaiting it,
+    // any rejection can become an unhandled promise rejection and crash the Node process.
+    //
+    // Unwrap the IIFE so the caller's async wrapper is the one owning the awaits/errors.
+    const trimmed = s.trim();
+    const looksLikeAsyncArrowIife =
+      /^\(\s*async\s*\(\s*\)\s*=>\s*\{/.test(trimmed) &&
+      /\}\s*\)\s*\(\s*\)\s*;?\s*$/.test(trimmed);
+    const looksLikeAsyncFunctionIife =
+      /^\(\s*async\s+function\s*\(\s*\)\s*\{/.test(trimmed) &&
+      /\}\s*\)\s*\(\s*\)\s*;?\s*$/.test(trimmed);
+    if (looksLikeAsyncArrowIife || looksLikeAsyncFunctionIife) {
+      const firstBrace = trimmed.indexOf('{');
+      const lastBrace = trimmed.lastIndexOf('}');
+      if (firstBrace >= 0 && lastBrace > firstBrace) {
+        s = trimmed.slice(firstBrace + 1, lastBrace).trim();
+      }
+    }
+
+    // Repair a common LLM bug in selector maps:
+    //   const selectors = { interest2, notif1, terms, ... };
+    // This is valid syntax but will throw ReferenceError if those vars don't exist.
+    // For our test pages these are almost always element IDs, so default to '#<name>'.
+    s = s.replace(/const\s+selectors\s*=\s*\{([\s\S]*?)\}\s*;/m, (full, inner) => {
+      const lines = String(inner).split('\n');
+      const fixed = lines.map((line) => {
+        const m = line.match(/^(\s*)([A-Za-z_$][\w$]*)\s*,\s*$/);
+        if (!m) return line;
+        const indent = m[1];
+        const key = m[2];
+        return `${indent}${key}: '#${key}',`;
+      });
+      return `const selectors = {\n${fixed.join('\n')}\n};`;
+    });
+
+    // Repair malformed waitForSelector calls where options were embedded into the selector string.
+    // Example: page.waitForSelector('selectors.interest1, { timeout: 3000 }')
+    s = s.replace(
+      /waitForSelector\(\s*'selectors\.([A-Za-z_$][\w$]*)\s*,\s*\{\s*timeout\s*:\s*(\d+)\s*\}\s*'\s*\)/g,
+      'waitForSelector(selectors.$1, { timeout: $2 })'
+    );
+
     // LLMs sometimes emit a broken fragment of an ensureChecked helper at top-level,
     // which crashes at runtime with ReferenceError: selector/shouldBeChecked.
     // Remove the fragment if detected (we inject a proper helper instead).
