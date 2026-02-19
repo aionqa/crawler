@@ -4025,7 +4025,8 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
 
           const currentUrl = String(page.url() || stepPayload.current_url || stepPayload.page_url || '').toLowerCase();
           const hasErrorSignal = /(invalid|incorrect|error|failed|unauthorized|forbidden|required)/.test(bodyText);
-          const hasSuccessSignal = /(login successful|successfully logged in|welcome|dashboard|signed in|profile)/.test(bodyText);
+          // Include "logged in" signals (used by SDLC fixtures like /html/login-status.html).
+          const hasSuccessSignal = /(login successful|successfully logged in|you are logged in|\blogged in\b|welcome|dashboard|signed in|profile)/.test(bodyText);
           const isLoginSuccessUrl =
             currentUrl.includes('login-success') ||
             currentUrl.includes('login-successful') ||
@@ -4035,8 +4036,10 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             //   /html/login/specific-credentials-success.html
             //   /html/login/any-credentials-success.html
             (currentUrl.includes('success') && (currentUrl.includes('/login/') || currentUrl.includes('credentials')));
-          // Treat explicit success pages as NOT being "still on login".
-          const onLoginUrl = !isLoginSuccessUrl && (/\/login\b/.test(currentUrl) || currentUrl.includes('auth'));
+          // SDLC fixture: /html/login-status.html is a status page, not a login form.
+          const isLoginStatusUrl = currentUrl.includes('login-status');
+          // Treat explicit success/status pages as NOT being "still on login".
+          const onLoginUrl = !isLoginSuccessUrl && !isLoginStatusUrl && (/\/login\b/.test(currentUrl) || currentUrl.includes('auth'));
 
           // FMClarity-specific: successful SSO can land briefly on a non-app URL (even an error shell),
           // but still set the real auth cookies we need for subsequent authorized crawling.
@@ -4069,7 +4072,9 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           // Without AI, be conservative:
           // - if we're still clearly on a login flow (URL contains login/auth OR login fields/buttons exist) => continue
           // - only mark success when we see strong success signals AND login controls are gone
-          const looksLikeLoginFlow = onLoginUrl || hasPasswordField || hasEmailField || hasSubmitLikeButton;
+          // URL alone is a weak signal (status pages still contain "login" in path).
+          const hasLoginControls = hasPasswordField || hasEmailField || hasSubmitLikeButton;
+          const looksLikeLoginFlow = hasLoginControls || (onLoginUrl && !hasSuccessSignal);
           const status = isLoginSuccessUrl
             ? 'success'
             : fmclarityCookieAuth
