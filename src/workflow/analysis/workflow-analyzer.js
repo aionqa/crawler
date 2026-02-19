@@ -6814,6 +6814,23 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       // CRITICAL: For determine_completion step, also store directly by ID for easy access
       if (step.id === 'determine_completion' || step.name?.includes('Determine Login Progress')) {
+        // If we landed on a known login-success URL, force the status to success.
+        // This prevents the login while-loop from getting stuck in "continue" due to conservative AI output.
+        try {
+          const currentUrl = page && !page.isClosed() ? String(page.url() || '') : '';
+          const urlLower = currentUrl.toLowerCase();
+          if (urlLower.includes('login-success') && parsedResponse && parsedResponse.status !== 'success') {
+            parsedResponse.status = 'success';
+            if (!parsedResponse.reason) {
+              parsedResponse.reason = 'Detected login success page by URL';
+            } else if (!String(parsedResponse.reason).toLowerCase().includes('login success')) {
+              parsedResponse.reason = `${parsedResponse.reason} (override: URL indicates login success)`;
+            }
+          }
+        } catch (e) {
+          // Best-effort override; ignore URL read errors.
+        }
+
         // Validate that status field is present
         if (!parsedResponse.status && !parsedResponse.completion_status && parsedResponse.is_complete === undefined) {
           console.error(`❌ ERROR: determine_completion response missing status field!`);
@@ -13174,7 +13191,23 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
       return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
     };
     
-    if (maxIterations > 1) {
+    const stepIdLower = String(step.id || '').toLowerCase();
+    const stepNameLower = String(step.name || '').toLowerCase();
+    const isLoginJob =
+      workflowState?.jobType === 'login' ||
+      this.context?.jobType === 'login' ||
+      this.context?.job_type === 'login' ||
+      this.context?.isLoginJob === true ||
+      workflowState?.variablePool?.job?.jobType === 'login' ||
+      workflowState?.variablePool?.job?.isLoginJob === true;
+    const isLoginLoop =
+      isLoginJob ||
+      stepIdLower.includes('login') ||
+      stepNameLower.includes('login');
+
+    // Only apply the "single-step journey" clamping heuristic to crawl/journey loops.
+    // Login workflows often need multiple attempts even when the page doesn't show "Step X of Y".
+    if (maxIterations > 1 && !isLoginLoop) {
       let visibleText = workflowState.visibleText;
       if (!visibleText && page && !page.isClosed()) {
         try {
