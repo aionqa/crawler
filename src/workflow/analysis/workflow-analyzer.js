@@ -13302,8 +13302,11 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
         // Wizard page but step count not detected - keep maxIterations from config (don't limit to 1)
         console.log(`🔢 Wizard page detected but step count not found - keeping maxIterations=${maxIterations} from config`);
       } else {
-        maxIterations = 1;
-        console.log(`🔢 No step indicator detected; limiting iterations to 1 for single-step journey`);
+        // Single-step pages still need a couple attempts because generated scripts can be flaky.
+        // Keep bounded retries so we don't loop forever.
+        const bounded = Math.min(Number(maxIterations || 3), 3);
+        maxIterations = Math.max(2, bounded);
+        console.log(`🔢 No step indicator detected; using bounded retries maxIterations=${maxIterations} for single-step journey`);
       }
     }
     const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
@@ -14228,6 +14231,66 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
           console.error(`❌ [WHILE-LOOP-ITERATION-${iteration}] Error stack:`, saveIterError.stack);
         }
         
+        // If execution failed due to selector/timing issues, do NOT treat this as a proven "failure".
+        // Override determine_completion to continue so the loop retries (bounded by maxIterations).
+        try {
+          const execErr = String(workflowState?.lastExecutionResult?.error || '');
+          const execErrLower = execErr.toLowerCase();
+          const hasExecFailureSignal =
+            workflowState?.lastExecutionResult?.execution_failed === true ||
+            workflowState?.lastExecutionResult?.error_type === 'execution' ||
+            workflowState?.executionErrorType === 'execution';
+          const looksLikeSelectorOrTiming =
+            execErrLower.includes('timeout') ||
+            execErrLower.includes('waiting for locator') ||
+            execErrLower.includes('waiting for selector') ||
+            execErrLower.includes('strict mode violation') ||
+            execErrLower.includes('no node found') ||
+            execErrLower.includes('element is not attached') ||
+            execErrLower.includes('not visible') ||
+            execErrLower.includes('target closed') ||
+            execErrLower.includes('navigation') ||
+            execErrLower.includes('frame was detached');
+          const looksLikeHardCodeBug =
+            execErrLower.includes('syntaxerror') ||
+            execErrLower.includes('referenceerror') ||
+            execErrLower.includes('unexpected token') ||
+            execErrLower.includes('cannot use import') ||
+            execErrLower.includes('is not a function');
+
+          if (hasExecFailureSignal && looksLikeSelectorOrTiming && !looksLikeHardCodeBug) {
+            const patched = {
+              status: 'continue',
+              completion_status: 'continue',
+              is_complete: false,
+              reason: `Execution inconclusive (retrying): ${execErr.substring(0, 180)}`,
+              execution_error_type: 'inconclusive',
+            };
+
+            if (!workflowState.determine_completion) workflowState.determine_completion = {};
+            workflowState.determine_completion.result = patched;
+            if (!workflowState.results) workflowState.results = {};
+            if (!workflowState.results.determine_completion) workflowState.results.determine_completion = {};
+            workflowState.results.determine_completion.result = patched;
+            if (workflowState.variablePool?.steps) {
+              workflowState.variablePool.steps.determine_completion = { result: patched };
+            }
+
+            console.log(`🟡 Overrode determine_completion -> continue due to inconclusive execution error`);
+            if (jobId) {
+              await this.sendLogToBackend(
+                jobId,
+                'info',
+                `🟡 Inconclusive execution (selector/timing). Retrying journey (bounded).`,
+                'WORKFLOW-ANALYZER',
+                { execution_error: execErr.substring(0, 500), patched_determine_completion: patched }
+              );
+            }
+          }
+        } catch (inconclusivePatchErr) {
+          console.warn(`⚠️ Failed to patch determine_completion for inconclusive execution: ${inconclusivePatchErr.message}`);
+        }
+
         // Evaluate condition after nested steps
         let conditionValue = undefined;
         if (conditionType === 'code' && config.conditionCode) {
