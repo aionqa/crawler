@@ -4026,7 +4026,12 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           const currentUrl = String(page.url() || stepPayload.current_url || stepPayload.page_url || '').toLowerCase();
           const hasErrorSignal = /(invalid|incorrect|error|failed|unauthorized|forbidden|required)/.test(bodyText);
           const hasSuccessSignal = /(login successful|successfully logged in|welcome|dashboard|signed in|profile)/.test(bodyText);
-          const onLoginUrl = /\/login\b/.test(currentUrl) || currentUrl.includes('auth');
+          const isLoginSuccessUrl =
+            currentUrl.includes('login-success') ||
+            currentUrl.includes('login-successful') ||
+            currentUrl.includes('logged-in-success');
+          // Treat explicit success pages as NOT being "still on login".
+          const onLoginUrl = !isLoginSuccessUrl && (/\/login\b/.test(currentUrl) || currentUrl.includes('auth'));
 
           // FMClarity-specific: successful SSO can land briefly on a non-app URL (even an error shell),
           // but still set the real auth cookies we need for subsequent authorized crawling.
@@ -4060,13 +4065,15 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           // - if we're still clearly on a login flow (URL contains login/auth OR login fields/buttons exist) => continue
           // - only mark success when we see strong success signals AND login controls are gone
           const looksLikeLoginFlow = onLoginUrl || hasPasswordField || hasEmailField || hasSubmitLikeButton;
-          const status = fmclarityCookieAuth
+          const status = isLoginSuccessUrl
             ? 'success'
-            : hasErrorSignal
-              ? 'failure'
-              : (!looksLikeLoginFlow && hasSuccessSignal)
-                ? 'success'
-                : 'continue';
+            : fmclarityCookieAuth
+              ? 'success'
+              : hasErrorSignal
+                ? 'failure'
+                : (!looksLikeLoginFlow && hasSuccessSignal)
+                  ? 'success'
+                  : 'continue';
           const isComplete = status === 'success' || status === 'failure';
 
           aiResponse = {
@@ -4987,6 +4994,24 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
 
       // CRITICAL: For determine_completion step, also store directly by ID for easy access
       if (step.id === 'determine_completion' || step.name?.includes('Determine Login Progress')) {
+        // If we landed on a known login-success URL, force the status to success.
+        // This prevents the login while-loop from getting stuck in "continue" due to conservative AI output
+        // or deterministic fallback heuristics.
+        try {
+          const currentUrl = page && !page.isClosed() ? String(page.url() || '') : '';
+          const urlLower = currentUrl.toLowerCase();
+          if (urlLower.includes('login-success') && parsedResponse && parsedResponse.status !== 'success') {
+            parsedResponse.status = 'success';
+            if (!parsedResponse.reason) {
+              parsedResponse.reason = 'Detected login success page by URL';
+            } else if (!String(parsedResponse.reason).toLowerCase().includes('login success')) {
+              parsedResponse.reason = `${parsedResponse.reason} (override: URL indicates login success)`;
+            }
+          }
+        } catch (e) {
+          // Best-effort override; ignore URL read errors.
+        }
+
         // Validate that status field is present
         if (!parsedResponse.status && !parsedResponse.completion_status && parsedResponse.is_complete === undefined) {
           console.error(`❌ ERROR: determine_completion response missing status field!`);
@@ -11431,8 +11456,65 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
     console.log(`🔄 Executing while-loop (${step.name})`);
     
     const config = step.config || {};
-    // CRITICAL: Force 1 iteration per job - no multiple iterations allowed
-    const maxIterations = 1;
+    // Allow maxIterations from template config, but clamp to 1 for normal single-step journeys.
+    // Login workflows often need multiple attempts even when the page doesn't show "Step X of Y".
+    let maxIterations = config.maxIterations || 5;
+    const resolveStepCountFromText = (textValue) => {
+      if (!textValue || typeof textValue !== 'string') return null;
+      const match = textValue.match(/step\s*\d+\s*(?:of|\/)\s*(\d+)/i);
+      if (!match) return null;
+      const parsed = Number.parseInt(match[1], 10);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    };
+
+    const stepIdLower = String(step.id || '').toLowerCase();
+    const stepNameLower = String(step.name || '').toLowerCase();
+    const isLoginJob =
+      workflowState?.jobType === 'login' ||
+      this.context?.jobType === 'login' ||
+      this.context?.job_type === 'login' ||
+      this.context?.isLoginJob === true ||
+      workflowState?.variablePool?.job?.jobType === 'login' ||
+      workflowState?.variablePool?.job?.isLoginJob === true;
+    const isLoginLoop =
+      isLoginJob ||
+      stepIdLower.includes('perform_login') ||
+      stepIdLower.includes('login') ||
+      stepNameLower.includes('login');
+
+    if (maxIterations > 1 && !isLoginLoop) {
+      let visibleText = workflowState.visibleText;
+      if (!visibleText && page && !page.isClosed()) {
+        try {
+          visibleText = await page.innerText('body');
+        } catch (error) {
+          console.warn(`⚠️ Failed to read visible text for step count detection: ${error.message}`);
+        }
+      }
+
+      const pageUrl = (workflowState.pageUrl || '').toLowerCase();
+      const currentJourney = workflowState.currentJourney || workflowState.currentItem || {};
+      const journeyId = (currentJourney.journey_id || '').toLowerCase();
+      const journeyDesc = (currentJourney.description || '').toLowerCase();
+      const isWizardPage =
+        pageUrl.includes('multi-step-wizard') ||
+        pageUrl.includes('multistep') ||
+        journeyId.includes('wizard') ||
+        journeyDesc.includes('wizard') ||
+        journeyDesc.includes('multi-step') ||
+        journeyDesc.includes('multistep');
+
+      const detectedStepCount = resolveStepCountFromText(visibleText);
+      if (detectedStepCount) {
+        maxIterations = detectedStepCount;
+        console.log(`🔢 Detected step count from page text: ${detectedStepCount}`);
+      } else if (isWizardPage) {
+        console.log(`🔢 Wizard page detected but step count not found - keeping maxIterations=${maxIterations} from config`);
+      } else {
+        maxIterations = 1;
+        console.log(`🔢 No step indicator detected; limiting iterations to 1 for single-step journey`);
+      }
+    }
     const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
     const conditionType = config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
     const invertCondition = config.invertCondition === true; // If true, loop while condition is false
