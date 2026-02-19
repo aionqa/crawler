@@ -7790,6 +7790,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
           // If expected_outcome_verified is true, status should be 'success'
           // This ensures green status on the journeys page
           let finalStatus = justification.status;
+
+          const unwrapBool = (v) => {
+            const raw = (v && typeof v === 'object' && 'value' in v) ? v.value : v;
+            if (raw === true || raw === false) return raw;
+            const s = String(raw ?? '').trim().toLowerCase();
+            if (s === 'true') return true;
+            if (s === 'false') return false;
+            return null;
+          };
+          const verified = unwrapBool(justification.expected_outcome_verified);
           
           // CRITICAL: For failure-test journeys, ALWAYS mark as 'failure' (form correctly failed)
           // The user explicitly stated: "the one which is shown always fail will obviously fail to mock the app, it must be marked as failed"
@@ -7800,9 +7810,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
             console.log(`✅ [FAILURE-TEST] Journey ${journey.journey_id} - marking as 'failure' (form correctly failed as expected)`);
           } else {
             // Normal journey logic
-            if (justification.expected_outcome_verified === true) {
+            if (verified === true) {
               finalStatus = 'success';
-            } else if (justification.expected_outcome_verified === false) {
+            } else if (verified === false) {
               finalStatus = 'failure';
             }
             // Otherwise keep the AI's status (pending, etc.)
@@ -7810,9 +7820,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
           
           return {
             ...journey,
+            status: finalStatus,
             ai_justification: justification.reason,
             justification_status: finalStatus,
-            expected_outcome_verified: justification.expected_outcome_verified,
+            expected_outcome_verified: verified === null ? justification.expected_outcome_verified : verified,
             verification_details: justification.verification_details,
             iterations: [...existingIterations, journeyIteration]
           };
