@@ -2607,12 +2607,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         
         // Send error log to backend with full context including variable pool URL
-        let variablePoolForBackend = null;
-        try {
-          variablePoolForBackend = workflowState.variablePool;
-        } catch (e) {
-          // If we can't access it, leave it null
-        }
+        // NEVER attach the raw variablePool to backend logs: it can contain structured values and
+        // circular refs (which will crash axios JSON serialization and mask the real error).
+        const variablePoolSummaryForBackend = (() => {
+          try {
+            const vp = workflowState.variablePool || {};
+            return {
+              job_keys: vp.job ? Object.keys(vp.job).slice(0, 80) : [],
+              page_keys: vp.page ? Object.keys(vp.page).slice(0, 80) : [],
+              cycle_len: Array.isArray(vp.cycle) ? vp.cycle.length : 0,
+              steps_keys: vp.steps ? Object.keys(vp.steps).slice(0, 120) : []
+            };
+          } catch {
+            return null;
+          }
+        })();
         
         const errorLogMessage = variablePoolUrl 
           ? `${errorMessage}\n📥 Variable Pool: ${variablePoolUrl}`
@@ -2627,7 +2636,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           error: stepError.message,
           error_stack: stepError.stack,
           full_step: step,
-          variable_pool: variablePoolForBackend,
+          variable_pool_summary: variablePoolSummaryForBackend,
           variable_pool_download_url: variablePoolUrl
         });
         
