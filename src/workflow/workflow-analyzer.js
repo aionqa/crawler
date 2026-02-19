@@ -4029,7 +4029,12 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           const isLoginSuccessUrl =
             currentUrl.includes('login-success') ||
             currentUrl.includes('login-successful') ||
-            currentUrl.includes('logged-in-success');
+            currentUrl.includes('logged-in-success') ||
+            currentUrl.includes('credentials-success') ||
+            // Many of our SDLC fixtures redirect to URLs like:
+            //   /html/login/specific-credentials-success.html
+            //   /html/login/any-credentials-success.html
+            (currentUrl.includes('success') && (currentUrl.includes('/login/') || currentUrl.includes('credentials')));
           // Treat explicit success pages as NOT being "still on login".
           const onLoginUrl = !isLoginSuccessUrl && (/\/login\b/.test(currentUrl) || currentUrl.includes('auth'));
 
@@ -5000,7 +5005,13 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
         try {
           const currentUrl = page && !page.isClosed() ? String(page.url() || '') : '';
           const urlLower = currentUrl.toLowerCase();
-          if (urlLower.includes('login-success') && parsedResponse && parsedResponse.status !== 'success') {
+          const isLoginSuccessUrl =
+            urlLower.includes('login-success') ||
+            urlLower.includes('login-successful') ||
+            urlLower.includes('logged-in-success') ||
+            urlLower.includes('credentials-success') ||
+            (urlLower.includes('success') && (urlLower.includes('/login/') || urlLower.includes('credentials')));
+          if (isLoginSuccessUrl && parsedResponse && parsedResponse.status !== 'success') {
             parsedResponse.status = 'success';
             if (!parsedResponse.reason) {
               parsedResponse.reason = 'Detected login success page by URL';
