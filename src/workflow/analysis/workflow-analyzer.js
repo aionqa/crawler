@@ -1821,6 +1821,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
     return result;
   }
 
+  /**
+   * Keep execution_result small and non-circular for storage/logs.
+   * lastExecutionResult can contain nested step_result objects that reference legs/journeys/iterations,
+   * which easily becomes circular and break JSON serialization.
+   */
+  summarizeExecutionResult(lastExecutionResult, maxErrorLen = 600) {
+    const r = lastExecutionResult && typeof lastExecutionResult === 'object' ? lastExecutionResult : {};
+    const err = typeof r.error === 'string' ? r.error : (r.error ? String(r.error) : '');
+    return {
+      execution_failed: r.execution_failed === true,
+      error_type: r.error_type ? String(r.error_type) : null,
+      error: err ? err.substring(0, maxErrorLen) : null,
+    };
+  }
+
   async ensurePageId(workflowState, jobId) {
     if (workflowState.pageId && workflowState.projectId) {
       return workflowState.pageId;
@@ -14207,7 +14222,7 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
                 steps_count: stepsExecuted.length,
                 
                 // Execution result
-                execution_result: workflowState.lastExecutionResult || {},
+                execution_result: this.summarizeExecutionResult(workflowState.lastExecutionResult),
                 
                 // Additional details
                 details: {
@@ -14952,7 +14967,7 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
           iteration,
           condition,
           timestamp: new Date().toISOString(),
-          lastResult: workflowState.lastExecutionResult || {},
+          lastResult: this.summarizeExecutionResult(workflowState.lastExecutionResult),
           step_result: stepResult
         };
         loopState.iterations.push(iterationState);
@@ -15238,7 +15253,7 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
                 }
                 return workflowState.legScriptToExecute || '';
               })(),
-              execution_result: workflowState.lastExecutionResult || {},
+              execution_result: this.summarizeExecutionResult(workflowState.lastExecutionResult),
               page_url_before: workflowState.urlBeforeAction || '',
               page_url_after: page.url(),
               screenshot_before: screenshotBefore,
@@ -15375,7 +15390,7 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
               reason: determineCompletionResult.reason || determineCompletionResult.what_happened || '',
               error: isFailure ? (determineCompletionResult.reason || determineCompletionResult.what_happened || 'Leg execution failed') : null,
               script_executed: workflowState.legScriptToExecute || '',
-              execution_result: workflowState.lastExecutionResult || {},
+              execution_result: this.summarizeExecutionResult(workflowState.lastExecutionResult),
               page_url_before: workflowState.urlBeforeAction || '',
               page_url_after: page.url(),
               screenshot_before: workflowState[`screenshot_before_leg`]?.result?.screenshot_file_id || null,
