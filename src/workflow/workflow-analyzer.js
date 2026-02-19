@@ -12725,8 +12725,20 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
     console.log(`🔄 Executing iterative leg test (${step.name})`);
     
     const config = step.config || {};
-    // CRITICAL: Force 1 iteration per job - no multiple iterations allowed
-    const maxIterations = 1;
+    // Historically we hard-clamped this to 1 to avoid runaway loops.
+    // Login flows are an exception: they often require multiple attempts / checks even when the UI
+    // doesn't show a step indicator.
+    const isLoginJob =
+      workflowState?.jobType === 'login' ||
+      this.context?.jobType === 'login' ||
+      this.context?.job_type === 'login' ||
+      this.context?.isLoginJob === true ||
+      workflowState?.variablePool?.job?.jobType === 'login' ||
+      workflowState?.variablePool?.job?.isLoginJob === true;
+    let maxIterations = config.maxIterations || 5;
+    if (!isLoginJob) {
+      maxIterations = 1;
+    }
     
     // Get current leg from context
     const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
@@ -12741,7 +12753,9 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
     let finalResult = null;
     let executionErrorType = null; // Track if error is execution-related
     
-    console.log(`🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id} (1 iteration only)`);
+    console.log(
+      `🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id} (maxIterations=${maxIterations})`
+    );
     
     // Update status to 'testing' when starting to test this action
     if (workflowState.workflowId && currentLeg.leg_id) {
@@ -12763,7 +12777,7 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
       }
     }
     
-    // CRITICAL: Only one iteration per job - stop after first
+    // Iterative attempts up to maxIterations (login workflows may need > 1).
     while (iteration < maxIterations) {
       iteration++;
       console.log(`🔄 Iteration ${iteration}/${maxIterations} for leg: ${currentLeg.leg_id}`);
