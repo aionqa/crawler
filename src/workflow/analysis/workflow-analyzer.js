@@ -14315,14 +14315,20 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
             execErrLower.includes('target closed') ||
             execErrLower.includes('navigation') ||
             execErrLower.includes('frame was detached');
-          const looksLikeHardCodeBug =
+          // IMPORTANT:
+          // - "selector is not defined", SyntaxError, etc. are AI-script bugs (NOT proven product failures).
+          // - We still want to retry (bounded by maxIterations) to give the AI a chance to regenerate.
+          const looksLikeAiScriptBug =
             execErrLower.includes('syntaxerror') ||
             execErrLower.includes('referenceerror') ||
             execErrLower.includes('unexpected token') ||
             execErrLower.includes('cannot use import') ||
-            execErrLower.includes('is not a function');
+            execErrLower.includes('is not a function') ||
+            execErrLower.includes(' is not defined') ||
+            execErrLower.includes('selector is not defined') ||
+            execErrLower.includes('shouldbechecked is not defined');
 
-          if (hasExecFailureSignal && looksLikeSelectorOrTiming && !looksLikeHardCodeBug) {
+          if (hasExecFailureSignal && (looksLikeSelectorOrTiming || looksLikeAiScriptBug)) {
             const patched = {
               status: 'continue',
               completion_status: 'continue',
@@ -14345,7 +14351,9 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
               await this.sendLogToBackend(
                 jobId,
                 'info',
-                `🟡 Inconclusive execution (selector/timing). Retrying journey (bounded).`,
+                looksLikeAiScriptBug
+                  ? `🟡 Inconclusive execution (AI script bug). Retrying journey (bounded).`
+                  : `🟡 Inconclusive execution (selector/timing). Retrying journey (bounded).`,
                 'WORKFLOW-ANALYZER',
                 { execution_error: execErr.substring(0, 500), patched_determine_completion: patched }
               );
