@@ -21,3 +21,8 @@ dist/
 
 # Node.js dependencies
 **/node_modules/
+
+# Local SDLC/admin test artifacts
+admin-sdlc-test-report.json
+test-admin-sdlc.js
+screenshots/
