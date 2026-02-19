@@ -9872,10 +9872,20 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     const definesSafeClick = /\b(function\s+safeClick|const\s+safeClick|let\s+safeClick)\b/.test(s);
     const definesEnsureChecked = /\b(function\s+ensureChecked|const\s+ensureChecked|let\s+ensureChecked)\b/.test(s);
+    const definesSafeFill = /\b(function\s+safeFill|const\s+safeFill|let\s+safeFill)\b/.test(s);
+    const definesSafeType = /\b(function\s+safeType|const\s+safeType|let\s+safeType)\b/.test(s);
     const usesSafeClick = /\bsafeClick\s*\(/.test(s);
     const usesEnsureChecked = /\bensureChecked\s*\(/.test(s);
+    const usesSafeFill = /\bsafeFill\s*\(/.test(s);
+    const usesSafeType = /\bsafeType\s*\(/.test(s);
 
-    if ((usesSafeClick && !definesSafeClick) || (usesEnsureChecked && !definesEnsureChecked) || hasBrokenEnsureCheckedFragment) {
+    if (
+      (usesSafeClick && !definesSafeClick) ||
+      (usesEnsureChecked && !definesEnsureChecked) ||
+      (usesSafeFill && !definesSafeFill) ||
+      (usesSafeType && !definesSafeType) ||
+      hasBrokenEnsureCheckedFragment
+    ) {
       const prelude = `
 const safeClick = async (selectorOrLocator, options = {}) => {
   try {
@@ -9901,6 +9911,54 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
   const isChecked = await page.isChecked(selector).catch(() => false);
   if (isChecked !== shouldBeChecked) {
     await page.click(selector, { force: true }).catch(() => page.click(selector));
+  }
+};
+
+const safeFill = async (selectorOrLocator, value, options = {}) => {
+  const val = (value === undefined || value === null) ? 'test' : String(value);
+  try {
+    if (typeof selectorOrLocator === 'string') {
+      await page.fill(selectorOrLocator, val, options);
+    } else if (selectorOrLocator && typeof selectorOrLocator.fill === 'function') {
+      await selectorOrLocator.fill(val, options);
+    } else {
+      throw new Error('safeFill: invalid target');
+    }
+  } catch (e) {
+    // Fallback: scroll into view, force fill, or type after click.
+    if (typeof selectorOrLocator === 'string') {
+      const loc = page.locator(selectorOrLocator);
+      await loc.scrollIntoViewIfNeeded().catch(() => {});
+      await loc.fill(val, { ...options, force: true }).catch(async () => {
+        await loc.click({ force: true }).catch(() => {});
+        await loc.type(val, { delay: 10 }).catch(() => {});
+      });
+    } else if (selectorOrLocator) {
+      await selectorOrLocator.scrollIntoViewIfNeeded?.().catch?.(() => {});
+      await selectorOrLocator.fill(val, { ...options, force: true }).catch(async () => {
+        await selectorOrLocator.click?.({ force: true }).catch?.(() => {});
+        await selectorOrLocator.type?.(val, { delay: 10 }).catch?.(() => {});
+      });
+    } else {
+      throw e;
+    }
+  }
+};
+
+// Some models use safeType() for typing into fields; keep it as a thin wrapper.
+const safeType = async (selectorOrLocator, value, options = {}) => {
+  const val = (value === undefined || value === null) ? 'test' : String(value);
+  try {
+    if (typeof selectorOrLocator === 'string') {
+      await page.type(selectorOrLocator, val, options);
+    } else if (selectorOrLocator && typeof selectorOrLocator.type === 'function') {
+      await selectorOrLocator.type(val, options);
+    } else {
+      // Fallback to fill when type() isn't available.
+      await safeFill(selectorOrLocator, val, options);
+    }
+  } catch (e) {
+    await safeFill(selectorOrLocator, val, options);
   }
 };
 `.trim();
