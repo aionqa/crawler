@@ -16070,10 +16070,9 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
       this.context?.isLoginJob === true ||
       workflowState?.variablePool?.job?.jobType === 'login' ||
       workflowState?.variablePool?.job?.isLoginJob === true;
-    let maxIterations = config.maxIterations || 5;
-    if (!isLoginJob) {
-      maxIterations = 1;
-    }
+    // Non-login journeys still need retries because AI-generated scripts can be flaky
+    // (bad selectors, missing arguments, transient UI timing). Keep bounded retries.
+    let maxIterations = config.maxIterations || (isLoginJob ? 5 : 3);
     
     // Get current leg from context
     const currentLeg = workflowState.currentLeg || workflowState.currentItem || {};
@@ -16087,6 +16086,7 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
     let lastExecutionResult = null;
     let finalResult = null;
     let executionErrorType = null; // Track if error is execution-related
+    let forceRegenerateScript = false;
     
     console.log(
       `🔄 Starting iterative testing for leg: ${currentLeg.title || currentLeg.description || currentLeg.leg_id} (maxIterations=${maxIterations})`
@@ -16145,8 +16145,13 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
           }
         }, workflowState, jobId);
         
-        // Step 3: Generate action script (only on first iteration, or if new content detected, or if no script is stored)
-        if (iteration === 1 || (lastExecutionResult && lastExecutionResult.new_content_detected) || !workflowState.legScriptToExecute) {
+        // Step 3: Generate action script (first iteration OR when we explicitly need a fresh script)
+        if (
+          iteration === 1 ||
+          forceRegenerateScript ||
+          (lastExecutionResult && lastExecutionResult.new_content_detected) ||
+          !workflowState.legScriptToExecute
+        ) {
           // Get previous execution history for this leg (from both database and current loop execution)
           let previousExecutionHistory = [];
           
@@ -16250,6 +16255,7 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
           }
           
           workflowState.legScriptToExecute = script;
+          forceRegenerateScript = false;
         }
         
         // Step 4: Execute the script
@@ -16286,6 +16292,9 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
               errorMsg.includes('script')) {
             executionErrorType = 'execution';
           }
+
+          // If the script failed to execute (or got stuck waiting), force a new script next iteration.
+          forceRegenerateScript = true;
         }
         
         // Step 5: Capture page state after action (only visible elements)
@@ -16362,14 +16371,45 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
             if (legSucceeded) {
               iterationResult = 'success';
             } else if (legFailed) {
-              // Check if failure is due to execution error (syntax, timeout, etc.) or action failure
-              if (executionErrorType === 'execution' || 
-                  (lastExecutionResult && (lastExecutionResult.error_type === 'execution' || lastExecutionResult.execution_failed))) {
+              // If the script failed due to DOM timing/selector issues, that is NOT a "proven product failure".
+              // Mark as inconclusive (retryable) so UI doesn't go red for crawler/LLM brittleness.
+              const execErr = String(lastExecutionResult?.error || '');
+              const execErrLower = execErr.toLowerCase();
+              const looksLikeCodeBug =
+                execErrLower.includes('syntaxerror') ||
+                execErrLower.includes('referenceerror') ||
+                execErrLower.includes('unexpected token') ||
+                execErrLower.includes('cannot use import') ||
+                execErrLower.includes('is not a function');
+              const looksLikeSelectorOrTiming =
+                execErrLower.includes('timeout') ||
+                execErrLower.includes('waiting for locator') ||
+                execErrLower.includes('waiting for selector') ||
+                execErrLower.includes('strict mode violation') ||
+                execErrLower.includes('no node found') ||
+                execErrLower.includes('element is not attached') ||
+                execErrLower.includes('not visible') ||
+                execErrLower.includes('target closed') ||
+                execErrLower.includes('navigation') ||
+                execErrLower.includes('frame was detached');
+
+              const hasExecutionError =
+                executionErrorType === 'execution' ||
+                (lastExecutionResult && (lastExecutionResult.error_type === 'execution' || lastExecutionResult.execution_failed));
+
+              if (hasExecutionError && looksLikeSelectorOrTiming && !looksLikeCodeBug) {
+                iterationResult = 'inconclusive';
+              } else if (hasExecutionError) {
                 iterationResult = 'execution_failure';
               } else {
                 iterationResult = 'failure';
               }
-              iterationError = completionResult.reason || completionResult.what_happened || lastExecutionResult?.error || 'Leg execution failed';
+
+              iterationError =
+                completionResult.reason ||
+                completionResult.what_happened ||
+                lastExecutionResult?.error ||
+                'Leg execution failed';
             }
             
             // Build iteration object with all relevant data
@@ -16377,12 +16417,18 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
               iteration_number: iteration,
               attempt_number: iteration,
               result: iterationResult,
-              status: status,
+              // IMPORTANT: backend status inference uses the last iteration's `status`.
+              // Set it to our normalized result so we don't persist false "failure" from AI for retryable errors.
+              status: iterationResult,
+              ai_status: status,
               completion_status: completionResult.completion_status || status,
               is_complete: legSucceeded || legFailed,
               reason: completionResult.reason || completionResult.what_happened || '',
               error: iterationError,
-              execution_error_type: executionErrorType || (iterationResult === 'execution_failure' ? 'execution' : null),
+              execution_error_type:
+                iterationResult === 'inconclusive'
+                  ? 'inconclusive'
+                  : (executionErrorType || (iterationResult === 'execution_failure' ? 'execution' : null)),
               script_executed: workflowState.legScriptToExecute || '',
               execution_result: lastExecutionResult,
               page_url_before: workflowState.urlBeforeAction || '',
@@ -16404,7 +16450,11 @@ const ensureChecked = async (selector, shouldBeChecked = true) => {
               leg.status = 'success';
               finalResult = 'success';
             } else if (legFailed) {
-              if (executionErrorType === 'execution' || iterationResult === 'execution_failure') {
+              if (iterationResult === 'inconclusive') {
+                // Not a proven failure; keep pending so future runs can retry.
+                leg.status = 'pending';
+                finalResult = 'inconclusive';
+              } else if (executionErrorType === 'execution' || iterationResult === 'execution_failure') {
                 leg.status = 'execution_failure';
                 finalResult = 'execution_failure';
               } else {
