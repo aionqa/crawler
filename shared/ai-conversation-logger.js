@@ -1456,6 +1456,7 @@ export class AIConversationLogger {
       
       console.log(`[AI-CALL] ✅ AI call completed: ${promptSlug} (${response.usage?.total_tokens || 0} tokens)`);
 
+      // Only count completed request–response as one conversation (see .cursor/rules/50-ai-conversation-terminology.mdc)
       if (jobId && response.usage) {
         await this.reportAiMetrics(jobId, {
           usage: response.usage,
