@@ -2155,10 +2155,19 @@ const modeHandlers = {
               });
             }
           } catch (redirectError) {
-            // If handleLoginRedirect is 'fail', the error is already thrown
-            // If it's 'auto_retry' and fails, we should also fail
+            // Respect explicit strict mode, but avoid aborting the whole crawl when auto-retry
+            // cannot re-authenticate (expired credentials/cookies, flaky IdP, etc).
+            // Continuing allows us to still collect/analyze reachable pages for this run.
             await sendLog(jobId, 'error', `❌ Login redirect handling failed: ${redirectError.message}`);
-            throw redirectError;
+            if (handleLoginRedirect === 'fail') {
+              throw redirectError;
+            }
+            await sendLog(jobId, 'warn', `⚠️ Continuing crawl without re-authentication (auto_retry fallback)`, {
+              component: 'CRAWLER-TEXT',
+              action: 'login_redirect_auto_retry_fallback_continue',
+              intended_url: currentUrl,
+              final_url: finalUrl
+            });
           }
         }
         
