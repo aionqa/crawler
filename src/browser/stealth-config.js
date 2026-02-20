@@ -24,7 +24,7 @@ export function getStealthLaunchArgs() {
     '--disable-blink-features=AutomationControlled', // Remove automation flags
     '--disable-features=IsolateOrigins,site-per-process', // Avoid fingerprinting
     '--disable-site-isolation-trials',
-    '--disable-web-security', // Some sites check for this
+    // Keep browser behavior close to real users; avoid changing core web security model.
     '--disable-features=BlockInsecurePrivateNetworkRequests',
     // Make it look more like a real browser
     '--lang=en-US,en',
@@ -78,18 +78,22 @@ export async function injectStealthScripts(page) {
       get: () => false,
     });
 
-    // Override chrome object
-    window.chrome = {
-      runtime: {},
-    };
+    // Provide minimal chrome object only when absent.
+    if (!window.chrome) {
+      window.chrome = { runtime: {} };
+    }
 
     // Override permissions
-    const originalQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = (parameters) => (
-      parameters.name === 'notifications' ?
-        Promise.resolve({ state: Notification.permission }) :
-        originalQuery(parameters)
-    );
+    const originalQuery = window.navigator.permissions && window.navigator.permissions.query
+      ? window.navigator.permissions.query.bind(window.navigator.permissions)
+      : null;
+    if (originalQuery) {
+      window.navigator.permissions.query = (parameters) => (
+        parameters.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery(parameters)
+      );
+    }
 
     // Override plugins to look realistic
     Object.defineProperty(navigator, 'plugins', {
@@ -117,14 +121,53 @@ export async function injectStealthScripts(page) {
     });
 
     // Override connection
-    Object.defineProperty(navigator, 'connection', {
-      get: () => ({
-        effectiveType: '4g',
-        rtt: 50,
-        downlink: 10,
-        saveData: false,
-      }),
-    });
+    // Ensure navigator.connection supports listener methods in all Chromium variants.
+    // Some builds expose connection but only with addListener/removeListener.
+    if ('connection' in navigator && navigator.connection) {
+      try {
+        const conn = navigator.connection;
+        const proto = Object.getPrototypeOf(conn);
+        if (proto && typeof conn.addEventListener !== 'function') {
+          if (typeof conn.addListener === 'function') {
+            proto.addEventListener = function(type, listener) {
+              if (type === 'change') return this.addListener(listener);
+            };
+          } else {
+            proto.addEventListener = function() {};
+          }
+        }
+        if (proto && typeof conn.removeEventListener !== 'function') {
+          if (typeof conn.removeListener === 'function') {
+            proto.removeEventListener = function(type, listener) {
+              if (type === 'change') return this.removeListener(listener);
+            };
+          } else {
+            proto.removeEventListener = function() {};
+          }
+        }
+      } catch (_) {
+        // ignore compatibility patch failures
+      }
+    } else {
+      const listeners = new Map();
+      Object.defineProperty(navigator, 'connection', {
+        get: () => ({
+          effectiveType: '4g',
+          rtt: 50,
+          downlink: 10,
+          saveData: false,
+          onchange: null,
+          addEventListener: (type, listener) => {
+            if (!listeners.has(type)) listeners.set(type, new Set());
+            listeners.get(type).add(listener);
+          },
+          removeEventListener: (type, listener) => {
+            if (listeners.has(type)) listeners.get(type).delete(listener);
+          },
+          dispatchEvent: () => true
+        }),
+      });
+    }
 
     // Mock WebGL to avoid fingerprinting
     const getParameter = WebGLRenderingContext.prototype.getParameter;
@@ -138,14 +181,8 @@ export async function injectStealthScripts(page) {
       return getParameter.call(this, parameter);
     };
 
-    // Override toString to hide automation
-    const originalToString = Function.prototype.toString;
-    Function.prototype.toString = function() {
-      if (this === navigator.webdriver || this === window.chrome) {
-        return 'function() { [native code] }';
-      }
-      return originalToString.call(this);
-    };
+    // Avoid overriding Function.prototype.toString globally.
+    // This is high-risk and can break app/runtime internals.
 
     // Compatibility polyfill:
     // Some app bundles assume MediaQueryList supports addEventListener/removeEventListener.
