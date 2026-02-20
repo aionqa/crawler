@@ -2000,6 +2000,11 @@ const modeHandlers = {
         const { url: rawUrl, depth } = urlQueue.shift();
         const currentUrl = canonicalizeUrl(rawUrl) || ensureUrlHasScheme(rawUrl) || rawUrl;
         
+        // Strict domain: never visit or analyze URLs outside the crawl's seed domain
+        if (!isWithinDomain(currentUrl, seedUrl, allowSubdomains)) {
+          await sendLog(jobId, 'info', `⏭️ Skipping URL outside crawl domain: ${currentUrl} (seed: ${seedUrl})`);
+          continue;
+        }
         // Skip if already visited or too deep
         if (visitedUrls.has(currentUrl) || depth > maxDepth) {
           continue;
@@ -2079,6 +2084,11 @@ const modeHandlers = {
               }
             } catch (urlError) {
               console.warn(`Could not get page URL after navigation: ${urlError.message}`);
+            }
+            // Strict domain: do not analyze pages that redirected outside the crawl's seed domain
+            if (!isWithinDomain(finalUrl, seedUrl, allowSubdomains)) {
+              await sendLog(jobId, 'info', `⏭️ Skipping page outside crawl domain (redirect): ${finalUrl} (seed: ${seedUrl})`);
+              continue;
             }
           } catch (navError) {
             await sendLog(jobId, 'warn', `⚠️ Navigation failed: ${navError.message}`);
@@ -2228,8 +2238,12 @@ const modeHandlers = {
             continue;
           }
         }
-        // Use project's start_url for domain filtering, not the current page URL
-        const projectStartUrl = context.start_url || actualPageUrl; // Fallback to current URL if not provided
+        // Strict domain: only analyze pages within the crawl's seed domain (never other domains)
+        if (!isWithinDomain(actualPageUrl, seedUrl, allowSubdomains)) {
+          await sendLog(jobId, 'info', `⏭️ Skipping page outside crawl domain: ${actualPageUrl} (seed: ${seedUrl})`);
+          continue;
+        }
+        const projectStartUrl = seedUrl; // Use seed URL so we only store pages from this crawl's domain
         const actualPageUrlCanonical = canonicalizeUrl(actualPageUrl);
         if (actualPageUrlCanonical && analyzedPageUrls.has(actualPageUrlCanonical)) {
           await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrlCanonical} already analyzed in this job (in-memory dedupe), skipping duplicate analysis`);
@@ -2590,8 +2604,9 @@ const modeHandlers = {
         }
         
         // Step 3: Extract links from page for crawling (if not at max depth)
+        // Use seed URL as domain authority so "internal" = same domain as crawl seed only (no other domains)
         if (shouldDiscoverLinks && depth < maxDepth) {
-          const linksData = await extractAllLinks(page, jobId, currentUrl, allowSubdomains);
+          const linksData = await extractAllLinks(page, jobId, seedUrl, allowSubdomains);
           const allInternal = Array.isArray(linksData?.internal) ? linksData.internal : [];
           const anchors = [];
           const crawlableInternalLinks = [];
@@ -2667,6 +2682,8 @@ const modeHandlers = {
               // Regular link - use base URL (without hash) for deduplication
               const urlToCheck = canonicalizeUrl((link?.urlWithoutHash || link?.href || '').split('#')[0].trim());
               if (!urlToCheck) continue;
+              // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
+              if (!isWithinDomain(urlToCheck, seedUrl, allowSubdomains)) continue;
               if (!visitedUrls.has(urlToCheck) && !analyzedPageUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
                 if (!isLoginJob) {
                   urlQueue.push({ url: urlToCheck, depth: depth + 1 });
@@ -4190,6 +4207,12 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
     // Hash fragments represent modal/popup actions on the same page, not separate pages
     const normalizedUrl = currentUrl.split('#')[0];
     
+    // Strict domain: never visit or analyze URLs outside the crawl's seed domain
+    if (!isWithinDomain(normalizedUrl, startUrl, allowSubdomains)) {
+      await sendLog(jobId, 'info', `⏭️ Skipping URL outside crawl domain: ${normalizedUrl} (seed: ${startUrl})`, { page_url: currentUrl, mode: approach });
+      continue;
+    }
+    
     // Skip if already visited (by base URL, without hash)
     if (visitedUrls.has(normalizedUrl)) {
       await sendLog(jobId, 'info', `⏭️  Skipping (already visited): ${normalizedUrl}`, { page_url: currentUrl, mode: approach });
@@ -4423,7 +4446,8 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           
           // Regular link - use urlWithoutHash to avoid processing same page with different hashes
           const urlToCheck = link.urlWithoutHash || link.href.split('#')[0];
-          
+          // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
+          if (!isWithinDomain(urlToCheck, startUrl, allowSubdomains)) continue;
           if (!visitedUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
             urlQueue.push({ url: urlToCheck, depth: depth + 1 });
             newLinksAdded++;
