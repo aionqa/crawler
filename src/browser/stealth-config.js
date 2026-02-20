@@ -44,20 +44,9 @@ export function getStealthContextOptions(options = {}) {
     permissions: ['geolocation'], // Common permission
     geolocation: { latitude: 40.7128, longitude: -74.0060 }, // New York coordinates
     colorScheme: 'light',
-    // Extra HTTP headers to look more realistic
-    extraHTTPHeaders: {
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'DNT': '1', // Do Not Track
-      'Connection': 'keep-alive',
-      'Upgrade-Insecure-Requests': '1',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-      'Cache-Control': 'max-age=0',
-    },
+    // Do not force global extra headers.
+    // They can alter CORS/preflight behavior on third-party assets (e.g. reCAPTCHA/fonts)
+    // and break login pages. Let Chromium generate request headers naturally.
     // Record video if needed
     ...(options.recordVideo ? { recordVideo: options.recordVideo } : {}),
     ignoreHTTPSErrors: true,
