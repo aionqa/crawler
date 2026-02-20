@@ -21,9 +21,11 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
     if (page && !page.__aionqaDiagnosticsAttached) {
       page.__aionqaDiagnosticsAttached = true;
       let consoleCount = 0;
-      const maxConsole = 60;
+      const maxConsole = 140;
       let netCount = 0;
       const maxNet = 40;
+      let navCount = 0;
+      const maxNav = 30;
 
       const redact = (value) => {
         try {
@@ -54,10 +56,36 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
         try {
           if (consoleCount >= maxConsole) return;
           const type = msg.type();
-          if (!['error', 'warning'].includes(type)) return;
           consoleCount++;
           const text = msg.text();
-          await backendLogger.appendJobLog(jobId, type === 'error' ? 'error' : 'warn', `🗯️ [CONSOLE.${type}] ${redact(text)}`.slice(0, 2000), 'BROWSER');
+          const level = type === 'error'
+            ? 'error'
+            : (type === 'warning' ? 'warn' : 'info');
+          await backendLogger.appendJobLog(
+            jobId,
+            level,
+            `🗯️ [CONSOLE.${type}] ${redact(text)}`.slice(0, 2500),
+            'BROWSER',
+            {
+              page_url: (() => { try { return page.url(); } catch { return null; } })()
+            }
+          );
+        } catch (_) {}
+      });
+
+      // Track navigations to explain whether the script actually leaves login page.
+      page.on('framenavigated', async (frame) => {
+        try {
+          if (navCount >= maxNav) return;
+          if (!frame || frame !== page.mainFrame()) return;
+          navCount++;
+          const nextUrl = frame.url();
+          await backendLogger.appendJobLog(
+            jobId,
+            'info',
+            `🧭 [NAVIGATED] Main frame navigated to ${redact(nextUrl)}`.slice(0, 2000),
+            'BROWSER'
+          );
         } catch (_) {}
       });
 
