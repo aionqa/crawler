@@ -293,9 +293,9 @@ export class AIConversationLogger {
   }
 
   /**
-   * Fetch prompt configuration from backend by slug
-   * @param {string} slug - Prompt slug (e.g., "analyze-page-summary")
-   * @returns {Promise<Object>} Prompt configuration
+   * Fetch prompt from backend by slug. Deprecated: backend returns 410; prompts must be in workflow template and passed as customTemplate.
+   * @param {string} slug - Prompt slug
+   * @returns {Promise<Object>} Prompt configuration (will fail with 410 if backend has no separate prompts)
    */
   async fetchPrompt(slug) {
     // Check cache first

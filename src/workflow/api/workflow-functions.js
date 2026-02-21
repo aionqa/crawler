@@ -18,13 +18,14 @@ export async function executeAiRequest(page, jobId, stepId, parameters, context)
   try {
     const RUNNER_TOKEN = process.env.RUNNER_TOKEN;
     const aiLogger = new AIConversationLogger(BACKEND_URL, RUNNER_TOKEN);
-    
-    // Get prompt template from backend
-    const promptResponse = await axios.get(`${BACKEND_URL}/api/prompts/${parameters.prompt}`);
-    const promptTemplate = promptResponse.data;
-    
+
+    // Prompts are defined in workflow template only; no separate prompt API.
+    const workflowPrompts = context?.workflowTemplate?.prompts || [];
+    const promptTemplate = Array.isArray(workflowPrompts)
+      ? workflowPrompts.find(p => (p.slug || p.name || p.id) === parameters.prompt)
+      : null;
     if (!promptTemplate) {
-      throw new Error(`Prompt template ${parameters.prompt} not found`);
+      throw new Error(`Prompt "${parameters.prompt}" not found in workflow template. Define prompts in the workflow template only.`);
     }
 
     // Prepare attachments based on configuration
