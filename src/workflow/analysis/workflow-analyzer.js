@@ -6840,22 +6840,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // CRITICAL: For determine_completion step, also store directly by ID for easy access
       if (step.id === 'determine_completion' || step.name?.includes('Determine Login Progress')) {
         // If we landed on a known login-success URL, force the status to success.
-        // This prevents the login while-loop from getting stuck in "continue" due to conservative AI output.
-        try {
-          const currentUrl = page && !page.isClosed() ? String(page.url() || '') : '';
-          const urlLower = currentUrl.toLowerCase();
-          if (urlLower.includes('login-success') && parsedResponse && parsedResponse.status !== 'success') {
-            parsedResponse.status = 'success';
-            if (!parsedResponse.reason) {
-              parsedResponse.reason = 'Detected login success page by URL';
-            } else if (!String(parsedResponse.reason).toLowerCase().includes('login success')) {
-              parsedResponse.reason = `${parsedResponse.reason} (override: URL indicates login success)`;
-            }
-          }
-        } catch (e) {
-          // Best-effort override; ignore URL read errors.
-        }
-
         // Validate that status field is present
         if (!parsedResponse.status && !parsedResponse.completion_status && parsedResponse.is_complete === undefined) {
           console.error(`❌ ERROR: determine_completion response missing status field!`);
@@ -15620,97 +15604,44 @@ const humanDelay = async (minMs = 80, maxMs = 220) => {
             finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
           }
         } else {
-          const executionSucceeded =
-            workflowState.lastExecutionResult?.success === true ||
-            (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType);
-          const completionText = `${lastDetermineCompletion?.reason || ''} ${lastDetermineCompletion?.what_happened || ''}`.toLowerCase();
-          const hasBlockingSignal = /(invalid|required|error|failed|failure|exception|timeout|blocked|captcha)/.test(completionText);
-          if (iteration >= maxIterations && executionSucceeded && !hasBlockingSignal) {
-            // In single-iteration mode, treat conservative AI failure as success when execution was clean.
-            finalLegStatus = 'success';
-            finalLegResult = 'success';
-            finalLegError = null;
-            console.log(`✅ Max-iteration fallback: overriding conservative failure to success after clean execution`);
+          // Use AI result only; no override to success based on execution.
+          const hasExecutionError = workflowState.executionErrorType === 'execution' ||
+                                    lastDetermineCompletion.execution_error_type === 'execution' ||
+                                    lastDetermineCompletion.error_type === 'execution';
+          
+          if (hasExecutionError) {
+            finalLegStatus = 'execution_failure';
+            finalLegResult = 'execution_failure';
           } else {
-            // Check if failure is due to execution error
-            const hasExecutionError = workflowState.executionErrorType === 'execution' ||
-                                      lastDetermineCompletion.execution_error_type === 'execution' ||
-                                      lastDetermineCompletion.error_type === 'execution';
-            
-            if (hasExecutionError) {
-              finalLegStatus = 'execution_failure';
-              finalLegResult = 'execution_failure';
-            } else {
-              finalLegStatus = 'failure';
-              finalLegResult = 'failure';
-            }
-            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
+            finalLegStatus = 'failure';
+            finalLegResult = 'failure';
           }
+          finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
         }
       } else if (status === 'continue' || status === 'stuck') {
         // If max iterations reached and status is still 'continue' or 'stuck', mark as failure
         // This indicates the action couldn't be completed within the iteration limit
         if (iteration >= maxIterations) {
-          const executionSucceeded =
-            workflowState.lastExecutionResult?.success === true ||
-            (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType);
-          const completionText = `${lastDetermineCompletion?.reason || ''} ${lastDetermineCompletion?.what_happened || ''}`.toLowerCase();
-          const hasBlockingSignal = /(invalid|required|error|failed|failure|exception|timeout|blocked|captcha)/.test(completionText);
-          if (executionSucceeded && !hasBlockingSignal) {
-            // In single-iteration mode, AI can conservatively return "continue" despite successful script execution.
-            finalLegStatus = 'success';
-            finalLegResult = 'success';
-            finalLegError = null;
-          } else {
-            finalLegStatus = 'failure';
-            finalLegResult = 'failure';
-            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Action could not be completed: status was '${status}' after ${iteration} iterations`;
-          }
+          finalLegStatus = 'failure';
+          finalLegResult = 'failure';
+          finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Action could not be completed: status was '${status}' after ${iteration} iterations`;
         } else if (loopExitedEarly) {
-          // Loop exited early with condition=false, which typically means success
-          // But if status is 'continue' or 'stuck', we need to check execution result
-          const executionSucceeded = workflowState.lastExecutionResult?.success !== false;
-          if (executionSucceeded) {
-            finalLegStatus = 'success';
-            finalLegResult = 'success';
-          } else {
-            finalLegStatus = 'failure';
-            finalLegResult = 'failure';
-            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution did not complete successfully';
-          }
+          // Loop exited early but status is continue/stuck - use failure (pure justification from AI).
+          finalLegStatus = 'failure';
+          finalLegResult = 'failure';
+          finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution did not complete successfully';
         }
         // If not at max iterations yet and loop didn't exit early, finalLegStatus remains null so loop can continue
       } else if (loopExitedEarly && iteration > 0) {
-        // Loop exited early but no clear status - check execution result
-        const executionSucceeded = workflowState.lastExecutionResult?.success !== false;
-        if (executionSucceeded) {
-          finalLegStatus = 'success';
-          finalLegResult = 'success';
-        } else {
-          finalLegStatus = 'failure';
-          finalLegResult = 'failure';
-          finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Action execution did not complete successfully';
-        }
-      }
-    } else if (loopExitedEarly && iteration > 0) {
-      // No determine_completion result but loop exited early - check execution result
-      // If loop exited early and no errors, assume success
-      const executionSucceeded = 
-        workflowState.lastExecutionResult?.success === true ||
-        workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType ||
-        workflowState.lastExecutionResult?.error === undefined ||
-        !workflowState.lastExecutionResult?.error;
-      
-      if (executionSucceeded) {
-        finalLegStatus = 'success';
-        finalLegResult = 'success';
-        console.log(`✅ Loop exited early with successful execution (no determine_completion) - marking leg as success`);
-      } else {
         finalLegStatus = 'failure';
         finalLegResult = 'failure';
-        finalLegError = workflowState.lastExecutionResult?.error || 'Action execution did not complete successfully';
-        console.log(`⚠️ Loop exited early but execution may have failed - marking leg as failure`);
+        finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Action execution did not complete successfully';
       }
+    } else if (loopExitedEarly && iteration > 0) {
+      // No determine_completion result; do not assume success (pure justification).
+      finalLegStatus = 'failure';
+      finalLegResult = 'failure';
+      finalLegError = workflowState.lastExecutionResult?.error || 'Action execution did not complete successfully';
     }
     
     // If still no final status and max iterations reached, mark as failure
@@ -15720,20 +15651,6 @@ const humanDelay = async (minMs = 80, maxMs = 220) => {
       finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Max iterations reached without completion';
     }
 
-    // Final safeguard: in single-pass mode, if script execution completed cleanly,
-    // don't leave the leg as failure purely due to conservative AI completion labeling.
-    if (
-      iteration >= maxIterations &&
-      (finalLegStatus === 'failure' || finalLegStatus === 'execution_failure') &&
-      workflowState.lastExecutionResult?.success !== false &&
-      !workflowState.executionErrorType
-    ) {
-      finalLegStatus = 'success';
-      finalLegResult = 'success';
-      finalLegError = null;
-      console.log(`✅ Final safeguard: overriding conservative failure to success after clean execution at max iterations`);
-    }
-    
     // Log final status determination for debugging
     if (finalLegStatus) {
       console.log(`✅ Determined final leg status: ${finalLegStatus} (result: ${finalLegResult}, iterations: ${iteration}, loopExitedEarly: ${loopExitedEarly}, lastExecutionResult.success: ${workflowState.lastExecutionResult?.success})`);
