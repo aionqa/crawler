@@ -510,6 +510,56 @@ async function sendLog(jobId, level, message, data = {}, conversationId = null) 
   }
 }
 
+/** Safe subset of headers for storage (no auth/cookies). */
+const SAFE_HEADER_NAMES = new Set([
+  'content-type', 'accept', 'accept-language', 'cache-control', 'x-requested-with',
+  'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'referer', 'origin'
+]);
+function sanitizeHeaders(headers) {
+  if (!headers || typeof headers !== 'object') return {};
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    const lower = String(k).toLowerCase();
+    if (SAFE_HEADER_NAMES.has(lower) && v != null) out[k] = String(v);
+  }
+  return out;
+}
+
+/**
+ * Send collected crawler API calls (XHR/fetch) to backend for API Explorer.
+ * @param {string} jobId
+ * @param {string|null} projectId
+ * @param {Array<{url:string,method:string,status:number,page_url:string,request_headers?:object,response_headers?:object,timestamp:number}>} calls
+ * @param {string} [runnerToken]
+ */
+async function sendApiCallsToBackend(jobId, projectId, calls, runnerToken = '') {
+  if (!calls || calls.length === 0) return;
+  try {
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const projectIdStr = projectId != null ? (typeof projectId === 'object' ? projectId.toString() : String(projectId)) : null;
+    await axios.post(`${backendUrl}/api/jobs/${jobId}/api-calls`, {
+      project_id: projectIdStr,
+      calls: calls.map(c => ({
+        url: c.url,
+        method: c.method || 'GET',
+        status: c.status,
+        page_url: c.page_url || '',
+        request_headers: c.request_headers || {},
+        response_headers: c.response_headers || {},
+        timestamp: c.timestamp != null ? c.timestamp : Date.now()
+      }))
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(runnerToken ? { Authorization: `Bearer ${runnerToken}` } : {})
+      },
+      timeout: 30000
+    });
+  } catch (err) {
+    console.warn(`[API-CALLS] Failed to send ${calls.length} API calls to backend: ${err.message}`);
+  }
+}
+
 // Upload files via backend API (legacy - used for fallback only)
 async function uploadFileToBackend({ buffer, contentType, type, jobId, metadata = {} }) {
   try {
@@ -6114,7 +6164,41 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         // never fail crawl due to diagnostics wiring
         console.warn(`[BROWSER-DIAGNOSTICS] Failed to attach diagnostics: ${diagErr.message}`);
       }
-      
+
+      // Collect backend API calls (XHR/fetch) for API Explorer
+      const collectedApiCalls = [];
+      const maxApiCalls = 500;
+      try {
+        page.on('response', (resp) => {
+          try {
+            if (collectedApiCalls.length >= maxApiCalls) return;
+            const req = resp.request();
+            const resourceType = req.resourceType ? req.resourceType() : '';
+            if (resourceType !== 'xhr' && resourceType !== 'fetch') return;
+            const pageUrl = (() => { try { return page.url(); } catch { return ''; } })();
+            const requestHeaders = req.headers ? req.headers() : {};
+            let responseHeaders = {};
+            try {
+              responseHeaders = resp.headers ? resp.headers() : {};
+            } catch (_) {}
+            collectedApiCalls.push({
+              url: req.url(),
+              method: req.method ? req.method() : 'GET',
+              status: resp.status(),
+              page_url: pageUrl,
+              request_headers: sanitizeHeaders(requestHeaders),
+              response_headers: sanitizeHeaders(responseHeaders),
+              timestamp: Date.now()
+            });
+          } catch (_) {
+            // ignore
+          }
+        });
+      } catch (apiCollectErr) {
+        console.warn(`[API-CALLS] Failed to attach API call collector: ${apiCollectErr.message}`);
+      }
+
+      try {
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {
         await sendLog(jobId, 'info', `🍪 Setting ${cookies.length} cookies for authentication...`);
@@ -6390,6 +6474,11 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       
       console.log(`[START-CRAWL] finalResult.success = ${finalResult.success}`);
       return finalResult;
+      } finally {
+        if (collectedApiCalls.length > 0) {
+          await sendApiCallsToBackend(jobId, projectId, collectedApiCalls, context.runner_token || '');
+        }
+      }
     }, {
       headless: context.options?.headless !== false,
       enable_screenshots: mode === 'workflow'
