@@ -5005,29 +5005,6 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
       // CRITICAL: For determine_completion step, also store directly by ID for easy access
       if (step.id === 'determine_completion' || step.name?.includes('Determine Login Progress')) {
         // If we landed on a known login-success URL, force the status to success.
-        // This prevents the login while-loop from getting stuck in "continue" due to conservative AI output
-        // or deterministic fallback heuristics.
-        try {
-          const currentUrl = page && !page.isClosed() ? String(page.url() || '') : '';
-          const urlLower = currentUrl.toLowerCase();
-          const isLoginSuccessUrl =
-            urlLower.includes('login-success') ||
-            urlLower.includes('login-successful') ||
-            urlLower.includes('logged-in-success') ||
-            urlLower.includes('credentials-success') ||
-            (urlLower.includes('success') && (urlLower.includes('/login/') || urlLower.includes('credentials')));
-          if (isLoginSuccessUrl && parsedResponse && parsedResponse.status !== 'success') {
-            parsedResponse.status = 'success';
-            if (!parsedResponse.reason) {
-              parsedResponse.reason = 'Detected login success page by URL';
-            } else if (!String(parsedResponse.reason).toLowerCase().includes('login success')) {
-              parsedResponse.reason = `${parsedResponse.reason} (override: URL indicates login success)`;
-            }
-          }
-        } catch (e) {
-          // Best-effort override; ignore URL read errors.
-        }
-
         // Validate that status field is present
         if (!parsedResponse.status && !parsedResponse.completion_status && parsedResponse.is_complete === undefined) {
           console.error(`❌ ERROR: determine_completion response missing status field!`);
@@ -11309,24 +11286,9 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             }
           }
           
-          // If status is still unknown but journey executed, assume success (while-loop completed)
-          // The while-loop only exits when status is NOT 'pending', so if we're here, journey finished
-          if (journeyStatus === 'unknown') {
-            const hasExecutionResults = stepResults.some(s => 
-              s.originalStepId === 'execute_journey_action_script' || 
-              s.originalStepId === 'execute-code-from-variable' ||
-              s.originalStepId === 'execute-code'
-            );
-            
-            if (hasExecutionResults) {
-              // Journey executed and loop completed - treat as success
-              journeyStatus = 'success';
-              console.log(`✅ Journey ${legId} executed successfully (status inferred from loop completion)`);
-            }
-          }
-          
+          // Use justification result only; no inferring success from execution.
           const isSuccess = journeyStatus === 'success';
-          const finalResult = isSuccess ? 'success' : (journeyStatus === 'failure' ? 'failure' : 'success'); // Default to success if unknown but executed
+          const finalResult = journeyStatus === 'success' ? 'success' : (journeyStatus === 'failure' ? 'failure' : (journeyStatus || 'pending'));
           const error = justifyResult?.reason || null;
           
           try {
@@ -11428,20 +11390,8 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           journeyStatus = justifyResult?.status || 'unknown';
         }
         
-        // If status is unknown, check if journey executed (has execution step)
-        if (journeyStatus === 'unknown') {
-          const hasExecutionResults = stepResults.some(s => 
-            s.originalStepId === 'execute_journey_action_script' || 
-            s.originalStepId === 'execute-code-from-variable' ||
-            s.originalStepId === 'execute-code'
-          );
-          
-          if (hasExecutionResults) {
-            journeyStatus = 'success'; // Journey executed, assume success
-          }
-        }
-        
-        const finalResult = journeyStatus === 'success' ? 'success' : (journeyStatus === 'failure' ? 'failure' : 'success');
+        // Use justification result only; no inferring success from execution.
+        const finalResult = journeyStatus === 'success' ? 'success' : (journeyStatus === 'failure' ? 'failure' : (journeyStatus || 'pending'));
         const error = justifyResult?.reason || null;
         
         try {

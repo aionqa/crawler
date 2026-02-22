@@ -5061,34 +5061,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // Debug: Log what was returned
       console.log(`🔍 AI Response for step ${step.id} (${step.name}):`, JSON.stringify(parsedResponse, null, 2).substring(0, 1000));
 
-      // Engine-side normalization for non-reactive submits:
-      // If justification is "pending" after a submit-intent journey and no visible errors are reported,
-      // treat it as success to account for classic post/refresh pages without explicit success banners.
-      if (isJustifyJourneyStep && parsedResponse && typeof parsedResponse === 'object') {
-        const pageUrlLower = String(stepPayload.page_url || workflowState.pageUrl || '').toLowerCase();
-        const isNonReactivePage = pageUrlLower.includes('/non-reactive/');
-        const statusLower = String(parsedResponse.status || '').toLowerCase();
-        const reasonLower = String(parsedResponse.reason || '').toLowerCase();
-        const detailsLower = String(parsedResponse.verification_details || '').toLowerCase();
-        const hasExplicitErrorSignal =
-          /(error|invalid|required|please fill|failed|exception|tooltip|validation)/.test(reasonLower) ||
-          /(error|invalid|required|please fill|failed|exception|tooltip|validation)/.test(detailsLower);
-        const currentActions = Array.isArray(stepPayload.currentJourney?.actions) ? stepPayload.currentJourney.actions : [];
-        const hasSubmitIntent = currentActions.some((a) => {
-          const type = String(a?.type || '').toLowerCase();
-          const sel = String(a?.selector || '').toLowerCase();
-          const desc = String(a?.description || '').toLowerCase();
-          return type === 'form_submit' || sel.includes('submit') || sel.includes('register') || desc.includes('submit') || desc.includes('register');
-        });
-        if (isNonReactivePage && statusLower === 'pending' && hasSubmitIntent && !hasExplicitErrorSignal) {
-          parsedResponse.status = 'success';
-          parsedResponse.expected_outcome_verified = true;
-          parsedResponse.reason = 'No visible validation/error after submit on non-reactive page; treating post-submit reset state as success.';
-          parsedResponse.verification_details = (parsedResponse.verification_details || '') + ' [Engine override: non-reactive post-submit with no errors => success]';
-          console.log('✅ [JUSTIFY-OVERRIDE] Converted pending -> success for non-reactive post-submit journey');
-        }
-      }
-      
       // CRITICAL: Log journeys in response for debugging
       if (parsedResponse && typeof parsedResponse === 'object') {
         const hasJourneys = !!(parsedResponse.journeys || parsedResponse.page_summary?.journeys);
@@ -7757,40 +7729,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
           
           console.log(`✅ [SAVE-DATA] Created iteration for journey ${journey.journey_id} with reason: ${justification.reason ? justification.reason.substring(0, 80) + '...' : 'NO REASON'}`);
           
-          // CRITICAL: Check if this journey is designed to test failure scenarios
-          const journeyDesc = (journey.description || '').toLowerCase();
-          const journeyExpectedOutcome = (journey.expected_outcome || '').toLowerCase();
-          const isFailureTestJourney = 
-            journeyDesc.includes('always fail') ||
-            journeyDesc.includes('verify that submission fails') ||
-            journeyDesc.includes('verify that submission does not succeed') ||
-            journeyDesc.includes('non-existent domain') ||
-            journeyDesc.includes('will fail') ||
-            journeyDesc.includes('should fail') ||
-            journeyDesc.includes('expected to fail') ||
-            journeyDesc.includes('does not succeed') ||
-            journeyDesc.includes('submission fails') ||
-            journeyDesc.includes('does not navigate') ||
-            journeyDesc.includes('stays on page') ||
-            journeyDesc.includes('form remains visible') ||
-            journeyDesc.includes('form still visible') ||
-            journeyExpectedOutcome.includes('fail') ||
-            journeyExpectedOutcome.includes('does not succeed') ||
-            journeyExpectedOutcome.includes('does not navigate') ||
-            journeyExpectedOutcome.includes('stays on page') ||
-            journeyExpectedOutcome.includes('form remains visible');
-          
-          if (isFailureTestJourney) {
-            console.log(`🔍 [FAILURE-TEST-DETECTED] Journey ${journey.journey_id} is a failure-test journey`);
-            console.log(`   Description: ${journeyDesc.substring(0, 100)}...`);
-            console.log(`   Expected Outcome: ${journeyExpectedOutcome.substring(0, 100)}...`);
-          }
-          
-          // CRITICAL: Map status based on expected_outcome_verified (primary source)
-          // If expected_outcome_verified is true, status should be 'success'
-          // This ensures green status on the journeys page
+          // Map status from justification only (pure; no overrides by journey type).
           let finalStatus = justification.status;
-
           const unwrapBool = (v) => {
             const raw = (v && typeof v === 'object' && 'value' in v) ? v.value : v;
             if (raw === true || raw === false) return raw;
@@ -7800,22 +7740,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             return null;
           };
           const verified = unwrapBool(justification.expected_outcome_verified);
-          
-          // CRITICAL: For failure-test journeys, ALWAYS mark as 'failure' (form correctly failed)
-          // The user explicitly stated: "the one which is shown always fail will obviously fail to mock the app, it must be marked as failed"
-          if (isFailureTestJourney) {
-            // For failure-test journeys, mark as 'failure' regardless of AI response
-            // This indicates the form correctly failed (which is the expected behavior)
+          if (verified === true) {
+            finalStatus = 'success';
+          } else if (verified === false) {
             finalStatus = 'failure';
-            console.log(`✅ [FAILURE-TEST] Journey ${journey.journey_id} - marking as 'failure' (form correctly failed as expected)`);
-          } else {
-            // Normal journey logic
-            if (verified === true) {
-              finalStatus = 'success';
-            } else if (verified === false) {
-              finalStatus = 'failure';
-            }
-            // Otherwise keep the AI's status (pending, etc.)
           }
           
           return {
