@@ -19,6 +19,8 @@ export function getStealthLaunchArgs() {
     '--no-sandbox',
     '--disable-dev-shm-usage',
     '--window-size=1920,1080',
+    // Opt in to software WebGL to silence "Automatic fallback to software WebGL has been deprecated" (headless/CI often has no GPU)
+    '--enable-unsafe-swiftshader',
     '--force-device-scale-factor=1',
     // Stealth arguments to avoid detection
     '--disable-blink-features=AutomationControlled', // Remove automation flags
