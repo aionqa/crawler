@@ -2173,7 +2173,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     try {
       const res = await axios.get(`${this.backendUrl}/pages/${pageId}`, { headers: this.getAuthHeaders(), timeout: 5000 });
-      const pagePrompt = (res.data?.special_prompts?.page_prompt || '').trim();
+      const pagePrompt = (
+        res.data?.special_prompts?.project_tree_page_prompt ||
+        res.data?.special_prompts?.page_prompt ||
+        ''
+      ).trim();
       workflowState._pagePromptCache[pageId] = pagePrompt;
       return pagePrompt ? (base ? `${base}\n\n=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}` : `=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}`).trim() : base;
     } catch (e) {
