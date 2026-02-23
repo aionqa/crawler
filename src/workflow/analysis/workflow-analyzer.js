@@ -2159,6 +2159,30 @@ IMPORTANT OUTPUT REQUIREMENTS:
   }
 
   /**
+   * Get additional_prompt_text for AI payloads: project context + page-specific prompt (if page_id set).
+   * Page prompt is fetched from backend and cached in workflowState._pagePromptCache.
+   */
+  async getEffectiveAdditionalPromptText(workflowState) {
+    const base = (this.context.additional_prompt_text || '').trim();
+    const pageId = workflowState?.pageId || this.context?.page_id || null;
+    if (!pageId) return base;
+    if (!workflowState._pagePromptCache) workflowState._pagePromptCache = {};
+    if (workflowState._pagePromptCache[pageId] !== undefined) {
+      const pagePrompt = workflowState._pagePromptCache[pageId];
+      return pagePrompt ? (base ? `${base}\n\n=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}` : `=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}`).trim() : base;
+    }
+    try {
+      const res = await axios.get(`${this.backendUrl}/pages/${pageId}`, { headers: this.getAuthHeaders(), timeout: 5000 });
+      const pagePrompt = (res.data?.special_prompts?.page_prompt || '').trim();
+      workflowState._pagePromptCache[pageId] = pagePrompt;
+      return pagePrompt ? (base ? `${base}\n\n=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}` : `=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}`).trim() : base;
+    } catch (e) {
+      workflowState._pagePromptCache[pageId] = '';
+      return base;
+    }
+  }
+
+  /**
    * Execute workflow template steps and return results
    * @param {Page} page - Playwright page object
    * @param {string} jobId - Job ID for logging
@@ -3466,11 +3490,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const decoratedTemplate = appendRequirementToTemplate(customTemplate, requirementText);
     const templateForExecution = this.enforceLegInstructionsInTemplate(decoratedTemplate);
     
+    const effectiveAdditionalPrompt = await this.getEffectiveAdditionalPromptText(workflowState);
     const descriptionPayload = {
       page_title: workflowState.pageTitle,
       page_url: workflowState.pageUrl,
       visible_text: workflowState.visibleText,
-      additional_prompt_text: this.context.additional_prompt_text || ''
+      additional_prompt_text: effectiveAdditionalPrompt
     };
 
     const attachments = Array.isArray(step.config?.attachments)
@@ -3844,11 +3869,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
     };
     
     // Prepare payload based on step configuration
+    const effectiveAdditionalPrompt = await this.getEffectiveAdditionalPromptText(workflowState);
     const stepPayload = {
       page_url: workflowState.pageUrl,
       page_title: workflowState.pageTitle || await page.title(),
       page_content: workflowState.htmlContent || await page.content(),
-      additional_prompt_text: this.context.additional_prompt_text || ''
+      additional_prompt_text: effectiveAdditionalPrompt
     };
     // CRITICAL: Strict validation - credentials MUST be valid in workflowState.inputCredentials, no fallbacks
     if (workflowState.inputCredentials) {
@@ -7051,6 +7077,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       links: linksData
     }, null, 2);
     
+    const effectiveAdditionalPromptWorkflow = await this.getEffectiveAdditionalPromptText(workflowState);
     const optimizedPayload = {
       page_url: workflowState.pageUrl,
       page_title: workflowState.pageTitle,
@@ -7059,7 +7086,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       forms_json: JSON.stringify(formsData, null, 2),
       links_json: JSON.stringify(linksData, null, 2),
       conversation_history: workflowState.conversationHistory,
-      additional_prompt_text: this.context.additional_prompt_text || ''
+      additional_prompt_text: effectiveAdditionalPromptWorkflow
     };
     
     // Log prompt usage with step information
