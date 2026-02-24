@@ -4476,11 +4476,11 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           // Create minimal analysis for external pages (no AI processing)
           const pageAnalysis = {
             // url is the final browser URL (may differ from the queue URL due to redirects/SSO).
-            url: currentUrl,
+            url: pageUrl,
             // requested_url is the URL we intended to crawl (queue item).
-            requested_url: pageUrl,
+            requested_url: currentUrl,
             // final_url is redundant with url but keeps the intent explicit for downstream storage.
-            final_url: currentUrl,
+            final_url: pageUrl,
             project_id: context?.project_id || null,
             title: pageTitle,
             pageId: pageId,
@@ -4501,8 +4501,8 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         const pageAnalysis = await analyzeSinglePage(page, jobId, currentUrl, approach, openaiClient, pageId, options);
         // Preserve the originally requested URL so the backend can update the "requested" page record
         // even if we were redirected to a different host/path during navigation (common with SSO).
-        pageAnalysis.requested_url = pageUrl;
-        pageAnalysis.final_url = currentUrl;
+        pageAnalysis.requested_url = currentUrl;
+        pageAnalysis.final_url = pageUrl;
         pageAnalysis.project_id = context?.project_id || null;
         
         return { pageAnalysis, pageId, pageTitle, pageUrl };
