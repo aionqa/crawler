@@ -2097,6 +2097,7 @@ const modeHandlers = {
           currentPageUrl = null; // Force navigation
         }
         let finalUrl = currentUrl;
+        let redirectedOutsideSeedDomain = false;
         if (currentPageUrl !== currentUrl) {
           try {
             // Capture response status and retry transient 5xx (common with CDNs returning 503).
@@ -2135,11 +2136,9 @@ const modeHandlers = {
             } catch (urlError) {
               console.warn(`Could not get page URL after navigation: ${urlError.message}`);
             }
-            // Strict domain: do not analyze pages that redirected outside the crawl's seed domain
-            if (!isWithinDomain(finalUrl, seedUrl, allowSubdomains)) {
-              await sendLog(jobId, 'info', `⏭️ Skipping page outside crawl domain (redirect): ${finalUrl} (seed: ${seedUrl})`);
-              continue;
-            }
+            // Defer strict-domain skip until after login-redirect handling.
+            // Some authenticated sites redirect to an auth subdomain first and can recover in-session.
+            redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains);
           } catch (navError) {
             await sendLog(jobId, 'warn', `⚠️ Navigation failed: ${navError.message}`);
             // Try to continue with current page
@@ -2229,6 +2228,18 @@ const modeHandlers = {
               final_url: finalUrl
             });
           }
+        }
+
+        // Strict domain: do not analyze pages outside the crawl seed domain after redirect/login handling.
+        if (!isWithinDomain(finalUrl, seedUrl, allowSubdomains)) {
+          await sendLog(
+            jobId,
+            'info',
+            redirectedOutsideSeedDomain
+              ? `⏭️ Skipping page outside crawl domain (redirect): ${finalUrl} (seed: ${seedUrl})`
+              : `⏭️ Skipping page outside crawl domain: ${finalUrl} (seed: ${seedUrl})`
+          );
+          continue;
         }
         
         // Run Lighthouse analysis on the page if requested by workflow
