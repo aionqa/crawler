@@ -11323,7 +11323,13 @@ const humanDelay = async (minMs = 80, maxMs = 220) => {
         // Backward-compat: some generated scripts occasionally reference `input_input_credentials`
         // (typo) instead of `input_credentials`. Provide an alias so logins don't silently use
         // fallback placeholder credentials.
-        executableBody = `const input_input_credentials = input_credentials;\n${executableBody}`;
+        executableBody = `const input_input_credentials = input_credentials;
+const runJourney = async (task) => {
+  if (typeof task === 'function') return await task();
+  return task;
+};
+const run_step = runJourney;
+${executableBody}`;
         let fn;
         try {
           fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
