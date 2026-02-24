@@ -6099,6 +6099,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         let pageErrorCount = 0;
         let requestFailCount = 0;
         let responseCount = 0;
+        let websocketCount = 0;
         const maxEach = 25;
 
         page.on('console', (msg) => {
@@ -6145,15 +6146,62 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
           }
         });
 
+        // SPA reliability diagnostics: track websocket lifecycle and handshake failures.
+        page.on('websocket', (ws) => {
+          try {
+            if (websocketCount >= maxEach) return;
+            websocketCount++;
+            const wsUrl = typeof ws.url === 'function' ? ws.url() : null;
+            void sendLog(jobId, 'info', `🧵 [WEBSOCKET OPEN] ${wsUrl || 'unknown websocket url'}`, {
+              component: 'BROWSER-DIAGNOSTICS',
+              websocket_url: wsUrl,
+              page_url: (() => { try { return page.url(); } catch { return null; } })()
+            });
+
+            if (typeof ws.on === 'function') {
+              ws.on('close', () => {
+                void sendLog(jobId, 'warn', `🧵 [WEBSOCKET CLOSED] ${wsUrl || 'unknown websocket url'}`, {
+                  component: 'BROWSER-DIAGNOSTICS',
+                  websocket_url: wsUrl,
+                  page_url: (() => { try { return page.url(); } catch { return null; } })()
+                });
+              });
+            }
+          } catch (_) {
+            // ignore
+          }
+        });
+
         // Log navigation/document responses (especially 5xx/4xx) to debug cases where screenshots show
         // CDN errors (503) but we have no failed-request event (since response still exists).
         page.on('response', (resp) => {
           try {
             if (responseCount >= maxEach) return;
             const req = resp.request();
-            if (!req || !req.isNavigationRequest || !req.isNavigationRequest()) return;
-            if (req.resourceType && req.resourceType() !== 'document') return;
+            if (!req) return;
+            const resourceType = req.resourceType ? req.resourceType() : '';
             const status = resp.status();
+
+            // Capture websocket handshake responses (especially 5xx) with infra headers.
+            if (resourceType === 'websocket' && status >= 400) {
+              responseCount++;
+              const headers = resp.headers ? resp.headers() : {};
+              void sendLog(jobId, 'warn', `🧵 [WS HANDSHAKE] ${status} ${resp.url()}`, {
+                component: 'BROWSER-DIAGNOSTICS',
+                status,
+                url: resp.url(),
+                resource_type: resourceType,
+                server: headers?.server || null,
+                via: headers?.via || null,
+                'x-cache': headers?.['x-cache'] || null,
+                'cf-ray': headers?.['cf-ray'] || null,
+                'cf-cache-status': headers?.['cf-cache-status'] || null
+              });
+              return;
+            }
+
+            if (!req || !req.isNavigationRequest || !req.isNavigationRequest()) return;
+            if (resourceType !== 'document') return;
             if (status < 400) return;
             responseCount++;
             const headers = resp.headers ? resp.headers() : {};
