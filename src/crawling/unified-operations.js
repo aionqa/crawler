@@ -2305,8 +2305,67 @@ const modeHandlers = {
           continue;
         }
         const projectStartUrl = seedUrl; // Use seed URL so we only store pages from this crawl's domain
+        const requestedPageUrlCanonical = canonicalizeUrl(currentUrl);
         const actualPageUrlCanonical = canonicalizeUrl(actualPageUrl);
         if (actualPageUrlCanonical && analyzedPageUrls.has(actualPageUrlCanonical)) {
+          // Preserve redirected routes as first-class analyzed pages so they appear in Pages UI/reporting.
+          // Without this, nav items that redirect to an already analyzed page get silently dropped.
+          if (
+            requestedPageUrlCanonical &&
+            requestedPageUrlCanonical !== actualPageUrlCanonical &&
+            isWithinDomain(requestedPageUrlCanonical, seedUrl, allowSubdomains)
+          ) {
+            try {
+              const redirectSummary = `Route redirected to ${actualPageUrlCanonical} and reused existing analysis for that destination page.`;
+              await sendDiscoveredPageToBackend(
+                jobId,
+                {
+                  url: requestedPageUrlCanonical,
+                  requested_url: requestedPageUrlCanonical,
+                  final_url: actualPageUrlCanonical,
+                  project_id: projectId,
+                  title: `${pageTitle || 'Page'} (redirected)`,
+                  analyzed: true,
+                  page_description: {
+                    short_description: `Redirect route to ${actualPageUrlCanonical}`,
+                    description: redirectSummary
+                  },
+                  ai_analysis: {
+                    status: 'redirect_alias',
+                    summary: redirectSummary
+                  },
+                  page_stats: {
+                    forms_count: 0,
+                    links_count: 0,
+                    interactive_elements_count: 0
+                  },
+                  actions_summary: {
+                    total_actions: 0,
+                    passed_actions: 0,
+                    failed_actions: 0,
+                    skipped_actions: 0
+                  },
+                  forms: [],
+                  links: [],
+                  interactive_elements: [],
+                  non_interactive_elements: []
+                },
+                projectStartUrl,
+                allowSubdomains
+              );
+              await sendLog(
+                jobId,
+                'info',
+                `🧾 Recorded redirected route page: ${requestedPageUrlCanonical} -> ${actualPageUrlCanonical}`
+              );
+            } catch (redirectStoreError) {
+              await sendLog(
+                jobId,
+                'warn',
+                `⚠️ Failed to store redirected route page (${requestedPageUrlCanonical}): ${redirectStoreError.message}`
+              );
+            }
+          }
           await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrlCanonical} already analyzed in this job (in-memory dedupe), skipping duplicate analysis`);
           continue;
         }
