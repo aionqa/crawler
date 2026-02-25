@@ -228,39 +228,113 @@ function cleanLogMessage(message) {
 // Helper function to check if URL is within the same domain.
 // When allowSubdomains=true, treat sibling subdomains as internal as long as the
 // registrable domain (naively: last 2 labels) matches.
-function isWithinDomain(pageUrl, baseUrl, allowSubdomains = false) {
+function normalizeDomainHost(input) {
+  if (!input || typeof input !== 'string') return '';
+  const trimmed = input.trim();
+  if (!trimmed) return '';
+  try {
+    const parsed = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+    return parsed.hostname.replace(/^www\./, '').toLowerCase().trim();
+  } catch {
+    return trimmed.replace(/^https?:\/\//i, '').split('/')[0].replace(/^www\./, '').toLowerCase().trim();
+  }
+}
+
+function hostBaseDomain(hostname) {
+  const parts = String(hostname || '').split('.').filter(Boolean);
+  if (parts.length < 2) return String(hostname || '');
+  return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+}
+
+function hostMatchesDomain(hostname, domain, allowSubdomains = false) {
+  const h = normalizeDomainHost(hostname);
+  const d = normalizeDomainHost(domain);
+  if (!h || !d) return false;
+  if (h === d) return true;
+  if (allowSubdomains && (h.endsWith(`.${d}`) || hostBaseDomain(h) === hostBaseDomain(d))) return true;
+  return false;
+}
+
+function buildDomainScope(baseUrl, allowSubdomains = false, projectDomains = [], apiDomains = []) {
+  const baseHost = normalizeDomainHost(baseUrl || '');
+  const normalizedProjectDomains = Array.isArray(projectDomains) ? projectDomains.map(normalizeDomainHost).filter(Boolean) : [];
+  const normalizedApiDomains = Array.isArray(apiDomains) ? apiDomains.map(normalizeDomainHost).filter(Boolean) : [];
+  const projectSet = new Set([...(baseHost ? [baseHost] : []), ...normalizedProjectDomains]);
+  const apiSet = new Set(normalizedApiDomains);
+  return {
+    allowSubdomains: allowSubdomains === true,
+    projectDomains: [...projectSet],
+    apiDomains: [...apiSet]
+  };
+}
+
+function isApiDomain(pageUrl, domainScope = null) {
+  if (!domainScope || !Array.isArray(domainScope.apiDomains) || domainScope.apiDomains.length === 0) return false;
+  try {
+    const host = normalizeDomainHost(new URL(pageUrl).hostname);
+    return domainScope.apiDomains.some((apiDomain) => hostMatchesDomain(host, apiDomain, true));
+  } catch {
+    return false;
+  }
+}
+
+function isWithinProjectDomains(pageUrl, baseUrl, allowSubdomains = false, domainScope = null) {
   try {
     const pageUrlObj = new URL(pageUrl);
+    const pageHostname = pageUrlObj.hostname.replace(/^www\./, '').toLowerCase();
+
+    if (isApiDomain(pageUrl, domainScope)) return false;
+
+    if (domainScope && Array.isArray(domainScope.projectDomains) && domainScope.projectDomains.length > 0) {
+      return domainScope.projectDomains.some((domainHost) => hostMatchesDomain(pageHostname, domainHost, allowSubdomains));
+    }
+
     const baseUrlObj = new URL(baseUrl);
-    
-    // Check if hostname matches (including www vs non-www)
-    const pageHostname = pageUrlObj.hostname.replace(/^www\./, '');
-    const baseHostname = baseUrlObj.hostname.replace(/^www\./, '');
+    const baseHostname = baseUrlObj.hostname.replace(/^www\./, '').toLowerCase();
 
     if (pageHostname === baseHostname) return true;
-
     if (!allowSubdomains) return false;
-
-    const getBaseDomain = (hostname) => {
-      const parts = String(hostname || '').split('.').filter(Boolean);
-      if (parts.length < 2) return String(hostname || '');
-      return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
-    };
-
-    return getBaseDomain(pageHostname) === getBaseDomain(baseHostname);
+    return hostBaseDomain(pageHostname) === hostBaseDomain(baseHostname);
   } catch (error) {
     // If URL parsing fails, treat as external
     return false;
   }
 }
 
+function isWithinDomain(pageUrl, baseUrl, allowSubdomains = false, domainScope = null) {
+  return isWithinProjectDomains(pageUrl, baseUrl, allowSubdomains, domainScope);
+}
+
+async function recordApiDomainClassification(jobId, projectId, apiUrl, pageUrl, runnerToken = '') {
+  try {
+    await sendApiCallsToBackend(
+      jobId,
+      projectId,
+      [
+        {
+          url: apiUrl,
+          method: 'REDIRECT',
+          status: null,
+          page_url: pageUrl || '',
+          request_headers: {},
+          response_headers: { 'x-aionqa-classification': 'api-domain-redirect' },
+          timestamp: Date.now()
+        }
+      ],
+      runnerToken
+    );
+  } catch (err) {
+    console.warn(`[API-CALLS] Failed to record API domain classification for ${apiUrl}: ${err.message}`);
+  }
+}
+
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
-async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null, allowSubdomains = false) {
+async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null, allowSubdomains = false, domainScope = null) {
   try {
     // Domain filtering: Only send internal pages to backend
-    if (baseUrl && !isWithinDomain(pageUrl, baseUrl, allowSubdomains)) {
+    if (baseUrl && !isWithinDomain(pageUrl, baseUrl, allowSubdomains, domainScope)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageUrl}`);
       return null;
     }
@@ -330,10 +404,10 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
 
 // Send discovered page to backend immediately (incremental storage)
 // Returns the pageId from the backend
-async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allowSubdomains = false) {
+async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allowSubdomains = false, domainScope = null) {
   try {
     // Domain filtering: Only send internal pages to backend
-    if (baseUrl && !isWithinDomain(pageData.url, baseUrl, allowSubdomains)) {
+    if (baseUrl && !isWithinDomain(pageData.url, baseUrl, allowSubdomains, domainScope)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageData.url}`);
       return null;
     }
@@ -2039,6 +2113,14 @@ const modeHandlers = {
       throw new Error('No seed URL found in context - cannot start crawl');
     }
     seedUrl = ensureUrlHasScheme(seedUrl);
+    const projectDomains = Array.isArray(context?.project_domains) ? context.project_domains : [];
+    const apiDomains = Array.isArray(context?.api_domains) ? context.api_domains : [];
+    const domainScope = buildDomainScope(seedUrl, allowSubdomains, projectDomains, apiDomains);
+    await sendLog(
+      jobId,
+      'info',
+      `🌐 Domain scope: project=[${domainScope.projectDomains.join(', ') || normalizeDomainHost(seedUrl)}] api=[${domainScope.apiDomains.join(', ') || 'none'}]`
+    );
     
     const urlQueue = [{ url: canonicalizeUrl(seedUrl), depth: 0 }];
     await sendLog(jobId, 'info', `📍 Starting workflow crawl from seed URL: ${seedUrl}`);
@@ -2051,7 +2133,7 @@ const modeHandlers = {
         const currentUrl = canonicalizeUrl(rawUrl) || ensureUrlHasScheme(rawUrl) || rawUrl;
         
         // Strict domain: never visit or analyze URLs outside the crawl's seed domain
-        if (!isWithinDomain(currentUrl, seedUrl, allowSubdomains)) {
+        if (!isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope)) {
           await sendLog(jobId, 'info', `⏭️ Skipping URL outside crawl domain: ${currentUrl} (seed: ${seedUrl})`);
           continue;
         }
@@ -2132,13 +2214,26 @@ const modeHandlers = {
               finalUrl = page.url();
               if (finalUrl !== currentUrl) {
                 await sendLog(jobId, 'info', `🔄 Page redirected from ${currentUrl} to ${finalUrl}`);
+                try {
+                  const fromHost = normalizeDomainHost(new URL(currentUrl).hostname);
+                  const toHost = normalizeDomainHost(new URL(finalUrl).hostname);
+                  if (fromHost && toHost && fromHost !== toHost && isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope)) {
+                    await sendLog(
+                      jobId,
+                      'warn',
+                      `⚠️ Redirect crossed project domains: ${fromHost} -> ${toHost} (both allowed in project scope)`
+                    );
+                  }
+                } catch (_) {
+                  // ignore host parse errors
+                }
               }
             } catch (urlError) {
               console.warn(`Could not get page URL after navigation: ${urlError.message}`);
             }
             // Defer strict-domain skip until after login-redirect handling.
             // Some authenticated sites redirect to an auth subdomain first and can recover in-session.
-            redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains);
+            redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
           } catch (navError) {
             await sendLog(jobId, 'warn', `⚠️ Navigation failed: ${navError.message}`);
             // Try to continue with current page
@@ -2231,7 +2326,12 @@ const modeHandlers = {
         }
 
         // Strict domain: do not analyze pages outside the crawl seed domain after redirect/login handling.
-        if (!isWithinDomain(finalUrl, seedUrl, allowSubdomains)) {
+        if (isApiDomain(finalUrl, domainScope)) {
+          await sendLog(jobId, 'warn', `↪️ Redirected to API domain within project scope, skipping page analysis and recording in API Explorer: ${currentUrl} -> ${finalUrl}`);
+          await recordApiDomainClassification(jobId, projectId, finalUrl, currentUrl, context?.runner_token || '');
+          continue;
+        }
+        if (!isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope)) {
           await sendLog(
             jobId,
             'info',
@@ -2300,7 +2400,12 @@ const modeHandlers = {
           }
         }
         // Strict domain: only analyze pages within the crawl's seed domain (never other domains)
-        if (!isWithinDomain(actualPageUrl, seedUrl, allowSubdomains)) {
+        if (isApiDomain(actualPageUrl, domainScope)) {
+          await sendLog(jobId, 'warn', `↪️ Navigated to API domain within project scope, skipping page storage and recording in API Explorer: ${actualPageUrl}`);
+          await recordApiDomainClassification(jobId, projectId, actualPageUrl, currentUrl, context?.runner_token || '');
+          continue;
+        }
+        if (!isWithinDomain(actualPageUrl, seedUrl, allowSubdomains, domainScope)) {
           await sendLog(jobId, 'info', `⏭️ Skipping page outside crawl domain: ${actualPageUrl} (seed: ${seedUrl})`);
           continue;
         }
@@ -2313,7 +2418,7 @@ const modeHandlers = {
           if (
             requestedPageUrlCanonical &&
             requestedPageUrlCanonical !== actualPageUrlCanonical &&
-            isWithinDomain(requestedPageUrlCanonical, seedUrl, allowSubdomains)
+            isWithinDomain(requestedPageUrlCanonical, seedUrl, allowSubdomains, domainScope)
           ) {
             try {
               const redirectSummary = `Route redirected to ${actualPageUrlCanonical} and reused existing analysis for that destination page.`;
@@ -2351,7 +2456,8 @@ const modeHandlers = {
                   non_interactive_elements: []
                 },
                 projectStartUrl,
-                allowSubdomains
+                allowSubdomains,
+                domainScope
               );
               await sendLog(
                 jobId,
@@ -2376,7 +2482,8 @@ const modeHandlers = {
           projectId,
           projectStartUrl,
           lighthouseResults,
-          allowSubdomains
+          allowSubdomains,
+          domainScope
         );
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
@@ -2726,7 +2833,24 @@ const modeHandlers = {
         // Step 3: Extract links from page for crawling (if not at max depth)
         // Use seed URL as domain authority so "internal" = same domain as crawl seed only (no other domains)
         if (shouldDiscoverLinks && depth < maxDepth) {
-          const linksData = await extractAllLinks(page, jobId, seedUrl, allowSubdomains);
+          const linksData = await extractAllLinks(page, jobId, seedUrl, allowSubdomains, domainScope);
+          if (Array.isArray(linksData.api) && linksData.api.length > 0) {
+            await sendApiCallsToBackend(
+              jobId,
+              projectId,
+              linksData.api.slice(0, 200).map((link) => ({
+                url: link.href || link.urlWithoutHash || '',
+                method: 'GET',
+                status: null,
+                page_url: actualPageUrlCanonical || currentUrl,
+                request_headers: {},
+                response_headers: { 'x-aionqa-classification': 'api-domain-link' },
+                timestamp: Date.now()
+              })),
+              context?.runner_token || ''
+            );
+            await sendLog(jobId, 'warn', `ℹ️ Classified ${linksData.api.length} link(s) as API-domain endpoints (not crawled as pages)`);
+          }
           const allInternal = Array.isArray(linksData?.internal) ? linksData.internal : [];
           const anchors = [];
           const crawlableInternalLinks = [];
@@ -2803,7 +2927,7 @@ const modeHandlers = {
               const urlToCheck = canonicalizeUrl((link?.urlWithoutHash || link?.href || '').split('#')[0].trim());
               if (!urlToCheck) continue;
               // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
-              if (!isWithinDomain(urlToCheck, seedUrl, allowSubdomains)) continue;
+              if (!isWithinDomain(urlToCheck, seedUrl, allowSubdomains, domainScope)) continue;
               if (!visitedUrls.has(urlToCheck) && !analyzedPageUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
                 if (!isLoginJob) {
                   urlQueue.push({ url: urlToCheck, depth: depth + 1 });
@@ -3342,7 +3466,10 @@ async function performMediaCrawl(page, context, openaiClient) {
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'media', openaiClient, {
     max_depth: context.options?.max_depth ?? 3,
     max_pages: context.options?.max_pages ?? 50,
-    runner_token: context.runner_token
+    runner_token: context.runner_token,
+    project_id: context.project_id || null,
+    project_domains: context.project_domains || context.options?.project_domains || [],
+    api_domains: context.api_domains || context.options?.api_domains || []
   });
   
   // Build overall conclusion
@@ -3482,7 +3609,10 @@ async function performTextCrawl(page, context, openaiClient) {
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'text', openaiClient, {
     max_depth: context.options?.max_depth ?? 3,
     max_pages: context.options?.max_pages ?? 50,
-    runner_token: context.runner_token
+    runner_token: context.runner_token,
+    project_id: context.project_id || null,
+    project_domains: context.project_domains || context.options?.project_domains || [],
+    api_domains: context.api_domains || context.options?.api_domains || []
   });
   
   // Build overall conclusion
@@ -3627,7 +3757,10 @@ async function performFormsCrawl(page, context, openaiClient) {
   const analyzedPages = await recursiveCrawl(page, jobId, startUrl, 'forms', openaiClient, {
     max_depth: context.options?.max_depth ?? 3,
     max_pages: context.options?.max_pages ?? 50,
-    runner_token: context.runner_token
+    runner_token: context.runner_token,
+    project_id: context.project_id || null,
+    project_domains: context.project_domains || context.options?.project_domains || [],
+    api_domains: context.api_domains || context.options?.api_domains || []
   });
   
   // Build overall conclusion
@@ -3728,7 +3861,7 @@ async function extractPageElements(page, jobId) {
 // performStaticLogin function completely removed - all login operations must use workflow templates (rule 95-remove-deprecated-immediately.mdc)
 
 // Comprehensive link extraction
-async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
+async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false, domainScope = null) {
   try {
     await sendLog(jobId, 'info', '🔗 Extracting all links from page (comprehensive scan)...');
     
@@ -3736,6 +3869,8 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
     const links = await page.$$eval('a[href], area[href], [data-href], [data-url]', (elements, opts) => {
       const baseUrl = opts?.baseUrl || '';
       const allowSubdomains = Boolean(opts?.allowSubdomains);
+      const projectDomains = Array.isArray(opts?.projectDomains) ? opts.projectDomains : [];
+      const apiDomains = Array.isArray(opts?.apiDomains) ? opts.apiDomains : [];
       const linkSet = new Set();
       const links = [];
 
@@ -3744,6 +3879,22 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
         const parts = normalizeHost(hostname).split('.').filter(Boolean);
         if (parts.length < 2) return normalizeHost(hostname);
         return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+      };
+      const hostMatchesDomain = (host, domain, allowSubs) => {
+        const h = normalizeHost(host);
+        const d = normalizeHost(domain);
+        if (!h || !d) return false;
+        if (h === d) return true;
+        if (allowSubs && (h.endsWith(`.${d}`) || getBaseDomain(h) === getBaseDomain(d))) return true;
+        return false;
+      };
+      const isApiHost = (host) => apiDomains.some((apiDomain) => hostMatchesDomain(host, apiDomain, true));
+      const isProjectHost = (host, baseHost) => {
+        if (host === baseHost) return true;
+        if (projectDomains.length === 0) {
+          return allowSubdomains && getBaseDomain(host) === getBaseDomain(baseHost);
+        }
+        return projectDomains.some((domain) => hostMatchesDomain(host, domain, allowSubdomains));
       };
       
       elements.forEach(el => {
@@ -3756,24 +3907,26 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
         
         // Parse URL to check if it's within domain
         let isInternal = false;
+        let isApi = false;
         let fullUrl = href;
         try {
           const linkUrl = new URL(href);
           const baseUrlObj = new URL(baseUrl);
-          // Check both hostname and origin for more accurate domain matching
           const linkHost = normalizeHost(linkUrl.hostname);
           const baseHost = normalizeHost(baseUrlObj.hostname);
-          isInternal =
-            linkHost === baseHost ||
-            linkUrl.origin === baseUrlObj.origin ||
-            (allowSubdomains && getBaseDomain(linkHost) === getBaseDomain(baseHost));
+          isApi = isApiHost(linkHost);
+          isInternal = !isApi && isProjectHost(linkHost, baseHost);
           fullUrl = linkUrl.href;
         } catch (e) {
           // Relative URL or invalid
           if (href.startsWith('/') || href.startsWith('./') || href.startsWith('../') || !href.includes('://')) {
+            // Relative links are internal to current page host by definition.
             isInternal = true;
             try {
               fullUrl = new URL(href, baseUrl).href;
+              const relHost = normalizeHost(new URL(fullUrl).hostname);
+              isApi = isApiHost(relHost);
+              if (isApi) isInternal = false;
             } catch (e2) {
               fullUrl = href;
             }
@@ -3794,6 +3947,7 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
             hashFragment: hashFragment,
             title: el.title || '',
             isInternal: isInternal,
+            isApi: isApi,
             target: el.target || '',
             rel: el.rel || ''
           });
@@ -3801,7 +3955,12 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
       });
       
       return links;
-    }, { baseUrl, allowSubdomains });
+    }, {
+      baseUrl,
+      allowSubdomains,
+      projectDomains: Array.isArray(domainScope?.projectDomains) ? domainScope.projectDomains : [],
+      apiDomains: Array.isArray(domainScope?.apiDomains) ? domainScope.apiDomains : []
+    });
     
     const normalizeUrlForDedup = (value) => {
       try {
@@ -3815,6 +3974,7 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
       }
     };
     const internalLinksRaw = links.filter(l => l.isInternal);
+    const apiLinksRaw = links.filter(l => l.isApi);
     const uniqueInternalMap = new Map();
     for (const link of internalLinksRaw) {
       const dedupeKey = normalizeUrlForDedup(link?.urlWithoutHash || link?.href || '');
@@ -3828,9 +3988,10 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
       }
     }
     const internalLinks = Array.from(uniqueInternalMap.values());
-    const externalLinks = links.filter(l => !l.isInternal);
+    const externalLinks = links.filter(l => !l.isInternal && !l.isApi);
+    const apiLinks = apiLinksRaw;
     
-    await sendLog(jobId, 'info', `📊 Found ${links.length} unique links (${internalLinks.length} internal, ${externalLinks.length} external)`);
+    await sendLog(jobId, 'info', `📊 Found ${links.length} unique links (${internalLinks.length} internal, ${apiLinks.length} api, ${externalLinks.length} external)`);
     
     // Log internal links for debugging
     if (internalLinks.length > 0) {
@@ -3840,12 +4001,13 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false) {
     return {
       all: links,
       internal: internalLinks,
+      api: apiLinks,
       external: externalLinks,
       total: links.length
     };
   } catch (error) {
     await sendLog(jobId, 'error', `Failed to extract links: ${error.message}`);
-    return { all: [], internal: [], external: [], total: 0 };
+    return { all: [], internal: [], api: [], external: [], total: 0 };
   }
 }
 
@@ -3951,6 +4113,12 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
   }
 
   const allowSubdomains = options?.allow_subdomains === true;
+  const domainScope = buildDomainScope(
+    baseUrl,
+    allowSubdomains,
+    Array.isArray(options?.project_domains) ? options.project_domains : [],
+    Array.isArray(options?.api_domains) ? options.api_domains : []
+  );
   
   // Generate unique conversation ID for this page's analysis
   const conversationId = `conv_${jobId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -3986,7 +4154,7 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
   await sendLog(jobId, 'info', `🔍 Step 2/6: Extracting links from page...`, pageContext);
   let linksData = { all: [], internal: [], external: [], total: 0 };
   try {
-    linksData = await extractAllLinks(page, jobId, currentUrl, allowSubdomains);
+    linksData = await extractAllLinks(page, jobId, currentUrl, allowSubdomains, domainScope);
     await sendLog(jobId, 'info', `✓ Found ${linksData.total} links (${linksData.internal.length} internal, ${linksData.external.length} external)`, pageContext);
   } catch (error) {
     await sendLog(jobId, 'warn', `⚠️ Link extraction failed: ${error.message}`, pageContext);
@@ -4309,6 +4477,12 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
   const maxDepth = options.max_depth || 3;
   const maxPages = options.max_pages || 50;
   const allowSubdomains = options?.allow_subdomains === true;
+  const domainScope = buildDomainScope(
+    startUrl,
+    allowSubdomains,
+    Array.isArray(options?.project_domains) ? options.project_domains : [],
+    Array.isArray(options?.api_domains) ? options.api_domains : []
+  );
   
   const visitedUrls = new Set();
   const analyzedPages = [];
@@ -4328,7 +4502,12 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
     const normalizedUrl = currentUrl.split('#')[0];
     
     // Strict domain: never visit or analyze URLs outside the crawl's seed domain
-    if (!isWithinDomain(normalizedUrl, startUrl, allowSubdomains)) {
+    if (isApiDomain(normalizedUrl, domainScope)) {
+      await sendLog(jobId, 'warn', `↪️ Skipping API-domain URL (classified to API Explorer, not page): ${normalizedUrl}`, { page_url: currentUrl, mode: approach });
+      await recordApiDomainClassification(jobId, options?.project_id || null, normalizedUrl, currentUrl, options?.runner_token || '');
+      continue;
+    }
+    if (!isWithinDomain(normalizedUrl, startUrl, allowSubdomains, domainScope)) {
       await sendLog(jobId, 'info', `⏭️ Skipping URL outside crawl domain: ${normalizedUrl} (seed: ${startUrl})`, { page_url: currentUrl, mode: approach });
       continue;
     }
@@ -4429,6 +4608,22 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           pageTitle = await page.title();
           pageUrl = await page.url();
           await sendLog(jobId, 'info', `📄 Page loaded: ${pageTitle}`, currentPageContext);
+          if (pageUrl && currentUrl && pageUrl !== currentUrl) {
+            try {
+              const fromHost = normalizeDomainHost(new URL(currentUrl).hostname);
+              const toHost = normalizeDomainHost(new URL(pageUrl).hostname);
+              if (fromHost && toHost && fromHost !== toHost && isWithinDomain(pageUrl, startUrl, allowSubdomains, domainScope)) {
+                await sendLog(
+                  jobId,
+                  'warn',
+                  `⚠️ Redirect crossed project domains: ${fromHost} -> ${toHost} (both allowed in project scope)`,
+                  currentPageContext
+                );
+              }
+            } catch (_) {
+              // ignore host parse errors
+            }
+          }
         } catch (error) {
           await sendLog(jobId, 'error', `❌ Failed to get page info: ${error.message}`, currentPageContext);
           throw error;
@@ -4444,7 +4639,8 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           context?.project_id || null,
           startUrl,
           null,
-          allowSubdomains
+          allowSubdomains,
+          domainScope
         );
         
         // Update page context with pageId for all subsequent logs
@@ -4462,7 +4658,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         }
         
         // Check if this page is within the target domain before AI analysis
-        const isWithinTargetDomain = isWithinDomain(currentUrl, startUrl, allowSubdomains);
+        const isWithinTargetDomain = isWithinDomain(currentUrl, startUrl, allowSubdomains, domainScope);
         
         if (!isWithinTargetDomain) {
           // Skip AI analysis for external domains - just collect basic info
@@ -4523,7 +4719,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         
         // Update the page with full analysis data
         if (pageId) {
-          await sendDiscoveredPageToBackend(jobId, pageAnalysis, startUrl, allowSubdomains);
+          await sendDiscoveredPageToBackend(jobId, pageAnalysis, startUrl, allowSubdomains, domainScope);
           await sendLog(jobId, 'info', `✓ Page analysis complete and stored`, {
             ...currentPageContext,
             pageId: pageId,
@@ -4567,7 +4763,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           // Regular link - use urlWithoutHash to avoid processing same page with different hashes
           const urlToCheck = link.urlWithoutHash || link.href.split('#')[0];
           // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
-          if (!isWithinDomain(urlToCheck, startUrl, allowSubdomains)) continue;
+          if (!isWithinDomain(urlToCheck, startUrl, allowSubdomains, domainScope)) continue;
           if (!visitedUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
             urlQueue.push({ url: urlToCheck, depth: depth + 1 });
             newLinksAdded++;
@@ -4637,7 +4833,10 @@ async function performStaticCrawl(page, context, openaiClient) {
     max_depth: context.options?.max_depth ?? 3,
     max_pages: context.options?.max_pages ?? 50,
     skip_crawled_pages: context.options?.skip_crawled_pages ?? false,
-    runner_token: context.runner_token
+    runner_token: context.runner_token,
+    project_id: context.project_id || null,
+    project_domains: context.project_domains || context.options?.project_domains || [],
+    api_domains: context.api_domains || context.options?.api_domains || []
   });
   
   // Build overall conclusion
@@ -6111,6 +6310,18 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       context.allow_subdomains = allowSubdomains;
       if (context.options && typeof context.options === 'object') {
         context.options.allow_subdomains = allowSubdomains;
+      }
+      const normalizedProjectDomains = Array.isArray(context.project_domains)
+        ? context.project_domains
+        : (Array.isArray(context.options?.project_domains) ? context.options.project_domains : []);
+      const normalizedApiDomains = Array.isArray(context.api_domains)
+        ? context.api_domains
+        : (Array.isArray(context.options?.api_domains) ? context.options.api_domains : []);
+      context.project_domains = normalizedProjectDomains;
+      context.api_domains = normalizedApiDomains;
+      if (context.options && typeof context.options === 'object') {
+        context.options.project_domains = normalizedProjectDomains;
+        context.options.api_domains = normalizedApiDomains;
       }
     }
     
