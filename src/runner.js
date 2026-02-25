@@ -7,6 +7,7 @@
 import { startCrawl } from './crawling/unified-operations.js';
 import { executeLoginWithWorkflow } from './login/login-workflow-engine.js';
 import axios from 'axios';
+import https from 'https';
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import express from 'express';
@@ -457,6 +458,12 @@ async function executeJob(job) {
       console.warn(`⚠️  Failed to update job status: ${statusError.message}`);
     }
 
+    if (job.health_check || job.context?.health_check) {
+      const result = await executeHealthCheckJob(job);
+      await reportJobComplete(job.id, result);
+      console.log(`✅ Health check job ${job.id} completed`);
+      return true;
+    }
     if (job.jobType === 'login') {
       // Execute login job
       console.log(`[DEBUG] About to execute login job, job object keys:`, Object.keys(job));
@@ -1301,6 +1308,176 @@ async function checkSingleUrlAvailability(url, timeoutMs) {
       ok: false,
       response_time_ms: Date.now() - startedAt,
       error: error.message
+    };
+  }
+}
+
+/**
+ * Execute a scheduled health check (availability, certificate, sitemap, content_check) on the crawler.
+ * Returns result in the shape expected by the backend: { success, schedule_result: { ok, status, ... } }.
+ */
+async function executeHealthCheckJob(job) {
+  const hc = job.health_check || job.context?.health_check || {};
+  const kind = hc.kind || 'availability';
+  const url = hc.target?.url || job.start_url || job.url || '';
+  const options = hc.options || {};
+  const timeoutMs = Number(options.request_timeout_ms) || DEFAULT_AVAILABILITY_TIMEOUT_MS;
+  const checkedAt = new Date();
+
+  if (!url) {
+    return {
+      success: false,
+      schedule_result: { ok: false, status: 'invalid_target', message: 'No target URL', checked_at: checkedAt }
+    };
+  }
+
+  try {
+    if (kind === 'availability') {
+      const start = Date.now();
+      const response = await axios.get(url, { timeout: timeoutMs, maxRedirects: 5, validateStatus: () => true, responseType: 'text' });
+      const ok = response.status >= 200 && response.status < 400;
+      return {
+        success: true,
+        schedule_result: {
+          ok,
+          status: ok ? 'ok' : 'bad_status',
+          http_status: response.status,
+          response_time_ms: Date.now() - start,
+          checked_url: url,
+          checked_at: checkedAt
+        }
+      };
+    }
+
+    if (kind === 'certificate') {
+      const start = Date.now();
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch {
+        return {
+          success: false,
+          schedule_result: { ok: false, status: 'invalid_target', message: 'Invalid URL', checked_at: checkedAt }
+        };
+      }
+      if (parsed.protocol !== 'https:') {
+        return {
+          success: false,
+          schedule_result: { ok: false, status: 'invalid_target', message: 'Certificate check requires HTTPS', checked_url: url, checked_at: checkedAt }
+        };
+      }
+      const result = await new Promise((resolve) => {
+        const req = https.request({
+          hostname: parsed.hostname,
+          port: parsed.port || 443,
+          path: parsed.pathname || '/',
+          method: 'GET',
+          timeout: timeoutMs,
+          rejectUnauthorized: false
+        }, (res) => {
+          const responseTimeMs = Date.now() - start;
+          const cert = res.socket?.getPeerCertificate?.();
+          if (!cert || Object.keys(cert).length === 0) {
+            resolve({ ok: false, status: 'no_certificate', message: 'No peer certificate', response_time_ms: responseTimeMs });
+            return;
+          }
+          const now = new Date();
+          const validTo = cert.valid_to ? new Date(cert.valid_to) : null;
+          const validFrom = cert.valid_from ? new Date(cert.valid_from) : null;
+          const isExpired = validTo ? now > validTo : true;
+          const notYetValid = validFrom ? now < validFrom : false;
+          const ok = !isExpired && !notYetValid;
+          resolve({
+            ok,
+            status: ok ? 'ok' : (isExpired ? 'expired' : 'not_yet_valid'),
+            checked_url: url,
+            response_time_ms: responseTimeMs,
+            valid_from: validFrom ? validFrom.toISOString() : null,
+            valid_to: validTo ? validTo.toISOString() : null,
+            days_until_expiry: validTo && !isExpired ? Math.floor((validTo - now) / (24 * 60 * 60 * 1000)) : null,
+            checked_at: checkedAt
+          });
+        });
+        req.on('error', (err) => {
+          resolve({ ok: false, status: 'error', message: String(err.message), response_time_ms: Date.now() - start, checked_at: checkedAt });
+        });
+        req.on('timeout', () => {
+          req.destroy();
+          resolve({ ok: false, status: 'timeout', message: 'Connection timeout', response_time_ms: Date.now() - start, checked_at: checkedAt });
+        });
+        req.end();
+      });
+      return { success: true, schedule_result: { ...result, checked_at: checkedAt } };
+    }
+
+    if (kind === 'sitemap') {
+      const sitemapUrl = (options.sitemap_url && String(options.sitemap_url).trim()) || (() => {
+        try {
+          const base = new URL(url);
+          return `${base.origin}/sitemap.xml`;
+        } catch {
+          return '';
+        }
+      })();
+      if (!sitemapUrl) {
+        return {
+          success: false,
+          schedule_result: { ok: false, status: 'invalid_target', message: 'No sitemap URL', checked_at: checkedAt }
+        };
+      }
+      const start = Date.now();
+      const response = await axios.get(sitemapUrl, { timeout: timeoutMs, maxRedirects: 3, validateStatus: () => true, responseType: 'text' });
+      const xml = String(response.data || '');
+      const locMatches = xml.match(/<loc>([^<]+)<\/loc>/gi) || [];
+      const ok = response.status >= 200 && response.status < 400 && locMatches.length > 0;
+      return {
+        success: true,
+        schedule_result: {
+          ok,
+          status: ok ? 'ok' : (response.status >= 200 && response.status < 400 ? 'empty' : 'bad_status'),
+          http_status: response.status,
+          response_time_ms: Date.now() - start,
+          sitemap_url: sitemapUrl,
+          url_count: locMatches.length,
+          checked_at: checkedAt
+        }
+      };
+    }
+
+    if (kind === 'content_check') {
+      const mustInclude = String(options.content_must_include || '').trim();
+      const start = Date.now();
+      const response = await axios.get(url, { timeout: timeoutMs, maxRedirects: 5, validateStatus: () => true, responseType: 'text' });
+      const body = String(response.data || '');
+      const ok = response.status >= 200 && response.status < 400 && (!mustInclude || body.includes(mustInclude));
+      return {
+        success: true,
+        schedule_result: {
+          ok,
+          status: ok ? 'ok' : (response.status >= 200 && response.status < 400 ? 'missing_content' : 'bad_status'),
+          http_status: response.status,
+          response_time_ms: Date.now() - start,
+          checked_url: url,
+          must_include: mustInclude || null,
+          checked_at: checkedAt
+        }
+      };
+    }
+
+    return {
+      success: false,
+      schedule_result: { ok: false, status: 'unsupported', message: `Unsupported check kind: ${kind}`, checked_at: checkedAt }
+    };
+  } catch (err) {
+    return {
+      success: false,
+      schedule_result: {
+        ok: false,
+        status: 'error',
+        message: String(err.message || err),
+        checked_url: url,
+        checked_at: checkedAt
+      }
     };
   }
 }
