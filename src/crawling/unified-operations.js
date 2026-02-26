@@ -2089,6 +2089,22 @@ const modeHandlers = {
         return noHash.replace(/\/+$/, '') || noHash;
       }
     };
+    // For queue/dedup: same page by default (canonical); when treat_trailing_slash_separately, /path and /path/ are different
+    const treatTrailingSlashSeparately = context.options?.treat_trailing_slash_separately === true;
+    const urlKeyForDedupe = (url) => {
+      const withScheme = ensureUrlHasScheme(url);
+      if (!withScheme) return '';
+      if (treatTrailingSlashSeparately) {
+        try {
+          const u = new URL(withScheme);
+          u.hash = '';
+          return u.toString();
+        } catch {
+          return String(withScheme).split('#')[0].trim() || withScheme;
+        }
+      }
+      return canonicalizeUrl(url);
+    };
     // Get initial URL - handle case where page might navigate after cookies are loaded
     // IMPORTANT: Don't access page.url() immediately - page might not be ready or context might be destroyed
     // Use the seed URL from context instead
@@ -2122,7 +2138,7 @@ const modeHandlers = {
       `🌐 Domain scope: project=[${domainScope.projectDomains.join(', ') || normalizeDomainHost(seedUrl)}] api=[${domainScope.apiDomains.join(', ') || 'none'}]`
     );
     
-    const urlQueue = [{ url: canonicalizeUrl(seedUrl), depth: 0 }];
+    const urlQueue = [{ url: urlKeyForDedupe(seedUrl), depth: 0 }];
     await sendLog(jobId, 'info', `📍 Starting workflow crawl from seed URL: ${seedUrl}`);
     let pagesAnalyzed = 0;
     const allWorkflows = [];
@@ -2130,7 +2146,7 @@ const modeHandlers = {
     try {
       while (urlQueue.length > 0 && pagesAnalyzed < maxPages) {
         const { url: rawUrl, depth } = urlQueue.shift();
-        const currentUrl = canonicalizeUrl(rawUrl) || ensureUrlHasScheme(rawUrl) || rawUrl;
+        const currentUrl = urlKeyForDedupe(rawUrl) || ensureUrlHasScheme(rawUrl) || rawUrl;
         
         // Strict domain: never visit or analyze URLs outside the crawl's seed domain
         if (!isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope)) {
@@ -2410,8 +2426,8 @@ const modeHandlers = {
           continue;
         }
         const projectStartUrl = seedUrl; // Use seed URL so we only store pages from this crawl's domain
-        const requestedPageUrlCanonical = canonicalizeUrl(currentUrl);
-        const actualPageUrlCanonical = canonicalizeUrl(actualPageUrl);
+        const requestedPageUrlCanonical = urlKeyForDedupe(currentUrl);
+        const actualPageUrlCanonical = urlKeyForDedupe(actualPageUrl);
         if (actualPageUrlCanonical && analyzedPageUrls.has(actualPageUrlCanonical)) {
           // Preserve redirected routes as first-class analyzed pages so they appear in Pages UI/reporting.
           // Without this, nav items that redirect to an already analyzed page get silently dropped.
@@ -2867,7 +2883,7 @@ const modeHandlers = {
             try {
               const current = new URL(currentUrl);
               const target = new URL(href, currentUrl);
-              const targetCanonical = canonicalizeUrl(target.href);
+              const targetCanonical = urlKeyForDedupe(target.href);
               const samePath = normalizePath(target.pathname) === normalizePath(current.pathname);
               const isAnchor = Boolean(target.hash) && target.origin === current.origin && samePath;
               if (isAnchor) {
@@ -2889,7 +2905,7 @@ const modeHandlers = {
               if (href.includes('#') && urlWithoutHash === currentUrl.split('#')[0]) {
                 anchors.push(link);
               } else {
-                const targetCanonical = canonicalizeUrl(urlWithoutHash);
+                const targetCanonical = urlKeyForDedupe(urlWithoutHash);
                 if (targetCanonical && targetCanonical !== currentUrl) {
                   if (!uniqueCrawlableByCanonicalUrl.has(targetCanonical)) {
                     uniqueCrawlableByCanonicalUrl.set(targetCanonical, {
@@ -2924,7 +2940,7 @@ const modeHandlers = {
             let queuedCount = 0;
             for (const link of crawlableInternalLinks.slice(0, 50)) {
               // Regular link - use base URL (without hash) for deduplication
-              const urlToCheck = canonicalizeUrl((link?.urlWithoutHash || link?.href || '').split('#')[0].trim());
+              const urlToCheck = urlKeyForDedupe((link?.urlWithoutHash || link?.href || '').split('#')[0].trim());
               if (!urlToCheck) continue;
               // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
               if (!isWithinDomain(urlToCheck, seedUrl, allowSubdomains, domainScope)) continue;

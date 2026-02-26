@@ -32,7 +32,8 @@ const OptionsSchema = z.object({
   max_depth: z.number().min(0).max(10).default(3), // Changed min from 1 to 0 to allow single-page analysis
   skip_ai_analysis: z.boolean().default(false), // Skip AI analysis but still collect links
   skip_already_analyzed: z.boolean().default(false), // Skip already analyzed pages
-  disable_ai_completely: z.boolean().default(false) // Disable all AI processing
+  disable_ai_completely: z.boolean().default(false), // Disable all AI processing
+  treat_trailing_slash_separately: z.boolean().default(false) // When true, /path and /path/ are different pages; default false = same page
 });
 
 const ContextSchema = z.object({
