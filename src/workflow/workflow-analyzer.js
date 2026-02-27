@@ -827,7 +827,7 @@ class WorkflowAnalyzer {
         const legId = `auto-link-${index + 1}`;
         
         if (isHashBasedAction) {
-          // Hash-based link = modal/popup action on same page, not navigation
+          // Hash-based link = modal/popup action on same page, not navigation — include as action
           legs.push({
             leg_id: legId,
             type: 'click',
@@ -849,28 +849,8 @@ class WorkflowAnalyzer {
               is_modal_action: true
             }
           });
-        } else {
-          // Regular navigation link
-          legs.push({
-            leg_id: legId,
-            type: 'navigate',
-            action: 'navigate',
-            description: `Follow link #${index + 1} to ${baseUrl}`,
-            test_instructions: 'Click the link and verify that the destination page loads successfully without errors.',
-            element_info: {
-              selector: link.selector,
-              selectors: link.selectors || [],
-              href: link.href,
-              text: link.text
-            },
-            confidence: 0.4,
-            status: 'pending',
-            metadata: {
-              generated_by: 'playwright-analysis',
-              source: 'link'
-            }
-          });
         }
+        // Regular navigation links: do NOT create legs/actions; they are listed in links and added to crawl scope if unique and within scanning domains
       });
     }
     
