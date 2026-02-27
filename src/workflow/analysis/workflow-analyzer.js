@@ -5636,6 +5636,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
                   journeys: cleanedJourneys,
                   job_id: jobId
                 };
+                if (workflowState.pageDescription) {
+                  payload.page_description = workflowState.pageDescription;
+                }
                 
                 console.log(`🔍 [JOURNEYS-IMMEDIATE] Saving ${journeys.length} journey(s) immediately after extraction to page ${pageIdToSave}`);
                 const response = await axios.post(
@@ -7879,6 +7882,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       accessibilityData: saveAccessibilityData && accessibilityAnalysis ? accessibilityAnalysis : null,
       job_id: jobId
     };
+    if (workflowState.pageDescription) {
+      payload.page_description = workflowState.pageDescription;
+    }
     
     // Debug: Log journey iterations being sent
     if (journeys.length > 0) {

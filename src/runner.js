@@ -49,7 +49,7 @@ console.log(`🏷️  Crawler Version: ${CRAWLER_VERSION}`);
 console.log(`📅 Crawler Build Date: ${CRAWLER_BUILD_DATE}`);
 
 // Initialize video stream manager for real-time streaming
-const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID);
+const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID, RUNNER_TOKEN);
 
 // Initialize video recorder for full recording
 const videoRecorder = new VideoRecorder(BACKEND_URL, RUNNER_ID, RUNNER_TOKEN);

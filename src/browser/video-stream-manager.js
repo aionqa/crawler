@@ -10,9 +10,10 @@ import path from 'path';
 import axios from 'axios';
 
 class VideoStreamManager {
-  constructor(backendUrl, runnerId) {
+  constructor(backendUrl, runnerId, runnerToken = null) {
     this.backendUrl = backendUrl;
     this.runnerId = runnerId;
+    this.runnerToken = runnerToken ?? process.env.RUNNER_TOKEN ?? null;
     this.activeStreams = new Map(); // jobId -> stream info
     this.frameBuffer = new Map(); // jobId -> circular buffer of frames
     this.bufferSize = 150; // Keep last 150 frames (30 seconds at 5fps)
@@ -153,20 +154,50 @@ class VideoStreamManager {
   }
 
   /**
-   * Send frame to backend
+   * Send frame to backend. Uses presigned S3 upload when runner token is available
+   * (avoids sending large base64 through the backend); otherwise falls back to legacy JSON body.
    */
   async _sendFrame(frameData) {
     try {
-      await axios.post(`${this.backendUrl}/api/runners/${this.runnerId}/stream-frame`, {
-        jobId: frameData.jobId,
-        frame: frameData.data,
-        frameNumber: frameData.frameNumber,
-        timestamp: new Date(frameData.timestamp).toISOString(),
-        url: frameData.url
-      }, {
-        timeout: 3000,
-        maxBodyLength: Infinity
-      });
+      if (this.runnerToken) {
+        // Upload directly to S3 with presigned URL, then notify backend with key only
+        const presignedRes = await axios.post(
+          `${this.backendUrl}/api/upload/presigned-url`,
+          { type: 'frame', jobId: frameData.jobId },
+          { timeout: 5000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
+        );
+        const { url: presignedUrl, key, publicUrl } = presignedRes.data;
+        const imageBuffer = Buffer.from(frameData.data, 'base64');
+        await axios.put(presignedUrl, imageBuffer, {
+          headers: { 'Content-Type': 'image/jpeg' },
+          maxBodyLength: Infinity,
+          timeout: 10000
+        });
+        await axios.post(
+          `${this.backendUrl}/api/runners/${this.runnerId}/stream-frame`,
+          {
+            jobId: frameData.jobId,
+            key,
+            publicUrl,
+            timestamp: new Date(frameData.timestamp).toISOString(),
+            frameNumber: frameData.frameNumber,
+            url: frameData.url
+          },
+          { timeout: 3000 }
+        );
+      } else {
+        // Legacy: send base64 in JSON (can hit body size limits)
+        await axios.post(`${this.backendUrl}/api/runners/${this.runnerId}/stream-frame`, {
+          jobId: frameData.jobId,
+          frame: frameData.data,
+          frameNumber: frameData.frameNumber,
+          timestamp: new Date(frameData.timestamp).toISOString(),
+          url: frameData.url
+        }, {
+          timeout: 3000,
+          maxBodyLength: Infinity
+        });
+      }
     } catch (error) {
       // Silently fail - don't interrupt streaming
       if (error.code !== 'ECONNREFUSED' && error.code !== 'ETIMEDOUT') {
