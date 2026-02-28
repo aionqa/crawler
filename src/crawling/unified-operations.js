@@ -1816,14 +1816,18 @@ async function withBrowser(action, options = {}) {
   
   let browser;
   
+  const viewport = (options.viewport && typeof options.viewport.width === 'number' && typeof options.viewport.height === 'number')
+    ? { width: options.viewport.width, height: options.viewport.height }
+    : { width: 1920, height: 1080 };
+
   try {
-    // Launch local embedded browser with stealth configuration
+    // Launch local embedded browser with stealth configuration (strict viewport from project)
     browser = await chromium.launch({
       headless: true,
-      args: getStealthLaunchArgs()
+      args: getStealthLaunchArgs(viewport)
     });
     
-    await sendLog(options.jobId || 'server', 'info', `✅ Embedded browser launched successfully with stealth configuration`);
+    await sendLog(options.jobId || 'server', 'info', `✅ Embedded browser launched successfully (viewport ${viewport.width}x${viewport.height})`);
   } catch (error) {
     await sendLog(options.jobId || 'server', 'error', `Failed to launch embedded browser: ${error.message}`);
     throw new Error(`Embedded browser launch failed: ${error.message}`);
@@ -1832,11 +1836,11 @@ async function withBrowser(action, options = {}) {
   // Configure browser context with stealth options and video recording support
   const enableRecording = options.enable_video_recording !== false;
   const contextOptions = getStealthContextOptions({
-    viewport: { width: 1920, height: 1080 },
+    viewport,
     userAgent: options.userAgent, // Allow override if provided
     recordVideo: enableRecording ? {
       dir: '/tmp/aionqa_videos',
-      size: { width: 1920, height: 1080 }
+      size: viewport
     } : undefined
   });
   
@@ -1850,8 +1854,8 @@ async function withBrowser(action, options = {}) {
   // Inject stealth scripts to hide automation
   await injectStealthScripts(page);
   
-  // Set viewport to match window size (1920x1080 from launch args)
-  await page.setViewportSize({ width: 1920, height: 1080 });
+  // Set viewport strictly (must match launch and context)
+  await page.setViewportSize(viewport);
   
   console.log('Context and page created, calling callbacks...');
   console.log('options.onContextReady exists:', !!options.onContextReady);
@@ -6384,6 +6388,14 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       await sendLog(jobId, 'warn', `⚠️ Missing workflow_template_id (${workflowTemplateId}) or project_id (${projectId}), skipping pre-navigation cookie check`);
     }
     
+    const browserOptions = {
+      jobId,
+      enable_video_recording: context.enable_video_recording !== false,
+      enable_screenshots: context.enable_screenshots !== false,
+      viewport: (context.viewport && typeof context.viewport.width === 'number' && typeof context.viewport.height === 'number')
+        ? { width: context.viewport.width, height: context.viewport.height }
+        : { width: 1920, height: 1080 }
+    };
     const result = await withBrowser(async ({ page, context: browserContext }) => {
       await sendLog(jobId, 'info', 'Browser session started', { mode, allowSubdomains });
 
@@ -6843,7 +6855,8 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       jobId: jobId,
       browserServiceUrl: context.browserServiceUrl,
       onPageReady: context.onPageReady, // Pass callback for browser streaming
-      onContextReady: context.onContextReady // Pass callback for video recording
+      onContextReady: context.onContextReady, // Pass callback for video recording
+      viewport: browserOptions.viewport
     });
 
     await sendLog(jobId, 'info', `✅ Crawl completed in ${result.duration_ms}ms`);

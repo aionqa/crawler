@@ -642,8 +642,11 @@ async function executeLoginJob(job, streamInterval) {
     password: workflowExecutionContext.credentials.password ? '***' : 'MISSING' 
   });
 
-  // Launch local browser (embedded) - SAME as crawl jobs
-  console.log(`🌐 Launching local Chromium browser for login with stealth configuration`);
+  // Launch local browser (embedded) - viewport from project (strict 1920x1080 default)
+  const viewport = (jobContext.viewport && typeof jobContext.viewport.width === 'number' && typeof jobContext.viewport.height === 'number')
+    ? { width: jobContext.viewport.width, height: jobContext.viewport.height }
+    : { width: 1920, height: 1080 };
+  console.log(`🌐 Launching local Chromium browser for login (viewport ${viewport.width}x${viewport.height})`);
   const { chromium } = await import('playwright');
   
   // Import stealth configuration
@@ -655,15 +658,15 @@ async function executeLoginJob(job, streamInterval) {
   
   const browser = await chromium.launch({ 
     headless: true,
-    args: getStealthLaunchArgs()
+    args: getStealthLaunchArgs(viewport)
   });
 
   const context = await browser.newContext(
     getStealthContextOptions({
-      viewport: { width: 1920, height: 1080 },
+      viewport,
       recordVideo: {
         dir: '/tmp/aionqa_videos',
-        size: { width: 1920, height: 1080 }
+        size: viewport
       }
     })
   );

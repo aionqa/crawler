@@ -11,14 +11,20 @@ export function getRealisticUserAgent() {
   return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 }
 
+const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
+
 /**
  * Get stealth browser launch arguments
+ * @param {{ width: number, height: number }|undefined} viewport - Optional viewport (default 1920x1080)
  */
-export function getStealthLaunchArgs() {
+export function getStealthLaunchArgs(viewport) {
+  const v = viewport && typeof viewport.width === 'number' && typeof viewport.height === 'number'
+    ? viewport
+    : DEFAULT_VIEWPORT;
   return [
     '--no-sandbox',
     '--disable-dev-shm-usage',
-    '--window-size=1920,1080',
+    `--window-size=${v.width},${v.height}`,
     // Opt in to software WebGL to silence "Automatic fallback to software WebGL has been deprecated" (headless/CI often has no GPU)
     '--enable-unsafe-swiftshader',
     '--force-device-scale-factor=1',
@@ -39,7 +45,9 @@ export function getStealthLaunchArgs() {
  */
 export function getStealthContextOptions(options = {}) {
   const baseOptions = {
-    viewport: options.viewport || { width: 1920, height: 1080 },
+    viewport: (options.viewport && typeof options.viewport.width === 'number' && typeof options.viewport.height === 'number')
+      ? options.viewport
+      : DEFAULT_VIEWPORT,
     userAgent: options.userAgent || getRealisticUserAgent(),
     locale: 'en-US',
     timezoneId: 'America/New_York', // Common timezone
