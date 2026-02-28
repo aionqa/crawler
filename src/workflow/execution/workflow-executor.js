@@ -525,18 +525,20 @@ class WorkflowExecutor {
   }
 
   /**
-   * Start a video segment for the leg if video recorder available
+   * Start a video segment for the leg/journey if video recorder available (precise per-journey video)
    */
   startLegSegment(jobId, leg) {
     if (!this.videoRecorder) {
       return null;
     }
+    const journeyId = leg?.journey_id || leg?.leg_id;
     const label = leg?.description
-      ? `Leg: ${leg.description}`
-      : (leg?.leg_id ? `Leg ${leg.leg_id}` : 'Workflow Step');
-    return this.videoRecorder.startSegment(jobId, `leg-${leg?.leg_id || Date.now()}`, label, {
+      ? (journeyId ? `Journey ${journeyId}: ${leg.description}` : `Leg: ${leg.description}`)
+      : (journeyId ? `Journey ${journeyId}` : (leg?.leg_id ? `Leg ${leg.leg_id}` : 'Workflow Step'));
+    return this.videoRecorder.startSegment(jobId, `leg-${leg?.leg_id || journeyId || Date.now()}`, label, {
       type: 'workflow_leg',
       leg_id: leg?.leg_id || null,
+      journey_id: leg?.journey_id || null,
       description: leg?.description || null
     });
   }
@@ -1131,8 +1133,8 @@ class WorkflowExecutor {
             await randomScroll('down', 50 + Math.random() * 150);
           }
           
-          // Brief pause before starting actions
-          await humanDelay(200, 500);
+          // Brief pause before starting actions (slower for visible video)
+          await humanDelay(400, 900);
         } catch (error) {
           // Don't fail if human behavior injection fails
           console.warn(`[WorkflowExecutor] Human behavior injection warning: ${error.message}`);
@@ -2599,8 +2601,8 @@ class WorkflowExecutor {
                 const steps = Math.floor(Math.random() * 15) + 20; // 20-35 steps
                 await pageObj.mouse.move(targetX, targetY, { steps });
                 
-                // Hover before clicking (humans hover to see hover effects)
-                await humanDelay(400, 800); // Longer hover to see menus open
+                // Hover before clicking (humans hover to see hover effects) - slower for video
+                await humanDelay(600, 1200);
                 
                 // Perform click
                 await element.click({ 
@@ -2609,12 +2611,11 @@ class WorkflowExecutor {
                   timeout: options.timeout || 60000
                 });
                 
-                // Wait after clicking to see menu opens, dropdowns, etc. (humans wait to see result)
-                // Longer delay for interactive elements that trigger menus
+                // Wait after clicking to see menu opens, dropdowns (slower for visible video)
                 if (Math.random() < 0.5) {
-                  await humanDelay(600, 1200); // 50% chance: 600-1200ms (for menus)
+                  await humanDelay(900, 1800);
                 } else {
-                  await humanDelay(200, 500);  // 50% chance: 200-500ms (quick clicks)
+                  await humanDelay(400, 900);
                 }
               } else {
                 // Fallback to regular click if bounding box unavailable
@@ -2623,7 +2624,7 @@ class WorkflowExecutor {
                   force: options.force || false,
                   timeout: options.timeout || 60000
                 });
-                await humanDelay(300, 700);
+                await humanDelay(500, 1100);
               }
               
               return;
@@ -2641,7 +2642,7 @@ class WorkflowExecutor {
                   const targetY = box.y + box.height / 2 + offsetY;
                   const steps = Math.floor(Math.random() * 15) + 20;
                   await pageObj.mouse.move(targetX, targetY, { steps });
-                  await humanDelay(400, 800);
+                  await humanDelay(600, 1200);
                 }
                 
                 await firstElement.click({ 
@@ -2649,7 +2650,7 @@ class WorkflowExecutor {
                   force: options.force || false,
                   timeout: options.timeout || 60000
                 });
-                await humanDelay(600, 1200);
+                await humanDelay(900, 1800);
                 return;
               }
               throw clickError;
@@ -2703,19 +2704,17 @@ class WorkflowExecutor {
               );
             }
             
-            // Use human-like typing with mistakes and corrections
-            // Increase typo chance to 15% and add more pauses for better video visibility
+            // Use human-like typing with mistakes and corrections (slower for visible video)
             await humanType(pageObj, selector, String(value), {
-              minDelay: 100,        // Slower typing (100-300ms between keystrokes)
-              maxDelay: 300,
-              typoChance: 0.15,     // 15% chance of making a typo
-              pauseChance: 0.20,    // 20% chance of pausing mid-typing
-              pauseDuration: [600, 1500], // Longer pauses (600-1500ms)
-              moveMouseFirst: true   // Move mouse to field first
+              minDelay: 180,
+              maxDelay: 450,
+              typoChance: 0.15,
+              pauseChance: 0.22,
+              pauseDuration: [800, 2200],
+              moveMouseFirst: true
             });
             
-            // Additional pause after completing field (humans verify what they typed)
-            await humanDelay(500, 1000);
+            await humanDelay(700, 1500);
             
             return;
           } catch (typingError) {

@@ -2896,7 +2896,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         test_instructions: journey.test_instructions,
         expected_outcome: journey.expected_outcome,
         actions: journey.actions || [],
-        journey_id: journey.journey_id
+        journey_id: journey.journey_id,
+        status: journey.status || journey.justification_status || journey.final_result || 'pending'
       }));
       console.log(`✅ [WORKFLOW-RESULT] Derived ${resultLegs.length} legs from journeysToExecute for result (caller will see testable legs)`);
     }
@@ -9915,10 +9916,10 @@ const safeType = async (selectorOrLocator, value, options = {}) => {
   }
 };
 
-// Small human-like delay helper used by some model-generated scripts.
-const humanDelay = async (minMs = 80, maxMs = 220) => {
-  const min = Number.isFinite(minMs) ? Math.max(0, Math.floor(minMs)) : 80;
-  const max = Number.isFinite(maxMs) ? Math.max(min, Math.floor(maxMs)) : 220;
+// Small human-like delay helper used by some model-generated scripts (slower for visible video).
+const humanDelay = async (minMs = 250, maxMs = 650) => {
+  const min = Number.isFinite(minMs) ? Math.max(0, Math.floor(minMs)) : 250;
+  const max = Number.isFinite(maxMs) ? Math.max(min, Math.floor(maxMs)) : 650;
   const jitter = max > min ? Math.floor(Math.random() * (max - min + 1)) : 0;
   const delay = min + jitter;
   await page.waitForTimeout(delay);

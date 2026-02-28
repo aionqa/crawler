@@ -473,6 +473,7 @@ class VideoRecorder {
           label: segment.label,
           type: segment.metadata?.type || 'workflow_leg',
           leg_id: segment.metadata?.leg_id || null,
+          journey_id: segment.metadata?.journey_id || null,
           start_offset: segmentStartOffset,
           end_offset: segmentEndOffset,
           padded_start: paddedStart,

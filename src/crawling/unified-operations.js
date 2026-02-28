@@ -2984,18 +2984,27 @@ const modeHandlers = {
       // If we have journeys and all failed, report crawl as failed (no fallbacks)
       const lastWorkflow = allWorkflows.length > 0 ? allWorkflows[allWorkflows.length - 1] : null;
       const journeys = lastWorkflow?.journeys || [];
+      const legs = lastWorkflow?.legs || [];
       const allJourneysFailed = journeys.length > 0 && journeys.every(j => j.status === 'failure');
       const workflowSuccess = !allJourneysFailed;
       if (allJourneysFailed) {
         await sendLog(jobId, 'warn', `📊 All ${journeys.length} journey(s) failed - reporting crawl as FAILED`);
       }
-      
+      // Include legs and journeys with status so job result shows correct state (fixes "pending" when done)
+      const resultLegs = legs.length > 0 ? legs : journeys.map(j => ({
+        leg_id: j.journey_id,
+        journey_id: j.journey_id,
+        description: j.description,
+        status: j.status || j.justification_status || j.final_result
+      }));
       return {
         success: workflowSuccess,
         approach: 'workflow',
         message: workflowSuccess ? `Analyzed ${pagesAnalyzed} pages with workflow-based testing` : `All ${journeys.length} journey(s) failed`,
         url: finalPageUrl,
         title: finalPageTitle,
+        legs: resultLegs,
+        journeys: journeys,
         details: {
           total_pages: pagesAnalyzed,
           total_workflows: allWorkflows.length,

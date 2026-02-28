@@ -306,9 +306,10 @@ export async function addHumanBehavior(page) {
 }
 
 /**
- * Wait with human-like random delay (uses realistic timing patterns)
+ * Wait with human-like random delay (uses realistic timing patterns).
+ * Slower defaults so video playback clearly shows each action.
  */
-export async function humanDelay(min = 100, max = 500) {
+export async function humanDelay(min = 300, max = 900) {
   // Use exponential distribution for more realistic delays
   const lambda = 1 / ((min + max) / 2);
   const delay = Math.min(max, Math.max(min, -Math.log(Math.random()) / lambda));
@@ -316,14 +317,12 @@ export async function humanDelay(min = 100, max = 500) {
 }
 
 /**
- * Human-like typing delay between characters
+ * Human-like typing delay between characters (slower for visible video).
  */
 export function getTypingDelay() {
-  // Humans type at variable speeds, faster for common patterns
-  const baseDelay = 50 + Math.random() * 150;
-  // Occasionally pause longer (thinking, reading)
-  if (Math.random() < 0.1) {
-    return baseDelay + Math.random() * 500;
+  const baseDelay = 120 + Math.random() * 280;
+  if (Math.random() < 0.12) {
+    return baseDelay + Math.random() * 800;
   }
   return baseDelay;
 }
