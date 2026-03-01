@@ -17,6 +17,51 @@ function safeJsonClone(obj) {
 }
 
 /**
+ * Compute a stable journey ID from page URL and journey content so the same logical journey
+ * keeps the same id across runs even when the testable website's DOM ids/selectors change.
+ * Uses normalized description + action signatures (type + normalized selector/description).
+ */
+function computeStableJourneyId(pageUrl, journey) {
+  try {
+    const crypto = require('crypto');
+    const urlNorm = (pageUrl || '').replace(/\?.*$/, '').replace(/#.*$/, '').toLowerCase().trim();
+    const descNorm = (journey.description || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const actionSigs = (journey.actions || []).map((a, i) => {
+      const sel = (a.selector || '').replace(/\s+/g, ' ').trim();
+      const nameMatch = sel.match(/\[name\s*=\s*["']([^"']+)["']\]/);
+      const normSel = nameMatch ? `[name="${nameMatch[1]}"]` : sel;
+      return `${i}:${a.type || 'action'}:${normSel}:${(a.description || '').substring(0, 40)}`;
+    });
+    const payload = `${urlNorm}|${descNorm}|${actionSigs.join('|')}`;
+    const hash = crypto.createHash('sha256').update(payload).digest('hex').substring(0, 16);
+    return `journey_${hash}`;
+  } catch (e) {
+    return journey.journey_id || `journey_${Math.random().toString(36).substr(2, 9)}`;
+  }
+}
+
+/**
+ * Resolve an action's selector from the actual forms data so input vs textarea (and other tag mismatches)
+ * are corrected using what the page actually has. Works for any site - no hardcoded ids.
+ */
+function resolveActionSelectorFromForms(action, forms) {
+  if (!action || action.type !== 'input' || !action.selector || !Array.isArray(forms)) return;
+  const nameMatch = action.selector.match(/(?:input|textarea)\[name\s*=\s*["']([^"']+)["']\]/i) ||
+    action.selector.match(/\[name\s*=\s*["']([^"']+)["']\]/);
+  if (!nameMatch) return;
+  const fieldName = nameMatch[1];
+  for (const form of forms) {
+    const fields = form.fields || [];
+    const field = fields.find(f => (f.name || '').trim() === fieldName);
+    if (field && field.selector) {
+      action.selector = field.selector;
+      if (field.type) action.element_type = field.type === 'textarea' ? 'textarea' : (field.type || 'input');
+      return;
+    }
+  }
+}
+
+/**
  * WorkflowAnalyzer - Updated 2025-10-15
  * Handles initial page analysis using Playwright + OpenAI
  * Creates workflow structure with testable legs
@@ -5698,8 +5743,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
           }
           
           // Convert journeys to legs format (extract actions from each journey)
-          // CRITICAL: Ensure journey_id is stable and based on element selector/id for status updates
-          
+          // CRITICAL: Resolve selectors from forms (fix input vs textarea etc.) then set stable journey_id
+          const pageUrlForStableId = workflowState.pageUrl || workflowState.context?.page_url || this.context?.page_url || '';
+
           for (let journeyIndex = 0; journeyIndex < journeys.length; journeyIndex++) {
             const journey = journeys[journeyIndex];
             
@@ -5709,90 +5755,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
               journey.actions = [];
             }
             
+            // Resolve input/textarea selectors from actual forms so tag matches the page (flexible, any site)
+            if (journey.actions.length > 0 && interactiveGroups.forms?.length) {
+              for (const action of journey.actions) {
+                resolveActionSelectorFromForms(action, interactiveGroups.forms);
+              }
+            }
+            
+            // Stable internal id: same logical journey keeps same id even if website DOM ids change
+            journey.journey_id = computeStableJourneyId(pageUrlForStableId, journey);
+            
             // If journey has actions, process it
             if (journey.actions.length > 0) {
-              // CRITICAL: Generate stable journey_id from element selector/id if not already stable
-              let stableJourneyId = journey.journey_id;
-              
-              // Try to match journey to a form or interactive element
-              // Check if journey_id already follows our pattern (form_*, button_*, element_*)
-              const isAlreadyStable = stableJourneyId && (
-                stableJourneyId.startsWith('form_') || 
-                stableJourneyId.startsWith('button_') || 
-                stableJourneyId.startsWith('element_')
-              );
-              
-              if (!isAlreadyStable) {
-                // Try to find matching interactive group (form or interactive element)
-                const firstActionSelector = journey.actions[0]?.selector || '';
-                let matchingInteractiveGroup = null;
-                let groupType = null; // 'form' or 'interactiveElement'
-                
-                // Try to match by selector to a form first
-                for (const form of interactiveGroups.forms) {
-                  if (form.selector && firstActionSelector.includes(form.selector.replace(/[#\.\[\]]/g, ''))) {
-                    matchingInteractiveGroup = form;
-                    groupType = 'form';
-                    break;
-                  }
-                }
-                
-                // Try to match by selector to an interactive element if no form match
-                if (!matchingInteractiveGroup) {
-                  for (const element of interactiveGroups.interactiveElements) {
-                    if (element.selector && firstActionSelector === element.selector) {
-                      matchingInteractiveGroup = element;
-                      groupType = 'interactiveElement';
-                      break;
-                    }
-                  }
-                }
-                
-                // Generate stable ID based on group type
-                if (matchingInteractiveGroup && groupType === 'form') {
-                  const formId = matchingInteractiveGroup.id || '';
-                  const formSelector = matchingInteractiveGroup.selector || '';
-                  const formAction = matchingInteractiveGroup.action || '';
-                  
-                  if (formId) {
-                    stableJourneyId = `form_${formId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-                  } else if (formSelector) {
-                    const selectorMatch = formSelector.match(/(?:action=['\"]([^'\"]+)['\"]|id=['\"]([^'\"]+)['\"]|#([a-zA-Z0-9_-]+)|form\[([^\]]+)\])/);
-                    if (selectorMatch) {
-                      const extracted = selectorMatch[1] || selectorMatch[2] || selectorMatch[3] || selectorMatch[4];
-                      stableJourneyId = `form_${extracted.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 30)}`;
-                    } else {
-                      stableJourneyId = `form_${journeyIndex}`;
-                    }
-                  } else if (formAction) {
-                    const actionPath = formAction.split('/').pop().split('?')[0];
-                    stableJourneyId = `form_${actionPath.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-                  } else {
-                    stableJourneyId = `form_${journeyIndex}`;
-                  }
-                } else if (matchingInteractiveGroup && groupType === 'interactiveElement') {
-                  const elementId = matchingInteractiveGroup.id || '';
-                  const elementText = (matchingInteractiveGroup.text || '').toLowerCase().replace(/[^a-zA-Z0-9]/g, '-').substring(0, 30);
-                  const elementSelector = matchingInteractiveGroup.selector || '';
-                  
-                  if (elementId) {
-                    stableJourneyId = `button_${elementId.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
-                  } else if (elementText) {
-                    stableJourneyId = `button_${elementText}`;
-                  } else if (elementSelector) {
-                    const selectorId = elementSelector.replace(/[#\.\[\]='\"]/g, '_').substring(0, 30);
-                    stableJourneyId = `element_${selectorId}`;
-                  } else {
-                    stableJourneyId = `element_${journeyIndex}`;
-                  }
-                } else {
-                  // Fallback: use existing journey_id if it exists, otherwise generate generic
-                  stableJourneyId = stableJourneyId || `journey_${journeyIndex}`;
-                }
-                
-                console.log(`🔧 [JOURNEY-ID] Correcting journey_id from "${journey.journey_id}" to "${stableJourneyId}" for journey at index ${journeyIndex}`);
-                journey.journey_id = stableJourneyId; // Update in original journey object too
-              }
+              const stableJourneyId = journey.journey_id; // content-based stable id already set above
               
               // Match each action to an interactive element from interactive_elements array
               // This creates the nested structure: page -> journey -> action -> interactive element
@@ -8469,7 +8444,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const actions = [];
       let order = 0;
       (form.fields || []).forEach((field) => {
-        const sel = field.selector || (field.id ? `#${field.id}` : null) || (field.name ? `input[name="${field.name}"]` : null) || null;
+        const sel = field.selector || (field.id ? `#${field.id}` : null) || (field.name ? `[name="${field.name}"]` : null) || null;
         if (sel) {
           actions.push({
             action_id: `action_${order}`,
