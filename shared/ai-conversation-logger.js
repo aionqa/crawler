@@ -1996,6 +1996,51 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
       case 'analyze-validation-rules':
         return `Analyzing form validation rules and error messages`;
         
+      case 'content_optimization_analysis':
+        if (pageTitle) {
+          return `Content optimization analysis for page: ${pageTitle}`;
+        }
+        if (pageUrl) {
+          try {
+            const u = new URL(pageUrl.startsWith('http') ? pageUrl : 'https://' + pageUrl);
+            const path = u.pathname || '/';
+            return `Content optimization of ${path === '/' ? 'home' : path.replace(/^\//, '')}`;
+          } catch {
+            return `Content optimization analysis`;
+          }
+        }
+        return `Content optimization analysis`;
+
+      case 'page_summary':
+        if (pageTitle) {
+          return `General analysis of page: ${pageTitle}`;
+        }
+        if (pageUrl) {
+          try {
+            const u = new URL(pageUrl.startsWith('http') ? pageUrl : 'https://' + pageUrl);
+            const path = u.pathname || '/';
+            return `General analysis of ${path === '/' ? 'home' : path.replace(/^\//, '')}`;
+          } catch {
+            return `Page summary`;
+          }
+        }
+        return `Page summary`;
+
+      case 'playwright_script':
+      case 'generate-playwright-script':
+        if (workflowLeg && pageUrl) {
+          try {
+            const u = new URL(pageUrl.startsWith('http') ? pageUrl : 'https://' + pageUrl);
+            const path = u.pathname || '/';
+            return `Playwright script for journey on page ${path === '/' ? 'home' : path.replace(/^\//, '')}`;
+          } catch {
+            return `Playwright script for ${workflowLeg}`;
+          }
+        }
+        if (workflowLeg) return `Playwright script for journey: ${workflowLeg}`;
+        if (pageTitle) return `Playwright script for page: ${pageTitle}`;
+        return `Playwright script for journey`;
+
       default:
         // Fallback to more descriptive generic message
         if (approach && pageTitle) {
