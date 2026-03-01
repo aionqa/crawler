@@ -13741,6 +13741,35 @@ ${executableBody}`;
               nestedNameLower.includes('justify journey') ||
               nestedNameLower.includes('execute journey action script');
             if (nestedStep.config?.critical || isJourneyLoopCoreStep) {
+              // In journey context: mark current journey as failure and persist so we don't leave it "pending"
+              const currentJourney = workflowState.currentJourney || workflowState.currentItem;
+              if (currentJourney && workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute)) {
+                const journeyId = currentJourney.journey_id || currentJourney.id;
+                const journeyIndex = workflowState.journeysToExecute.findIndex(j =>
+                  (j.journey_id === journeyId) || (j.id === journeyId));
+                if (journeyIndex >= 0) {
+                  const journey = workflowState.journeysToExecute[journeyIndex];
+                  journey.status = 'failure';
+                  journey.justification_status = 'failure';
+                  journey.expected_outcome_verified = false;
+                  if (!Array.isArray(journey.iterations)) journey.iterations = [];
+                  journey.iterations.push({
+                    error: nestedError.message,
+                    result: 'failure',
+                    reason: `Step failed: ${nestedError.message}`
+                  });
+                  // Synthetic justify result so iteration save below records failure
+                  const syntheticJustify = { status: 'failure', reason: nestedError.message, expected_outcome_verified: false };
+                  workflowState.justify_journey = { result: syntheticJustify };
+                  workflowState.variablePool = workflowState.variablePool || {};
+                  workflowState.variablePool.steps = workflowState.variablePool.steps || {};
+                  workflowState.variablePool.steps['justify-journey'] = { result: syntheticJustify };
+                  workflowState.variablePool.steps['justify_journey'] = { result: syntheticJustify };
+                  console.log(`✅ [JOURNEY-FAIL] Marked journey ${journeyId} as failure (step error) so it will be persisted`);
+                  workflowState._journeyStepFailed = true;
+                  break; // exit nested steps loop so iteration save runs and persists failure
+                }
+              }
               throw nestedError;
             }
           }
@@ -14390,6 +14419,11 @@ ${executableBody}`;
         }
 
         // Evaluate condition after nested steps
+        if (workflowState._journeyStepFailed) {
+          condition = false;
+          delete workflowState._journeyStepFailed;
+          console.log(`🛑 [WHILE-LOOP] Exiting loop after journey step failure (failure already persisted)`);
+        }
         let conditionValue = undefined;
         if (conditionType === 'code' && config.conditionCode) {
           // Clean the code before execution
