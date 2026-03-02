@@ -3110,6 +3110,18 @@ class WorkflowExecutor {
                     if (shouldUseDomFallback(clickError) && typeof selectorHint === 'string' && selectorHint.trim()) {
                       const fallbackResult = await domClickFallback(selectorHint);
                       if (fallbackResult?.clicked) return;
+                      const selectorLower = selectorHint.toLowerCase();
+                      const isLikelyFormControl =
+                        selectorLower.includes('input') ||
+                        selectorLower.includes('textarea') ||
+                        selectorLower.includes('select') ||
+                        selectorLower.includes('[name=') ||
+                        selectorLower.includes('#form_');
+                      if (isLikelyFormControl) {
+                        // Hidden duplicate controls are common in dynamic themes.
+                        // Skip click and let fill/type fallback resolve a visible candidate.
+                        return;
+                      }
                     }
                     throw clickError;
                   }
