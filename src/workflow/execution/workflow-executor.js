@@ -3274,9 +3274,11 @@ class WorkflowExecutor {
         // This allows the script code to contain backticks, ${}, etc. without problems
         const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
         
-        // Create a function with page and wrapper (alias) as parameters - AI may use either name
-        const fn = new Function('page', 'wrapper', functionBody);
-        return await fn(wrappedPage, wrappedPage);
+        // Create a function with page and common aliases as parameters.
+        // Some generated scripts call locator(...) directly.
+        const fn = new Function('page', 'wrapper', 'locator', functionBody);
+        const locatorAlias = (...args) => wrappedPage.locator(...args);
+        return await fn(wrappedPage, wrappedPage, locatorAlias);
       };
       
       // Fix incomplete string literals automatically instead of failing
