@@ -2576,6 +2576,35 @@ class WorkflowExecutor {
           return { filled: false };
         };
 
+        const trySelectOptionFallback = async (locatorObj, value) => {
+          try {
+            const target = await pickVisibleCandidate(locatorObj);
+            const tagName = await target.evaluate(el => (el.tagName || '').toLowerCase()).catch(() => '');
+            if (tagName !== 'select') return { handled: false };
+            const desired = String(value ?? '').trim();
+            try {
+              if (desired) {
+                await target.selectOption({ label: desired }, { timeout: 5000 });
+                return { handled: true };
+              }
+            } catch {
+              // Try fallback option below
+            }
+            const fallbackValue = await target.evaluate((el) => {
+              const options = Array.from(el.options || []);
+              const candidate = options.find(opt => !opt.disabled && String(opt.value || '').trim() !== '');
+              return candidate ? candidate.value : null;
+            });
+            if (fallbackValue) {
+              await target.selectOption(fallbackValue, { timeout: 5000 });
+              return { handled: true };
+            }
+          } catch {
+            // handled=false by default
+          }
+          return { handled: false };
+        };
+
         const pickVisibleCandidate = async (locatorObj, maxChecks = 8) => {
           try {
             const count = await locatorObj.count();
@@ -2821,6 +2850,10 @@ class WorkflowExecutor {
             const fillTimeout = options?.timeout || 60000;
             await target.waitFor({ state: 'attached', timeout: fillTimeout });
             await target.scrollIntoViewIfNeeded({ timeout: 10000 }).catch(() => {});
+            const selectFallback = await trySelectOptionFallback(pageObj.locator(selector), value);
+            if (selectFallback.handled) {
+              return;
+            }
 
             // Use human-like typing with mistakes and corrections (slower for visible video)
             await humanType(pageObj, selector, String(value), {
@@ -2946,6 +2979,10 @@ class WorkflowExecutor {
               try {
                 const target = await pickVisibleCandidate(locator);
                 await target.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
+                const selectFallback = await trySelectOptionFallback(locator, value);
+                if (selectFallback.handled) {
+                  return;
+                }
                 return await target.fill(value, options);
               } catch (fillError) {
                 if (shouldUseDomFallback(fillError) && typeof selector === 'string') {
