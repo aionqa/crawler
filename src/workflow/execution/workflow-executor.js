@@ -1162,6 +1162,54 @@ class WorkflowExecutor {
           executionResult.soft_error = executionResult.error;
           executionResult.error = null;
         }
+
+        // Step 4.5: Normalize visible email fields after script execution.
+        // Some generated scripts leave synthetic placeholder values (e.g. "test")
+        // that trigger browser validation overlays and false-negative journey outcomes.
+        try {
+          const emailSanity = await page.evaluate(() => {
+            const isVisible = (el) => {
+              if (!el) return false;
+              const style = window.getComputedStyle(el);
+              if (!style) return false;
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+              const rect = el.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            };
+            const candidates = Array.from(document.querySelectorAll('input[type="email"], input[name*="email" i], input[id*="email" i]'));
+            let fixed = 0;
+            for (const el of candidates) {
+              if (!isVisible(el)) continue;
+              const current = String(el.value || '').trim();
+              const message = String(el.validationMessage || '').toLowerCase();
+              const looksInvalidEmail =
+                (!!current && !current.includes('@')) ||
+                (typeof el.checkValidity === 'function' && !el.checkValidity() && (message.includes('email') || message.includes('@')));
+              if (!looksInvalidEmail) continue;
+              let normalized = current.replace(/\s+/g, '').replace(/[^a-zA-Z0-9._+-]/g, '');
+              if (!normalized || normalized === 'test') normalized = 'test.user';
+              if (!normalized.includes('@')) normalized = `${normalized}@example.com`;
+              if (normalized.startsWith('@')) normalized = `test${normalized}`;
+              if (normalized.endsWith('@')) normalized = `${normalized}example.com`;
+              if (typeof el.setCustomValidity === 'function') el.setCustomValidity('');
+              el.value = normalized;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              el.dispatchEvent(new Event('blur', { bubbles: true }));
+              fixed += 1;
+            }
+            return { fixed, scanned: candidates.length };
+          });
+          if (emailSanity?.fixed > 0) {
+            await this.backendLogger.appendJobLog(jobId, 'info',
+              `✅ Normalized ${emailSanity.fixed} email field(s) after script execution`,
+              'WORKFLOW-EXECUTOR',
+              { leg_id: leg.leg_id, email_sanity: emailSanity }
+            );
+          }
+        } catch (emailSanityError) {
+          console.warn(`[WorkflowExecutor] Email sanity pass warning: ${emailSanityError.message}`);
+        }
         
         // Step 5: Take screenshot after action (always, even if script failed)
         // CRITICAL: Wrap in try-catch to handle browser crashes gracefully
