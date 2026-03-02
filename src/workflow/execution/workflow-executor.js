@@ -2009,8 +2009,8 @@ class WorkflowExecutor {
       cleaned = cleaned.replace(/```[\w]*/g, '');
     }
     
-    // Extract function bodies instead of removing functions completely
-    // This handles nested braces by matching from function start to matching closing brace
+    // NOTE: Keep function declarations intact. Some AI scripts define helper functions
+    // and call them later; stripping bodies can break those calls at runtime.
     const extractFunctionBodies = (text) => {
       const patterns = [
         /async\s+function\s*\([^)]*\)\s*\{/g,
@@ -2049,7 +2049,7 @@ class WorkflowExecutor {
       return text;
     };
     
-    cleaned = extractFunctionBodies(cleaned);
+    // cleaned = extractFunctionBodies(cleaned);
     
     // Remove IIFE wrappers (async () => { ... })() or (async function() { ... })()
     cleaned = cleaned.replace(/\(async\s*\([^)]*\)\s*=>\s*\{/g, '');
