@@ -13330,12 +13330,33 @@ ${executableBody}`;
             // CRITICAL: Use iterations from journey (which was updated by while-loop with all iterations)
             // The while-loop saves iterations to journey.iterations, so use that directly
             const journeyIterations = journey.iterations || [];
+            const lastIteration = journeyIterations.length > 0 ? journeyIterations[journeyIterations.length - 1] : null;
+            const resolvedDescription = String(
+              journey.description ||
+              item.description ||
+              lastIteration?.reason ||
+              journey.ai_justification ||
+              `Journey ${journeyId}`
+            ).trim();
+            const resolvedExpectedOutcome = String(
+              journey.expected_outcome ||
+              item.expected_outcome ||
+              'Journey action completes with expected page outcome'
+            ).trim();
+            const resolvedScript = String(
+              journey.playwright_script ||
+              lastIteration?.script_executed ||
+              ''
+            ).trim();
             console.log(`💾 [FOR-EACH] Journey ${journeyId} has ${journeyIterations.length} iteration(s) from while-loop`);
             
             // Ensure we have the latest status and iterations
             return {
               ...journey,
               journey_id: journey.journey_id || journey.id || journeyId,
+              description: resolvedDescription,
+              expected_outcome: resolvedExpectedOutcome,
+              ...(resolvedScript ? { playwright_script: resolvedScript } : {}),
               justification_status: finalStatus,
               status: finalStatus,
               iterations: journeyIterations // Use iterations from journey (updated by while-loop)
@@ -13350,6 +13371,7 @@ ${executableBody}`;
           const payload = {
             saveLegs: false,
             journeys: processedJourneys,
+            page_description: workflowState.pageDescription || null,
             job_id: jobId
           };
           
