@@ -72,8 +72,9 @@ class WorkflowExecutor {
     ];
 
     for (const selector of captchaSelectors) {
-      const element = await page.$(selector).catch(() => null);
-      if (element) {
+      const locator = page.locator(selector).first();
+      const visible = await locator.isVisible().catch(() => false);
+      if (visible) {
         const type = selector.includes('recaptcha')
           ? 'reCAPTCHA'
           : selector.includes('hcaptcha')
@@ -81,16 +82,160 @@ class WorkflowExecutor {
             : selector.includes('turnstile')
               ? 'Cloudflare Turnstile'
               : 'Generic Captcha';
-        return { selector, type };
+        return { selector, type, visible: true };
       }
     }
     return null;
   }
 
+  parseJSONSafe(value) {
+    if (value == null) return null;
+    if (typeof value === 'object') return value;
+    if (typeof value !== 'string') return null;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
+  extractCaptchaDetectionFromAI(aiResponse) {
+    const payload = this.parseJSONSafe(aiResponse) || aiResponse || {};
+    const root = payload?.result && typeof payload.result === 'object' ? payload.result : payload;
+    const captchaStatus = (root?.captcha_status && typeof root.captcha_status === 'object') ? root.captcha_status : {};
+
+    const explicitDetected =
+      root?.captcha_detected === true ||
+      root?.captcha_present === true ||
+      root?.has_captcha === true ||
+      captchaStatus?.present === true;
+
+    const explicitSolved =
+      root?.captcha_solved === true ||
+      root?.captcha_resolved === true ||
+      captchaStatus?.solved === true;
+
+    const reasonText = String(
+      root?.reason ||
+      root?.verification_details ||
+      root?.what_happened ||
+      ''
+    );
+    const mentionsCaptcha = /(captcha|recaptcha|hcaptcha|turnstile|challenge)/i.test(reasonText);
+
+    const detected = explicitDetected || mentionsCaptcha;
+    const solved = explicitSolved;
+    const type = String(
+      root?.captcha_type ||
+      captchaStatus?.type ||
+      (/(turnstile)/i.test(reasonText) ? 'Cloudflare Turnstile' :
+        /(hcaptcha)/i.test(reasonText) ? 'hCaptcha' :
+        /(recaptcha)/i.test(reasonText) ? 'reCAPTCHA' : 'AI-reported captcha')
+    );
+
+    return {
+      detected,
+      solved,
+      type,
+      source: explicitDetected ? 'ai_field' : (mentionsCaptcha ? 'ai_text_inference' : 'none'),
+      notes: reasonText ? reasonText.substring(0, 300) : ''
+    };
+  }
+
+  async solveCaptchaWithEngine(page, jobId, captchaInfo, attempt, maxAttempts, phase = 'runtime') {
+    const pageUrl = page.url();
+    const screenshotBuffer = await page.screenshot({ fullPage: true, type: 'png' }).catch(() => null);
+    const screenshotBase64 = screenshotBuffer ? screenshotBuffer.toString('base64') : null;
+    const htmlContent = await page.content().catch(() => '');
+    const visibleText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+    const interactiveElements = await page.$$eval(
+      'button, a, input, select, textarea, [role="button"], [onclick]',
+      els => els.slice(0, 60).map((el) => ({
+        tag: el.tagName?.toLowerCase?.() || '',
+        id: el.id || '',
+        name: el.getAttribute?.('name') || '',
+        type: el.getAttribute?.('type') || '',
+        text: (el.textContent || '').trim().slice(0, 120),
+        class: el.className || ''
+      }))
+    ).catch(() => []);
+
+    const solverRequest = {
+      page_url: pageUrl,
+      captcha: {
+        type: captchaInfo?.type || 'AI-reported captcha',
+        selector: captchaInfo?.selector || null,
+        phase,
+        attempt,
+        max_attempts: maxAttempts
+      },
+      screenshot_base64: screenshotBase64,
+      html_content: String(htmlContent || '').slice(0, 50000),
+      visible_text: String(visibleText || '').slice(0, 10000),
+      interactive_elements: interactiveElements
+    };
+
+    const solverTemplate = [
+      'You are a CAPTCHA solver engine for Playwright automation.',
+      'Analyze the provided screenshot/HTML/page context and return ONLY valid JSON with this schema:',
+      '{',
+      '  "captcha_detected": true|false,',
+      '  "captcha_solved": true|false,',
+      '  "captcha_type": "string",',
+      '  "confidence": 0..1,',
+      '  "notes": "short explanation",',
+      '  "playwright_script": "optional JS script to execute on page (no markdown)"',
+      '}',
+      'If solving requires interaction, provide playwright_script.',
+      'If already solved, set captcha_solved=true and playwright_script empty.'
+    ].join('\n');
+
+    const aiResponse = await this.aiLogger.makeAICallWithPrompt(
+      'captcha-solver-engine',
+      solverRequest,
+      jobId,
+      'captcha-solver',
+      pageUrl,
+      null,
+      solverRequest,
+      solverTemplate
+    );
+
+    const parsed = this.parseJSONSafe(aiResponse) || aiResponse || {};
+    const root = parsed?.result && typeof parsed.result === 'object' ? parsed.result : parsed;
+    const script = typeof root?.playwright_script === 'string'
+      ? root.playwright_script
+      : (typeof root?.script === 'string' ? root.script : (typeof root?.code === 'string' ? root.code : ''));
+    const aiSaysSolved = root?.captcha_solved === true || root?.captcha_resolved === true;
+
+    await this.logCaptcha(jobId, 'info', `🧠 CAPTCHA solver engine response (attempt ${attempt}/${maxAttempts})`, {
+      action: 'captcha_solver_ai_response',
+      phase,
+      attempt,
+      max_attempts: maxAttempts,
+      captcha_type: captchaInfo?.type || root?.captcha_type || 'AI-reported captcha',
+      ai_reported_solved: aiSaysSolved,
+      ai_confidence: typeof root?.confidence === 'number' ? root.confidence : null,
+      notes: typeof root?.notes === 'string' ? root.notes.substring(0, 300) : undefined
+    });
+
+    let executionResult = { success: true };
+    if (script && script.trim().length > 0) {
+      executionResult = await this.executeScript(page, script, jobId);
+    }
+
+    return {
+      ai_reported_solved: aiSaysSolved,
+      script_executed: Boolean(script && script.trim().length > 0),
+      execution_success: Boolean(executionResult?.success),
+      execution_error: executionResult?.error || null
+    };
+  }
+
   /**
    * Attempt to solve a captcha once with human-like behavior
    */
-  async attemptCaptchaSolve(page, jobId, captchaInfo, attempt, maxAttempts) {
+  async attemptCaptchaSolve(page, jobId, captchaInfo, attempt, maxAttempts, phase = 'runtime') {
     await this.logCaptcha(
       jobId,
       'warn',
@@ -118,7 +263,45 @@ class WorkflowExecutor {
       // Non-blocking
     }
 
-    // Try to click the captcha container or frame
+    // First try the dedicated solver engine (AI-guided captcha solving).
+    try {
+      const engineResult = await this.solveCaptchaWithEngine(page, jobId, captchaInfo, attempt, maxAttempts, phase);
+      if (engineResult?.script_executed || engineResult?.ai_reported_solved) {
+        await this.logCaptcha(
+          jobId,
+          engineResult?.execution_success === false ? 'warn' : 'info',
+          `🧩 CAPTCHA solver engine attempted solution`,
+          {
+            action: 'captcha_solver_engine_attempt',
+            phase,
+            attempt,
+            max_attempts: maxAttempts,
+            captcha_type: captchaInfo.type,
+            captcha_selector: captchaInfo.selector,
+            ai_reported_solved: engineResult?.ai_reported_solved === true,
+            script_executed: engineResult?.script_executed === true,
+            execution_success: engineResult?.execution_success !== false,
+            execution_error: engineResult?.execution_error || undefined
+          }
+        );
+      }
+    } catch (engineError) {
+      await this.logCaptcha(
+        jobId,
+        'warn',
+        `⚠️ CAPTCHA solver engine error: ${engineError.message}`,
+        {
+          action: 'captcha_solver_engine_error',
+          phase,
+          attempt,
+          max_attempts: maxAttempts,
+          captcha_type: captchaInfo.type,
+          captcha_selector: captchaInfo.selector
+        }
+      );
+    }
+
+    // Fallback: click captcha container or frame
     try {
       const element = await page.$(captchaInfo.selector).catch(() => null);
       if (element) {
@@ -148,11 +331,11 @@ class WorkflowExecutor {
   /**
    * Resolve captcha with up to 10 attempts during a leg execution
    */
-  async resolveCaptchaWithRetries(page, jobId, maxAttempts = 10, phase = 'pre-leg') {
+  async resolveCaptchaWithRetries(page, jobId, maxAttempts = 10, phase = 'pre-leg', initialCaptchaInfo = null) {
     let detectedAtLeastOnce = false;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const captchaInfo = await this.detectCaptchaOnPage(page);
+      const captchaInfo = (attempt === 1 && initialCaptchaInfo) ? initialCaptchaInfo : await this.detectCaptchaOnPage(page);
       if (!captchaInfo) {
         if (detectedAtLeastOnce) {
           await this.logCaptcha(
@@ -166,10 +349,10 @@ class WorkflowExecutor {
       }
 
       detectedAtLeastOnce = true;
-      await this.attemptCaptchaSolve(page, jobId, captchaInfo, attempt, maxAttempts);
+      await this.attemptCaptchaSolve(page, jobId, captchaInfo, attempt, maxAttempts, phase);
 
-      const stillPresent = await page.$(captchaInfo.selector).catch(() => null);
-      if (!stillPresent) {
+      const remainingCaptcha = await this.detectCaptchaOnPage(page);
+      if (!remainingCaptcha) {
         await this.logCaptcha(
           jobId,
           'info',
@@ -197,10 +380,10 @@ class WorkflowExecutor {
     return { detected: true, resolved: false, attempts: maxAttempts };
   }
 
-  async resolveCaptchaWithTimeout(page, jobId, maxAttempts = 10, phase = 'pre-leg', timeoutMs = 15000) {
+  async resolveCaptchaWithTimeout(page, jobId, maxAttempts = 10, phase = 'pre-leg', timeoutMs = 15000, initialCaptchaInfo = null) {
     try {
       return await Promise.race([
-        this.resolveCaptchaWithRetries(page, jobId, maxAttempts, phase),
+        this.resolveCaptchaWithRetries(page, jobId, maxAttempts, phase, initialCaptchaInfo),
         new Promise((resolve) => {
           setTimeout(() => {
             resolve({ detected: false, resolved: false, attempts: 0, timed_out: true });
@@ -1274,7 +1457,7 @@ class WorkflowExecutor {
         // Log prompt usage
         await this.logPromptUsage(determinePromptIdentifier, determinePromptSource, determineTemplate, determineCompletionRequest);
         
-        const determineCompletionResponse = await this.aiLogger.makeAICallWithPrompt(
+        let determineCompletionResponse = await this.aiLogger.makeAICallWithPrompt(
           determinePromptIdentifier,
           determineCompletionRequest,
           jobId,
@@ -1284,6 +1467,74 @@ class WorkflowExecutor {
           determineCompletionRequest,
           determineTemplate
         );
+        const parsedDetermine = this.parseJSONSafe(determineCompletionResponse);
+        if (parsedDetermine && typeof parsedDetermine === 'object') {
+          determineCompletionResponse = parsedDetermine;
+        } else if (!determineCompletionResponse || typeof determineCompletionResponse !== 'object') {
+          determineCompletionResponse = {
+            status: 'failure',
+            completion_status: 'failed',
+            reason: String(determineCompletionResponse || 'Invalid determine completion response')
+          };
+        }
+
+        // Normalize AI captcha signal into a dedicated field.
+        const aiCaptchaDetection = this.extractCaptchaDetectionFromAI(determineCompletionResponse);
+        determineCompletionResponse.captcha_detection = aiCaptchaDetection;
+        determineCompletionResponse.captcha_detected = aiCaptchaDetection.detected === true;
+        determineCompletionResponse.captcha_solved = aiCaptchaDetection.solved === true;
+
+        // If AI reports captcha from screenshot/analysis, log immediately and run solver engine up to 10 times.
+        if (aiCaptchaDetection.detected) {
+          await this.logCaptcha(
+            jobId,
+            'warn',
+            '⚠️ CAPTCHA detected by AI screenshot analysis; starting solver engine',
+            {
+              action: 'captcha_ai_detected',
+              phase: 'post-determine-completion',
+              captcha_type: aiCaptchaDetection.type,
+              source: aiCaptchaDetection.source,
+              notes: aiCaptchaDetection.notes
+            }
+          );
+
+          const runtimeCaptchaInfo = await this.detectCaptchaOnPage(page);
+          const fallbackCaptchaInfo = {
+            type: aiCaptchaDetection.type || 'AI-reported captcha',
+            selector: runtimeCaptchaInfo?.selector || 'ai_reported_captcha',
+            visible: true
+          };
+
+          const aiCaptchaResult = await this.resolveCaptchaWithTimeout(
+            page,
+            jobId,
+            10,
+            'ai-detected-post-action',
+            45000,
+            runtimeCaptchaInfo || fallbackCaptchaInfo
+          );
+
+          determineCompletionResponse.captcha_status = {
+            present: true,
+            solved: aiCaptchaResult?.resolved === true,
+            attempts: aiCaptchaResult?.attempts || 0,
+            source: 'ai_screenshot_detection'
+          };
+          determineCompletionResponse.captcha_solved = aiCaptchaResult?.resolved === true;
+
+          if (aiCaptchaResult?.resolved === true) {
+            const reasonText = String(
+              determineCompletionResponse.reason ||
+              determineCompletionResponse.verification_details ||
+              ''
+            );
+            if (/(captcha|recaptcha|hcaptcha|turnstile|challenge)/i.test(reasonText)) {
+              determineCompletionResponse.status = 'success';
+              determineCompletionResponse.completion_status = 'complete';
+            }
+          }
+        }
 
         // Extract reason from determine completion response
         const completionReason = determineCompletionResponse.reason || 
