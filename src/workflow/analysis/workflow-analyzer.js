@@ -13357,6 +13357,7 @@ ${executableBody}`;
               description: resolvedDescription,
               expected_outcome: resolvedExpectedOutcome,
               ...(resolvedScript ? { playwright_script: resolvedScript } : {}),
+              ...(resolvedScript ? { script_executed: resolvedScript } : {}),
               justification_status: finalStatus,
               status: finalStatus,
               iterations: journeyIterations // Use iterations from journey (updated by while-loop)
@@ -13368,10 +13369,14 @@ ${executableBody}`;
         if (processedJourneys.length > 0) {
           console.log(`💾 Saving ${processedJourneys.length} journey(s) with status after for-each completion`);
           
+          const persistedPageDescription = workflowState.pageDescription || {
+            short_description: workflowState.pageTitle || workflowState.pageUrl || 'Page analyzed',
+            description: workflowState.pageTitle || workflowState.pageUrl || 'Page analyzed'
+          };
           const payload = {
             saveLegs: false,
             journeys: processedJourneys,
-            page_description: workflowState.pageDescription || null,
+            page_description: persistedPageDescription,
             job_id: jobId
           };
           
