@@ -2939,92 +2939,77 @@ class WorkflowExecutor {
         if (typeof pageObj.focus === 'function') wrapper.focus = wrapMethod('focus', pageObj.focus.bind(pageObj));
         if (typeof pageObj.blur === 'function') wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
         
-        // Wrap locator method to also intercept methods on locators
+        // Wrap locator method and chained locators (first/nth/filter/locator/...) so resilient
+        // behavior applies even when AI scripts chain locators before click/fill.
         const originalLocator = typeof pageObj.locator === 'function' ? pageObj.locator.bind(pageObj) : () => { throw new Error('page.locator is not available'); };
+        const locatorChainMethods = new Set(['first', 'last', 'nth', 'filter', 'locator', 'or', 'and']);
+        const makeLocatorProxy = (locator, selectorHint = '') => {
+          return new Proxy(locator, {
+            get(target, prop) {
+              if (prop === 'then') {
+                return undefined;
+              }
+              const originalValue = target[prop];
+              if (typeof originalValue !== 'function') {
+                return originalValue;
+              }
+              const bound = originalValue.bind(target);
+              if (locatorChainMethods.has(String(prop))) {
+                return (...args) => {
+                  const chained = bound(...args);
+                  return makeLocatorProxy(chained, selectorHint);
+                };
+              }
+              if (prop === 'click') {
+                return async (...args) => {
+                  await logAction(`locator(${typeof selectorHint === 'string' ? selectorHint.substring(0, 50) : '...'}).click`, args);
+                  try {
+                    const visible = await pickVisibleCandidate(target);
+                    return await visible.click(...args);
+                  } catch (clickError) {
+                    if (shouldUseDomFallback(clickError) && typeof selectorHint === 'string' && selectorHint.trim()) {
+                      const fallbackResult = await domClickFallback(selectorHint);
+                      if (fallbackResult?.clicked) return;
+                    }
+                    throw clickError;
+                  }
+                };
+              }
+              if (prop === 'fill') {
+                return async (...args) => {
+                  await logAction(`locator(${typeof selectorHint === 'string' ? selectorHint.substring(0, 50) : '...'}).fill`, args);
+                  const [value, options] = args;
+                  try {
+                    const visible = await pickVisibleCandidate(target);
+                    await visible.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
+                    const selectFallback = await trySelectOptionFallback(target, value);
+                    if (selectFallback.handled) return;
+                    return await visible.fill(value, options);
+                  } catch (fillError) {
+                    if (shouldUseDomFallback(fillError) && typeof selectorHint === 'string' && selectorHint.trim()) {
+                      const fallbackResult = await domFillFallback(selectorHint, value);
+                      if (fallbackResult?.filled) return;
+                      const semanticFallbackResult = await semanticVisibleFillFallback(selectorHint, value);
+                      if (semanticFallbackResult?.filled) return;
+                    }
+                    throw fillError;
+                  }
+                };
+              }
+              return async (...args) => {
+                await logAction(`locator(${typeof selectorHint === 'string' ? selectorHint.substring(0, 50) : '...'}).${String(prop)}`, args);
+                const result = await bound(...args);
+                if (result && typeof result === 'object' && typeof result.count === 'function' && typeof result.locator === 'function') {
+                  return makeLocatorProxy(result, selectorHint);
+                }
+                return result;
+              };
+            }
+          });
+        };
         wrapper.locator = function(selector, options) {
           const locator = originalLocator(selector, options);
-          
-          // Wrap locator methods
-          const wrapLocatorMethod = (methodName, originalLocatorMethod) => {
-            return async function(...args) {
-              await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).${methodName}`, args);
-              return await originalLocatorMethod.apply(locator, args);
-            };
-          };
-          
-          // Wrap common locator methods
-          if (locator.click) {
-            const originalLocatorClick = locator.click.bind(locator);
-            locator.click = async function(...args) {
-              await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).click`, args);
-              try {
-                const target = await pickVisibleCandidate(locator);
-                return await target.click(...args);
-              } catch (clickError) {
-                if (shouldUseDomFallback(clickError)) {
-                  const fallbackResult = await domClickFallback(selector);
-                  if (fallbackResult?.clicked) {
-                    return;
-                  }
-                }
-                return await originalLocatorClick(...args);
-              }
-            };
-          }
-          if (locator.fill) {
-            const originalLocatorFill = locator.fill.bind(locator);
-            locator.fill = async function(...args) {
-              await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).fill`, args);
-              const [value, options] = args;
-              try {
-                const target = await pickVisibleCandidate(locator);
-                await target.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
-                const selectFallback = await trySelectOptionFallback(locator, value);
-                if (selectFallback.handled) {
-                  return;
-                }
-                return await target.fill(value, options);
-              } catch (fillError) {
-                if (shouldUseDomFallback(fillError) && typeof selector === 'string') {
-                  const fallbackResult = await domFillFallback(selector, value);
-                  if (fallbackResult?.filled) {
-                    return;
-                  }
-                }
-                return await originalLocatorFill(...args);
-              }
-            };
-          }
-          if (locator.type) {
-            const originalLocatorType = locator.type.bind(locator);
-            locator.type = wrapLocatorMethod('type', originalLocatorType);
-          }
-          if (locator.press) {
-            const originalLocatorPress = locator.press.bind(locator);
-            locator.press = wrapLocatorMethod('press', originalLocatorPress);
-          }
-          if (locator.selectOption) {
-            const originalLocatorSelectOption = locator.selectOption.bind(locator);
-            locator.selectOption = wrapLocatorMethod('selectOption', originalLocatorSelectOption);
-          }
-          if (locator.check) {
-            const originalLocatorCheck = locator.check.bind(locator);
-            locator.check = wrapLocatorMethod('check', originalLocatorCheck);
-          }
-          if (locator.uncheck) {
-            const originalLocatorUncheck = locator.uncheck.bind(locator);
-            locator.uncheck = wrapLocatorMethod('uncheck', originalLocatorUncheck);
-          }
-          if (locator.hover) {
-            const originalLocatorHover = locator.hover.bind(locator);
-            locator.hover = wrapLocatorMethod('hover', originalLocatorHover);
-          }
-          if (locator.screenshot) {
-            const originalLocatorScreenshot = locator.screenshot.bind(locator);
-            locator.screenshot = wrapLocatorMethod('screenshot', originalLocatorScreenshot);
-          }
-          
-          return locator;
+          return makeLocatorProxy(locator, selector);
         };
         
         // Wrap screenshot method to capture and log screenshots during script execution
