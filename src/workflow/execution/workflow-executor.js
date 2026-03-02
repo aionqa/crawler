@@ -2644,6 +2644,9 @@ class WorkflowExecutor {
               await target.selectOption(fallbackValue, { timeout: 5000 });
               return { handled: true };
             }
+            // Even when we cannot pick a new option, do not fall through to fill() on <select>.
+            // Keep current/default selection and allow journey to continue.
+            return { handled: true, skipped: true };
           } catch {
             // handled=false by default
           }
