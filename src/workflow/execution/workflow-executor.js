@@ -2998,7 +2998,17 @@ class WorkflowExecutor {
         };
         
         // Wrap common page methods (only bind when method exists to avoid "undefined.bind" errors)
-        if (typeof pageObj.type === 'function') wrapper.type = wrapMethod('type', pageObj.type.bind(pageObj));
+        if (typeof pageObj.type === 'function') {
+          wrapper.type = async function(selector, text, options = {}) {
+            const normalizedText = normalizeInputValue(selector, text);
+            await logAction('type', [selector, normalizedText]);
+            const target = await pickVisibleCandidate(pageObj.locator(selector));
+            await target.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
+            const selectFallback = await trySelectOptionFallback(pageObj.locator(selector), normalizedText);
+            if (selectFallback.handled) return;
+            return await target.type(String(normalizedText), options);
+          };
+        }
         if (typeof pageObj.press === 'function') wrapper.press = wrapMethod('press', pageObj.press.bind(pageObj));
         if (typeof pageObj.goto === 'function') wrapper.goto = wrapMethod('goto', pageObj.goto.bind(pageObj));
         if (typeof pageObj.waitForTimeout === 'function') {
@@ -3077,6 +3087,18 @@ class WorkflowExecutor {
                     }
                     throw fillError;
                   }
+                };
+              }
+              if (prop === 'type') {
+                return async (...args) => {
+                  await logAction(`locator(${typeof selectorHint === 'string' ? selectorHint.substring(0, 50) : '...'}).type`, args);
+                  const [value, options] = args;
+                  const normalizedValue = normalizeInputValue(selectorHint, value);
+                  const visible = await pickVisibleCandidate(target);
+                  await visible.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
+                  const selectFallback = await trySelectOptionFallback(target, normalizedValue);
+                  if (selectFallback.handled) return;
+                  return await visible.type(String(normalizedValue), options);
                 };
               }
               return async (...args) => {
