@@ -2820,14 +2820,19 @@ class WorkflowExecutor {
             console.warn(`[WorkflowExecutor] Human typing failed, falling back to regular fill: ${typingError.message}`);
             const variants = getSelectorAlternatives(selector);
             try {
+              let lastFillError = null;
               for (const variant of variants) {
                 try {
                   return await originalFill(variant, value, options);
-                } catch {
-                  // Try next alternative
+                } catch (variantError) {
+                  lastFillError = variantError;
                 }
               }
-              throw new Error(`Fill failed for selector and alternatives: ${selector}`);
+              const fallbackResult = await domFillFallback(selector, value);
+              if (fallbackResult?.filled) {
+                return;
+              }
+              throw (lastFillError || new Error(`Fill failed for selector and alternatives: ${selector}`));
             } catch (fillError) {
               if (shouldUseDomFallback(fillError)) {
                 const fallbackResult = await domFillFallback(selector, value);
