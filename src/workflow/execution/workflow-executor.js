@@ -2558,6 +2558,22 @@ class WorkflowExecutor {
           return { filled: false, reason: 'fallback-failed' };
         };
 
+        const pickVisibleCandidate = async (locatorObj, maxChecks = 8) => {
+          try {
+            const count = await locatorObj.count();
+            const checks = Math.min(count, maxChecks);
+            for (let i = 0; i < checks; i += 1) {
+              const candidate = locatorObj.nth(i);
+              if (await candidate.isVisible().catch(() => false)) {
+                return candidate;
+              }
+            }
+          } catch {
+            // Ignore and fallback to first()
+          }
+          return locatorObj.first();
+        };
+
         // Wrap click method with human-like behavior AND logging
         const originalClick = pageObj.click.bind(pageObj);
         wrapper.click = async function(selector, options = {}) {
@@ -2777,7 +2793,7 @@ class WorkflowExecutor {
               );
             }
             
-            const target = pageObj.locator(selector).first();
+            const target = await pickVisibleCandidate(pageObj.locator(selector));
             const fillTimeout = options?.timeout || 60000;
             await target.waitFor({ state: 'attached', timeout: fillTimeout });
             await target.scrollIntoViewIfNeeded({ timeout: 10000 }).catch(() => {});
@@ -2869,11 +2885,41 @@ class WorkflowExecutor {
           // Wrap common locator methods
           if (locator.click) {
             const originalLocatorClick = locator.click.bind(locator);
-            locator.click = wrapLocatorMethod('click', originalLocatorClick);
+            locator.click = async function(...args) {
+              await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).click`, args);
+              try {
+                const target = await pickVisibleCandidate(locator);
+                return await target.click(...args);
+              } catch (clickError) {
+                if (shouldUseDomFallback(clickError)) {
+                  const fallbackResult = await domClickFallback(selector);
+                  if (fallbackResult?.clicked) {
+                    return;
+                  }
+                }
+                return await originalLocatorClick(...args);
+              }
+            };
           }
           if (locator.fill) {
             const originalLocatorFill = locator.fill.bind(locator);
-            locator.fill = wrapLocatorMethod('fill', originalLocatorFill);
+            locator.fill = async function(...args) {
+              await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).fill`, args);
+              const [value, options] = args;
+              try {
+                const target = await pickVisibleCandidate(locator);
+                await target.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
+                return await target.fill(value, options);
+              } catch (fillError) {
+                if (shouldUseDomFallback(fillError) && typeof selector === 'string') {
+                  const fallbackResult = await domFillFallback(selector, value);
+                  if (fallbackResult?.filled) {
+                    return;
+                  }
+                }
+                return await originalLocatorFill(...args);
+              }
+            };
           }
           if (locator.type) {
             const originalLocatorType = locator.type.bind(locator);
