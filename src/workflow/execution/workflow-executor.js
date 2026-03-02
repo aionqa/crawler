@@ -2490,6 +2490,74 @@ class WorkflowExecutor {
         
         const wrapper = {};
         
+        const shouldUseDomFallback = (error) => {
+          const msg = String(error?.message || '').toLowerCase();
+          return (
+            msg.includes('not visible') ||
+            msg.includes('timeout') ||
+            msg.includes('intercepts pointer events') ||
+            msg.includes('element is outside of the viewport') ||
+            msg.includes('not editable')
+          );
+        };
+
+        const domClickFallback = async (selector) => {
+          try {
+            const target = pageObj.locator(selector).first();
+            await target.waitFor({ state: 'attached', timeout: 5000 });
+            return await target.evaluate((el) => {
+              if (typeof el.focus === 'function') el.focus();
+              if (typeof el.click === 'function') {
+                el.click();
+                return { clicked: true, method: 'native-click' };
+              }
+              el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, composed: true }));
+              return { clicked: true, method: 'mouseevent-click' };
+            });
+          } catch {
+            return { clicked: false, reason: 'fallback-failed' };
+          }
+        };
+
+        const getSelectorAlternatives = (selector) => {
+          if (typeof selector !== 'string' || !selector.trim()) return [selector];
+          const base = selector.trim();
+          const alternatives = new Set([base]);
+          const typedByName = base.match(/^(input|textarea|select)(\s*\[\s*name\s*=\s*["'][^"']+["']\s*\])$/i);
+          if (typedByName) {
+            const namePart = typedByName[2];
+            ['input', 'textarea', 'select'].forEach((tag) => alternatives.add(`${tag}${namePart}`));
+          }
+          return Array.from(alternatives);
+        };
+
+        const domFillFallback = async (selector, value) => {
+          const variants = getSelectorAlternatives(selector);
+          for (const variant of variants) {
+            try {
+              const target = pageObj.locator(variant).first();
+              await target.waitFor({ state: 'attached', timeout: 4000 });
+              const result = await target.evaluate((el, val) => {
+                if (typeof el.focus === 'function') el.focus();
+                const targetValue = String(val ?? '');
+                const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
+                if (descriptor && typeof descriptor.set === 'function') {
+                  descriptor.set.call(el, targetValue);
+                } else {
+                  el.value = targetValue;
+                }
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                return { filled: true };
+              }, value);
+              if (result?.filled) return result;
+            } catch {
+              // Continue through selector variants
+            }
+          }
+          return { filled: false, reason: 'fallback-failed' };
+        };
+
         // Wrap click method with human-like behavior AND logging
         const originalClick = pageObj.click.bind(pageObj);
         wrapper.click = async function(selector, options = {}) {
@@ -2517,8 +2585,8 @@ class WorkflowExecutor {
             // Increased timeout for slow-loading elements (60 seconds)
             const visibilityTimeout = options.timeout || 60000;
             
-            // Wait for element to be visible with longer timeout
-            await element.waitFor({ state: 'visible', timeout: visibilityTimeout });
+            // Wait for element attachment first; some sites reveal elements via animation/overlay late
+            await element.waitFor({ state: 'attached', timeout: visibilityTimeout });
             
             // Check if element is actually visible (not just in DOM but hidden by CSS)
             const isActuallyVisible = await element.evaluate((el) => {
@@ -2551,9 +2619,7 @@ class WorkflowExecutor {
                        el.offsetHeight > 0;
               }).catch(() => false);
               
-              if (!isNowVisible) {
-                throw new Error(`Element ${selector} is not visible (hidden by CSS)`);
-              }
+              // Do not hard-fail here; we still attempt resilient click paths below.
             }
             
             // Scroll element into view if needed
@@ -2653,6 +2719,13 @@ class WorkflowExecutor {
                 await humanDelay(900, 1800);
                 return;
               }
+              // Fallback for modern UI layers where Playwright actionability says "not visible"
+              if (shouldUseDomFallback(clickError)) {
+                const fallbackResult = await domClickFallback(selector);
+                if (fallbackResult?.clicked) {
+                  return;
+                }
+              }
               throw clickError;
             }
           } catch (markerError) {
@@ -2704,6 +2777,11 @@ class WorkflowExecutor {
               );
             }
             
+            const target = pageObj.locator(selector).first();
+            const fillTimeout = options?.timeout || 60000;
+            await target.waitFor({ state: 'attached', timeout: fillTimeout });
+            await target.scrollIntoViewIfNeeded({ timeout: 10000 }).catch(() => {});
+
             // Use human-like typing with mistakes and corrections (slower for visible video)
             await humanType(pageObj, selector, String(value), {
               minDelay: 180,
@@ -2720,7 +2798,25 @@ class WorkflowExecutor {
           } catch (typingError) {
             // If human typing fails, fall back to regular fill
             console.warn(`[WorkflowExecutor] Human typing failed, falling back to regular fill: ${typingError.message}`);
-            return await originalFill(selector, value, options);
+            const variants = getSelectorAlternatives(selector);
+            try {
+              for (const variant of variants) {
+                try {
+                  return await originalFill(variant, value, options);
+                } catch {
+                  // Try next alternative
+                }
+              }
+              throw new Error(`Fill failed for selector and alternatives: ${selector}`);
+            } catch (fillError) {
+              if (shouldUseDomFallback(fillError)) {
+                const fallbackResult = await domFillFallback(selector, value);
+                if (fallbackResult?.filled) {
+                  return;
+                }
+              }
+              throw fillError;
+            }
           }
         };
         
