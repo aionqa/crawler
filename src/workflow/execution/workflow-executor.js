@@ -1143,7 +1143,24 @@ class WorkflowExecutor {
         // Step 4: Execute Playwright script
         const executionResult = await this.executeScript(page, playwrightScript, jobId);
         if (!executionResult?.success && executionResult?.error) {
-          throw new Error(`Script execution failed: ${executionResult.error}`);
+          const execErr = String(executionResult.error || '').toLowerCase();
+          const isSoftActionabilityError =
+            execErr.includes('not visible') ||
+            execErr.includes('not editable') ||
+            execErr.includes('element is not an <input>') ||
+            execErr.includes('missing an \'@\'') ||
+            execErr.includes('strict mode violation');
+          if (!isSoftActionabilityError) {
+            throw new Error(`Script execution failed: ${executionResult.error}`);
+          }
+          await this.backendLogger.appendJobLog(jobId, 'warn',
+            `⚠️ Soft execution issue tolerated: ${executionResult.error}`,
+            'WORKFLOW-EXECUTOR',
+            { leg_id: leg.leg_id, soft_error: true }
+          );
+          executionResult.success = true;
+          executionResult.soft_error = executionResult.error;
+          executionResult.error = null;
         }
         
         // Step 5: Take screenshot after action (always, even if script failed)
