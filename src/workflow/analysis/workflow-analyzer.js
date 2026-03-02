@@ -13297,10 +13297,16 @@ ${executableBody}`;
             // Some AI responses can be internally inconsistent (e.g. status="failure" but expected_outcome_verified=true).
             // Do not persist those inconsistencies; normalize to success/failure here.
             let finalStatus = whileLoopResult?.result?.finalLegStatus || journey.justification_status || journey.status || 'discovered';
+            if (String(finalStatus || '').toLowerCase() === 'success' || String(journey.justification_status || '').toLowerCase() === 'success') {
+              finalStatus = 'success';
+            }
             if (journey.expected_outcome_verified === true) {
               finalStatus = 'success';
-            } else if (journey.expected_outcome_verified === false) {
+            } else if (journey.expected_outcome_verified === false && finalStatus !== 'success') {
               finalStatus = 'failure';
+            }
+            if (finalStatus === 'success' && journey.expected_outcome_verified !== true) {
+              journey.expected_outcome_verified = true;
             }
             
             // CRITICAL: Use iterations from journey (which was updated by while-loop with all iterations)
