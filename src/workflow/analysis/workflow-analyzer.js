@@ -13334,15 +13334,10 @@ ${executableBody}`;
             const resolvedDescription = String(
               journey.description ||
               item.description ||
-              lastIteration?.reason ||
               journey.ai_justification ||
-              `Journey ${journeyId}`
+              ''
             ).trim();
-            const resolvedExpectedOutcome = String(
-              journey.expected_outcome ||
-              item.expected_outcome ||
-              'Journey action completes with expected page outcome'
-            ).trim();
+            const resolvedExpectedOutcome = String(journey.expected_outcome || item.expected_outcome || '').trim();
             const resolvedScript = String(
               journey.playwright_script ||
               lastIteration?.script_executed ||
@@ -13354,8 +13349,8 @@ ${executableBody}`;
             return {
               ...journey,
               journey_id: journey.journey_id || journey.id || journeyId,
-              description: resolvedDescription,
-              expected_outcome: resolvedExpectedOutcome,
+              ...(resolvedDescription ? { description: resolvedDescription } : {}),
+              ...(resolvedExpectedOutcome ? { expected_outcome: resolvedExpectedOutcome } : {}),
               ...(resolvedScript ? { playwright_script: resolvedScript } : {}),
               ...(resolvedScript ? { script_executed: resolvedScript } : {}),
               justification_status: finalStatus,
@@ -13369,14 +13364,10 @@ ${executableBody}`;
         if (processedJourneys.length > 0) {
           console.log(`💾 Saving ${processedJourneys.length} journey(s) with status after for-each completion`);
           
-          const persistedPageDescription = workflowState.pageDescription || {
-            short_description: workflowState.pageTitle || workflowState.pageUrl || 'Page analyzed',
-            description: workflowState.pageTitle || workflowState.pageUrl || 'Page analyzed'
-          };
           const payload = {
             saveLegs: false,
             journeys: processedJourneys,
-            page_description: persistedPageDescription,
+            page_description: workflowState.pageDescription || null,
             job_id: jobId
           };
           
