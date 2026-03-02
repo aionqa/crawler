@@ -200,6 +200,27 @@ class WorkflowExecutor {
     return { detected: true, resolved: false, attempts: maxAttempts };
   }
 
+  async resolveCaptchaWithTimeout(page, jobId, maxAttempts = 10, phase = 'pre-leg', timeoutMs = 15000) {
+    try {
+      return await Promise.race([
+        this.resolveCaptchaWithRetries(page, jobId, maxAttempts, phase),
+        new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({ detected: false, resolved: false, attempts: 0, timed_out: true });
+          }, timeoutMs);
+        })
+      ]);
+    } catch (error) {
+      await this.logCaptcha(
+        jobId,
+        'warn',
+        `⚠️ CAPTCHA guard failed during ${phase}: ${error.message}`,
+        { phase, max_attempts: maxAttempts, timeout_ms: timeoutMs }
+      );
+      return { detected: false, resolved: false, attempts: 0, error: error.message };
+    }
+  }
+
   /**
    * Load workflow template from backend
    */
@@ -692,7 +713,10 @@ class WorkflowExecutor {
         const pageUrlBefore = page.url();
         
         // Step 1a: Detect and resolve captcha (up to 10 attempts) before collecting artifacts
-        const captchaResult = await this.resolveCaptchaWithRetries(page, jobId, 10, 'pre-leg');
+        const captchaResult = await this.resolveCaptchaWithTimeout(page, jobId, 10, 'pre-leg', 15000);
+        if (captchaResult?.timed_out) {
+          await this.logCaptcha(jobId, 'warn', '⚠️ CAPTCHA pre-leg check timed out; continuing', { phase: 'pre-leg', timeout_ms: 15000 });
+        }
         if (captchaResult.detected && !captchaResult.resolved) {
           await this.logCaptcha(
             jobId,
@@ -3471,7 +3495,10 @@ class WorkflowExecutor {
       
       // Wrap script execution with timeout (increased to 45 seconds to match workflow step timeout)
       // Re-check for CAPTCHA right before executing the script with up to 10 attempts
-      await this.resolveCaptchaWithRetries(page, jobId, 10, 'pre-script');
+      const preScriptCaptcha = await this.resolveCaptchaWithTimeout(page, jobId, 10, 'pre-script', 15000);
+      if (preScriptCaptcha?.timed_out) {
+        await this.logCaptcha(jobId, 'warn', '⚠️ CAPTCHA pre-script check timed out; continuing', { phase: 'pre-script', timeout_ms: 15000 });
+      }
       
       // Increased timeout to 90 seconds for complex interactions and CAPTCHA handling
       const result = await Promise.race([
