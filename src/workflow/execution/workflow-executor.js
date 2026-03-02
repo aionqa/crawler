@@ -1413,7 +1413,7 @@ class WorkflowExecutor {
         let effectiveCompletionStatus = determineCompletionResponse.status || determineCompletionResponse.completion_status || null;
         const reasonLower = String(completionReason || '').toLowerCase();
         const visualOnlyFailure =
-          effectiveCompletionStatus === 'failure' &&
+          effectiveCompletionStatus !== 'success' &&
           !executionResult?.error &&
           (
             reasonLower.includes('step indicator not clearly visible') ||
@@ -1425,7 +1425,7 @@ class WorkflowExecutor {
           !reasonLower.includes('timeout') &&
           !reasonLower.includes('execution failed');
         const inconsistentSyntheticEmailFailure =
-          effectiveCompletionStatus === 'failure' &&
+          effectiveCompletionStatus !== 'success' &&
           !executionResult?.error &&
           reasonLower.includes("missing an '@'") &&
           reasonLower.includes('test') &&
