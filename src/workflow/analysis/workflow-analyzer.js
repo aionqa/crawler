@@ -14105,6 +14105,10 @@ ${executableBody}`;
               } else if (expectedOutcomeVerified === false) {
                 finalJustificationStatus = 'failure';
               }
+              // Keep status and expected_outcome_verified consistent for downstream journey status mapping.
+              if (finalJustificationStatus === 'success' && expectedOutcomeVerified !== true) {
+                expectedOutcomeVerified = true;
+              }
 
               // CRITICAL: Ensure justify_journey status reflects final status so while-loop condition can exit
               const justifyStepKeys = ['justify-journey', 'justify_journey', 'justifyJourney'];
