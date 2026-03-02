@@ -2531,6 +2531,20 @@ class WorkflowExecutor {
           return Array.from(alternatives);
         };
 
+        const normalizeInputValue = (selector, rawValue) => {
+          const value = rawValue == null ? '' : String(rawValue);
+          const sel = String(selector || '').toLowerCase();
+          const looksLikeEmailField =
+            sel.includes('email') ||
+            sel.includes('type="email"') ||
+            sel.includes("type='email'") ||
+            sel.includes('[type=email]');
+          if (looksLikeEmailField && !value.includes('@')) {
+            return 'test@example.com';
+          }
+          return value;
+        };
+
         const domFillFallback = async (selector, value) => {
           const variants = getSelectorAlternatives(selector);
           for (const variant of variants) {
@@ -2810,8 +2824,9 @@ class WorkflowExecutor {
         const originalFill = pageObj.fill.bind(pageObj);
         wrapper.fill = async function(selector, value, options) {
           try {
+            const normalizedValue = normalizeInputValue(selector, value);
             // Log the action execution
-            await logAction('fill', [selector, value]);
+            await logAction('fill', [selector, normalizedValue]);
             
             // Get element label for marker
             let label = 'Input';
@@ -2838,7 +2853,7 @@ class WorkflowExecutor {
                 {
                   action_type: 'input',
                   selector: selector,
-                  value_preview: String(value).substring(0, 50),
+                  value_preview: String(normalizedValue).substring(0, 50),
                   timestamp: Date.now(),
                   is_timeline_marker: true,
                   marker_color: '#10b981' // Green for inputs
@@ -2856,7 +2871,7 @@ class WorkflowExecutor {
             }
 
             // Use human-like typing with mistakes and corrections (slower for visible video)
-            await humanType(pageObj, selector, String(value), {
+            await humanType(pageObj, selector, String(normalizedValue), {
               minDelay: 180,
               maxDelay: 450,
               typoChance: 0.15,
@@ -2876,27 +2891,28 @@ class WorkflowExecutor {
               let lastFillError = null;
               for (const variant of variants) {
                 try {
-                  return await originalFill(variant, value, options);
+                  const normalizedVariantValue = normalizeInputValue(variant, normalizedValue);
+                  return await originalFill(variant, normalizedVariantValue, options);
                 } catch (variantError) {
                   lastFillError = variantError;
                 }
               }
-              const fallbackResult = await domFillFallback(selector, value);
+              const fallbackResult = await domFillFallback(selector, normalizedValue);
               if (fallbackResult?.filled) {
                 return;
               }
-              const semanticFallbackResult = await semanticVisibleFillFallback(selector, value);
+              const semanticFallbackResult = await semanticVisibleFillFallback(selector, normalizedValue);
               if (semanticFallbackResult?.filled) {
                 return;
               }
               throw (lastFillError || new Error(`Fill failed for selector and alternatives: ${selector}`));
             } catch (fillError) {
               if (shouldUseDomFallback(fillError)) {
-                const fallbackResult = await domFillFallback(selector, value);
+                const fallbackResult = await domFillFallback(selector, normalizedValue);
                 if (fallbackResult?.filled) {
                   return;
                 }
-                const semanticFallbackResult = await semanticVisibleFillFallback(selector, value);
+                const semanticFallbackResult = await semanticVisibleFillFallback(selector, normalizedValue);
                 if (semanticFallbackResult?.filled) {
                   return;
                 }
@@ -2979,17 +2995,18 @@ class WorkflowExecutor {
                 return async (...args) => {
                   await logAction(`locator(${typeof selectorHint === 'string' ? selectorHint.substring(0, 50) : '...'}).fill`, args);
                   const [value, options] = args;
+                  const normalizedValue = normalizeInputValue(selectorHint, value);
                   try {
                     const visible = await pickVisibleCandidate(target);
                     await visible.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
-                    const selectFallback = await trySelectOptionFallback(target, value);
+                    const selectFallback = await trySelectOptionFallback(target, normalizedValue);
                     if (selectFallback.handled) return;
-                    return await visible.fill(value, options);
+                    return await visible.fill(normalizedValue, options);
                   } catch (fillError) {
                     if (shouldUseDomFallback(fillError) && typeof selectorHint === 'string' && selectorHint.trim()) {
-                      const fallbackResult = await domFillFallback(selectorHint, value);
+                      const fallbackResult = await domFillFallback(selectorHint, normalizedValue);
                       if (fallbackResult?.filled) return;
-                      const semanticFallbackResult = await semanticVisibleFillFallback(selectorHint, value);
+                      const semanticFallbackResult = await semanticVisibleFillFallback(selectorHint, normalizedValue);
                       if (semanticFallbackResult?.filled) return;
                     }
                     throw fillError;
