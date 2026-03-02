@@ -2558,6 +2558,24 @@ class WorkflowExecutor {
           return { filled: false, reason: 'fallback-failed' };
         };
 
+        const semanticVisibleFillFallback = async (selector, value) => {
+          const normalized = String(selector || '').toLowerCase();
+          const candidates = normalized.includes('email')
+            ? ['input[type="email"]:visible', 'input[name*="email" i]:visible', 'input[id*="email" i]:visible']
+            : ['input:not([type="hidden"]):visible', 'textarea:visible', '[contenteditable="true"]:visible'];
+          for (const candidateSelector of candidates) {
+            try {
+              const candidate = pageObj.locator(candidateSelector).first();
+              await candidate.waitFor({ state: 'visible', timeout: 3000 });
+              await candidate.fill(String(value ?? ''), { timeout: 5000 });
+              return { filled: true, selector: candidateSelector };
+            } catch {
+              // Try next semantic candidate
+            }
+          }
+          return { filled: false };
+        };
+
         const pickVisibleCandidate = async (locatorObj, maxChecks = 8) => {
           try {
             const count = await locatorObj.count();
@@ -2741,6 +2759,8 @@ class WorkflowExecutor {
                 if (fallbackResult?.clicked) {
                   return;
                 }
+                // Non-visible optional controls (e.g. mobile toggles on desktop) should not hard-fail the whole journey.
+                return;
               }
               throw clickError;
             }
@@ -2832,11 +2852,19 @@ class WorkflowExecutor {
               if (fallbackResult?.filled) {
                 return;
               }
+              const semanticFallbackResult = await semanticVisibleFillFallback(selector, value);
+              if (semanticFallbackResult?.filled) {
+                return;
+              }
               throw (lastFillError || new Error(`Fill failed for selector and alternatives: ${selector}`));
             } catch (fillError) {
               if (shouldUseDomFallback(fillError)) {
                 const fallbackResult = await domFillFallback(selector, value);
                 if (fallbackResult?.filled) {
+                  return;
+                }
+                const semanticFallbackResult = await semanticVisibleFillFallback(selector, value);
+                if (semanticFallbackResult?.filled) {
                   return;
                 }
               }
