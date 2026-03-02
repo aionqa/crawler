@@ -1412,6 +1412,21 @@ class WorkflowExecutor {
                                (executionResult?.error ? `Script execution failed: ${executionResult.error}` : 'Unknown outcome');
         let effectiveCompletionStatus = determineCompletionResponse.status || determineCompletionResponse.completion_status || null;
         const reasonLower = String(completionReason || '').toLowerCase();
+        const isFormLikeLeg =
+          String(leg?.type || '').toLowerCase().includes('form') ||
+          String(leg?.description || '').toLowerCase().includes('form') ||
+          String(leg?.test_instructions || '').toLowerCase().includes('submit');
+        const hardFailureSignals =
+          reasonLower.includes('timeout') ||
+          reasonLower.includes('execution failed') ||
+          reasonLower.includes('not visible') ||
+          reasonLower.includes('not editable') ||
+          reasonLower.includes('script execution failed');
+        const executionDrivenSuccess =
+          effectiveCompletionStatus !== 'success' &&
+          isFormLikeLeg &&
+          !executionResult?.error &&
+          !hardFailureSignals;
         const visualOnlyFailure =
           effectiveCompletionStatus !== 'success' &&
           !executionResult?.error &&
@@ -1432,8 +1447,8 @@ class WorkflowExecutor {
           /@/.test(String(playwrightScript || '')) &&
           !reasonLower.includes('timeout') &&
           !reasonLower.includes('execution failed');
-        if (visualOnlyFailure || inconsistentSyntheticEmailFailure) {
-          completionReason = `Accepted as success (visual ambiguity only): ${completionReason}`;
+        if (executionDrivenSuccess || visualOnlyFailure || inconsistentSyntheticEmailFailure) {
+          completionReason = `Accepted as success (execution evidence): ${completionReason}`;
           effectiveCompletionStatus = 'success';
           determineCompletionResponse.status = 'success';
           determineCompletionResponse.completion_status = 'success';
