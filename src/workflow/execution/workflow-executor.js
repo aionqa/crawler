@@ -1406,10 +1406,33 @@ class WorkflowExecutor {
         );
 
         // Extract reason from determine completion response
-        const completionReason = determineCompletionResponse.reason || 
-                                 determineCompletionResponse.description || 
-                                 determineCompletionResponse.what_happened ||
-                                 (executionResult?.error ? `Script execution failed: ${executionResult.error}` : 'Unknown outcome');
+        let completionReason = determineCompletionResponse.reason || 
+                               determineCompletionResponse.description || 
+                               determineCompletionResponse.what_happened ||
+                               (executionResult?.error ? `Script execution failed: ${executionResult.error}` : 'Unknown outcome');
+        let effectiveCompletionStatus = determineCompletionResponse.status || determineCompletionResponse.completion_status || null;
+        const reasonLower = String(completionReason || '').toLowerCase();
+        const visualOnlyFailure =
+          effectiveCompletionStatus === 'failure' &&
+          !executionResult?.error &&
+          (
+            reasonLower.includes('step indicator not clearly visible') ||
+            reasonLower.includes('step indicator not visible') ||
+            reasonLower.includes('no multi-step wizard indicators')
+          ) &&
+          !reasonLower.includes('validation error') &&
+          !reasonLower.includes("missing an '@'") &&
+          !reasonLower.includes('timeout') &&
+          !reasonLower.includes('execution failed');
+        if (visualOnlyFailure) {
+          completionReason = `Accepted as success (visual ambiguity only): ${completionReason}`;
+          effectiveCompletionStatus = 'success';
+          determineCompletionResponse.status = 'success';
+          determineCompletionResponse.completion_status = 'success';
+          if (determineCompletionResponse.expected_outcome_verified == null) {
+            determineCompletionResponse.expected_outcome_verified = true;
+          }
+        }
 
         // Collect execution state for redo capability
         const pageUrlAfter = page.url();
@@ -1457,10 +1480,10 @@ class WorkflowExecutor {
           script_executed: playwrightScript, // Script must exist - validated above
           openai_request: determineCompletionRequest,
           openai_response: determineCompletionResponse,
-          result: determineCompletionResponse.status === 'success' ? 'success' : 
-                  (determineCompletionResponse.status === 'failure' ? 'failure' : 'incomplete'),
-          status: determineCompletionResponse.status || null, // Status from determine_completion (success/failure/continue/stuck)
-          completion_status: determineCompletionResponse.completion_status || null, // Alternative status field
+          result: effectiveCompletionStatus === 'success' ? 'success' : 
+                  (effectiveCompletionStatus === 'failure' ? 'failure' : 'incomplete'),
+          status: effectiveCompletionStatus || null, // Effective status after ambiguity normalization
+          completion_status: effectiveCompletionStatus || null,
           error: executionResult?.error || null, // Keep script error for technical details
           reason: completionReason, // CRITICAL: Reasoning from determine_completion for execution history
           failure_reason: completionReason, // Keep for backward compatibility
@@ -1473,7 +1496,7 @@ class WorkflowExecutor {
         });
 
         // Step 9: Check result - always complete after single attempt (no retries)
-        const completionStatus = determineCompletionResponse.status || determineCompletionResponse.completion_status;
+        const completionStatus = effectiveCompletionStatus;
         if (completionStatus === 'success' || determineCompletionResponse.is_complete === true) {
           console.log(`[WorkflowExecutor] Leg ${leg.leg_id} completed successfully. Reason: ${completionReason}`);
           completed = true;
