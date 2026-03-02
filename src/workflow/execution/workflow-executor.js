@@ -3030,6 +3030,8 @@ class WorkflowExecutor {
                 if (semanticFallbackResult?.filled) {
                   return;
                 }
+                // Hidden/non-actionable optional fields should not fail entire journey.
+                return;
               }
               throw fillError;
             }
@@ -3135,6 +3137,8 @@ class WorkflowExecutor {
                       if (fallbackResult?.filled) return;
                       const semanticFallbackResult = await semanticVisibleFillFallback(selectorHint, normalizedValue);
                       if (semanticFallbackResult?.filled) return;
+                      // Hidden/non-actionable optional fields should not fail entire journey.
+                      return;
                     }
                     throw fillError;
                   }
