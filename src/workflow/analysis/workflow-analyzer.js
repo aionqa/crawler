@@ -17739,9 +17739,33 @@ ${executableBody}`;
         }
       };
 
-      // Get page_id and project_id from workflowState or context
-      const pageId = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
-      const projectId = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
+      // Resolve page/project ids from all known field variants used across workflow paths.
+      let pageId =
+        workflowState.pageId ||
+        workflowState.page_id ||
+        this.context?.page_id ||
+        this.context?.pageId ||
+        stepContext?.pageId ||
+        stepContext?.page_id;
+      let projectId =
+        workflowState.projectId ||
+        workflowState.project_id ||
+        this.context?.project_id ||
+        this.context?.projectId ||
+        stepContext?.projectId ||
+        stepContext?.project_id;
+
+      // If page_id is still missing but we have project context + URL, upsert page and continue.
+      if (!pageId && projectId) {
+        workflowState.projectId = workflowState.projectId || projectId;
+        if (!workflowState.pageUrl && (stepContext?.page_url || stepContext?.pageUrl)) {
+          workflowState.pageUrl = stepContext.page_url || stepContext.pageUrl;
+        }
+        const resolvedPageId = await this.ensurePageId(workflowState, jobId);
+        if (resolvedPageId) {
+          pageId = resolvedPageId;
+        }
+      }
 
       // Compute "where we would save" deterministically for visibility/debugging.
       const currentJourneyForKey =
