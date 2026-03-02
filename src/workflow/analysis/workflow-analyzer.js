@@ -1861,6 +1861,27 @@ IMPORTANT OUTPUT REQUIREMENTS:
     };
   }
 
+  /**
+   * Produce a short human-readable justification from a long error message (e.g. Playwright call log).
+   * Used when a journey step fails before the AI justify step runs, so we do not store the full
+   * "locator.fill Timeout... Call log: ..." dump as "AI Justification".
+   */
+  summarizeErrorForJustification(errorMessage, maxLen = 280) {
+    const msg = typeof errorMessage === 'string' ? errorMessage : (errorMessage ? String(errorMessage) : '');
+    if (!msg) return 'Step failed (no error message).';
+    if (msg.length <= maxLen) return msg;
+    const lower = msg.toLowerCase();
+    if (lower.includes('timeout') && (lower.includes('exceeded') || lower.includes('ms'))) {
+      const elementPart = lower.includes('not visible') ? ' element not visible' : (lower.includes('not editable') ? ' element not editable' : '');
+      return `Execution failed: timeout${elementPart}.`;
+    }
+    if (lower.includes('locator.') && lower.includes('waiting for')) {
+      return 'Execution failed: action timed out waiting for element.';
+    }
+    const firstSentence = msg.split(/[.!?\n]/)[0].trim();
+    return firstSentence.length <= maxLen ? firstSentence : firstSentence.substring(0, maxLen - 3) + '...';
+  }
+
   async ensurePageId(workflowState, jobId) {
     if (workflowState.pageId && workflowState.projectId) {
       return workflowState.pageId;
@@ -4027,8 +4048,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
       stepPayload.execution_history = workflowState.executionHistory;
     }
     if (workflowState.lastExecutionResult) {
-      stepPayload.last_execution_result = workflowState.lastExecutionResult;
-      stepPayload.execution_result = workflowState.lastExecutionResult;
+      // For justify_journey, pass only a short summary so the AI does not echo the full Playwright call log into "reason"
+      const isJustifyJourney = step.id === 'justify_journey' || step.name?.toLowerCase().includes('justify journey');
+      if (isJustifyJourney) {
+        stepPayload.last_execution_result = this.summarizeExecutionResult(workflowState.lastExecutionResult, 200);
+        stepPayload.execution_result = stepPayload.last_execution_result;
+      } else {
+        stepPayload.last_execution_result = workflowState.lastExecutionResult;
+        stepPayload.execution_result = workflowState.lastExecutionResult;
+      }
     }
     
     // Add previous step results summary
@@ -13753,13 +13781,14 @@ ${executableBody}`;
                   journey.justification_status = 'failure';
                   journey.expected_outcome_verified = false;
                   if (!Array.isArray(journey.iterations)) journey.iterations = [];
+                  const shortReason = this.summarizeErrorForJustification(nestedError.message);
                   journey.iterations.push({
                     error: nestedError.message,
                     result: 'failure',
-                    reason: `Step failed: ${nestedError.message}`
+                    reason: `Step failed: ${shortReason}`
                   });
-                  // Synthetic justify result so iteration save below records failure
-                  const syntheticJustify = { status: 'failure', reason: nestedError.message, expected_outcome_verified: false };
+                  // Synthetic justify result so iteration save below records failure (short reason for UI "AI Justification")
+                  const syntheticJustify = { status: 'failure', reason: shortReason, expected_outcome_verified: false };
                   workflowState.justify_journey = { result: syntheticJustify };
                   workflowState.variablePool = workflowState.variablePool || {};
                   workflowState.variablePool.steps = workflowState.variablePool.steps || {};
@@ -14019,6 +14048,10 @@ ${executableBody}`;
                   justificationReason = extractValue(unwrappedJustifyData.reason);
                 } else if (unwrappedJustifyData?.verification_details) {
                   justificationReason = extractValue(unwrappedJustifyData.verification_details);
+                }
+                // If AI echoed the raw Playwright call log into reason, replace with short summary for UI
+                if (typeof justificationReason === 'string' && justificationReason.length > 400 && (justificationReason.includes('Call log:') || /locator\.\w+ Timeout/.test(justificationReason))) {
+                  justificationReason = this.summarizeErrorForJustification(justificationReason);
                 }
                 
                 // Extract status - handle structured format
@@ -15171,6 +15204,10 @@ ${executableBody}`;
               justificationReason = extractValue(unwrappedResult.reason);
             } else if (unwrappedResult?.verification_details) {
               justificationReason = extractValue(unwrappedResult.verification_details);
+            }
+            // If AI echoed the raw Playwright call log into reason, replace with short summary for UI
+            if (typeof justificationReason === 'string' && justificationReason.length > 400 && (justificationReason.includes('Call log:') || /locator\.\w+ Timeout/.test(justificationReason))) {
+              justificationReason = this.summarizeErrorForJustification(justificationReason);
             }
             
             console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Extracted justificationReason: ${justificationReason ? justificationReason.substring(0, 100) + '...' : 'EMPTY'}`);
