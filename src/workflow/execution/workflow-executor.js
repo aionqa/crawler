@@ -2745,11 +2745,15 @@ class WorkflowExecutor {
               throw clickError;
             }
           } catch (markerError) {
-            // Don't fail script execution if marker sending fails
+            // Marker/logging failures must not downgrade to a brittle raw click path.
             console.warn(`[WorkflowExecutor] Failed to send click marker: ${markerError.message}`);
-            // Still try to click even if marker failed
-            const element = pageObj.locator(selector).first();
-            return await element.click(options);
+            if (shouldUseDomFallback(markerError)) {
+              const fallbackResult = await domClickFallback(selector);
+              if (fallbackResult?.clicked) {
+                return;
+              }
+            }
+            throw markerError;
           }
         };
         
