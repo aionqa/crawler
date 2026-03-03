@@ -1293,6 +1293,7 @@ export class AIConversationLogger {
       }
       
       // 9. Log AI call completion with duration, tokens, and cost to job logs
+      // Prefer cost_usd/saved_usd from AI service (backend-reported) so we never show $0 when customer was charged or saved.
       const aiCallDuration = Date.now() - aiCallStartTime;
       if (jobId && this.backendUrl && response.usage) {
         try {
@@ -1300,11 +1301,14 @@ export class AIConversationLogger {
           const inputTokens = response.usage.prompt_tokens ?? response.usage.input_tokens ?? 0;
           const outputTokens = response.usage.completion_tokens ?? response.usage.output_tokens ?? 0;
           const totalTokens = response.usage.total_tokens ?? (inputTokens + outputTokens);
-          
+          const costFromService = response.cost_usd != null ? response.cost_usd : (response.saved_usd != null ? response.saved_usd : null);
+          const effectiveCost = costFromService != null ? costFromService : costDetails.totalCost;
           const durationSeconds = (aiCallDuration / 1000).toFixed(2);
-          const costText = costDetails.totalCost > 0 
-            ? `Cost: $${costDetails.totalCost.toFixed(6)} USD`
-            : 'Cost: $0.000000 USD';
+          const costText = response.saved_usd != null && response.saved_usd > 0
+            ? `Saved $${Number(response.saved_usd).toFixed(6)} USD (self-deployed, not charged)`
+            : effectiveCost > 0
+              ? `Cost: $${Number(effectiveCost).toFixed(6)} USD`
+              : 'Cost: $0.000000 USD';
           
           await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
             jobId,
@@ -1324,7 +1328,9 @@ export class AIConversationLogger {
                 output_tokens: outputTokens,
                 total_tokens: totalTokens
               },
-              cost: costDetails,
+              cost: { ...costDetails, totalCost: effectiveCost },
+              cost_usd: response.cost_usd,
+              saved_usd: response.saved_usd,
               status: 'completed',
               finish_reason: finishReason,
               full_response: JSON.stringify({
