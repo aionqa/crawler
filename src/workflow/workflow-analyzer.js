@@ -11973,7 +11973,50 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             }
             
             // Extract condition from step result
-            if (conditionPath && determineStepResult) {
+            // First try resolving directly from workflow state/results so nested keys like
+            // "execute_workflow_journeys::0::...::justify_journey.result.status" are supported
+            // when conditionPath uses short form "justify_journey.result.status".
+            if (conditionPath) {
+              const rootSegment = conditionPath.split('.')[0];
+              const isDetermineCompletionPath = rootSegment === 'determine_completion' || rootSegment === 'determine-completion';
+
+              if (!isDetermineCompletionPath) {
+                const directConditionValue = this.resolvePathValue(workflowState, conditionPath, 'results');
+                if (directConditionValue !== undefined && directConditionValue !== null) {
+                  conditionValue = directConditionValue;
+                  console.log(`✅ Extracted condition value directly from workflow state via path "${conditionPath}": ${conditionValue}`);
+                } else if (workflowState.results && conditionPath.includes('.')) {
+                  const pathSuffix = conditionPath.split('.').slice(1).join('.');
+                  const stepIdVariants = [rootSegment, rootSegment.replace(/_/g, '-'), rootSegment.replace(/-/g, '_')];
+                  const matchingKey = Object.keys(workflowState.results).find((key) =>
+                    stepIdVariants.some((variant) => key === variant || key.endsWith(`::${variant}`))
+                  );
+
+                  if (matchingKey) {
+                    let candidate = workflowState.results[matchingKey];
+                    if (candidate && typeof candidate === 'object' && 'result' in candidate) {
+                      candidate = candidate.result;
+                    }
+                    if (candidate && typeof candidate === 'object' && pathSuffix) {
+                      for (const segment of pathSuffix.split('.')) {
+                        if (candidate && typeof candidate === 'object') {
+                          candidate = candidate[segment];
+                        } else {
+                          candidate = undefined;
+                          break;
+                        }
+                      }
+                    }
+                    if (candidate !== undefined && candidate !== null) {
+                      conditionValue = candidate;
+                      console.log(`✅ Extracted condition value via nested key "${matchingKey}" and suffix "${pathSuffix}": ${conditionValue}`);
+                    }
+                  }
+                }
+              }
+            }
+
+            if ((conditionValue === undefined || conditionValue === null) && conditionPath && determineStepResult) {
               const pathSegments = conditionPath.split('.');
               // CRITICAL: If path starts with "determine_completion", skip the first segment and use determineStepResult directly
               // This handles paths like "determine_completion.status" where determineStepResult IS the determine_completion result
