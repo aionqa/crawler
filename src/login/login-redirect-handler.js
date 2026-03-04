@@ -146,6 +146,15 @@ export async function handleLoginRedirect(
     await sendLog(jobId, 'error', `❌ Login redirect detected - failing crawl as configured`);
     throw new Error(`Login page detected at ${currentUrl} - crawl failed (handle_login_redirect: fail)`);
   }
+
+  // Warn and ignore: log warning and continue crawl without re-authenticating
+  if (handleLoginRedirect === 'warn_ignore') {
+    await sendLog(jobId, 'warn', `⚠️ Login redirect ignored (warn_ignore) - continuing crawl without re-authentication`, {
+      current_url: currentUrl,
+      intended_url: intendedUrl
+    });
+    return null;
+  }
   
   // Auto-retry: Get latest login job cookies and re-authenticate
   if (handleLoginRedirect === 'auto_retry') {
