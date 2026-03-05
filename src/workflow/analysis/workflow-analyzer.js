@@ -14789,20 +14789,31 @@ ${executableBody}`;
                   );
 
                   if (matchingKey) {
-                    let candidate = workflowState.results[matchingKey];
-                    if (candidate && typeof candidate === 'object' && 'result' in candidate) {
-                      candidate = candidate.result;
-                    }
-                    if (candidate && typeof candidate === 'object' && pathSuffix) {
-                      for (const segment of pathSuffix.split('.')) {
-                        if (candidate && typeof candidate === 'object') {
-                          candidate = candidate[segment];
+                    const rawCandidate = workflowState.results[matchingKey];
+                    const suffixSegments = pathSuffix ? pathSuffix.split('.') : [];
+                    const resolveSegments = (source, segments) => {
+                      let current = source;
+                      for (const segment of segments) {
+                        if (current && typeof current === 'object') {
+                          current = current[segment];
                         } else {
-                          candidate = undefined;
-                          break;
+                          return undefined;
                         }
                       }
+                      return current;
+                    };
+
+                    // First resolve from the raw step result object.
+                    let candidate = resolveSegments(rawCandidate, suffixSegments);
+
+                    // If not found, retry from `.result`, while supporting both:
+                    // - "justify_journey.result.status" (drop leading "result")
+                    // - "justify_journey.status" (keep full suffix)
+                    if ((candidate === undefined || candidate === null) && rawCandidate && typeof rawCandidate === 'object' && 'result' in rawCandidate) {
+                      const segmentsFromResult = suffixSegments[0] === 'result' ? suffixSegments.slice(1) : suffixSegments;
+                      candidate = resolveSegments(rawCandidate.result, segmentsFromResult);
                     }
+
                     if (candidate !== undefined && candidate !== null) {
                       conditionValue = candidate;
                       console.log(`✅ Extracted condition value via nested key "${matchingKey}" and suffix "${pathSuffix}": ${conditionValue}`);
