@@ -4538,7 +4538,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           + '- Do not navigate to localhost/base URLs. Use current page state; only navigate if currentJourney explicitly requires a URL navigation action.\n'
           + '- For modal/wizard journeys: if target fields/buttons are not visible, first click the opener trigger (e.g., "Start", "Open", "Launch", "Begin") to display the modal/wizard, then continue actions.\n'
           + '- For modal openers, target explicit clickable elements (a/button/[role="button"][aria-haspopup]) and use click({ force: true }) when overlays can intercept pointer events.\n'
-          + '- Treat navigation/DOM-readiness waits as best-effort only: wrap waitForNavigation/waitForLoadState/non-critical waitForSelector in try/catch and continue on timeout.\n'
+          + '- Do NOT block on full page readiness: avoid strict waitForLoadState("load"/"networkidle"); prefer immediate interaction or short bounded waits (<=1500ms) and continue on timeout.\n'
           + '- Every interaction statement MUST be awaited (await page.click/fill/check/selectOption/type/press) and must not use bare page.click(...) without await.\n'
           + '- If an action adds dynamic inputs (e.g., Add Email/Add Phone), ensure every visible required input is non-empty before submit.\n'
           + '- Immediately before submit, handle browser validation safely: if any :invalid input exists, fill it with a valid realistic value and then submit.\n'
@@ -5554,17 +5554,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
           const interactiveElementsCount = significantInteractiveElements.length;
           const journeysCount = journeys.length;
           
-          console.log(`📊 [VALIDATION] Found ${formsCount} form(s), ${interactiveElementsCount} significant interactive element(s), ${journeysCount} journey(s)`);
+          console.log(`📊 [VALIDATION] Found ${formsCount} form(s), ${interactiveElementsCount} significant interactive element(s), ${journeysCount} journey(s) (one journey per logical flow, multiple actions per journey)`);
           
-          // Warn if no journeys but elements exist (AI might have missed something)
-          if (journeysCount === 0 && (formsCount > 0 || interactiveElementsCount > 0)) {
-            console.warn(`⚠️ [VALIDATION] No journeys generated but ${formsCount} form(s) and ${interactiveElementsCount} significant interactive element(s) exist on the page`);
+          // Warn if no journeys but forms exist (AI might have missed the flow)
+          if (journeysCount === 0 && formsCount > 0) {
+            console.warn(`⚠️ [VALIDATION] No journeys generated but ${formsCount} form(s) exist on the page`);
           }
           
-          // Validate journey count matches forms + significant interactive elements
-          // AI must follow the rule: ONE FORM/INTERACTIVE ELEMENT = ONE JOURNEY
-          if (journeysCount !== (formsCount + interactiveElementsCount)) {
-            console.warn(`⚠️ [VALIDATION] Generated ${journeysCount} journey(s) but expected ${formsCount + interactiveElementsCount} (${formsCount} form(s) + ${interactiveElementsCount} significant interactive element(s)). AI must follow the rule: EXACTLY ONE JOURNEY PER FORM/INTERACTIVE ELEMENT.`);
+          // Validate: one journey per logical flow (e.g. one form = one journey with multiple actions).
+          // Expect journeys <= forms + a few primary flows; warn if we have far more journeys than forms (e.g. one per button).
+          const expectedMaxJourneys = Math.max(formsCount + 3, 5);
+          if (journeysCount > expectedMaxJourneys) {
+            console.warn(`⚠️ [VALIDATION] Generated ${journeysCount} journey(s) but expected at most ~${expectedMaxJourneys} (one journey per logical flow, e.g. one per form/chat with multiple actions). Consider merging: one flow = one journey with many actions.`);
           }
           
           // Deduplicate journeys by mapping them back to unique interactive elements
@@ -13321,7 +13322,24 @@ ${executableBody}`;
               statusEvidence.includes('step indicator not clearly visible') ||
               statusEvidence.includes('no multi-step wizard indicators');
             if (finalStatus !== 'success' && softFailureOnly) {
-              finalStatus = 'success';
+              // Timeout/visibility-only evidence is not proof of success or failure.
+              // Persist as pending with warning so UI can show non-blocking instability.
+              finalStatus = 'pending';
+              const warningMessage = 'Execution timeout or visibility issue occurred before clear completion evidence.';
+              const existingWarnings = Array.isArray(journey.execution_warnings) ? journey.execution_warnings : [];
+              const hasEquivalentWarning = existingWarnings.some((w) =>
+                String(w?.type || '') === 'timeout_before_full_load'
+              );
+              if (!hasEquivalentWarning) {
+                journey.execution_warnings = [
+                  ...existingWarnings,
+                  {
+                    type: 'timeout_before_full_load',
+                    message: warningMessage,
+                    detected_at: new Date().toISOString()
+                  }
+                ];
+              }
             }
             if (finalStatus === 'success' && journey.expected_outcome_verified !== true) {
               journey.expected_outcome_verified = true;
@@ -13825,30 +13843,63 @@ ${executableBody}`;
                     nestedMsgLower.includes('not visible') ||
                     nestedMsgLower.includes('waiting for locator') ||
                     nestedMsgLower.includes('waiting for selector');
-                  journey.status = softStepError ? 'success' : 'failure';
-                  journey.justification_status = softStepError ? 'success' : 'failure';
-                  journey.expected_outcome_verified = softStepError ? true : false;
+                  let pageReadyState = 'unknown';
+                  if (softStepError && page && typeof page.evaluate === 'function' && !page.isClosed?.()) {
+                    try {
+                      pageReadyState = await page.evaluate(() => document.readyState || 'unknown');
+                    } catch (_) {
+                      pageReadyState = 'unknown';
+                    }
+                  }
+                  const domNotFullyLoaded = softStepError && pageReadyState !== 'complete' && pageReadyState !== 'unknown';
+                  const warningMessage = domNotFullyLoaded
+                    ? `Execution timeout while page was not fully loaded (readyState=${pageReadyState}).`
+                    : 'Execution timeout/visibility issue without definitive completion evidence.';
+                  journey.status = softStepError ? 'pending' : 'failure';
+                  journey.justification_status = softStepError ? 'pending' : 'failure';
+                  journey.expected_outcome_verified = softStepError ? null : false;
+                  if (softStepError) {
+                    const existingWarnings = Array.isArray(journey.execution_warnings) ? journey.execution_warnings : [];
+                    journey.execution_warnings = [
+                      ...existingWarnings,
+                      {
+                        type: 'timeout_before_full_load',
+                        message: warningMessage,
+                        ready_state: pageReadyState,
+                        detected_at: new Date().toISOString()
+                      }
+                    ];
+                  }
                   if (!Array.isArray(journey.iterations)) journey.iterations = [];
                   const shortReason = this.summarizeErrorForJustification(nestedError.message);
                   journey.iterations.push({
                     error: nestedError.message,
-                    result: softStepError ? 'success' : 'failure',
+                    result: softStepError ? 'pending' : 'failure',
                     reason: softStepError
-                      ? `Accepted as success (soft step error): ${shortReason}`
+                      ? `Warning (timeout/visibility): ${warningMessage} ${shortReason}`
                       : `Step failed: ${shortReason}`
                   });
                   // Synthetic justify result so iteration save below records failure (short reason for UI "AI Justification")
                   const syntheticJustify = {
-                    status: softStepError ? 'success' : 'failure',
-                    reason: softStepError ? `Accepted as success (soft step error): ${shortReason}` : shortReason,
-                    expected_outcome_verified: softStepError ? true : false
+                    status: softStepError ? 'pending' : 'failure',
+                    reason: softStepError ? `Warning (timeout/visibility): ${warningMessage}` : shortReason,
+                    expected_outcome_verified: softStepError ? null : false,
+                    warnings: softStepError
+                      ? [
+                          {
+                            type: 'timeout_before_full_load',
+                            message: warningMessage,
+                            ready_state: pageReadyState
+                          }
+                        ]
+                      : []
                   };
                   workflowState.justify_journey = { result: syntheticJustify };
                   workflowState.variablePool = workflowState.variablePool || {};
                   workflowState.variablePool.steps = workflowState.variablePool.steps || {};
                   workflowState.variablePool.steps['justify-journey'] = { result: syntheticJustify };
                   workflowState.variablePool.steps['justify_journey'] = { result: syntheticJustify };
-                  console.log(`✅ [JOURNEY-${softStepError ? 'SOFT-SUCCESS' : 'FAIL'}] Marked journey ${journeyId} as ${softStepError ? 'success' : 'failure'} from step error handling`);
+                  console.log(`✅ [JOURNEY-${softStepError ? 'SOFT-WARNING' : 'FAIL'}] Marked journey ${journeyId} as ${softStepError ? 'pending-with-warning' : 'failure'} from step error handling`);
                   workflowState._journeyStepFailed = !softStepError;
                   break; // exit nested steps loop so iteration save runs and persists failure
                 }
