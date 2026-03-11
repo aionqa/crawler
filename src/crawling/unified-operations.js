@@ -634,6 +634,40 @@ async function sendApiCallsToBackend(jobId, projectId, calls, runnerToken = '') 
   }
 }
 
+/**
+ * Send collected WebSocket messages (ws/wss) to backend for Websockets page.
+ * @param {string} jobId
+ * @param {string|null} projectId
+ * @param {Array<{url:string,page_url:string,direction:'sent'|'received',payload?:string,payload_base64?:string,timestamp:number}>} messages
+ * @param {string} [runnerToken]
+ */
+async function sendWebSocketMessagesToBackend(jobId, projectId, messages, runnerToken = '') {
+  if (!messages || messages.length === 0) return;
+  try {
+    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const projectIdStr = projectId != null ? (typeof projectId === 'object' ? projectId.toString() : String(projectId)) : null;
+    await axios.post(`${backendUrl}/api/jobs/${jobId}/websocket-messages`, {
+      project_id: projectIdStr,
+      messages: messages.map((m) => ({
+        url: m.url,
+        page_url: m.page_url || '',
+        direction: m.direction || 'received',
+        payload: m.payload,
+        payload_base64: m.payload_base64 || undefined,
+        timestamp: m.timestamp != null ? m.timestamp : Date.now()
+      }))
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        ...(runnerToken ? { Authorization: `Bearer ${runnerToken}` } : {})
+      },
+      timeout: 30000
+    });
+  } catch (err) {
+    console.warn(`[WEBSOCKET-MESSAGES] Failed to send ${messages.length} WebSocket messages to backend: ${err.message}`);
+  }
+}
+
 // Upload files via backend API (legacy - used for fallback only)
 async function uploadFileToBackend({ buffer, contentType, type, jobId, metadata = {} }) {
   try {
@@ -6564,6 +6598,45 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         console.warn(`[API-CALLS] Failed to attach API call collector: ${apiCollectErr.message}`);
       }
 
+      // Collect WebSocket messages (ws/wss) for Websockets page
+      const collectedWebSocketMessages = [];
+      const maxWebSocketMessages = 2000;
+      try {
+        page.on('websocket', (ws) => {
+          const wsUrl = ws.url();
+          if (!wsUrl || (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://'))) return;
+          const getPageUrl = () => { try { return page.url(); } catch { return ''; } };
+          ws.on('framesent', (event) => {
+            if (collectedWebSocketMessages.length >= maxWebSocketMessages) return;
+            const payload = event.payload;
+            const isBuffer = Buffer.isBuffer(payload);
+            collectedWebSocketMessages.push({
+              url: wsUrl,
+              page_url: getPageUrl(),
+              direction: 'sent',
+              payload: isBuffer ? null : (typeof payload === 'string' ? payload : String(payload)),
+              payload_base64: isBuffer ? payload.toString('base64') : null,
+              timestamp: Date.now()
+            });
+          });
+          ws.on('framereceived', (event) => {
+            if (collectedWebSocketMessages.length >= maxWebSocketMessages) return;
+            const payload = event.payload;
+            const isBuffer = Buffer.isBuffer(payload);
+            collectedWebSocketMessages.push({
+              url: wsUrl,
+              page_url: getPageUrl(),
+              direction: 'received',
+              payload: isBuffer ? null : (typeof payload === 'string' ? payload : String(payload)),
+              payload_base64: isBuffer ? payload.toString('base64') : null,
+              timestamp: Date.now()
+            });
+          });
+        });
+      } catch (wsCollectErr) {
+        console.warn(`[WEBSOCKET-MESSAGES] Failed to attach WebSocket collector: ${wsCollectErr.message}`);
+      }
+
       try {
       // Set initial cookies if provided
       if (cookies && cookies.length > 0) {
@@ -6843,6 +6916,9 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       } finally {
         if (collectedApiCalls.length > 0) {
           await sendApiCallsToBackend(jobId, projectId, collectedApiCalls, context.runner_token || '');
+        }
+        if (collectedWebSocketMessages.length > 0) {
+          await sendWebSocketMessagesToBackend(jobId, projectId, collectedWebSocketMessages, context.runner_token || '');
         }
       }
     }, {
