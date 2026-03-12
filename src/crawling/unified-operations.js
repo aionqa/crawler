@@ -2177,7 +2177,33 @@ const modeHandlers = {
       'info',
       `🌐 Domain scope: project=[${domainScope.projectDomains.join(', ') || normalizeDomainHost(seedUrl)}] api=[${domainScope.apiDomains.join(', ') || 'none'}]`
     );
-    
+
+    // Configured login page(s): used for auth only; never queued or tested as a scan target.
+    const loginUrls = Array.isArray(context?.login_urls) && context.login_urls.length > 0
+      ? context.login_urls.filter(u => u && typeof u === 'string')
+      : (context?.login_url ? [context.login_url] : []);
+    const isLoginPageUrl = (url, loginList) => {
+      if (!url || !loginList?.length) return false;
+      try {
+        const u = new URL(ensureUrlHasScheme(url));
+        const pathNorm = (u.pathname || '/').replace(/\/+$/, '') || '/';
+        const origin = u.origin;
+        for (const login of loginList) {
+          if (!login) continue;
+          const l = new URL(ensureUrlHasScheme(login));
+          const loginPath = (l.pathname || '/').replace(/\/+$/, '') || '/';
+          if (l.origin === origin && loginPath === pathNorm) return true;
+          if (loginPath === pathNorm) return true; // same pathname across origins (e.g. SSO subdomain)
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    };
+    if (loginUrls.length > 0) {
+      await sendLog(jobId, 'info', `🔐 Login-only URLs (will not be scanned or tested): ${loginUrls.join(', ')}`);
+    }
+
     const urlQueue = [{ url: urlKeyForDedupe(seedUrl), depth: 0 }];
     await sendLog(jobId, 'info', `📍 Starting workflow crawl from seed URL: ${seedUrl}`);
     let pagesAnalyzed = 0;
@@ -2191,6 +2217,11 @@ const modeHandlers = {
         // Strict domain: never visit or analyze URLs outside the crawl's seed domain
         if (!isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope)) {
           await sendLog(jobId, 'info', `⏭️ Skipping URL outside crawl domain: ${currentUrl} (seed: ${seedUrl})`);
+          continue;
+        }
+        // Login pages (from logins config) are for authentication only — do not scan or test them
+        if (isLoginPageUrl(currentUrl, loginUrls)) {
+          await sendLog(jobId, 'info', `🔐 Login page (configured): ${currentUrl} — skip scanning/testing, use for login only`);
           continue;
         }
         // Skip if already visited or too deep
@@ -2397,7 +2428,13 @@ const modeHandlers = {
           );
           continue;
         }
-        
+        // Login page (configured): use for auth only — do not scan or test
+        if (isLoginPageUrl(finalUrl, loginUrls)) {
+          await sendLog(jobId, 'info', `🔐 Login page (configured): ${finalUrl} — skip scanning/testing, use for login only`);
+          pagesAnalyzed--;
+          continue;
+        }
+
         // Run Lighthouse analysis on the page if requested by workflow
         let lighthouseResults = null;
         if (shouldRunPerformanceAnalysis) {
@@ -2984,6 +3021,8 @@ const modeHandlers = {
               if (!urlToCheck) continue;
               // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
               if (!isWithinDomain(urlToCheck, seedUrl, allowSubdomains, domainScope)) continue;
+              // Login pages (configured) are for auth only — never queue as a page to test
+              if (isLoginPageUrl(urlToCheck, loginUrls)) continue;
               if (!visitedUrls.has(urlToCheck) && !analyzedPageUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
                 if (!isLoginJob) {
                   urlQueue.push({ url: urlToCheck, depth: depth + 1 });
