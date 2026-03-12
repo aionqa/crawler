@@ -620,6 +620,8 @@ async function sendApiCallsToBackend(jobId, projectId, calls, runnerToken = '') 
         page_url: c.page_url || '',
         request_headers: c.request_headers || {},
         response_headers: c.response_headers || {},
+        request_body: c.request_body,
+        response_body: c.response_body,
         timestamp: c.timestamp != null ? c.timestamp : Date.now()
       }))
     }, {
@@ -6565,34 +6567,54 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         console.warn(`[BROWSER-DIAGNOSTICS] Failed to attach diagnostics: ${diagErr.message}`);
       }
 
-      // Collect backend API calls (XHR/fetch) for API Explorer
+      // Collect backend API calls (XHR/fetch) for API Explorer (including request/response bodies)
       const collectedApiCalls = [];
       const maxApiCalls = 500;
+      const maxBodyLength = 102400; // 100KB
       try {
         page.on('response', (resp) => {
-          try {
-            if (collectedApiCalls.length >= maxApiCalls) return;
-            const req = resp.request();
-            const resourceType = req.resourceType ? req.resourceType() : '';
-            if (resourceType !== 'xhr' && resourceType !== 'fetch') return;
-            const pageUrl = (() => { try { return page.url(); } catch { return ''; } })();
-            const requestHeaders = req.headers ? req.headers() : {};
-            let responseHeaders = {};
+          (async () => {
             try {
-              responseHeaders = resp.headers ? resp.headers() : {};
-            } catch (_) {}
-            collectedApiCalls.push({
-              url: req.url(),
-              method: req.method ? req.method() : 'GET',
-              status: resp.status(),
-              page_url: pageUrl,
-              request_headers: sanitizeHeaders(requestHeaders),
-              response_headers: sanitizeHeaders(responseHeaders),
-              timestamp: Date.now()
-            });
-          } catch (_) {
-            // ignore
-          }
+              if (collectedApiCalls.length >= maxApiCalls) return;
+              const req = resp.request();
+              const resourceType = req.resourceType ? req.resourceType() : '';
+              if (resourceType !== 'xhr' && resourceType !== 'fetch') return;
+              const pageUrl = (() => { try { return page.url(); } catch { return ''; } })();
+              const requestHeaders = req.headers ? req.headers() : {};
+              let responseHeaders = {};
+              try {
+                responseHeaders = resp.headers ? resp.headers() : {};
+              } catch (_) {}
+              let requestBody = null;
+              try {
+                const postData = req.postData();
+                if (postData && typeof postData === 'string') {
+                  requestBody = postData.length <= maxBodyLength ? postData : postData.slice(0, maxBodyLength);
+                }
+              } catch (_) {}
+              let responseBody = null;
+              try {
+                const buf = await resp.body();
+                if (buf && buf.length > 0) {
+                  const text = buf.toString('utf8');
+                  responseBody = text.length <= maxBodyLength ? text : text.slice(0, maxBodyLength);
+                }
+              } catch (_) {}
+              collectedApiCalls.push({
+                url: req.url(),
+                method: req.method ? req.method() : 'GET',
+                status: resp.status(),
+                page_url: pageUrl,
+                request_headers: sanitizeHeaders(requestHeaders),
+                response_headers: sanitizeHeaders(responseHeaders),
+                request_body: requestBody || undefined,
+                response_body: responseBody || undefined,
+                timestamp: Date.now()
+              });
+            } catch (_) {
+              // ignore
+            }
+          })();
         });
       } catch (apiCollectErr) {
         console.warn(`[API-CALLS] Failed to attach API call collector: ${apiCollectErr.message}`);
