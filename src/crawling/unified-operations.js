@@ -2926,6 +2926,18 @@ const modeHandlers = {
         // Step 3: Extract links from page for crawling (if not at max depth)
         // Use seed URL as domain authority so "internal" = same domain as crawl seed only (no other domains)
         if (shouldDiscoverLinks && depth < maxDepth) {
+          // CRITICAL: Workflow execution may have navigated away (e.g. clicked "Get Started" -> app). Extract links from the page we analyzed, not the post-navigation URL.
+          try {
+            const currentPageUrl = page.url();
+            const pageToExtractFrom = actualPageUrlCanonical || currentUrl;
+            if (currentPageUrl && pageToExtractFrom && urlKeyForDedupe(currentPageUrl) !== urlKeyForDedupe(pageToExtractFrom)) {
+              await sendLog(jobId, 'info', `🔗 Navigating back to ${pageToExtractFrom} to extract links (workflow may have navigated away)`);
+              await page.goto(pageToExtractFrom, { waitUntil: 'domcontentloaded', timeout: 15000 });
+              await page.waitForTimeout(1500);
+            }
+          } catch (navBackError) {
+            await sendLog(jobId, 'warn', `⚠️ Could not navigate back for link extraction: ${navBackError.message}`);
+          }
           const linksData = await extractAllLinks(page, jobId, seedUrl, allowSubdomains, domainScope);
           if (Array.isArray(linksData.api) && linksData.api.length > 0) {
             await sendApiCallsToBackend(
