@@ -2924,9 +2924,10 @@ const modeHandlers = {
           }
         }
         
-        // Step 3: Extract links from page for crawling (if not at max depth)
+        // Step 3: Extract links from page for crawling (if not at max depth), or for queue-based distributed we always extract+report from this page so backend can create subjobs
         // Use seed URL as domain authority so "internal" = same domain as crawl seed only (no other domains)
-        if (shouldDiscoverLinks && depth < maxDepth) {
+        const isDistributedRootOrChild = !!(context.distributed_parent_job_id || context.is_domain_crawl_page);
+        if (shouldDiscoverLinks && (depth < maxDepth || isDistributedRootOrChild)) {
           // CRITICAL: Workflow execution may have navigated away (e.g. clicked "Get Started" -> app). Extract links from the page we analyzed, not the post-navigation URL.
           try {
             const currentPageUrl = page.url();
