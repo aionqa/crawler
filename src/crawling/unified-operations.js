@@ -3035,6 +3035,10 @@ const modeHandlers = {
                 if (res.ok) {
                   const data = await res.json().catch(() => ({}));
                   await sendLog(jobId, 'info', `📋 Reported ${linksToReport.length} links to backend (${data.added ?? 0} queued for helpers)`);
+                  // Also log to root job so logs view shows "links collected and passed to queue"
+                  if (parentJobId && parentJobId !== jobId) {
+                    await sendLog(parentJobId, 'info', `🔗 Links collected and sent to queue: ${linksToReport.length} reported, ${data.added ?? 0} queued for helpers`, { component: 'CRAWLER-TEXT', action: 'links_reported', source_job_id: jobId });
+                  }
                 } else {
                   await sendLog(jobId, 'warn', `⚠️ report-links failed: ${res.status}`);
                 }
