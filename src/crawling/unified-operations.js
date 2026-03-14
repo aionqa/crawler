@@ -3027,7 +3027,8 @@ const modeHandlers = {
               try {
                 const reportUrl = `${backendUrl}/jobs/${parentJobId}/domain-crawl/report-links`;
                 const headers = { 'Content-Type': 'application/json' };
-                if (context.runner_token) headers['Authorization'] = `Bearer ${context.runner_token}`;
+                const reportToken = context.runner_token || process.env.RUNNER_TOKEN || '';
+                if (reportToken) headers['Authorization'] = `Bearer ${reportToken}`;
                 const res = await fetch(reportUrl, {
                   method: 'POST',
                   headers,
