@@ -2099,9 +2099,10 @@ const modeHandlers = {
     const workflowCapabilities = workflowAnalyzer.getCapabilities();
     context.workflow_capabilities = workflowCapabilities;
     const shouldRunPerformanceAnalysis = workflowCapabilities.usesPerformanceAudit === true;
-    // CRITICAL: Disable link discovery for single-page scans
+    // CRITICAL: Disable link discovery for single-page scans unless queue-based distributed (report links to backend)
     // Domain crawl: always discover and queue internal links. Single-page: no link discovery.
-    const shouldDiscoverLinks = !isSinglePageScan;
+    // Queue-based distributed: discover links on this page and report to backend so more page tasks are queued.
+    const shouldDiscoverLinks = !isSinglePageScan || !!(context.distributed_parent_job_id || context.is_domain_crawl_page);
     const hasAdvancedAnalysis = (workflowCapabilities.usesPlaywrightAnalysis === true) || (workflowCapabilities.usesAIModel === true);
     
     const visitedUrls = new Set();
@@ -3013,6 +3014,34 @@ const modeHandlers = {
           if (analysisResultForCurrentPage && typeof analysisResultForCurrentPage === 'object') {
             analysisResultForCurrentPage.anchors = anchors;
             analysisResultForCurrentPage.internal_links = crawlableInternalLinks;
+          }
+
+          // Queue-based distributed: report discovered links to backend so it can queue new page tasks for helpers
+          const parentJobId = context.distributed_parent_job_id;
+          if (parentJobId && crawlableInternalLinks.length > 0) {
+            const linksToReport = crawlableInternalLinks
+              .map((link) => (link?.urlWithoutHash || link?.href || '').trim())
+              .filter((u) => u && (u.startsWith('http://') || u.startsWith('https://')));
+            if (linksToReport.length > 0) {
+              try {
+                const reportUrl = `${backendUrl}/jobs/${parentJobId}/domain-crawl/report-links`;
+                const headers = { 'Content-Type': 'application/json' };
+                if (context.runner_token) headers['Authorization'] = `Bearer ${context.runner_token}`;
+                const res = await fetch(reportUrl, {
+                  method: 'POST',
+                  headers,
+                  body: JSON.stringify({ links: linksToReport })
+                });
+                if (res.ok) {
+                  const data = await res.json().catch(() => ({}));
+                  await sendLog(jobId, 'info', `📋 Reported ${linksToReport.length} links to backend (${data.added ?? 0} queued for helpers)`);
+                } else {
+                  await sendLog(jobId, 'warn', `⚠️ report-links failed: ${res.status}`);
+                }
+              } catch (reportErr) {
+                await sendLog(jobId, 'warn', `⚠️ Failed to report links to backend: ${reportErr.message}`);
+              }
+            }
           }
 
           // CRITICAL: Only collect links if we haven't reached max_pages and depth limit
