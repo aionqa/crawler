@@ -1055,9 +1055,14 @@ export class AIConversationLogger {
       const aiCallStartTime = Date.now();
       if (jobId && this.backendUrl && attemptNumber === 1) {
         try {
-          // Extract step information from sourcePayload
+          // Extract step information from sourcePayload (step that requested this AI call)
           const stepName = sourcePayload?.step_name || sourcePayload?.stepId || 'AI Request';
           const stepId = sourcePayload?.step_id || sourcePayload?.stepId || null;
+          const stepNumber = sourcePayload?.step_number ?? (typeof sourcePayload?.step_index === 'number' ? sourcePayload.step_index + 1 : null);
+          const totalSteps = sourcePayload?.total_steps ?? sourcePayload?.totalSteps ?? null;
+          const stepLabel = stepName !== 'AI Request'
+            ? (stepNumber != null && totalSteps != null ? `Step ${stepNumber}/${totalSteps}: ${stepName}` : `Step: ${stepName}`)
+            : null;
           
           // Build request JSON tree for display
           const requestTree = {
@@ -1091,18 +1096,20 @@ export class AIConversationLogger {
           if (storeLogs) paramsList.push('Store Logs');
           
           const paramsText = paramsList.length > 0 ? ` (${paramsList.join(', ')})` : '';
-          const stepInfo = stepName !== 'AI Request' ? ` - Step: ${stepName}` : '';
+          const requestedBy = stepLabel ? ` — Requested by: ${stepLabel}` : '';
           const pageInfo = pageUrl ? ` - Page: ${new URL(pageUrl).pathname}` : '';
           
           await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
             jobId,
             level: 'info',
-            message: `🤖 AI Request: ${stepName}${pageInfo} - Model: ${model}${paramsText}`,
+            message: `🤖 AI Request:${requestedBy}${pageInfo} - Model: ${model}${paramsText}`,
             component: 'AI-CALL',
             metadata: {
               prompt_slug: promptSlug,
               step_name: stepName,
               step_id: stepId,
+              step_number: stepNumber,
+              total_steps: totalSteps,
               page_url: pageUrl,
               model: model,
               model_params: {
@@ -1309,16 +1316,25 @@ export class AIConversationLogger {
             : effectiveCost > 0
               ? `Cost: $${Number(effectiveCost).toFixed(6)} USD`
               : 'Cost: $0.000000 USD';
+          const stepNameDone = sourcePayload?.step_name || sourcePayload?.stepId || null;
+          const stepNumberDone = sourcePayload?.step_number ?? (typeof sourcePayload?.step_index === 'number' ? sourcePayload.step_index + 1 : null);
+          const totalStepsDone = sourcePayload?.total_steps ?? sourcePayload?.totalSteps ?? null;
+          const stepLabelDone = stepNameDone
+            ? (stepNumberDone != null && totalStepsDone != null ? `Step ${stepNumberDone}/${totalStepsDone}: ${stepNameDone}` : `Step: ${stepNameDone}`)
+            : null;
+          const completedStepSuffix = stepLabelDone ? ` (${stepLabelDone})` : '';
           
           await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
             jobId,
             level: 'info',
-            message: `✅ AI call completed in ${durationSeconds}s - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, ${costText}`,
+            message: `✅ AI call completed in ${durationSeconds}s${completedStepSuffix} - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, ${costText}`,
             component: 'AI-CALL',
             metadata: {
               prompt_slug: promptSlug,
-              step_name: sourcePayload?.step_name || sourcePayload?.stepId || null,
+              step_name: stepNameDone,
               step_id: sourcePayload?.step_id || sourcePayload?.stepId || null,
+              step_number: stepNumberDone,
+              total_steps: totalStepsDone,
               page_url: pageUrl,
               model: response.model,
               duration_ms: aiCallDuration,

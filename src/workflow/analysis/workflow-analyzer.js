@@ -3920,13 +3920,20 @@ IMPORTANT OUTPUT REQUIREMENTS:
       }
     };
     
-    // Prepare payload based on step configuration
+    // Prepare payload based on step configuration (include step position for AI log messages)
     const effectiveAdditionalPrompt = await this.getEffectiveAdditionalPromptText(workflowState);
+    const stepIndex = stepContext?.stepIndex;
+    const totalSteps = stepContext?.siblings?.length ?? this.workflowTemplate?.steps?.length ?? null;
     const stepPayload = {
       page_url: workflowState.pageUrl,
       page_title: workflowState.pageTitle || await page.title(),
       page_content: workflowState.htmlContent || await page.content(),
-      additional_prompt_text: effectiveAdditionalPrompt
+      additional_prompt_text: effectiveAdditionalPrompt,
+      step_name: step.name || step.type,
+      step_id: step.id,
+      step_index: typeof stepIndex === 'number' ? stepIndex : null,
+      step_number: typeof stepIndex === 'number' ? stepIndex + 1 : null,
+      total_steps: totalSteps
     };
     // CRITICAL: Strict validation - credentials MUST be valid in workflowState.inputCredentials, no fallbacks
     if (workflowState.inputCredentials) {
