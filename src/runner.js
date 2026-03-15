@@ -958,7 +958,7 @@ async function executeCrawlJob(job, streamInterval) {
   
   const executionContext = {
     ...normalizedContext,
-    job_id: job.id,
+    job_id: job.id != null ? String(job.id) : null,
     project_id: job.project_id || normalizedContext.project_id || job.context?.project_id || null,
     projectId: job.project_id || normalizedContext.projectId || job.context?.projectId || null,
     workflow_template_id: workflowTemplateId, // CRITICAL: Must be set for workflow mode

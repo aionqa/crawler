@@ -2182,13 +2182,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Helper to send log to backend (for crucial workflow execution logs)
    */
   async sendLogToBackend(jobId, level, message, component = 'WORKFLOW-ANALYZER', metadata = {}) {
-    if (!jobId) {
+    const jobIdStr = jobId != null ? String(jobId) : null;
+    if (!jobIdStr) {
       return;
     }
 
     try {
       await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
+        jobId: jobIdStr,
         level: level,
         message: message,
         component: component,

@@ -52,10 +52,12 @@ export async function createJobLogContext(jobId, metadata = {}) {
  */
 export async function appendJobLog(jobId, level, message, component = 'unified-crawler', metadata = {}) {
   try {
+    const jobIdStr = jobId != null ? String(jobId) : null;
+    if (!jobIdStr) return { ok: false };
     const response = await fetch(`${BACKEND_URL}/api/logs/jobs/append`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, level, message, component, metadata })
+      body: JSON.stringify({ jobId: jobIdStr, level, message, component, metadata })
     });
     
     if (!response.ok) {
