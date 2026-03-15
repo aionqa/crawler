@@ -148,7 +148,7 @@ class WorkflowAnalyzer {
       'while-loop': 600000,          // 10 minutes - Journey iteration (generate+execute+justify per stage) needs multiple AI calls
       'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
       'screenshot': 60000,           // 1 minute - Quick operation
-      'cookie-collect': 60000,       // 1 minute - Quick operation
+      'cookie-collect': 120000,      // 2 minutes - browser cookies + optional backend save (GET job, POST project cookies)
       'content-change': 60000,       // 1 minute - Variable operations
       'var-dump': 60000,            // 1 minute - Quick operation
       'print': 30000,               // 30 seconds - Very quick
@@ -12037,7 +12037,8 @@ ${executableBody}`;
       if (config.saveToProject !== false) {
         try {
           const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
-            headers: this.getAuthHeaders()
+            headers: this.getAuthHeaders(),
+            timeout: 25000
           });
           // Handle both ObjectId and string formats
           const rawProjectId = jobResponse.data?.project_id;
@@ -12073,12 +12074,13 @@ ${executableBody}`;
       // Optionally save to project (only if projectId is available)
       if (config.saveToProject !== false && projectId) {
         try {
-          await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
-            cookies: collectedCookies,
-            source: 'workflow'
-          }, {
-            headers: this.getAuthHeaders()
-          });
+        await axios.post(`${this.backendUrl}/api/projects/${projectId}/cookies`, {
+          cookies: collectedCookies,
+          source: 'workflow'
+        }, {
+          headers: this.getAuthHeaders(),
+          timeout: 30000
+        });
           console.log(`✅ Saved ${collectedCookies.length} cookie(s) to project`);
         } catch (saveError) {
           console.warn(`⚠️ Failed to save cookies to project: ${saveError.message}`);

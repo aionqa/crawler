@@ -102,7 +102,7 @@ class WorkflowAnalyzer {
       'while-loop': 60000,           // 1 minute - Loops timeout quickly
       'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
       'screenshot': 60000,           // 1 minute - Quick operation
-      'cookie-collect': 60000,       // 1 minute - Quick operation
+      'cookie-collect': 120000,      // 2 minutes - browser cookies + optional backend save (GET job, POST project cookies)
       'content-change': 60000,       // 1 minute - Variable operations
       'var-dump': 60000,            // 1 minute - Quick operation
       'print': 30000,               // 30 seconds - Very quick
@@ -10038,7 +10038,8 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
       if (config.saveToProject !== false) {
         try {
           const jobResponse = await axios.get(`${this.backendUrl}/api/jobs/${jobId}`, {
-            headers: this.getAuthHeaders()
+            headers: this.getAuthHeaders(),
+            timeout: 25000
           });
           // Handle both ObjectId and string formats
           const rawProjectId = jobResponse.data?.project_id;
@@ -10078,7 +10079,8 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             cookies: collectedCookies,
             source: 'workflow'
           }, {
-            headers: this.getAuthHeaders()
+            headers: this.getAuthHeaders(),
+            timeout: 30000
           });
           console.log(`✅ Saved ${collectedCookies.length} cookie(s) to project`);
         } catch (saveError) {

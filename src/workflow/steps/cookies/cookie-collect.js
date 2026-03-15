@@ -27,7 +27,8 @@ export async function executeCookieCollectStep(page, step, workflowState, jobId,
     if (config.saveToProject !== false) {
       try {
         const jobResponse = await axios.get(`${workflowAnalyzer.backendUrl}/api/jobs/${jobId}`, {
-          headers: workflowAnalyzer.getAuthHeaders()
+          headers: workflowAnalyzer.getAuthHeaders(),
+          timeout: 25000
         });
         // Handle both ObjectId and string formats
         const rawProjectId = jobResponse.data?.project_id;
@@ -67,7 +68,8 @@ export async function executeCookieCollectStep(page, step, workflowState, jobId,
           cookies: collectedCookies,
           source: 'workflow'
         }, {
-          headers: workflowAnalyzer.getAuthHeaders()
+          headers: workflowAnalyzer.getAuthHeaders(),
+          timeout: 30000
         });
         console.log(`✅ Saved ${collectedCookies.length} cookie(s) to project`);
       } catch (saveError) {
