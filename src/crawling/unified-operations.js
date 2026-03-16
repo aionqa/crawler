@@ -4051,13 +4051,17 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false, do
         if (allowSubs && (h.endsWith(`.${d}`) || getBaseDomain(h) === getBaseDomain(d))) return true;
         return false;
       };
-      const isApiHost = (host) => apiDomains.some((apiDomain) => hostMatchesDomain(host, apiDomain, true));
       const isProjectHost = (host, baseHost) => {
         if (host === baseHost) return true;
         if (projectDomains.length === 0) {
           return allowSubdomains && getBaseDomain(host) === getBaseDomain(baseHost);
         }
         return projectDomains.some((domain) => hostMatchesDomain(host, domain, allowSubdomains));
+      };
+      // API only if host matches apiDomain and is NOT in project (project takes precedence)
+      const isApiHost = (host) => {
+        if (projectDomains.length > 0 && projectDomains.some((d) => hostMatchesDomain(host, d, true))) return false;
+        return apiDomains.some((apiDomain) => hostMatchesDomain(host, apiDomain, true));
       };
       
       elements.forEach(el => {
