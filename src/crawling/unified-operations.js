@@ -272,6 +272,12 @@ function isApiDomain(pageUrl, domainScope = null) {
   if (!domainScope || !Array.isArray(domainScope.apiDomains) || domainScope.apiDomains.length === 0) return false;
   try {
     const host = normalizeDomainHost(new URL(pageUrl).hostname);
+    // Project domains take precedence: do not treat a project URL as API (avoids same-base-domain
+    // false positive when api_domains include e.g. api.dev3.example.com and project includes webapp.dev3.example.com).
+    if (domainScope.projectDomains?.length) {
+      const inProject = domainScope.projectDomains.some((d) => hostMatchesDomain(host, d, true));
+      if (inProject) return false;
+    }
     return domainScope.apiDomains.some((apiDomain) => hostMatchesDomain(host, apiDomain, true));
   } catch {
     return false;
