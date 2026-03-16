@@ -24,8 +24,8 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
   const projectId = context.project_id || context.projectId;
   const jobId = context.job_id || context.jobId;
 
-  // Prefer llm_config.endpoint, but support the newer context.ai_services shape.
-  // Backend injects ai_services for jobs running on a helper; older runners expect llm_config.endpoint.
+  // All AI requests must use the project's configured AI service (context from backend/helper).
+  // Prefer llm_config.endpoint, then context.ai_services (injected per project); env only when no project/job.
   const aiServiceUrl = (() => {
     const explicit = llmConfig.endpoint && String(llmConfig.endpoint).trim();
     if (explicit) return explicit;
@@ -36,13 +36,16 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
       .find(Boolean);
     if (firstUrl) return firstUrl;
 
-    // Local dev convenience: allow container env to define the AI service base URL.
-    // This is referenced by backend job enrichment comments and localDockerTaskService.
+    // When running in a job with project context, do not fall back to env — project must have configured AI.
+    if (projectId || jobId) {
+      return '';
+    }
+    // Local dev only: allow env when no project/job (e.g. local Docker, scripts).
     const fromEnv = process.env.AI_SERVICE_URL && String(process.env.AI_SERVICE_URL).trim();
     return fromEnv || '';
   })();
   if (!aiServiceUrl) {
-    throw new Error('AI not configured. Add at least one AI service in the helper config (e.g. OpenAI or LM Studio URL).');
+    throw new Error('AI not configured. Set the project\'s AI service (Settings → LLM / endpoint) or add at least one AI service in the helper config.');
   }
 
   console.log(`[OpenAI-Client] Using AI Service: ${aiServiceUrl} for project ${projectId}${jobId ? ` (job: ${jobId})` : ''}`);
