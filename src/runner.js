@@ -255,6 +255,42 @@ function getAuthHeaders() {
   };
 }
 
+/** Backend retry delays: 10s, 30s, 3min. Runners continue without interruption when backend restarts; only admin explicit cleanup clears state. */
+const BACKEND_RETRY_DELAYS_MS = [10 * 1000, 30 * 1000, 3 * 60 * 1000];
+const BACKEND_RETRY_ATTEMPTS = 1 + BACKEND_RETRY_DELAYS_MS.length;
+
+function isRetryableBackendError(error) {
+  if (!error) return false;
+  const code = error.code || '';
+  const status = error.response?.status;
+  if (['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'ENETUNREACH'].includes(code)) return true;
+  if (status >= 500 || status === 408) return true;
+  return false;
+}
+
+/**
+ * Run a backend request with retries: 10s, 30s, 3min. Log after all attempts if still failing.
+ */
+async function withBackendRetry(fn, label) {
+  let lastError;
+  for (let attempt = 1; attempt <= BACKEND_RETRY_ATTEMPTS; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableBackendError(error) || attempt === BACKEND_RETRY_ATTEMPTS) break;
+      const delayMs = BACKEND_RETRY_DELAYS_MS[attempt - 1];
+      console.warn(`⚠️ [BACKEND-RETRY] ${label} attempt ${attempt}/${BACKEND_RETRY_ATTEMPTS} failed: ${error.message}. Retrying in ${delayMs / 1000}s...`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  console.error(`❌ [BACKEND-RETRY] Request failed after ${BACKEND_RETRY_ATTEMPTS} attempts: ${label}: ${lastError?.message || lastError}`);
+  if (lastError?.response) {
+    console.error(`   Status: ${lastError.response.status}; Response:`, lastError.response.data);
+  }
+  throw lastError;
+}
+
 async function appendJobLog(jobId, level, message, metadata = {}) {
   try {
     await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
@@ -273,15 +309,16 @@ async function appendJobLog(jobId, level, message, metadata = {}) {
 
 /**
  * Poll backend for next available job (login or crawl)
+ * Uses retries (10s, 30s, 3min) when backend is not responding so runner continues without interruption.
  */
 async function pollForJob() {
   // Try to get a crawl job first
   try {
-    const response = await axios.get(`${BACKEND_URL}/api/runner/jobs/next`, {
+    const response = await withBackendRetry(() => axios.get(`${BACKEND_URL}/api/runner/jobs/next`, {
       params: { type: 'crawl', runner_id: RUNNER_ID },
       headers: getAuthHeaders(),
       timeout: 5000
-    });
+    }), 'poll/crawl');
 
     if (response.data && response.data.job) {
       return { ...response.data.job, jobType: 'crawl' };
@@ -298,6 +335,7 @@ async function pollForJob() {
       console.error(`   Token configured: ${RUNNER_TOKEN ? 'Yes (length: ' + RUNNER_TOKEN.length + ')' : 'NO - THIS IS THE PROBLEM!'}`);
       console.error(`   Fix: Set RUNNER_TOKEN environment variable to a valid token from Settings > Runners`);
     } else {
+      // Connection/timeout/5xx already logged by withBackendRetry
       console.error(`❌ Error polling for crawl jobs:`, error.message);
       if (error.response) {
         console.error(`   Status: ${error.response.status}`);
@@ -308,17 +346,16 @@ async function pollForJob() {
 
   // If no crawl job, try to get a login job
   try {
-    const response = await axios.get(`${BACKEND_URL}/api/runner/jobs/next`, {
+    const response = await withBackendRetry(() => axios.get(`${BACKEND_URL}/api/runner/jobs/next`, {
       params: { type: 'login', runner_id: RUNNER_ID },
       headers: getAuthHeaders(),
       timeout: 5000
-    });
+    }), 'poll/login');
 
     if (response.data && response.data.job) {
       return { ...response.data.job, jobType: 'login' };
     }
   } catch (error) {
-    // 404 means no login jobs available
     if (error.response?.status === 404) {
       // Normal - no jobs available
     } else if (error.response?.status === 401) {
@@ -1486,37 +1523,37 @@ async function executeHealthCheckJob(job) {
 }
 
 /**
- * Report job completion to backend
+ * Report job completion to backend (retries 10s, 30s, 3min when backend not responding)
  */
 async function reportJobComplete(jobId, result) {
   try {
-    await axios.post(`${BACKEND_URL}/api/runner/jobs/${jobId}/complete`, {
+    await withBackendRetry(() => axios.post(`${BACKEND_URL}/api/runner/jobs/${jobId}/complete`, {
       result,
       runner_id: RUNNER_ID,
       timestamp: new Date().toISOString()
     }, {
       headers: getAuthHeaders()
-    });
+    }), `jobs/${jobId}/complete`);
   } catch (error) {
-    console.error(`❌ Error reporting job completion:`, error.message);
+    console.error(`❌ Error reporting job completion after retries:`, error?.message);
   }
 }
 
 /**
- * Report job failure to backend
+ * Report job failure to backend (retries 10s, 30s, 3min when backend not responding)
  */
 async function reportJobFailed(jobId, errorMessage, errorStack) {
   try {
-    await axios.post(`${BACKEND_URL}/api/runner/jobs/${jobId}/fail`, {
+    await withBackendRetry(() => axios.post(`${BACKEND_URL}/api/runner/jobs/${jobId}/fail`, {
       error: errorMessage,
       stack: errorStack,
       runner_id: RUNNER_ID,
       timestamp: new Date().toISOString()
     }, {
       headers: getAuthHeaders()
-    });
+    }), `jobs/${jobId}/fail`);
   } catch (error) {
-    console.error(`❌ Error reporting job failure:`, error.message);
+    console.error(`❌ Error reporting job failure after retries:`, error?.message);
   }
 }
 
