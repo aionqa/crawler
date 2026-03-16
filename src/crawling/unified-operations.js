@@ -283,11 +283,17 @@ function isWithinProjectDomains(pageUrl, baseUrl, allowSubdomains = false, domai
     const pageUrlObj = new URL(pageUrl);
     const pageHostname = pageUrlObj.hostname.replace(/^www\./, '').toLowerCase();
 
-    if (isApiDomain(pageUrl, domainScope)) return false;
-
+    // Check project domains first: if URL is in project scope, it is not an API domain (avoids
+    // same-base-domain false positive when api_domains include e.g. api.dev3.example.com and
+    // project includes webapp.dev3.example.com).
     if (domainScope && Array.isArray(domainScope.projectDomains) && domainScope.projectDomains.length > 0) {
-      return domainScope.projectDomains.some((domainHost) => hostMatchesDomain(pageHostname, domainHost, allowSubdomains));
+      const inProject = domainScope.projectDomains.some((domainHost) =>
+        hostMatchesDomain(pageHostname, domainHost, allowSubdomains)
+      );
+      if (inProject) return true;
     }
+
+    if (isApiDomain(pageUrl, domainScope)) return false;
 
     const baseUrlObj = new URL(baseUrl);
     const baseHostname = baseUrlObj.hostname.replace(/^www\./, '').toLowerCase();
