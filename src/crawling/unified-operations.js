@@ -6785,7 +6785,29 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       } else {
         await sendLog(jobId, 'info', `ℹ️ No cookies provided, proceeding without authentication`);
       }
-      
+
+      // Domain crawl: always load latest project cookies before any interaction so every page
+      // gets current tokens (login subjob or another page may have updated them).
+      const isDomainCrawlPage = context.is_domain_crawl_page === true || context.is_domain_crawl_page === 'true';
+      if (isDomainCrawlPage && projectId) {
+        try {
+          const axios = (await import('axios')).default;
+          const projectIdStr = typeof projectId === 'object' ? projectId.toString() : String(projectId || '');
+          if (projectIdStr) {
+            const projectCookiesResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/projects/${projectIdStr}/cookies`, {
+              headers: { 'Authorization': `Bearer ${context.runner_token || ''}` }
+            });
+            if (projectCookiesResponse.data && Array.isArray(projectCookiesResponse.data) && projectCookiesResponse.data.length > 0) {
+              const projectCookies = projectCookiesResponse.data;
+              await browserContext.addCookies(projectCookies);
+              await sendLog(jobId, 'info', `🍪 [Domain crawl] Loaded ${projectCookies.length} cookies from project before any interaction`);
+            }
+          }
+        } catch (err) {
+          await sendLog(jobId, 'warn', `⚠️ [Domain crawl] Failed to load project cookies before navigation: ${err.message}`);
+        }
+      }
+
       // Execute cookie-collect steps that need to run before navigation (workflow-driven)
       // ALSO: Always try to load cookies from project if projectId is available (even if no pre-navigation steps)
       if (projectId) {
