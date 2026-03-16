@@ -6417,7 +6417,23 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   // Force workflow mode - ignore deprecated approach_mode
   const mode = 'workflow';
   
-  await sendLog(jobId, 'info', `🚀 Starting WORKFLOW mode crawl process for ${url} (template: ${context.workflow_template_id})`, { mode, workflow_template_id: context.workflow_template_id });
+  // Same-browser scan: multiple URLs in one browser session (context.urls from project setting run_whole_scan_in_same_browser)
+  const urlList = (Array.isArray(context.urls) && context.urls.length > 0)
+    ? context.urls.map((u) => {
+        const t = (u && typeof u === 'string') ? u.trim() : '';
+        if (!t) return '';
+        return (t.startsWith('http://') || t.startsWith('https://')) ? t : `https://${t}`;
+      }).filter(Boolean)
+    : [url];
+  if (urlList.length === 0) {
+    throw new Error('No URLs to crawl (urlList is empty)');
+  }
+  const isSameBrowserScan = urlList.length > 1;
+  if (isSameBrowserScan) {
+    await sendLog(jobId, 'info', `🚀 Same-browser scan: ${urlList.length} URL(s) in one browser (template: ${context.workflow_template_id})`, { mode, workflow_template_id: context.workflow_template_id, url_count: urlList.length });
+  } else {
+    await sendLog(jobId, 'info', `🚀 Starting WORKFLOW mode crawl process for ${url} (template: ${context.workflow_template_id})`, { mode, workflow_template_id: context.workflow_template_id });
+  }
   
   // Check job status before starting - accept 'running', 'pending', 'queued', and 'unknown'
   // 'unknown' can happen if job was just created (race condition) - retry a few times
@@ -6945,120 +6961,117 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         }
       }
 
-      // Navigate to URL (cookies should already be set in browser context)
-      await sendLog(jobId, 'info', `Navigate: ${url}`, { mode });
-      
-      // Verify cookies are set before navigation
-      const cookiesBeforeNav = await browserContext.cookies();
-      await sendLog(jobId, 'info', `🍪 Browser context has ${cookiesBeforeNav.length} cookie(s) before navigation`);
-      
-      // Workflow-mode navigation: be resilient to transient CDN/origin 5xx (common on dev envs).
-      // We log the status explicitly because a 503 returns a response (no requestfailed event).
-      let navResponse = await page.goto(url, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000
-      });
-      let navStatus = navResponse ? navResponse.status() : null;
-      if (navStatus && navStatus >= 500) {
-        await sendLog(jobId, 'warn', `⚠️ Initial navigation returned HTTP ${navStatus} for ${url} — retrying with backoff...`, {
-          component: 'CRAWLER-TEXT',
-          action: 'startcrawl_nav_retry_5xx',
-          url,
-          status: navStatus
-        });
-        // Two retries with increasing wait.
-        const delays = [3000, 7000];
-        for (const d of delays) {
-          await page.waitForTimeout(d);
-          navResponse = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-          navStatus = navResponse ? navResponse.status() : null;
-          if (!navStatus || navStatus < 500) break;
+      // Process each URL (one or many in same browser when context.urls is set)
+      let lastResult = null;
+      for (let pageIndex = 0; pageIndex < urlList.length; pageIndex++) {
+        const currentUrl = urlList[pageIndex];
+        if (isSameBrowserScan) {
+          await sendLog(jobId, 'info', `Same-browser scan: page ${pageIndex + 1}/${urlList.length} — ${currentUrl}`, { mode });
         }
+
+        // Navigate to URL (cookies should already be set in browser context)
+        await sendLog(jobId, 'info', `Navigate: ${currentUrl}`, { mode });
+        
+        // Verify cookies are set before navigation (first page only for brevity)
+        if (pageIndex === 0) {
+          const cookiesBeforeNav = await browserContext.cookies();
+          await sendLog(jobId, 'info', `🍪 Browser context has ${cookiesBeforeNav.length} cookie(s) before navigation`);
+        }
+        
+        // Workflow-mode navigation: be resilient to transient CDN/origin 5xx (common on dev envs).
+        let navResponse = await page.goto(currentUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000
+        });
+        let navStatus = navResponse ? navResponse.status() : null;
         if (navStatus && navStatus >= 500) {
-          await sendLog(jobId, 'warn', `⚠️ Navigation still HTTP ${navStatus} after retries`, {
+          await sendLog(jobId, 'warn', `⚠️ Initial navigation returned HTTP ${navStatus} for ${currentUrl} — retrying with backoff...`, {
             component: 'CRAWLER-TEXT',
-            action: 'startcrawl_nav_retry_5xx_failed',
-            url,
+            action: 'startcrawl_nav_retry_5xx',
+            url: currentUrl,
             status: navStatus
           });
-        } else {
-          await sendLog(jobId, 'info', `✅ Navigation recovered after retry (status=${navStatus ?? 'unknown'})`, {
-            component: 'CRAWLER-TEXT',
-            action: 'startcrawl_nav_retry_recovered',
-            url,
-            status: navStatus ?? null
-          });
+          const delays = [3000, 7000];
+          for (const d of delays) {
+            await page.waitForTimeout(d);
+            navResponse = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            navStatus = navResponse ? navResponse.status() : null;
+            if (!navStatus || navStatus < 500) break;
+          }
+          if (navStatus && navStatus >= 500) {
+            await sendLog(jobId, 'warn', `⚠️ Navigation still HTTP ${navStatus} after retries`, {
+              component: 'CRAWLER-TEXT',
+              action: 'startcrawl_nav_retry_5xx_failed',
+              url: currentUrl,
+              status: navStatus
+            });
+          } else {
+            await sendLog(jobId, 'info', `✅ Navigation recovered after retry (status=${navStatus ?? 'unknown'})`, {
+              component: 'CRAWLER-TEXT',
+              action: 'startcrawl_nav_retry_recovered',
+              url: currentUrl,
+              status: navStatus ?? null
+            });
+          }
         }
-      }
 
-      // Fail fast on persistent 5xx to avoid wasting AI tokens analyzing an upstream error page.
-      if (navStatus && navStatus >= 500) {
-        let serverHeader = null;
+        // Fail fast on persistent 5xx
+        if (navStatus && navStatus >= 500) {
+          let serverHeader = null;
+          try {
+            const h = navResponse?.headers ? navResponse.headers() : null;
+            serverHeader = h?.server || null;
+          } catch (_) {}
+          throw new Error(`Start URL returned HTTP ${navStatus}${serverHeader ? ` (server=${serverHeader})` : ''}`);
+        }
+        
+        const finalUrl = page.url();
+        if (finalUrl !== currentUrl) {
+          await sendLog(jobId, 'info', `🔄 Navigation redirected from ${currentUrl} to ${finalUrl} (likely due to cookies)`);
+        }
+        
         try {
-          const h = navResponse?.headers ? navResponse.headers() : null;
-          serverHeader = h?.server || null;
-        } catch (_) {}
-        throw new Error(`Start URL returned HTTP ${navStatus}${serverHeader ? ` (server=${serverHeader})` : ''}`);
-      }
-      
-      // Check if navigation redirected (cookies might have caused redirect)
-      const finalUrl = page.url();
-      if (finalUrl !== url) {
-        await sendLog(jobId, 'info', `🔄 Navigation redirected from ${url} to ${finalUrl} (likely due to cookies)`);
-      }
-      
-      // Wait for navigation if DOM is loaded, otherwise wait for timeout then analyze
-      try {
-        await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-        await sendLog(jobId, 'info', '✅ Page DOM loaded', { mode });
-      } catch (error) {
-        await sendLog(jobId, 'warn', '⚠️ Page DOM not fully loaded after 30s, proceeding with analysis');
-        // Continue anyway - don't wait additional time
-        await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', { mode });
-      }
-
-      // Collect all cookies from this page visit
-      await collectAndSendCookies(page, jobId, url, context);
-
-      // Execute mode-specific operation
-      const modeHandler = modeHandlers[mode];
-      if (!modeHandler) {
-        throw new Error(`Unknown mode: ${mode}`);
-      }
-
-      const operationResult = await modeHandler(page, context, openaiClient, 'crawl');
-      
-      const workflowCaps = context.workflow_capabilities || {};
-      // Workflow mode already performs rich element discovery during analyzer execution.
-      // Skipping duplicate post-workflow extraction avoids late-run instability.
-      const shouldExtractElements = mode !== 'workflow'
-        || (workflowCaps.usesPlaywrightAnalysis === true
-          && context.options?.force_post_workflow_element_extraction === true);
-      
-      // Extract page elements for storage only when required
-      let pageElements = { interactive: [], nonInteractive: [] };
-      if (shouldExtractElements) {
-        try {
-          pageElements = await extractPageElements(page, jobId);
+          await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
+          await sendLog(jobId, 'info', '✅ Page DOM loaded', { mode });
         } catch (error) {
-          await sendLog(jobId, 'warn', `⚠️ Could not extract final page elements (browser may have closed): ${error.message}`);
+          await sendLog(jobId, 'warn', '⚠️ Page DOM not fully loaded after 30s, proceeding with analysis');
+          await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', { mode });
         }
+
+        await collectAndSendCookies(page, jobId, currentUrl, context);
+
+        const modeHandler = modeHandlers[mode];
+        if (!modeHandler) {
+          throw new Error(`Unknown mode: ${mode}`);
+        }
+
+        const operationResult = await modeHandler(page, context, openaiClient, 'crawl');
+        
+        const workflowCaps = context.workflow_capabilities || {};
+        const shouldExtractElements = mode !== 'workflow'
+          || (workflowCaps.usesPlaywrightAnalysis === true
+            && context.options?.force_post_workflow_element_extraction === true);
+        
+        let pageElements = { interactive: [], nonInteractive: [] };
+        if (shouldExtractElements) {
+          try {
+            pageElements = await extractPageElements(page, jobId);
+          } catch (error) {
+            await sendLog(jobId, 'warn', `⚠️ Could not extract final page elements (browser may have closed): ${error.message}`);
+          }
+        }
+        
+        lastResult = {
+          ...operationResult,
+          startTime,
+          duration_ms: Date.now() - startTime,
+          finalUrl: operationResult.url || finalUrl || 'unknown',
+          finalTitle: operationResult.title || 'unknown',
+          interactive_elements: pageElements.interactive || operationResult.details?.interactive_elements || [],
+          non_interactive_elements: pageElements.nonInteractive || operationResult.details?.non_interactive_elements || []
+        };
       }
-      
-      console.log(`[START-CRAWL] operationResult.success = ${operationResult.success}`);
-      
-      const finalResult = {
-        ...operationResult,
-        startTime,
-        duration_ms: Date.now() - startTime,
-        finalUrl: operationResult.url || 'unknown', // Use URL from operation result if page is closed
-        finalTitle: operationResult.title || 'unknown', // Use title from operation result if page is closed
-        interactive_elements: pageElements.interactive || operationResult.details?.interactive_elements || [],
-        non_interactive_elements: pageElements.nonInteractive || operationResult.details?.non_interactive_elements || []
-      };
-      
-      console.log(`[START-CRAWL] finalResult.success = ${finalResult.success}`);
-      return finalResult;
+      return lastResult;
       } finally {
         if (collectedApiCalls.length > 0) {
           await sendApiCallsToBackend(jobId, projectId, collectedApiCalls, context.runner_token || '');
