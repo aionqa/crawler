@@ -15,6 +15,9 @@ function safeJsonClone(obj) {
   return JSON.parse(JSON.stringify(obj, replacer));
 }
 
+/** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
+const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
+
 /**
  * WorkflowAnalyzer - Updated 2025-10-15
  * Handles initial page analysis using Playwright + OpenAI
@@ -77,7 +80,8 @@ class WorkflowAnalyzer {
 
   /**
    * Get timeout for a workflow step (in milliseconds)
-   * Returns step-specific timeout or default based on step type
+   * Returns step-specific timeout or default based on step type.
+   * For workflow-analysis and page-discovery uses context.max_job_duration_ms (from project "Max time per subjob") when available.
    * Range: 1 minute (60000ms) to 15 minutes (900000ms)
    */
   getStepTimeout(step) {
@@ -91,10 +95,14 @@ class WorkflowAnalyzer {
       return timeout;
     }
 
-    // Default timeouts by step type (in milliseconds)
+    // Step types that use project "Max time per subjob" from context (no hardcoded value)
+    const maxFromSettings = this.context?.max_job_duration_ms != null && Number.isFinite(Number(this.context.max_job_duration_ms))
+      ? Math.max(60000, Math.min(900000, Number(this.context.max_job_duration_ms)))
+      : DEFAULT_MAX_STEP_TIMEOUT_MS;
+
     const defaultTimeouts = {
       'ai-prompt': 900000,           // 15 minutes - AI calls can take time
-      'workflow-analysis': 180000,   // 3 minutes - Complex analysis
+      'workflow-analysis': maxFromSettings,   // From project "Max time per subjob" (context.max_job_duration_ms)
       'page-description': 120000,    // 2 minutes - Page analysis
       'playwright-analysis': 120000, // 2 minutes - Playwright analysis
       'execute-code': 120000,        // 2 minutes - Code execution
@@ -107,7 +115,7 @@ class WorkflowAnalyzer {
       'var-dump': 60000,            // 1 minute - Quick operation
       'print': 30000,               // 30 seconds - Very quick
       'sleep': 60000,               // 1 minute - Sleep operations
-      'page-discovery': 180000,     // 3 minutes - Discovery can take time
+      'page-discovery': maxFromSettings,     // From project "Max time per subjob" (context.max_job_duration_ms)
       'sitemap-exploration': 240000, // 4 minutes - Sitemap exploration
       'unlighthouse': 300000,       // 5 minutes - Performance audit
       'save-data': 120000,          // 2 minutes - Data saving
