@@ -287,6 +287,9 @@ async function withBackendRetry(fn, label) {
   console.error(`❌ [BACKEND-RETRY] Request failed after ${BACKEND_RETRY_ATTEMPTS} attempts: ${label}: ${lastError?.message || lastError}`);
   if (lastError?.response) {
     console.error(`   Status: ${lastError.response.status}; Response:`, lastError.response.data);
+    if (lastError.response.status >= 500 && lastError.response.data) {
+      console.error(`   Backend/proxy body: ${typeof lastError.response.data === 'object' ? JSON.stringify(lastError.response.data) : lastError.response.data}`);
+    }
   }
   throw lastError;
 }
@@ -1532,7 +1535,8 @@ async function reportJobComplete(jobId, result) {
       runner_id: RUNNER_ID,
       timestamp: new Date().toISOString()
     }, {
-      headers: getAuthHeaders()
+      headers: getAuthHeaders(),
+      timeout: 120000
     }), `jobs/${jobId}/complete`);
   } catch (error) {
     console.error(`❌ Error reporting job completion after retries:`, error?.message);
@@ -1550,7 +1554,8 @@ async function reportJobFailed(jobId, errorMessage, errorStack) {
       runner_id: RUNNER_ID,
       timestamp: new Date().toISOString()
     }, {
-      headers: getAuthHeaders()
+      headers: getAuthHeaders(),
+      timeout: 60000
     }), `jobs/${jobId}/fail`);
   } catch (error) {
     console.error(`❌ Error reporting job failure after retries:`, error?.message);

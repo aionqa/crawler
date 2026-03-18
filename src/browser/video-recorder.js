@@ -217,10 +217,14 @@ class VideoRecorder {
       const originalStart = (segment.originalStart - recordingStartTime) / 1000;
       const originalDuration = segment.duration / 1000;
       const displayDuration = (segment.displayEnd - segment.displayStart) / 1000;
-      
+      const outpoint = originalStart + originalDuration;
+      if (!Number.isFinite(originalStart) || !Number.isFinite(originalDuration) || !Number.isFinite(outpoint) || originalDuration <= 0) {
+        console.warn(`[VIDEO-RECORDER] Skipping segment with invalid times (originalStart=${originalStart}, originalDuration=${originalDuration})`);
+        continue;
+      }
       if (segment.type === 'active') {
         // Active segments: use normally with speed=1.0
-        segmentsContent.push(`file '${videoPath}'\ninpoint ${originalStart.toFixed(3)}\noutpoint ${(originalStart + originalDuration).toFixed(3)}\n`);
+        segmentsContent.push(`file '${videoPath}'\ninpoint ${originalStart.toFixed(3)}\noutpoint ${outpoint.toFixed(3)}\n`);
       } else {
         // Inactive segments: speed up if compressed
         if (segment.compressed && originalDuration > displayDuration) {
@@ -242,9 +246,18 @@ class VideoRecorder {
           inputs.push(tempSegment);
         } else {
           // Show in full if not compressed
-          segmentsContent.push(`file '${videoPath}'\ninpoint ${originalStart.toFixed(3)}\noutpoint ${(originalStart + originalDuration).toFixed(3)}\n`);
+          segmentsContent.push(`file '${videoPath}'\ninpoint ${originalStart.toFixed(3)}\noutpoint ${outpoint.toFixed(3)}\n`);
         }
       }
+    }
+    if (segmentsContent.length === 0) {
+      console.warn('[VIDEO-RECORDER] No valid segments after filtering (invalid/NaN times), using original video');
+      return {
+        path: videoPath,
+        size: (await fs.promises.stat(videoPath)).size,
+        duration: timeline.originalDuration / 1000,
+        inactiveMarkers: []
+      };
     }
     
     // Write segments file
