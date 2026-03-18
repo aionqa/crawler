@@ -4021,34 +4021,6 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           // Treat explicit success/status pages as NOT being "still on login".
           const onLoginUrl = !isLoginSuccessUrl && !isLoginStatusUrl && (/\/login\b/.test(currentUrl) || currentUrl.includes('auth'));
 
-          // FMClarity-specific: successful SSO can land briefly on a non-app URL (even an error shell),
-          // but still set the real auth cookies we need for subsequent authorized crawling.
-          // If we have strong auth cookies and we're no longer on the auth/login host, treat as success.
-          let fmclarityCookieAuth = false;
-          try {
-            const u = new URL(currentUrl);
-            const host = (u.hostname || '').toLowerCase();
-            const isFmclarity = host.endsWith('fmclarity.com');
-            const isAuthHost = host.startsWith('auth.') || host.includes('auth.');
-            if (isFmclarity && !isAuthHost && !/\/login\b/.test(u.pathname || '')) {
-              const strongTokenNames = new Set([
-                'fmc_token_v2',
-                'fmc_refresh_token_v2',
-                'fmc_id_token_v2',
-                'fmc_token',
-                'session_token',
-                'fmc_session'
-              ]);
-              fmclarityCookieAuth = Array.isArray(cookies) && cookies.some(c =>
-                strongTokenNames.has(String(c?.name || '')) &&
-                typeof c?.value === 'string' &&
-                c.value.length >= 20
-              );
-            }
-          } catch (_) {
-            // ignore
-          }
-
           // Without AI, be conservative:
           // - if we're still clearly on a login flow (URL contains login/auth OR login fields/buttons exist) => continue
           // - only mark success when we see strong success signals AND login controls are gone
@@ -4057,20 +4029,18 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
           const looksLikeLoginFlow = hasLoginControls || (onLoginUrl && !hasSuccessSignal);
           const status = isLoginSuccessUrl
             ? 'success'
-            : fmclarityCookieAuth
-              ? 'success'
-              : hasErrorSignal
-                ? 'failure'
-                : (!looksLikeLoginFlow && hasSuccessSignal)
-                  ? 'success'
-                  : 'continue';
+            : hasErrorSignal
+              ? 'failure'
+              : (!looksLikeLoginFlow && hasSuccessSignal)
+                ? 'success'
+                : 'continue';
           const isComplete = status === 'success' || status === 'failure';
 
           aiResponse = {
             status,
             is_complete: isComplete,
             reason: 'AI provider unavailable on runner helper; used deterministic DOM-based login validation fallback.',
-            what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}, fmclarityCookieAuth=${fmclarityCookieAuth}, cookies=${Array.isArray(cookies) ? cookies.length : 0}`,
+            what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}, cookies=${Array.isArray(cookies) ? cookies.length : 0}`,
             new_content_detected: status !== 'continue',
             content_type: 'page',
             needs_more_testing: !isComplete,
