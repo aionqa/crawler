@@ -6,6 +6,8 @@
 
 import { startCrawl } from './crawling/unified-operations.js';
 import { executeLoginWithWorkflow } from './login/login-workflow-engine.js';
+import { runZapBaseline } from './security/zap-runner.js';
+import { readFile } from 'fs/promises';
 import axios from 'axios';
 import https from 'https';
 import { randomUUID } from 'crypto';
@@ -347,7 +349,28 @@ async function pollForJob() {
     }
   }
 
-  // If no crawl job, try to get a login job
+  // If no crawl job, try to get a security job
+  try {
+    const response = await withBackendRetry(() => axios.get(`${BACKEND_URL}/api/runner/jobs/next`, {
+      params: { type: 'security', runner_id: RUNNER_ID },
+      headers: getAuthHeaders(),
+      timeout: 5000
+    }), 'poll/security');
+
+    if (response.data && response.data.job) {
+      return { ...response.data.job, jobType: 'security' };
+    }
+  } catch (error) {
+    if (error.response?.status === 404) {
+      // Normal - no jobs available
+    } else if (error.response?.status === 401) {
+      console.error(`❌ Authentication failed when polling for security jobs!`);
+    } else {
+      console.error(`❌ Error polling for security jobs:`, error.message);
+    }
+  }
+
+  // If no security job, try to get a login job
   try {
     const response = await withBackendRetry(() => axios.get(`${BACKEND_URL}/api/runner/jobs/next`, {
       params: { type: 'login', runner_id: RUNNER_ID },
@@ -502,6 +525,12 @@ async function executeJob(job) {
       const result = await executeHealthCheckJob(job);
       await reportJobComplete(job.id, result);
       console.log(`✅ Health check job ${job.id} completed`);
+      return true;
+    }
+    if (job.jobType === 'security') {
+      const result = await executeSecurityJob(job);
+      await reportJobComplete(job.id, result);
+      console.log(`✅ Security scan job ${job.id} completed`);
       return true;
     }
     if (job.jobType === 'login') {
@@ -1523,6 +1552,52 @@ async function executeHealthCheckJob(job) {
       }
     };
   }
+}
+
+/**
+ * Execute a security scan job (OWASP ZAP baseline).
+ * Runs ZAP against job URL, uploads report, returns result with report_url and summary.
+ */
+async function executeSecurityJob(job) {
+  const targetUrl = job.url || job.start_url || job.context?.start_url || job.context?.url || '';
+  if (!targetUrl || !targetUrl.startsWith('http')) {
+    return {
+      success: false,
+      error: 'No valid target URL for security scan',
+      security_report: null
+    };
+  }
+
+  console.log(`🔒 Running ZAP baseline scan for ${targetUrl}`);
+  const reportPath = `/tmp/zap-report-${job.id}-${Date.now()}.json`;
+
+  const zapResult = await runZapBaseline(targetUrl, reportPath);
+  if (!zapResult.success) {
+    return {
+      success: false,
+      error: zapResult.error || 'ZAP scan failed',
+      security_report: null
+    };
+  }
+
+  let reportUrl = null;
+  try {
+    const reportContent = await readFile(reportPath, 'utf8');
+    const fileName = `zap-security-report-${job.id}.json`;
+    reportUrl = await uploadFileForDownload(job.id, reportContent, fileName, 'application/json');
+  } catch (err) {
+    console.error(`❌ Failed to upload ZAP report: ${err.message}`);
+  }
+
+  return {
+    success: true,
+    security_report: {
+      report_url: reportUrl,
+      target_url: targetUrl,
+      summary: zapResult.summary || { high: 0, medium: 0, low: 0, informational: 0, total: 0 },
+      duration_ms: zapResult.duration_ms
+    }
+  };
 }
 
 /**

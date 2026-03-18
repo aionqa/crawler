@@ -1,6 +1,6 @@
 FROM node:20-bookworm-slim
 
-# Install system dependencies for Playwright and video recording
+# Install system dependencies for Playwright, video recording, and OWASP ZAP
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -8,7 +8,18 @@ RUN apt-get update && apt-get install -y \
     procps \
     curl \
     ffmpeg \
+    default-jre-headless \
     && rm -rf /var/lib/apt/lists/*
+
+# Install OWASP ZAP for security scans (baseline / passive scanning)
+ENV ZAP_VERSION=2.14.0
+ENV ZAP_HOME=/opt/zap
+RUN wget -q "https://github.com/zaproxy/zaproxy/releases/download/v${ZAP_VERSION}/ZAP_${ZAP_VERSION}_Linux.tar.gz" -O /tmp/zap.tar.gz \
+    && mkdir -p /opt \
+    && tar -xzf /tmp/zap.tar.gz -C /opt \
+    && mv "/opt/ZAP_${ZAP_VERSION}" "${ZAP_HOME}" \
+    && rm /tmp/zap.tar.gz \
+    && ln -sf "${ZAP_HOME}/zap.sh" /usr/local/bin/zap.sh
 
 # Avoid installing browsers into /root/.cache (can be flaky on some Docker backends).
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
