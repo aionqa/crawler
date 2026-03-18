@@ -7,7 +7,7 @@
 import { startCrawl } from './crawling/unified-operations.js';
 import { executeLoginWithWorkflow } from './login/login-workflow-engine.js';
 import { runZapBaseline } from './security/zap-runner.js';
-import { readFile, writeFile } from 'fs/promises';
+import { readFile, writeFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { spawn } from 'child_process';
@@ -1402,6 +1402,15 @@ async function executeK6LoadTestJob(job) {
   if (!script || typeof script !== 'string') {
     return { success: false, error: 'No k6_script in job context' };
   }
+  const runtimeLimitMsRaw = Number(
+    job.context?.k6_timeout_ms ??
+    job.options?.k6_timeout_ms ??
+    process.env.K6_MAX_RUNTIME_MS ??
+    (20 * 60 * 1000)
+  );
+  const runtimeLimitMs = Number.isFinite(runtimeLimitMsRaw)
+    ? Math.max(60 * 1000, Math.min(90 * 60 * 1000, Math.floor(runtimeLimitMsRaw)))
+    : 20 * 60 * 1000;
   const scriptPath = join(tmpdir(), `k6-load-test-${job.id}-${Date.now()}.js`);
   try {
     await writeFile(scriptPath, script, 'utf8');
@@ -1415,15 +1424,39 @@ async function executeK6LoadTestJob(job) {
     });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const complete = async (result) => {
+      if (settled) return;
+      settled = true;
+      try {
+        await unlink(scriptPath);
+      } catch (_) {
+        // Ignore temp file cleanup failures.
+      }
+      resolve(result);
+    };
+    const killTimer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch (_) {}
+      void complete({
+        success: false,
+        stdout: stdout.slice(-8000),
+        stderr: stderr.slice(-8000),
+        error: `k6 runtime exceeded ${Math.round(runtimeLimitMs / 1000)}s and was terminated`,
+        timed_out: true
+      });
+    }, runtimeLimitMs);
     child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
     child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
     child.on('close', (code, signal) => {
+      clearTimeout(killTimer);
       const success = code === 0;
       if (!success) {
         console.error(`[K6] Exit code ${code}, signal ${signal}`);
         console.error(`[K6] stderr: ${stderr.slice(-2000)}`);
       }
-      resolve({
+      void complete({
         success,
         stdout: stdout.slice(-8000),
         stderr: stderr.slice(-8000),
@@ -1433,7 +1466,8 @@ async function executeK6LoadTestJob(job) {
       });
     });
     child.on('error', (err) => {
-      resolve({
+      clearTimeout(killTimer);
+      void complete({
         success: false,
         error: err.message || 'Failed to spawn k6 (is k6 installed?)',
         stdout,
