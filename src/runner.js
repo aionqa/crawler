@@ -1855,8 +1855,11 @@ async function executeSingleJob() {
       console.log(`✅ Job ${JOB_ID} completed successfully`);
       process.exit(0);
     } else {
-      console.error(`❌ Job ${JOB_ID} failed`);
-      process.exit(1);
+      // executeJob() already reports failure state back to backend.
+      // Exiting with non-zero here can overwrite the job outcome as a generic
+      // container failure ("Container exited with code 1"), hiding root cause.
+      console.error(`❌ Job ${JOB_ID} failed (already reported to backend)`);
+      process.exit(0);
     }
   } catch (error) {
     console.error(`❌ Fatal error executing job:`, error.message);
