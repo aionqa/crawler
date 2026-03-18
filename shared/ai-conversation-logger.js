@@ -997,8 +997,23 @@ export class AIConversationLogger {
         try {
           const purpose = this.generateAIPurpose(promptSlug, sourcePayload || payload, pageUrl);
           const pendingConversationIdValue = `ai-conv-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-          
-          // Create pending AI conversation entry
+          const stepName = sourcePayload?.step_name || sourcePayload?.stepId || 'AI Request';
+          const requestTree = {
+            model: model,
+            prompt: promptSlug,
+            page: pageUrl || 'Unknown',
+            step: stepName,
+            parameters: {
+              reasoning_enabled: useReasoning,
+              websearch_enabled: useWebsearch,
+              text_format: textFormat,
+              reasoning_effort: reasoningEffort,
+              verbosity: verbosity,
+              store_logs: storeLogs
+            },
+            request: openaiRequest
+          };
+          // Create pending AI conversation entry (include full_request so Chat tab has request content)
           const pendingConversationData = {
             job_id: jobId,
             agent_name: agentName,
@@ -1017,7 +1032,7 @@ export class AIConversationLogger {
               prompt_slug: promptSlug,
               pending: true,
               request_sent_at: new Date().toISOString(),
-              // Add model and params information
+              full_request: JSON.stringify(requestTree, null, 2),
               model: model,
               model_params: {
                 reasoning_enabled: useReasoning,
