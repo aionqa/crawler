@@ -7,11 +7,29 @@
 import { spawn } from 'child_process';
 import { readFile } from 'fs/promises';
 import { existsSync } from 'fs';
+import net from 'net';
 
 const ZAP_HOME = process.env.ZAP_HOME || '/opt/zap';
 const ZAP_SCRIPT = `${ZAP_HOME}/zap.sh`;
 const DEFAULT_SPIDER_MINS = 1;
 const MAX_WAIT_MS = 10 * 60 * 1000; // 10 minutes
+
+async function allocateFreePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = (address && typeof address === 'object') ? address.port : null;
+      server.close((err) => {
+        if (err) return reject(err);
+        if (!port) return reject(new Error('Unable to allocate free TCP port'));
+        resolve(port);
+      });
+    });
+  });
+}
 
 /**
  * Run ZAP baseline scan against target URL.
@@ -29,9 +47,11 @@ export async function runZapBaseline(targetUrl, reportPath = '/tmp/zap-report.js
     return { success: false, error: `ZAP not found at ${ZAP_SCRIPT}. Install ZAP in the container image.` };
   }
 
+  const zapPort = await allocateFreePort().catch(() => 0);
   return new Promise((resolve) => {
     const args = [
       '-cmd',
+      ...(zapPort > 0 ? ['-port', String(zapPort)] : []),
       '-quickurl', targetUrl,
       '-quickout', reportPath,
       '-quickprogress'
