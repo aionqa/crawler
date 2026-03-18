@@ -7,7 +7,10 @@
 import { startCrawl } from './crawling/unified-operations.js';
 import { executeLoginWithWorkflow } from './login/login-workflow-engine.js';
 import { runZapBaseline } from './security/zap-runner.js';
-import { readFile } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { spawn } from 'child_process';
 import axios from 'axios';
 import https from 'https';
 import { randomUUID } from 'crypto';
@@ -532,6 +535,12 @@ async function executeJob(job) {
       await reportJobComplete(job.id, result);
       console.log(`✅ Security scan job ${job.id} completed`);
       return true;
+    }
+    if (job.jobType === 'k6_load_test') {
+      const result = await executeK6LoadTestJob(job);
+      await reportJobComplete(job.id, result);
+      console.log(`✅ K6 load test job ${job.id} ${result.success ? 'completed' : 'failed'}`);
+      return result.success;
     }
     if (job.jobType === 'login') {
       // Execute login job
@@ -1382,6 +1391,56 @@ async function checkSingleUrlAvailability(url, timeoutMs) {
       error: error.message
     };
   }
+}
+
+/**
+ * Execute a K6 load test job: write script to temp file and run `k6 run script.js`.
+ * Returns { success, stdout?, stderr?, exitCode?, error? }.
+ */
+async function executeK6LoadTestJob(job) {
+  const script = job.context?.k6_script;
+  if (!script || typeof script !== 'string') {
+    return { success: false, error: 'No k6_script in job context' };
+  }
+  const scriptPath = join(tmpdir(), `k6-load-test-${job.id}-${Date.now()}.js`);
+  try {
+    await writeFile(scriptPath, script, 'utf8');
+  } catch (writeErr) {
+    return { success: false, error: `Failed to write script: ${writeErr.message}` };
+  }
+  return new Promise((resolve) => {
+    const child = spawn('k6', ['run', scriptPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: false
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('close', (code, signal) => {
+      const success = code === 0;
+      if (!success) {
+        console.error(`[K6] Exit code ${code}, signal ${signal}`);
+        console.error(`[K6] stderr: ${stderr.slice(-2000)}`);
+      }
+      resolve({
+        success,
+        stdout: stdout.slice(-8000),
+        stderr: stderr.slice(-8000),
+        exitCode: code,
+        signal: signal || undefined,
+        error: success ? undefined : (stderr || stdout || `k6 exited with code ${code}`)
+      });
+    });
+    child.on('error', (err) => {
+      resolve({
+        success: false,
+        error: err.message || 'Failed to spawn k6 (is k6 installed?)',
+        stdout,
+        stderr
+      });
+    });
+  });
 }
 
 /**
