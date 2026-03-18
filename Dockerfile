@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install OWASP ZAP for security scans (baseline / passive scanning)
-ENV ZAP_VERSION=2.14.0
+ENV ZAP_VERSION=2.16.1
 ENV ZAP_HOME=/opt/zap
 RUN wget -q "https://github.com/zaproxy/zaproxy/releases/download/v${ZAP_VERSION}/ZAP_${ZAP_VERSION}_Linux.tar.gz" -O /tmp/zap.tar.gz \
     && mkdir -p /opt \
