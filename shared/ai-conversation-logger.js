@@ -753,6 +753,8 @@ export class AIConversationLogger {
    * @returns {Promise<Object>} AI response (parsed JSON)
    */
   async makeAICallWithPrompt(promptSlug, payload, jobId, agentName, pageUrl = null, screenshotId = null, sourcePayload = null, customTemplate = null, attemptNumber = 1, previousError = null, modelOverride = null, reasoningEnabled = false, websearchEnabled = false) {
+    // Use execution context job_id when set so AI chats go to the subjob that triggered them (not the parent)
+    const effectiveJobId = (this.context && (this.context.job_id || this.context.jobId)) ? (this.context.job_id || this.context.jobId) : jobId;
     // Track pending conversation ID for error handling
     let pendingConversationId = null;
     let pendingChatContextId = null;
@@ -840,17 +842,17 @@ export class AIConversationLogger {
       // 5. Get project LLM config to use project's default model if not overridden
       let projectModel = null;
       let projectOptions = {};
-      if (jobId && this.backendUrl) {
+          if (effectiveJobId && this.backendUrl) {
         try {
           // Extract project_id from payload or job context
           let projectId = payload?.project_id || payload?.projectId || null;
           
-          console.log(`[AI-CALL] 🔍 Looking for project_id: payload.project_id=${payload?.project_id}, payload.projectId=${payload?.projectId}, jobId=${jobId}`);
+          console.log(`[AI-CALL] 🔍 Looking for project_id: payload.project_id=${payload?.project_id}, payload.projectId=${payload?.projectId}, jobId=${effectiveJobId}`);
           
           // If project_id not in payload, try to get it from job
-          if (!projectId && jobId) {
+          if (!projectId && effectiveJobId) {
             try {
-              const jobResponse = await axios.get(`${this.backendUrl}/jobs/${jobId}`, {
+              const jobResponse = await axios.get(`${this.backendUrl}/jobs/${effectiveJobId}`, {
                 headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {},
                 timeout: 3000
               }).catch(() => null);
@@ -866,10 +868,10 @@ export class AIConversationLogger {
                   projectId = typeof rawProjectId === 'object' && rawProjectId.toString ? rawProjectId.toString() : String(rawProjectId);
                   console.log(`[AI-CALL] ℹ️ Retrieved project_id from job: ${projectId}`);
                 } else {
-                  console.warn(`[AI-CALL] ⚠️ Job ${jobId} does not have project_id field`);
+                  console.warn(`[AI-CALL] ⚠️ Job ${effectiveJobId} does not have project_id field`);
                 }
               } else {
-                console.warn(`[AI-CALL] ⚠️ No job data returned for jobId: ${jobId}`);
+                console.warn(`[AI-CALL] ⚠️ No job data returned for jobId: ${effectiveJobId}`);
               }
             } catch (jobError) {
               console.warn(`[AI-CALL] ⚠️ Could not fetch job to get project_id: ${jobError.message}`);
@@ -987,13 +989,13 @@ export class AIConversationLogger {
       }
       
       console.log(`[AI-CALL] 🤖 Making AI call with prompt: ${promptSlug}`);
-      console.log(`[AI-CALL] 📋 Context: job=${jobId}, agent=${agentName}, url=${pageUrl || 'N/A'}`);
+      console.log(`[AI-CALL] 📋 Context: job=${effectiveJobId}, agent=${agentName}, url=${pageUrl || 'N/A'}`);
       console.log(`[AI-CALL] 📊 Schema: ${prompt.response_schema_description?.substring(0, 100) || 'N/A'}...`);
       
       // 6. Log request immediately with pending status (before making OpenAI call)
       let pendingConversationId = null;
       let pendingChatContextId = null;
-      if (jobId && this.backendUrl) {
+      if (effectiveJobId && this.backendUrl) {
         try {
           const purpose = this.generateAIPurpose(promptSlug, sourcePayload || payload, pageUrl);
           const pendingConversationIdValue = `ai-conv-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -1015,7 +1017,7 @@ export class AIConversationLogger {
           };
           // Create pending AI conversation entry (include full_request so Chat tab has request content)
           const pendingConversationData = {
-            job_id: jobId,
+            job_id: effectiveJobId,
             agent_name: agentName,
             conversation_type: promptSlug,
             text_request: (userMessageText != null ? String(userMessageText) : '').substring(0, 500), // Preview of request
@@ -1068,7 +1070,7 @@ export class AIConversationLogger {
       
       // 6.5. Log AI conversation immediately to job logs with step name, page, and request JSON
       const aiCallStartTime = Date.now();
-      if (jobId && this.backendUrl && attemptNumber === 1) {
+      if (effectiveJobId && this.backendUrl && attemptNumber === 1) {
         try {
           // Extract step information from sourcePayload (step that requested this AI call)
           const stepName = sourcePayload?.step_name || sourcePayload?.stepId || 'AI Request';
@@ -1115,7 +1117,7 @@ export class AIConversationLogger {
           const pageInfo = pageUrl ? ` - Page: ${new URL(pageUrl).pathname}` : '';
           
           await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId,
+            jobId: effectiveJobId,
             level: 'info',
             message: `🤖 AI Request:${requestedBy}${pageInfo} - Model: ${model}${paramsText}`,
             component: 'AI-CALL',
@@ -1149,13 +1151,13 @@ export class AIConversationLogger {
       }
       
       // 7. Make OpenAI call (after ensuring budget)
-      if (jobId) {
-        await this.ensureAiBudget(jobId);
+      if (effectiveJobId) {
+        await this.ensureAiBudget(effectiveJobId);
       }
       // Update context with job_id and project_id for AI service URL resolution
       const contextUpdate = {
-        job_id: jobId,
-        jobId: jobId,
+        job_id: effectiveJobId,
+        jobId: effectiveJobId,
         project_id: payload?.project_id || sourcePayload?.project_id || this.context?.project_id,
         projectId: payload?.project_id || sourcePayload?.project_id || this.context?.project_id
       };
@@ -1197,10 +1199,10 @@ export class AIConversationLogger {
 
             if (finishReason === 'length') {
               console.warn(`[AI-CALL] ⚠️ OpenAI response was truncated (finish_reason: length). This may indicate incomplete content.`);
-              if (jobId && this.backendUrl) {
+              if (effectiveJobId && this.backendUrl) {
                 try {
                   await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-                    jobId,
+                    jobId: effectiveJobId,
                     level: 'warn',
                     message: `⚠️ OpenAI response was truncated (finish_reason: length). Response may be incomplete.`,
                     component: 'AI-CALL',
@@ -1317,7 +1319,7 @@ export class AIConversationLogger {
       // 9. Log AI call completion with duration, tokens, and cost to job logs
       // Prefer cost_usd/saved_usd from AI service (backend-reported) so we never show $0 when customer was charged or saved.
       const aiCallDuration = Date.now() - aiCallStartTime;
-      if (jobId && this.backendUrl && response.usage) {
+      if (effectiveJobId && this.backendUrl && response.usage) {
         try {
           const costDetails = this.calculateCost(response.usage, response.model);
           const inputTokens = response.usage.prompt_tokens ?? response.usage.input_tokens ?? 0;
@@ -1340,7 +1342,7 @@ export class AIConversationLogger {
           const completedStepSuffix = stepLabelDone ? ` (${stepLabelDone})` : '';
           
           await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId,
+            jobId: effectiveJobId,
             level: 'info',
             message: `✅ AI call completed in ${durationSeconds}s${completedStepSuffix} - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, ${costText}`,
             component: 'AI-CALL',
@@ -1382,7 +1384,7 @@ export class AIConversationLogger {
       
       // 10. Log conversation to job logs with FULL payload as attachments
       const conversationRecord = await this.logAIRequestResponse(
-        jobId,
+        effectiveJobId,
         agentName,
         promptSlug, // Use slug as conversation_type
         openaiRequest,
@@ -1427,7 +1429,7 @@ export class AIConversationLogger {
         const payloadComponents = this.buildRequestContextComponents(conversationRecord.sourcePayload || payload);
 
         await this.sendAIConversation(
-          jobId,
+          effectiveJobId,
           agentName,
           promptSlug,
           conversationRecord.textRequest,
@@ -1447,12 +1449,12 @@ export class AIConversationLogger {
             payload_components: payloadComponents
           }
         );
-      } else if (pendingConversationId && jobId && this.backendUrl) {
+      } else if (pendingConversationId && effectiveJobId && this.backendUrl) {
         // If conversationRecord wasn't created but we have a pending conversation, update it directly
         try {
           const purpose = this.generateAIPurpose(promptSlug, sourcePayload || payload, pageUrl);
           const updateData = {
-            job_id: jobId,
+            job_id: effectiveJobId,
             agent_name: agentName,
             conversation_type: promptSlug,
             text_request: (userMessageText != null ? String(userMessageText) : '').substring(0, 500),
@@ -1494,8 +1496,8 @@ export class AIConversationLogger {
       console.log(`[AI-CALL] ✅ AI call completed: ${promptSlug} (${response.usage?.total_tokens || 0} tokens)`);
 
       // Only count completed request–response as one conversation (see .cursor/rules/50-ai-conversation-terminology.mdc)
-      if (jobId && response.usage) {
-        await this.reportAiMetrics(jobId, {
+      if (effectiveJobId && response.usage) {
+        await this.reportAiMetrics(effectiveJobId, {
           usage: response.usage,
           model: response.model,
           ai_calls_count: 1,
@@ -1514,11 +1516,11 @@ export class AIConversationLogger {
       console.error(`[AI-CALL] ❌ AI call failed for prompt "${promptSlug}":`, error.message);
       
       // Update pending conversation to failed status if it exists
-      if (pendingConversationId && jobId && this.backendUrl) {
+      if (pendingConversationId && effectiveJobId && this.backendUrl) {
         try {
           const purpose = this.generateAIPurpose(promptSlug, sourcePayload || payload, pageUrl);
           const failureData = {
-            job_id: jobId,
+            job_id: effectiveJobId,
             agent_name: agentName,
             conversation_type: promptSlug,
             text_request: userMessageText?.substring(0, 500) || 'AI request',
@@ -1548,7 +1550,7 @@ export class AIConversationLogger {
       // Log failed request (fallback if pending conversation wasn't created)
       if (!pendingConversationId) {
         const failureRecord = await this.logAIRequestResponse(
-          jobId,
+          effectiveJobId,
           agentName,
           promptSlug,
           { prompt_slug: promptSlug, payload },
@@ -1566,7 +1568,7 @@ export class AIConversationLogger {
         if (failureRecord) {
           try {
             await this.sendAIConversation(
-              jobId,
+              effectiveJobId,
               agentName,
               promptSlug,
               failureRecord.textRequest,
