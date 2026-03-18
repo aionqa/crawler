@@ -1908,13 +1908,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
       });
 
       const discovered = response.data;
-      const pageId = discovered?._id || discovered?.page_id || discovered?.page?._id;
+      const rawPageId = discovered?._id || discovered?.page_id || discovered?.page?._id;
+      const pageId = rawPageId != null ? String(rawPageId) : null;
       if (pageId) {
         workflowState.pageId = pageId;
         console.log(`✅ Upserted page, obtained pageId=${pageId}`);
         return pageId;
       }
-      console.warn('⚠️ Page discover response missing _id');
+      if (discovered?.skipped === true) {
+        console.warn('⚠️ Page discover skipped (e.g. invalid/challenge page)');
+      } else {
+        console.warn('⚠️ Page discover response missing _id');
+      }
       return null;
     } catch (err) {
       console.warn(`⚠️ Failed to upsert page via /api/pages/discover: ${err.message}`);
