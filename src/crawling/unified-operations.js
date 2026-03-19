@@ -6691,19 +6691,31 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       }
 
       const isAllowedTelemetryHttpUrl = (rawUrl) => {
-        const value = String(rawUrl || '').trim();
-        if (!value || !/^https?:\/\//i.test(value)) return false;
-        return isWithinDomain(value, url, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
+        try {
+          const value = String(rawUrl || '').trim();
+          if (!value || !/^https?:\/\//i.test(value)) return false;
+          return isWithinDomain(value, url, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
+        } catch {
+          return false;
+        }
       };
       const isAllowedTelemetryWsUrl = (rawUrl) => {
-        const value = String(rawUrl || '').trim();
-        if (!value || !/^wss?:\/\//i.test(value)) return false;
-        return isWithinDomain(value, url, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
+        try {
+          const value = String(rawUrl || '').trim();
+          if (!value || !/^wss?:\/\//i.test(value)) return false;
+          return isWithinDomain(value, url, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
+        } catch {
+          return false;
+        }
       };
       const normalizePageUrlForTelemetry = (rawPageUrl) => {
-        const pageUrl = String(rawPageUrl || '').trim();
-        if (!pageUrl) return url;
-        return isWithinDomain(pageUrl, url, allowSubdomains, domainScope) ? pageUrl : url;
+        try {
+          const pageUrl = String(rawPageUrl || '').trim();
+          if (!pageUrl) return url;
+          return isWithinDomain(pageUrl, url, allowSubdomains, domainScope) ? pageUrl : url;
+        } catch {
+          return url;
+        }
       };
 
       // Collect backend API calls (XHR/fetch) for API Explorer (including request/response bodies)
@@ -6766,34 +6778,47 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       const maxWebSocketMessages = 2000;
       try {
         page.on('websocket', (ws) => {
-          const wsUrl = ws.url();
+          let wsUrl = '';
+          try {
+            wsUrl = typeof ws.url === 'function' ? ws.url() : '';
+          } catch {
+            wsUrl = '';
+          }
           if (!isAllowedTelemetryWsUrl(wsUrl)) return;
           const getPageUrl = () => { try { return page.url(); } catch { return ''; } };
           ws.on('framesent', (event) => {
-            if (collectedWebSocketMessages.length >= maxWebSocketMessages) return;
-            const payload = event.payload;
-            const isBuffer = Buffer.isBuffer(payload);
-            collectedWebSocketMessages.push({
-              url: wsUrl,
-              page_url: normalizePageUrlForTelemetry(getPageUrl()),
-              direction: 'sent',
-              payload: isBuffer ? null : (typeof payload === 'string' ? payload : String(payload)),
-              payload_base64: isBuffer ? payload.toString('base64') : null,
-              timestamp: Date.now()
-            });
+            try {
+              if (collectedWebSocketMessages.length >= maxWebSocketMessages) return;
+              const payload = event.payload;
+              const isBuffer = Buffer.isBuffer(payload);
+              collectedWebSocketMessages.push({
+                url: wsUrl,
+                page_url: normalizePageUrlForTelemetry(getPageUrl()),
+                direction: 'sent',
+                payload: isBuffer ? null : (typeof payload === 'string' ? payload : String(payload)),
+                payload_base64: isBuffer ? payload.toString('base64') : null,
+                timestamp: Date.now()
+              });
+            } catch (_) {
+              // Ignore malformed websocket frames.
+            }
           });
           ws.on('framereceived', (event) => {
-            if (collectedWebSocketMessages.length >= maxWebSocketMessages) return;
-            const payload = event.payload;
-            const isBuffer = Buffer.isBuffer(payload);
-            collectedWebSocketMessages.push({
-              url: wsUrl,
-              page_url: normalizePageUrlForTelemetry(getPageUrl()),
-              direction: 'received',
-              payload: isBuffer ? null : (typeof payload === 'string' ? payload : String(payload)),
-              payload_base64: isBuffer ? payload.toString('base64') : null,
-              timestamp: Date.now()
-            });
+            try {
+              if (collectedWebSocketMessages.length >= maxWebSocketMessages) return;
+              const payload = event.payload;
+              const isBuffer = Buffer.isBuffer(payload);
+              collectedWebSocketMessages.push({
+                url: wsUrl,
+                page_url: normalizePageUrlForTelemetry(getPageUrl()),
+                direction: 'received',
+                payload: isBuffer ? null : (typeof payload === 'string' ? payload : String(payload)),
+                payload_base64: isBuffer ? payload.toString('base64') : null,
+                timestamp: Date.now()
+              });
+            } catch (_) {
+              // Ignore malformed websocket frames.
+            }
           });
         });
       } catch (wsCollectErr) {
