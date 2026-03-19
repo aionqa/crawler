@@ -5600,6 +5600,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
               return ok;
             });
             const droppedCount = actions.length - cleanedActions.length;
+            if (cleanedActions.length === 0) {
+              return {
+                ...journey,
+                actions: cleanedActions,
+                status: 'skipped',
+                justification_status: 'skipped_insufficient_signal',
+                expected_outcome_verified: null,
+                ai_justification: journey?.ai_justification || (droppedCount > 0
+                  ? `Dropped ${droppedCount} invalid action(s) with unresolved selectors; marking journey as skipped.`
+                  : 'No executable actions were produced for this journey; marking as skipped.')
+              };
+            }
             if (droppedCount > 0) {
               return {
                 ...journey,
