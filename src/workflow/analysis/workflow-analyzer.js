@@ -5574,8 +5574,54 @@ IMPORTANT OUTPUT REQUIREMENTS:
           });
           const interactiveElementsCount = significantInteractiveElements.length;
           const journeysCount = journeys.length;
+          const hasNoActionableSignals = formsCount === 0 && interactiveElementsCount === 0;
+          workflowState.noActionableSignals = hasNoActionableSignals;
           
           console.log(`📊 [VALIDATION] Found ${formsCount} form(s), ${interactiveElementsCount} significant interactive element(s), ${journeysCount} journey(s) (one journey per logical flow, multiple actions per journey)`);
+          const actionRequiresSelector = (actionType) => {
+            const type = String(actionType || '').toLowerCase();
+            return ['click', 'fill', 'type', 'check', 'uncheck', 'selectoption', 'hover', 'press'].includes(type);
+          };
+          const hasInvalidSelector = (selector) => {
+            const value = String(selector || '').trim();
+            if (!value) return true;
+            if (value === 'selector' || value === 'undefined' || value === 'null') return true;
+            if (/\<[^>]*(selector|element)[^>]*\>/i.test(value)) return true;
+            if (/\{\{[^}]*selector[^}]*\}\}/i.test(value)) return true;
+            return false;
+          };
+          let droppedInvalidActions = 0;
+          journeys = journeys.map((journey) => {
+            const actions = Array.isArray(journey?.actions) ? journey.actions : [];
+            const cleanedActions = actions.filter((action) => {
+              if (!actionRequiresSelector(action?.action_type || action?.type)) return true;
+              const ok = !hasInvalidSelector(action?.selector);
+              if (!ok) droppedInvalidActions++;
+              return ok;
+            });
+            const droppedCount = actions.length - cleanedActions.length;
+            if (droppedCount > 0) {
+              return {
+                ...journey,
+                actions: cleanedActions,
+                ai_justification: journey?.ai_justification || `Dropped ${droppedCount} invalid action(s) with unresolved selectors.`,
+              };
+            }
+            return journey;
+          });
+          if (droppedInvalidActions > 0) {
+            console.warn(`⚠️ [JOURNEYS-QUALITY] Dropped ${droppedInvalidActions} invalid action(s) with unresolved selectors/placeholders`);
+          }
+          if (hasNoActionableSignals && journeys.length > 0) {
+            journeys = journeys.map((journey) => ({
+              ...journey,
+              actions: [],
+              status: 'skipped',
+              justification_status: 'skipped_insufficient_signal',
+              ai_justification: journey?.ai_justification || 'No actionable interactive elements were detected by Playwright analysis on this page.',
+              expected_outcome_verified: null
+            }));
+          }
           
           // Warn if no journeys but forms exist (AI might have missed the flow)
           if (journeysCount === 0 && formsCount > 0) {
@@ -15107,18 +15153,40 @@ ${executableBody}`;
           } else {
             // If path not found and it's required, default to false (exit loop)
             if (conditionPath) {
-              console.log(`⚠️ Condition path "${conditionPath}" not found, exiting loop`);
+              const fallbackStatus = String(
+                workflowState?.currentStepResult?.status ||
+                workflowState?.currentStepResult?.completion_status ||
+                workflowState?.determine_completion?.result?.status ||
+                workflowState?.determine_completion?.result?.completion_status ||
+                ''
+              ).toLowerCase();
+              const hasExecutionFailureSignal =
+                workflowState?.lastExecutionResult?.execution_failed === true ||
+                workflowState?.lastExecutionResult?.error_type === 'execution' ||
+                workflowState?.executionErrorType === 'execution';
+              workflowState.missingConditionPath = true;
+              console.log(`⚠️ Condition path "${conditionPath}" not found; using fallback status "${fallbackStatus || 'none'}"`);
               
               // Send log to backend
-              await this.sendLogToBackend(jobId, 'warn', `⚠️ Condition path "${conditionPath}" not found, exiting loop`, 'WORKFLOW-ANALYZER', {
+              await this.sendLogToBackend(jobId, 'warn', `⚠️ Condition path "${conditionPath}" not found; applying fallback loop condition`, 'WORKFLOW-ANALYZER', {
                 step_id: step.id,
                 step_name: step.name || step.type,
                 step_type: 'while-loop',
                 condition_path: conditionPath,
-                iteration: iteration
+                iteration: iteration,
+                fallback_status: fallbackStatus || null,
+                has_execution_failure_signal: hasExecutionFailureSignal
               });
-              
-              condition = invertCondition ? true : false;
+
+              if (fallbackStatus === 'pending' || fallbackStatus === 'continue' || fallbackStatus === 'stuck') {
+                condition = true;
+              } else if (fallbackStatus === 'success' || fallbackStatus === 'failure') {
+                condition = false;
+              } else if (hasExecutionFailureSignal && iteration < (config.maxIterations || 5)) {
+                condition = true;
+              } else {
+                condition = false;
+              }
             } else {
               // No condition path specified, default to false (exit loop)
               condition = false;
@@ -15927,33 +15995,63 @@ ${executableBody}`;
         // If max iterations reached and status is still 'continue' or 'stuck', mark as failure
         // This indicates the action couldn't be completed within the iteration limit
         if (iteration >= maxIterations) {
-          finalLegStatus = 'failure';
-          finalLegResult = 'failure';
-          finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Action could not be completed: status was '${status}' after ${iteration} iterations`;
+          if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+            finalLegStatus = 'skipped';
+            finalLegResult = 'skipped_insufficient_signal';
+            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Insufficient signal for reliable journey execution after ${iteration} iterations`;
+          } else {
+            finalLegStatus = 'failure';
+            finalLegResult = 'failure';
+            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Action could not be completed: status was '${status}' after ${iteration} iterations`;
+          }
         } else if (loopExitedEarly) {
           // Loop exited early but status is continue/stuck - use failure (pure justification from AI).
-          finalLegStatus = 'failure';
-          finalLegResult = 'failure';
-          finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution did not complete successfully';
+          if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+            finalLegStatus = 'skipped';
+            finalLegResult = 'skipped_insufficient_signal';
+            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Insufficient signal for reliable journey execution';
+          } else {
+            finalLegStatus = 'failure';
+            finalLegResult = 'failure';
+            finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution did not complete successfully';
+          }
         }
         // If not at max iterations yet and loop didn't exit early, finalLegStatus remains null so loop can continue
       } else if (loopExitedEarly && iteration > 0) {
-        finalLegStatus = 'failure';
-        finalLegResult = 'failure';
-        finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Action execution did not complete successfully';
+        if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+          finalLegStatus = 'skipped';
+          finalLegResult = 'skipped_insufficient_signal';
+          finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Insufficient signal for reliable journey execution';
+        } else {
+          finalLegStatus = 'failure';
+          finalLegResult = 'failure';
+          finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Action execution did not complete successfully';
+        }
       }
     } else if (loopExitedEarly && iteration > 0) {
       // No determine_completion result; do not assume success (pure justification).
-      finalLegStatus = 'failure';
-      finalLegResult = 'failure';
-      finalLegError = workflowState.lastExecutionResult?.error || 'Action execution did not complete successfully';
+      if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+        finalLegStatus = 'skipped';
+        finalLegResult = 'skipped_insufficient_signal';
+        finalLegError = workflowState.lastExecutionResult?.error || 'Insufficient signal for reliable journey execution';
+      } else {
+        finalLegStatus = 'failure';
+        finalLegResult = 'failure';
+        finalLegError = workflowState.lastExecutionResult?.error || 'Action execution did not complete successfully';
+      }
     }
     
     // If still no final status and max iterations reached, mark as failure
     if (!finalLegStatus && iteration >= maxIterations) {
-      finalLegStatus = 'failure';
-      finalLegResult = 'failure';
-      finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Max iterations reached without completion';
+      if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+        finalLegStatus = 'skipped';
+        finalLegResult = 'skipped_insufficient_signal';
+        finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Max iterations reached without reliable execution signal';
+      } else {
+        finalLegStatus = 'failure';
+        finalLegResult = 'failure';
+        finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Max iterations reached without completion';
+      }
     }
 
     // Log final status determination for debugging
