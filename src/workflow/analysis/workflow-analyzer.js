@@ -14250,14 +14250,15 @@ ${executableBody}`;
                 });
               }
               
-              // Map status based on expected_outcome_verified (primary source)
+              // Map status based on expected_outcome_verified (primary source).
+              // If verifier provides a boolean outcome, it must take precedence over a stale/pessimistic status string.
               let finalJustificationStatus = justificationStatus;
-              if (justificationStatus === 'pending') {
-                finalJustificationStatus = 'pending';
-              } else if (expectedOutcomeVerified === true) {
+              if (expectedOutcomeVerified === true) {
                 finalJustificationStatus = 'success';
               } else if (expectedOutcomeVerified === false) {
                 finalJustificationStatus = 'failure';
+              } else if (justificationStatus === 'pending') {
+                finalJustificationStatus = 'pending';
               }
               // Keep status and expected_outcome_verified consistent for downstream journey status mapping.
               if (finalJustificationStatus === 'success' && expectedOutcomeVerified !== true) {
@@ -15433,14 +15434,15 @@ ${executableBody}`;
               reasonLength: aiResponse?.reason ? (typeof aiResponse.reason === 'string' ? aiResponse.reason.length : 'not string') : 'N/A'
             });
             
-            // Map status based on expected_outcome_verified (primary source)
+            // Map status based on expected_outcome_verified (primary source).
+            // If verifier provides a boolean outcome, it must take precedence over a stale/pessimistic status string.
             let finalJustificationStatus = justificationStatus;
-            if (justificationStatus === 'pending') {
-              finalJustificationStatus = 'pending';
-            } else if (expectedOutcomeVerified === true) {
+            if (expectedOutcomeVerified === true) {
               finalJustificationStatus = 'success';
             } else if (expectedOutcomeVerified === false) {
               finalJustificationStatus = 'failure';
+            } else if (justificationStatus === 'pending') {
+              finalJustificationStatus = 'pending';
             }
             
             // Update journey with justification_status and ai_justification
@@ -15853,6 +15855,21 @@ ${executableBody}`;
       ''
     ).toLowerCase();
     const lastAiReason = lastIteration?.step_result?.reason || lastIteration?.step_result?.verification_details || null;
+    const reachedIterationBudget = iteration >= maxIterations;
+    const loopIterations = Array.isArray(loopState?.iterations) ? loopState.iterations : [];
+    const hasSuccessfulIterationEvidence = loopIterations.some((iter) => {
+      const status = String(iter?.step_result?.status || iter?.step_result?.completion_status || '').toLowerCase();
+      if (status === 'success') return true;
+      const verified = iter?.step_result?.expected_outcome_verified;
+      return verified === true || verified === 'true';
+    });
+    const hasHardFailureIteration = loopIterations.some((iter) => {
+      const status = String(iter?.step_result?.status || iter?.step_result?.completion_status || '').toLowerCase();
+      return status === 'failure';
+    });
+    const executionSucceeded =
+      workflowState.lastExecutionResult?.success === true ||
+      (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType && !workflowState.lastExecutionResult?.error);
     
     // Prefer AI justification status from the last while-loop iteration.
     if (!finalLegStatus && (lastAiStatus === 'success' || lastAiStatus === 'failure' || lastAiStatus === 'pending')) {
@@ -15863,8 +15880,17 @@ ${executableBody}`;
         finalLegStatus = insufficientSignalForJourney ? 'skipped' : 'failure';
         finalLegResult = insufficientSignalForJourney ? 'skipped_insufficient_signal' : 'failure';
       } else {
-        finalLegStatus = insufficientSignalForJourney ? 'skipped' : 'pending';
-        finalLegResult = insufficientSignalForJourney ? 'skipped_insufficient_signal' : 'pending';
+        if (insufficientSignalForJourney) {
+          finalLegStatus = 'skipped';
+          finalLegResult = 'skipped_insufficient_signal';
+        } else if (reachedIterationBudget && (executionSucceeded || hasSuccessfulIterationEvidence) && !hasHardFailureIteration) {
+          // Do not leave a terminal journey in pending when execution evidence is positive and no hard failure was observed.
+          finalLegStatus = 'success';
+          finalLegResult = 'success';
+        } else {
+          finalLegStatus = 'pending';
+          finalLegResult = 'pending';
+        }
       }
       finalLegError = lastAiReason || finalLegError;
     }
