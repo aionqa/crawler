@@ -6693,17 +6693,17 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       const isAllowedTelemetryHttpUrl = (rawUrl) => {
         const value = String(rawUrl || '').trim();
         if (!value || !/^https?:\/\//i.test(value)) return false;
-        return isWithinDomain(value, seedUrl, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
+        return isWithinDomain(value, url, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
       };
       const isAllowedTelemetryWsUrl = (rawUrl) => {
         const value = String(rawUrl || '').trim();
         if (!value || !/^wss?:\/\//i.test(value)) return false;
-        return isWithinDomain(value, seedUrl, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
+        return isWithinDomain(value, url, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
       };
       const normalizePageUrlForTelemetry = (rawPageUrl) => {
         const pageUrl = String(rawPageUrl || '').trim();
-        if (!pageUrl) return seedUrl;
-        return isWithinDomain(pageUrl, seedUrl, allowSubdomains, domainScope) ? pageUrl : seedUrl;
+        if (!pageUrl) return url;
+        return isWithinDomain(pageUrl, url, allowSubdomains, domainScope) ? pageUrl : url;
       };
 
       // Collect backend API calls (XHR/fetch) for API Explorer (including request/response bodies)
