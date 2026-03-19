@@ -15907,6 +15907,16 @@ ${executableBody}`;
     // Which means: (invertCondition ? condition : !condition) === true
     const shouldContinue = invertCondition ? !condition : condition;
     const loopExitedEarly = iteration < maxIterations && !shouldContinue;
+    const formsSignals = Array.isArray(workflowState?.playwrightAnalysis?.forms)
+      ? workflowState.playwrightAnalysis.forms.length
+      : 0;
+    const interactiveSignals = Array.isArray(workflowState?.playwrightAnalysis?.interactive_elements)
+      ? workflowState.playwrightAnalysis.interactive_elements.length
+      : 0;
+    const insufficientSignalForJourney =
+      workflowState.noActionableSignals === true ||
+      workflowState.missingConditionPath === true ||
+      (formsSignals === 0 && interactiveSignals === 0);
     
     // Only check determine_completion status if we haven't already set finalLegStatus from loopExitedEarly
     if (!finalLegStatus && lastDetermineCompletion) {
@@ -15995,7 +16005,7 @@ ${executableBody}`;
         // If max iterations reached and status is still 'continue' or 'stuck', mark as failure
         // This indicates the action couldn't be completed within the iteration limit
         if (iteration >= maxIterations) {
-          if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+          if (insufficientSignalForJourney) {
             finalLegStatus = 'skipped';
             finalLegResult = 'skipped_insufficient_signal';
             finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Insufficient signal for reliable journey execution after ${iteration} iterations`;
@@ -16006,7 +16016,7 @@ ${executableBody}`;
           }
         } else if (loopExitedEarly) {
           // Loop exited early but status is continue/stuck - use failure (pure justification from AI).
-          if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+          if (insufficientSignalForJourney) {
             finalLegStatus = 'skipped';
             finalLegResult = 'skipped_insufficient_signal';
             finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Insufficient signal for reliable journey execution';
@@ -16018,7 +16028,7 @@ ${executableBody}`;
         }
         // If not at max iterations yet and loop didn't exit early, finalLegStatus remains null so loop can continue
       } else if (loopExitedEarly && iteration > 0) {
-        if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+        if (insufficientSignalForJourney) {
           finalLegStatus = 'skipped';
           finalLegResult = 'skipped_insufficient_signal';
           finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Insufficient signal for reliable journey execution';
@@ -16030,7 +16040,7 @@ ${executableBody}`;
       }
     } else if (loopExitedEarly && iteration > 0) {
       // No determine_completion result; do not assume success (pure justification).
-      if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+      if (insufficientSignalForJourney) {
         finalLegStatus = 'skipped';
         finalLegResult = 'skipped_insufficient_signal';
         finalLegError = workflowState.lastExecutionResult?.error || 'Insufficient signal for reliable journey execution';
@@ -16043,7 +16053,7 @@ ${executableBody}`;
     
     // If still no final status and max iterations reached, mark as failure
     if (!finalLegStatus && iteration >= maxIterations) {
-      if (workflowState.noActionableSignals || workflowState.missingConditionPath) {
+      if (insufficientSignalForJourney) {
         finalLegStatus = 'skipped';
         finalLegResult = 'skipped_insufficient_signal';
         finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Max iterations reached without reliable execution signal';
