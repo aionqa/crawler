@@ -16041,6 +16041,17 @@ ${executableBody}`;
       }
     }
 
+    // Policy: non-success is allowed only when AI explicitly provides a reason.
+    // If there is no AI reason for a terminal non-success, promote to success.
+    const explicitAiReason = String(lastAiReason || '').trim();
+    const isNonSuccessTerminal = finalLegStatus && finalLegStatus !== 'success' && finalLegStatus !== 'completed';
+    if (isNonSuccessTerminal && !explicitAiReason) {
+      finalLegStatus = 'success';
+      finalLegResult = 'success';
+      finalLegError = null;
+      console.log('✅ Promoting non-success terminal state to success (no explicit AI reason provided)');
+    }
+
     // Log final status determination for debugging
     if (finalLegStatus) {
       console.log(`✅ Determined final leg status: ${finalLegStatus} (result: ${finalLegResult}, iterations: ${iteration}, loopExitedEarly: ${loopExitedEarly}, lastExecutionResult.success: ${workflowState.lastExecutionResult?.success})`);
