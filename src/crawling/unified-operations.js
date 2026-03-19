@@ -6690,6 +6690,22 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         console.warn(`[BROWSER-DIAGNOSTICS] Failed to attach diagnostics: ${diagErr.message}`);
       }
 
+      const isAllowedTelemetryHttpUrl = (rawUrl) => {
+        const value = String(rawUrl || '').trim();
+        if (!value || !/^https?:\/\//i.test(value)) return false;
+        return isWithinDomain(value, seedUrl, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
+      };
+      const isAllowedTelemetryWsUrl = (rawUrl) => {
+        const value = String(rawUrl || '').trim();
+        if (!value || !/^wss?:\/\//i.test(value)) return false;
+        return isWithinDomain(value, seedUrl, allowSubdomains, domainScope) || isApiDomain(value, domainScope);
+      };
+      const normalizePageUrlForTelemetry = (rawPageUrl) => {
+        const pageUrl = String(rawPageUrl || '').trim();
+        if (!pageUrl) return seedUrl;
+        return isWithinDomain(pageUrl, seedUrl, allowSubdomains, domainScope) ? pageUrl : seedUrl;
+      };
+
       // Collect backend API calls (XHR/fetch) for API Explorer (including request/response bodies)
       const collectedApiCalls = [];
       const maxApiCalls = 500;
@@ -6704,6 +6720,8 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
               if (resourceType !== 'xhr' && resourceType !== 'fetch') return;
               const pageUrl = (() => { try { return page.url(); } catch { return ''; } })();
               const requestHeaders = req.headers ? req.headers() : {};
+              const requestUrl = req.url ? req.url() : '';
+              if (!isAllowedTelemetryHttpUrl(requestUrl)) return;
               let responseHeaders = {};
               try {
                 responseHeaders = resp.headers ? resp.headers() : {};
@@ -6724,10 +6742,10 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
                 }
               } catch (_) {}
               collectedApiCalls.push({
-                url: req.url(),
+                url: requestUrl,
                 method: req.method ? req.method() : 'GET',
                 status: resp.status(),
-                page_url: pageUrl,
+                page_url: normalizePageUrlForTelemetry(pageUrl),
                 request_headers: sanitizeHeaders(requestHeaders),
                 response_headers: sanitizeHeaders(responseHeaders),
                 request_body: requestBody || undefined,
@@ -6749,7 +6767,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       try {
         page.on('websocket', (ws) => {
           const wsUrl = ws.url();
-          if (!wsUrl || (!wsUrl.startsWith('ws://') && !wsUrl.startsWith('wss://'))) return;
+          if (!isAllowedTelemetryWsUrl(wsUrl)) return;
           const getPageUrl = () => { try { return page.url(); } catch { return ''; } };
           ws.on('framesent', (event) => {
             if (collectedWebSocketMessages.length >= maxWebSocketMessages) return;
@@ -6757,7 +6775,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
             const isBuffer = Buffer.isBuffer(payload);
             collectedWebSocketMessages.push({
               url: wsUrl,
-              page_url: getPageUrl(),
+              page_url: normalizePageUrlForTelemetry(getPageUrl()),
               direction: 'sent',
               payload: isBuffer ? null : (typeof payload === 'string' ? payload : String(payload)),
               payload_base64: isBuffer ? payload.toString('base64') : null,
@@ -6770,7 +6788,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
             const isBuffer = Buffer.isBuffer(payload);
             collectedWebSocketMessages.push({
               url: wsUrl,
-              page_url: getPageUrl(),
+              page_url: normalizePageUrlForTelemetry(getPageUrl()),
               direction: 'received',
               payload: isBuffer ? null : (typeof payload === 'string' ? payload : String(payload)),
               payload_base64: isBuffer ? payload.toString('base64') : null,
