@@ -4762,7 +4762,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             // SDLC fixture: /html/login-status.html is a status page, not a login form.
             const isLoginStatusUrl = currentUrl.includes('login-status');
 
-            const onLoginUrl = !isLoginSuccessUrl && !isLoginStatusUrl && (/\/login\b/.test(currentUrl) || currentUrl.includes('auth'));
+            const onLoginUrl = !isLoginSuccessUrl && !isLoginStatusUrl && /\/login\b/.test(currentUrl);
 
             // URL alone is a weak signal (status pages still contain "login" in path).
             const hasLoginControls = hasPasswordField || hasEmailField || hasSubmitLikeButton;

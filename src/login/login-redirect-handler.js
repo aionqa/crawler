@@ -48,7 +48,7 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
   try {
     const pageUrl = page.url();
     
-    // ONLY check if login_url is explicitly configured (no hardcoded patterns)
+    // STRICT: only check configured login_url; no heuristic fallbacks.
     if (loginUrl) {
       try {
         const loginUrlObj = new URL(loginUrl);
@@ -59,35 +59,13 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
             currentUrlObj.pathname === loginUrlObj.pathname) {
           return { isLoginPage: true, confidence: 'high', reason: 'URL matches configured login URL' };
         }
-
-        // Some apps bounce between subdomains (e.g. webapp.* -> auth.*) but keep the same login path.
-        // Treat "same pathname as configured login_url" as a login-page hit as well.
-        if (currentUrlObj.pathname === loginUrlObj.pathname) {
-          return { isLoginPage: true, confidence: 'medium', reason: 'Pathname matches configured login URL (origin differs)' };
-        }
       } catch (urlError) {
         // Invalid URL format, skip
         console.warn(`[LOGIN-REDIRECT] Invalid login URL format: ${loginUrl}`);
       }
     }
-
-    // Fallback (best-effort): if login_url is missing from job context, still detect common SSO login pages.
-    // This prevents us from silently skipping re-auth on crawls when backend didn't include login_url.
-    try {
-      const u = new URL(pageUrl);
-      const path = (u.pathname || '').toLowerCase();
-      const host = (u.hostname || '').toLowerCase();
-      if (path === '/login' && (host.startsWith('auth.') || host.includes('.auth.') || host.includes('auth'))) {
-        const hasLoginForm = await page.locator('#login-form, form[id*=\"login\"], input#email, input[name=\"email\"], #next-button').first().isVisible().catch(() => false);
-        if (hasLoginForm) {
-          return { isLoginPage: true, confidence: 'low', reason: 'Fallback login detection (/login on auth host with login form)' };
-        }
-      }
-    } catch (_) {
-      // ignore
-    }
     
-    // No hardcoded detection - return false if no configured login URL matches
+    // No hardcoded detection - return false if configured login URL does not match.
     return { isLoginPage: false, confidence: 'low', reason: 'No configured login URL match' };
   } catch (error) {
     console.error(`[LOGIN-REDIRECT] Error detecting login page: ${error.message}`);
@@ -178,11 +156,13 @@ export async function handleLoginRedirect(
     const loginWorkflowId =
       loginConfig?.login_workflow_id ||
       context.login_workflow_id ||
-      context.login_workflow_template_id ||
-      'json-login-default-login-workflow';
+      context.login_workflow_template_id;
 
     if (!creds?.username || !creds?.password) {
       throw new Error('Backend did not return credentials for login-config');
+    }
+    if (!loginWorkflowId) {
+      throw new Error('login_workflow_id missing from login config/context; cannot use static fallback workflow');
     }
 
     // Run login workflow inside the SAME browser session. This is required for SSO flows
