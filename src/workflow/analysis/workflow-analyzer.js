@@ -13506,14 +13506,10 @@ ${executableBody}`;
     const config = step.config || {};
     // Allow maxIterations from template config (for multi-step wizards within same journey)
     // The rule "1 job = 1 attempt per leg" applies to retrying the same leg, not to iterating through steps within a journey
-    let maxIterations = config.maxIterations || 5;
-    const resolveStepCountFromText = (textValue) => {
-      if (!textValue || typeof textValue !== 'string') return null;
-      const match = textValue.match(/step\s*\d+\s*(?:of|\/)\s*(\d+)/i);
-      if (!match) return null;
-      const parsed = Number.parseInt(match[1], 10);
-      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-    };
+    const configuredMaxIterations = Number(config.maxIterations);
+    let maxIterations = Number.isFinite(configuredMaxIterations) && configuredMaxIterations > 0
+      ? Math.floor(configuredMaxIterations)
+      : 5;
     
     const stepIdLower = String(step.id || '').toLowerCase();
     const stepNameLower = String(step.name || '').toLowerCase();
@@ -13529,41 +13525,10 @@ ${executableBody}`;
       stepIdLower.includes('login') ||
       stepNameLower.includes('login');
 
-    // Only apply the "single-step journey" clamping heuristic to crawl/journey loops.
-    // Login workflows often need multiple attempts even when the page doesn't show "Step X of Y".
-    if (maxIterations > 1 && !isLoginLoop) {
-      let visibleText = workflowState.visibleText;
-      if (!visibleText && page && !page.isClosed()) {
-        try {
-          visibleText = await page.innerText('body');
-        } catch (error) {
-          console.warn(`⚠️ Failed to read visible text for step count detection: ${error.message}`);
-        }
-      }
-      
-      // CRITICAL: Check if this is a wizard/multistep journey before limiting iterations
-      const pageUrl = (workflowState.pageUrl || '').toLowerCase();
-      const currentJourney = workflowState.currentJourney || workflowState.currentItem || {};
-      const journeyId = (currentJourney.journey_id || '').toLowerCase();
-      const journeyDesc = (currentJourney.description || '').toLowerCase();
-      const isWizardPage = pageUrl.includes('multi-step-wizard') || pageUrl.includes('multistep') || 
-                          journeyId.includes('wizard') || journeyDesc.includes('wizard') || 
-                          journeyDesc.includes('multi-step') || journeyDesc.includes('multistep');
-      
-      const detectedStepCount = resolveStepCountFromText(visibleText);
-      if (detectedStepCount) {
-        maxIterations = detectedStepCount;
-        console.log(`🔢 Detected step count from page text: ${detectedStepCount}`);
-      } else if (isWizardPage) {
-        // Wizard page but step count not detected - keep maxIterations from config (don't limit to 1)
-        console.log(`🔢 Wizard page detected but step count not found - keeping maxIterations=${maxIterations} from config`);
-      } else {
-        // Single-step pages still need a couple attempts because generated scripts can be flaky.
-        // Keep bounded retries so we don't loop forever.
-        const bounded = Math.min(Number(maxIterations || 3), 3);
-        maxIterations = Math.max(2, bounded);
-        console.log(`🔢 No step indicator detected; using bounded retries maxIterations=${maxIterations} for single-step journey`);
-      }
+    // Respect workflow-configured iteration budget.
+    // Journey completion/continuation decisions are AI-driven from justify/determine status.
+    if (isLoginLoop && maxIterations < 3) {
+      maxIterations = 3;
     }
     const conditionPath = config.conditionPath; // Path to check for condition (e.g., 'determine_completion.is_complete')
     const conditionType = config.conditionType || 'code'; // 'code', 'ai-response', or 'path'
@@ -15034,129 +14999,19 @@ ${executableBody}`;
           }
           
           if (conditionValue !== undefined && conditionValue !== null) {
-            // Support both new status field (success/failure/continue/stuck) and legacy is_complete
+            // Support both new status field (success/failure/pending) and legacy is_complete
             if (typeof conditionValue === 'string') {
-              // New format: status field with 'success', 'failure', 'continue', 'stuck', 'pending'
-              const expectedValue = config.conditionValue || 'pending';
-              
-              // CRITICAL: Check if this is a multistep wizard by looking at visible text or step result
-              // Try multiple sources for step result
-              let stepResult = workflowState.currentStepResult;
-              if (!stepResult) {
-                // Try justify_journey result from various locations
-                stepResult = workflowState.justify_journey?.result || 
-                            workflowState.variablePool?.steps?.['justify-journey']?.result ||
-                            workflowState.variablePool?.steps?.['justify_journey']?.result ||
-                            workflowState.results?.['justify-journey']?.result ||
-                            workflowState.results?.['justify_journey']?.result ||
-                            {};
-              }
-              
-              const verificationDetails = stepResult.verification_details || stepResult.reason || '';
-              const visibleText = workflowState.visibleText || '';
-              const pageDescription = workflowState.pageDescription || '';
-              
-              // Detect if we're in a multistep wizard (look for step indicators in multiple places)
-              const searchText = (verificationDetails + ' ' + visibleText + ' ' + pageDescription).toLowerCase();
-              const hasStepIndicator = /step\s+\d+\s+of\s+\d+/i.test(searchText);
-              
-              // Also check if journey description mentions wizard or multistep
-              const currentJourney = workflowState.currentJourney || workflowState.currentItem || {};
-              const journeyDesc = (currentJourney.description || '').toLowerCase();
-              const journeyId = (currentJourney.journey_id || '').toLowerCase();
-              const pageUrl = (workflowState.pageUrl || '').toLowerCase();
-              const isWizardJourney = journeyDesc.includes('wizard') || journeyDesc.includes('multi-step') || journeyDesc.includes('multistep') ||
-                                     journeyId.includes('wizard') || pageUrl.includes('multi-step-wizard') || pageUrl.includes('multistep');
-              
-              // Log detection results
-              console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Condition evaluation:`, {
-                conditionValue,
-                hasStepIndicator,
-                isWizardJourney,
-                iteration,
-                maxIterations: config.maxIterations || 5,
-                pageUrl: workflowState.pageUrl,
-                journeyId: currentJourney.journey_id
-              });
-              
-              // If multistep wizard and status is "success", check if we're on final step
-              if ((hasStepIndicator || isWizardJourney) && conditionValue === 'success') {
-                // Extract step numbers from verification details or visible text
-                const stepMatch = searchText.match(/step\s+(\d+)\s+of\s+(\d+)/i);
-                if (stepMatch) {
-                  const currentStep = parseInt(stepMatch[1]);
-                  const totalSteps = parseInt(stepMatch[2]);
-                  
-                  if (currentStep < totalSteps) {
-                    // Not on final step - force pending
-                    console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Multistep wizard detected: Step ${currentStep} of ${totalSteps} - forcing 'pending' to continue`);
-                    condition = true; // Continue loop
-                    conditionValue = 'pending'; // Override status for logging
-                  } else if (currentStep === totalSteps) {
-                    // On final step - success is valid
-                    condition = false; // Exit loop on success
-                    console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Multistep wizard: Final step (${currentStep} of ${totalSteps}) - EXITING loop`);
-                  } else {
-                    // Invalid step numbers - use original logic
-                    condition = false;
-                    console.log(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Invalid step numbers (${currentStep} > ${totalSteps}) - EXITING loop`);
-                  }
-                } else if (isWizardJourney && iteration < (config.maxIterations || 5)) {
-                  // Wizard journey but can't determine step - if we're not at max iterations, continue
-                  console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Wizard journey detected but step unclear - continuing (iteration ${iteration}/${config.maxIterations || 5})`);
-                  condition = true; // Continue loop
-                  conditionValue = 'pending'; // Override status for logging
-                } else if (isWizardJourney && conditionValue === 'success' && iteration < (config.maxIterations || 5)) {
-                  // Wizard journey, status is success but not at max iterations
-                  // Check if we can determine if this is the final step
-                  // If step indicator shows we're on final step, allow success
-                  // Otherwise, continue to next iteration
-                  const finalStepMatch = searchText.match(/step\s+(\d+)\s+of\s+(\d+)/i);
-                  if (finalStepMatch) {
-                    const currentStep = parseInt(finalStepMatch[1]);
-                    const totalSteps = parseInt(finalStepMatch[2]);
-                    if (currentStep === totalSteps) {
-                      // This IS the final step - allow success
-                      console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Wizard journey: Final step (${currentStep} of ${totalSteps}) with success - EXITING loop`);
-                      condition = false; // Exit loop
-                    } else {
-                      // Not final step - continue
-                      console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Wizard journey: Step ${currentStep} of ${totalSteps} with success - continuing`);
-                      condition = true; // Continue loop
-                      conditionValue = 'pending'; // Override status for logging
-                    }
-                  } else {
-                    // Can't determine step - if we're close to max iterations, allow success
-                    // Otherwise continue
-                    if (iteration >= (config.maxIterations || 5) - 1) {
-                      console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Wizard journey: Near max iterations with success - EXITING loop`);
-                      condition = false; // Exit loop
-                    } else {
-                      console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Wizard journey: Status is 'success' but iteration ${iteration} < max ${config.maxIterations || 5} - continuing`);
-                      condition = true; // Continue loop
-                      conditionValue = 'pending'; // Override status for logging
-                    }
-                  }
-                } else {
-                  // Can't determine step and not clearly a wizard - use original logic
-                  condition = false; // Exit loop on success
-                  console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Status is "success" - journey complete, EXITING loop (condition=false)`);
-                }
+              const normalizedStatus = String(conditionValue || '').toLowerCase();
+              if (normalizedStatus === 'pending' || normalizedStatus === 'continue' || normalizedStatus === 'stuck') {
+                condition = true;
+                console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] AI status "${normalizedStatus}" -> CONTINUING loop`);
+              } else if (normalizedStatus === 'success' || normalizedStatus === 'failure') {
+                condition = false;
+                console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] AI status "${normalizedStatus}" -> EXITING loop`);
               } else {
-                // Not a multistep wizard or status is not success - use normal logic
-                condition = conditionValue === expectedValue;
-                
-                if (conditionValue === 'success') {
-                  // Success means journey is complete - exit loop
-                  condition = false; // Exit loop on success
-                  console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Status is "success" - journey complete, EXITING loop (condition=false)`);
-                } else if (conditionValue === 'pending') {
-                  // Pending means more steps to complete - continue loop
-                  condition = true; // Continue loop on pending
-                  console.log(`🔄 [WHILE-LOOP-ITERATION-${iteration}] Status is "pending" - more steps to complete, CONTINUING loop (condition=true)`);
-                } else {
-                  console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Checking status: ${conditionValue} === ${expectedValue} → ${condition} (will ${condition ? 'continue' : 'exit'})`);
-                }
+                const expectedValue = String(config.conditionValue || 'pending').toLowerCase();
+                condition = normalizedStatus === expectedValue;
+                console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] AI status "${normalizedStatus}" compared to "${expectedValue}" -> ${condition ? 'continue' : 'exit'}`);
               }
             } else {
               // Legacy format: boolean is_complete
@@ -15346,6 +15201,66 @@ ${executableBody}`;
         
         // CRITICAL: Also store stepResult in workflowState for easy access in journey update code
         workflowState.currentStepResult = stepResult;
+
+        // If AI justification discovers extra journeys, append them so for-each can process/fork.
+        try {
+          const candidateArrays = [
+            stepResult?.additional_journeys,
+            stepResult?.new_journeys,
+            stepResult?.discovered_journeys
+          ];
+          const discoveredJourneysRaw = candidateArrays.find((value) => Array.isArray(value)) || [];
+          if (discoveredJourneysRaw.length > 0) {
+            if (!Array.isArray(workflowState.journeysToExecute)) {
+              workflowState.journeysToExecute = [];
+            }
+            if (!workflowState.context) {
+              workflowState.context = {};
+            }
+            if (!Array.isArray(workflowState.context.journeysToExecute)) {
+              workflowState.context.journeysToExecute = workflowState.journeysToExecute;
+            }
+
+            const existingIds = new Set(
+              (workflowState.journeysToExecute || [])
+                .map((j) => String(j?.journey_id || j?.id || '').trim())
+                .filter(Boolean)
+            );
+            let appended = 0;
+            for (const rawJourney of discoveredJourneysRaw) {
+              if (!rawJourney || typeof rawJourney !== 'object') continue;
+              const generatedId = `discovered_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+              const journeyId = String(rawJourney.journey_id || rawJourney.id || generatedId).trim();
+              if (!journeyId || existingIds.has(journeyId)) continue;
+              const journey = {
+                ...rawJourney,
+                journey_id: journeyId,
+                actions: Array.isArray(rawJourney.actions) ? rawJourney.actions : [],
+                status: rawJourney.status || 'pending',
+                justification_status: rawJourney.justification_status || rawJourney.status || 'pending'
+              };
+              workflowState.journeysToExecute.push(journey);
+              existingIds.add(journeyId);
+              appended++;
+            }
+
+            if (appended > 0) {
+              workflowState.context.journeysToExecute = workflowState.journeysToExecute;
+              console.log(`🔀 [WHILE-LOOP-ITERATION-${iteration}] Appended ${appended} AI-discovered journey branch(es)`);
+              if (jobId) {
+                await this.sendLogToBackend(
+                  jobId,
+                  'info',
+                  `🔀 Appended ${appended} AI-discovered journey branch(es)`,
+                  'WORKFLOW-ANALYZER',
+                  { iteration, appended_discovered_journeys: appended }
+                );
+              }
+            }
+          }
+        } catch (discoverErr) {
+          console.warn(`⚠️ Failed to append AI-discovered journeys: ${discoverErr.message}`);
+        }
         
         // CRITICAL: Log condition evaluation details
         const conditionStatus = stepResult?.status || stepResult?.completion_status || 'unknown';
@@ -15929,8 +15844,32 @@ ${executableBody}`;
       workflowState.noActionableSignals === true ||
       workflowState.missingConditionPath === true ||
       (formsSignals === 0 && interactiveSignals === 0);
+    const lastIteration = Array.isArray(loopState?.iterations) && loopState.iterations.length > 0
+      ? loopState.iterations[loopState.iterations.length - 1]
+      : null;
+    const lastAiStatus = String(
+      lastIteration?.step_result?.status ||
+      lastIteration?.step_result?.completion_status ||
+      ''
+    ).toLowerCase();
+    const lastAiReason = lastIteration?.step_result?.reason || lastIteration?.step_result?.verification_details || null;
     
-    // Only check determine_completion status if we haven't already set finalLegStatus from loopExitedEarly
+    // Prefer AI justification status from the last while-loop iteration.
+    if (!finalLegStatus && (lastAiStatus === 'success' || lastAiStatus === 'failure' || lastAiStatus === 'pending')) {
+      if (lastAiStatus === 'success') {
+        finalLegStatus = 'success';
+        finalLegResult = 'success';
+      } else if (lastAiStatus === 'failure') {
+        finalLegStatus = insufficientSignalForJourney ? 'skipped' : 'failure';
+        finalLegResult = insufficientSignalForJourney ? 'skipped_insufficient_signal' : 'failure';
+      } else {
+        finalLegStatus = insufficientSignalForJourney ? 'skipped' : 'pending';
+        finalLegResult = insufficientSignalForJourney ? 'skipped_insufficient_signal' : 'pending';
+      }
+      finalLegError = lastAiReason || finalLegError;
+    }
+
+    // Only check determine_completion status if AI justification did not already set a final status
     if (!finalLegStatus && lastDetermineCompletion) {
       const status = lastDetermineCompletion.status || lastDetermineCompletion.completion_status || 'unknown';
       const isComplete = lastDetermineCompletion.is_complete === true;
