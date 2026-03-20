@@ -6470,28 +6470,10 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     // Use configured endpoint if available, otherwise fall back to direct OpenAI
     const openaiClient = createOpenAIClient(context, openaiApiKey);
 
-    // SSO flows often bounce across sibling subdomains (e.g. webapp.* -> auth.* -> app.*).
-    // When we detect that pattern, allow crawling across subdomains of the same base domain.
-    // This is best-effort and intentionally naive (last 2 labels).
-    let allowSubdomains = context?.allow_subdomains === true;
-    if (!allowSubdomains) {
-      try {
-        const startHost = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
-        const loginHost = context?.login_url
-          ? new URL(context.login_url).hostname.replace(/^www\./, '').toLowerCase()
-          : null;
-        const baseOf = (host) => {
-          const parts = String(host || '').split('.').filter(Boolean);
-          if (parts.length < 2) return String(host || '');
-          return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
-        };
-        if (loginHost && startHost !== loginHost && baseOf(startHost) === baseOf(loginHost)) {
-          allowSubdomains = true;
-        }
-      } catch (_) {
-        // ignore
-      }
-    }
+    // Crawl scope must follow the project flag. Do NOT auto-enable subdomains because login_url
+    // sits on a sibling host (e.g. auth.example.com) — that caused full-site subdomain crawls and
+    // wrong-origin screenshots when "Allow scanning subdomains" was off.
+    const allowSubdomains = context?.allow_subdomains === true;
 
     // Make the decision visible to all downstream helpers that only receive `context`/`options`.
     if (context && typeof context === 'object') {

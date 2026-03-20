@@ -276,12 +276,70 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Nav / header / footer menus as named groups (separate from journeys and the flat link list).
+   * Each root: { menu_label, items: [{ label, href }] } — display like "Footer menu → Features".
+   */
+  async extractMenuItemsTrees(page) {
+    return page.evaluate(() => {
+      function trimText(s) {
+        return (s || '').replace(/\s+/g, ' ').trim();
+      }
+      function labelFor(el) {
+        const ar = el.getAttribute && el.getAttribute('aria-label');
+        if (ar && trimText(ar)) return trimText(ar);
+        const tag = (el.tagName || '').toLowerCase();
+        if (tag === 'footer') return 'Footer menu';
+        if (tag === 'header') return 'Header menu';
+        if (tag === 'nav') return 'Navigation menu';
+        const role = el.getAttribute && el.getAttribute('role');
+        if (role === 'navigation') return 'Navigation menu';
+        if (el.className && /footer/i.test(String(el.className))) return 'Footer menu';
+        if (el.className && /header/i.test(String(el.className))) return 'Header menu';
+        return 'Menu';
+      }
+      const candidates = Array.from(document.querySelectorAll(
+        'nav, [role="navigation"], footer, header'
+      ));
+      const roots = [];
+      const seen = new Set();
+      for (const el of candidates) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        const anchors = el.querySelectorAll('a[href]');
+        if (!anchors.length) continue;
+        const menuLabel = labelFor(el);
+        const items = [];
+        const used = new Set();
+        anchors.forEach((a) => {
+          const t = trimText(a.textContent);
+          if (!t || t.length > 120) return;
+          let href = '';
+          try {
+            href = a.href || a.getAttribute('href') || '';
+          } catch (_) {
+            href = a.getAttribute('href') || '';
+          }
+          if (!href) return;
+          const key = `${href}\0${t}`;
+          if (used.has(key)) return;
+          used.add(key);
+          items.push({ label: t, href });
+        });
+        if (items.length === 0) continue;
+        roots.push({ menu_label: menuLabel, items });
+      }
+      return roots;
+    });
+  }
+
+  /**
    * Perform Playwright analysis to extract forms, links, interactive elements
    */
   async performPlaywrightAnalysis(page) {
     const analysis = {
       forms: [],
       links: [],
+      menu_items: [],
       interactive_elements: [],
       non_interactive_elements: []
     };
@@ -606,6 +664,7 @@ class WorkflowAnalyzer {
         // Use resolved href (full URL) instead of raw attribute to get complete URLs with hash fragments
         const href = await link.evaluate(el => el.href || el.getAttribute('href'));
         const text = await link.textContent();
+        const onclickAttr = await link.getAttribute('onclick');
         
         const isPureAnchor = href.startsWith('#') && !href.startsWith('http');
         
@@ -620,10 +679,34 @@ class WorkflowAnalyzer {
           analysis.links.push({
             href,
             text: text?.trim(),
+            onclick: onclickAttr ? onclickAttr.substring(0, 400) : null,
             selector: linkSelectors[0]?.selector, // Primary selector
             selectors: linkSelectors // All strategies
           });
         }
+      }
+
+      // javascript: links — stay in the link map and may be scheduled as interaction journeys
+      const jsAnchors = await page.$$('a[href^="javascript:"]');
+      for (const link of jsAnchors.slice(0, 20)) {
+        const href = await link.getAttribute('href');
+        const text = await link.textContent();
+        if (!href || !href.trim()) continue;
+        const linkSelectors = await this.getElementSelector(link);
+        analysis.links.push({
+          href,
+          text: text?.trim(),
+          is_script_href: true,
+          selector: linkSelectors[0]?.selector,
+          selectors: linkSelectors
+        });
+      }
+
+      try {
+        analysis.menu_items = await this.extractMenuItemsTrees(page);
+      } catch (menuErr) {
+        console.warn(`Could not extract menu items: ${menuErr.message}`);
+        analysis.menu_items = [];
       }
 
       // Extract interactive elements (buttons, clickable divs, etc.)
@@ -874,6 +957,31 @@ class WorkflowAnalyzer {
         // Regular navigation links: do NOT create legs/actions; they are listed in links and added to crawl scope if unique and within scanning domains
       });
     }
+
+    const scriptLinks = (Array.isArray(playwrightAnalysis.links) ? playwrightAnalysis.links : [])
+      .filter((l) => l && l.is_script_href && l.selector);
+    scriptLinks.slice(0, 8).forEach((link, sidx) => {
+      legs.push({
+        leg_id: `auto-js-link-${sidx + 1}`,
+        type: 'click',
+        action: 'click',
+        description: link.text ? `Run script link: ${link.text}` : 'Activate javascript: link',
+        test_instructions: 'Click the javascript: link and verify the expected in-page behavior (no full navigation away).',
+        element_info: {
+          selector: link.selector,
+          selectors: link.selectors || [],
+          href: link.href,
+          text: link.text,
+          is_script_href: true
+        },
+        confidence: 0.45,
+        status: 'pending',
+        metadata: {
+          generated_by: 'playwright-analysis',
+          source: 'javascript-link'
+        }
+      });
+    });
     
     console.log(`✅ Generated ${legs.length} leg(s) from Playwright analysis`);
     return legs;
@@ -966,7 +1074,116 @@ IMPORTANT OUTPUT REQUIREMENTS:
   - "priority": high | medium | low
   - "confidence": number between 0 and 1
   - "element_info": extra helpful selector/text/attribute data (ids, aria-labels, text, XPath, etc.)
-- Do NOT include duplicate actions or simple navigation links unless the navigation triggers a meaningful state change or workflow step.`;
+- Do NOT include duplicate actions or simple navigation links unless the navigation triggers a meaningful state change or workflow step.
+- Site navigation menus are captured separately as "menu_items" (structured); do NOT model plain menu links as journeys. Only include a journey for a link if it runs javascript:, has an onclick handler, opens a same-page fragment/modal, or otherwise changes on-page state.`;
+  }
+
+  /**
+   * Match Playwright-extracted link entry by CSS selector (AI legs often carry selector + implicit href).
+   */
+  findPlaywrightHrefForSelector(playwrightLinks, selector) {
+    if (!selector || !Array.isArray(playwrightLinks)) return '';
+    const sel = String(selector).trim();
+    if (!sel) return '';
+    for (const L of playwrightLinks) {
+      if (!L || typeof L !== 'object') continue;
+      if (L.selector === sel && L.href) return String(L.href).trim();
+      if (Array.isArray(L.selectors)) {
+        const hit = L.selectors.find((s) => s && s.selector === sel);
+        if (hit && L.href) return String(L.href).trim();
+      }
+    }
+    return '';
+  }
+
+  findPlaywrightOnclickForSelector(playwrightLinks, selector) {
+    if (!selector || !Array.isArray(playwrightLinks)) return '';
+    const sel = String(selector).trim();
+    if (!sel) return '';
+    for (const L of playwrightLinks) {
+      if (!L || typeof L !== 'object') continue;
+      if (L.selector === sel && L.onclick) return String(L.onclick).trim();
+      if (Array.isArray(L.selectors)) {
+        const hit = L.selectors.find((s) => s && s.selector === sel);
+        if (hit && L.onclick) return String(L.onclick).trim();
+      }
+    }
+    return '';
+  }
+
+  /**
+   * Plain http(s) document navigation belongs in the link map, not as executable journeys.
+   * Exceptions: javascript: URLs, handlers (onclick), same-page fragments (#…), and non-link actions (forms, toggles).
+   */
+  shouldSkipPlainHyperlinkJourneyItem(item, workflowState, isJourneyShape) {
+    const pageUrl = workflowState?.pageUrl || workflowState?.context?.pageUrl || '';
+    let typeStr = '';
+    let elementInfo = {};
+    let href = '';
+    let onclick = '';
+    let selector = '';
+
+    if (isJourneyShape && item?.actions) {
+      const actions = Array.isArray(item.actions) ? item.actions : [];
+      const primary = actions.find((a) => {
+        const t = String(a?.type || '').toLowerCase();
+        return t && t !== 'verify' && t !== 'check';
+      }) || actions[0];
+      if (!primary) return false;
+      typeStr = String(primary.type || '').toLowerCase();
+      elementInfo = primary.element_info || primary.elementInfo || {};
+      href = String(primary.href || primary.url || primary.target_url || elementInfo.href || '').trim();
+      onclick = String(primary.onclick || elementInfo.onclick || '').trim();
+      selector = String(primary.selector || '').trim();
+      if (!href) href = String(item.element_info?.href || '').trim();
+    } else {
+      typeStr = String(item?.type || item?.action || '').toLowerCase();
+      elementInfo = item?.element_info || item?.elementInfo || {};
+      href = String(elementInfo.href || item?.href || '').trim();
+      onclick = String(elementInfo.onclick || item?.onclick || '').trim();
+      selector = String(item?.selector || '').trim();
+    }
+
+    if (['form_submit', 'form', 'input', 'navigation_toggle', 'toggle', 'dropdown'].includes(typeStr)) {
+      return false;
+    }
+    if (typeStr === 'navigate' || typeStr === 'navigation') {
+      return true;
+    }
+
+    let oc = onclick.trim();
+    if (oc && oc !== 'no') return false;
+
+    if (selector && Array.isArray(workflowState?.playwrightAnalysis?.links)) {
+      if (!href) {
+        href = this.findPlaywrightHrefForSelector(workflowState.playwrightAnalysis.links, selector);
+      }
+      if (!oc) {
+        oc = this.findPlaywrightOnclickForSelector(workflowState.playwrightAnalysis.links, selector).trim();
+      }
+    }
+    if (oc && oc !== 'no') return false;
+
+    if (!href) return false;
+
+    const hlow = href.toLowerCase();
+    if (hlow.startsWith('javascript:')) return false;
+    if (hlow.startsWith('mailto:') || hlow.startsWith('tel:')) return true;
+
+    if (!pageUrl) return false;
+    try {
+      const basePage = String(pageUrl).split('#')[0];
+      const resolved = new URL(href, pageUrl).href;
+      const resolvedBase = resolved.split('#')[0];
+      const hasFragment = resolved.includes('#') && resolved.split('#').slice(1).join('#').length > 0;
+      if (resolvedBase === basePage) {
+        if (hasFragment) return false;
+        return true;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /**
@@ -1091,9 +1308,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
         seenSelectors.add(selectorKey);
         return true;
       });
+
+      const linkFilteredJourneys = dedupedJourneys.filter((journey) => {
+        if (this.shouldSkipPlainHyperlinkJourneyItem(journey, workflowState, true)) {
+          console.log(`⚠️ Skipping journey (plain navigation link — use link map, not journeys): ${journey.journey_id || journey.description || 'unknown'}`);
+          return false;
+        }
+        return true;
+      });
       
       // Convert journeys to legs for internal processing (backwards compatibility)
-      processedItems = this.convertJourneysToLegs(dedupedJourneys);
+      processedItems = this.convertJourneysToLegs(linkFilteredJourneys);
+    } else {
+      processedItems = rawLegs.filter((leg) => {
+        if (this.shouldSkipPlainHyperlinkJourneyItem(leg, workflowState, false)) {
+          console.log(`⚠️ Skipping leg (plain navigation link — use link map, not journeys): ${leg.leg_id || leg.description || 'unknown'}`);
+          return false;
+        }
+        return true;
+      });
     }
 
     const normalizeType = (rawType) => {
@@ -1246,7 +1479,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     };
 
     const normalizedLegs = [];
-    const itemsToNormalize = hasJourneys ? processedItems : rawLegs;
+    const itemsToNormalize = processedItems;
     for (let index = 0; index < itemsToNormalize.length; index++) {
       const rawLeg = itemsToNormalize[index];
       if (!rawLeg || typeof rawLeg !== 'object') {
@@ -1907,6 +2140,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         content: workflowState.htmlContent,
         forms: workflowState.playwrightAnalysis?.forms || [],
         links: workflowState.playwrightAnalysis?.links || [],
+        menu_items: workflowState.playwrightAnalysis?.menu_items || [],
         interactive_elements: workflowState.playwrightAnalysis?.interactiveElements || workflowState.playwrightAnalysis?.interactive_elements || [],
         analyzed: true
       };
@@ -3385,6 +3619,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const metadata = {
       forms_count: analysis.forms.length,
       links_count: analysis.links.length,
+      menu_items_roots: Array.isArray(analysis.menu_items) ? analysis.menu_items.length : 0,
       interactive_count: analysis.interactive_elements.length,
       non_interactive_count: analysis.non_interactive_elements.length
     };
@@ -3402,7 +3637,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
     await this.logStepOutcome(
       step,
       jobId,
-      `📊 [PLAYWRIGHT] Found ${analysis.forms.length} forms, ${analysis.links.length} links, ${analysis.interactive_elements.length} interactive elements, ${analysis.non_interactive_elements.length} non-interactive elements`,
+      `📊 [PLAYWRIGHT] Found ${analysis.forms.length} forms, ${analysis.links.length} links, ${(analysis.menu_items || []).length} menu group(s), ${analysis.interactive_elements.length} interactive elements, ${analysis.non_interactive_elements.length} non-interactive elements`,
       metadata
     );
     
@@ -3429,6 +3664,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             // Always save forms/interactive_elements - use Array.isArray to handle empty arrays correctly
             forms: Array.isArray(analysis.forms) ? analysis.forms : [],
             links: Array.isArray(analysis.links) ? analysis.links : [],
+            menu_items: Array.isArray(analysis.menu_items) ? analysis.menu_items : [],
             interactive_elements: Array.isArray(analysis.interactive_elements) ? analysis.interactive_elements : [],
             non_interactive_elements: Array.isArray(analysis.non_interactive_elements) ? analysis.non_interactive_elements : []
           }
@@ -7290,12 +7526,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
               forms: workflowState.playwrightAnalysis?.forms || [],
               interactive_elements: workflowState.playwrightAnalysis?.interactive_elements || [],
               links: workflowState.playwrightAnalysis?.links || [],
+              menu_items: workflowState.playwrightAnalysis?.menu_items || [],
               // CRITICAL: Also include in ai_analysis so extraction logic can find them
               ai_analysis: {
                 ...(workflowState.aiAnalysisResult || {}),
                 forms: workflowState.playwrightAnalysis?.forms || [],
                 interactive_elements: workflowState.playwrightAnalysis?.interactive_elements || [],
-                links: workflowState.playwrightAnalysis?.links || []
+                links: workflowState.playwrightAnalysis?.links || [],
+                menu_items: workflowState.playwrightAnalysis?.menu_items || []
               }
             }
           );
@@ -7369,6 +7607,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     if (workflowState.playwrightAnalysis && Array.isArray(workflowState.playwrightAnalysis.links)) {
       discoveryData.links = workflowState.playwrightAnalysis.links;
+    }
+    if (workflowState.playwrightAnalysis && Array.isArray(workflowState.playwrightAnalysis.menu_items)) {
+      discoveryData.menu_items = workflowState.playwrightAnalysis.menu_items;
     }
     if (workflowState.playwrightAnalysis && Array.isArray(workflowState.playwrightAnalysis.interactive_elements)) {
       discoveryData.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
@@ -7564,6 +7805,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           interactive_elements: includeInteractive && !!discoveryData.interactive_elements,
           non_interactive_elements: includeNonInteractive && !!discoveryData.non_interactive_elements,
           links: includeLinks && !!discoveryData.links,
+          menu_items: !!(discoveryData.menu_items && discoveryData.menu_items.length),
           description: includeDescription && !!discoveryData.page_description,
           ai_analysis: includeAiAnalysis && !!discoveryData.ai_analysis,
           screenshot: includeScreenshot && !!discoveryData.screenshot_file_id,
