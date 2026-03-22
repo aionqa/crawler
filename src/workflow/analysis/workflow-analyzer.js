@@ -5887,6 +5887,24 @@ IMPORTANT OUTPUT REQUIREMENTS:
           if (droppedEmptyJourneys > 0) {
             console.warn(`⚠️ [JOURNEYS-QUALITY] Removed ${droppedEmptyJourneys} journey(s) with no executable actions after selector validation`);
           }
+          const containsConditionalLanguage = (value) => /\b(if available|if present|if exists|maybe|might|try to|attempt to)\b/i.test(String(value || ''));
+          const journeysBeforeConditionalFilter = journeys.length;
+          journeys = journeys.filter((journey) => {
+            const summaryText = [
+              journey?.description,
+              journey?.test_instructions,
+              journey?.expected_outcome,
+              ...(Array.isArray(journey?.actions) ? journey.actions.map((a) => `${a?.description || ''} ${a?.expected_outcome || ''}`) : [])
+            ].join(' ');
+            if (containsConditionalLanguage(summaryText)) {
+              console.warn(`⚠️ [JOURNEYS-QUALITY] Removing speculative journey "${journey?.journey_id || journey?.description || 'unknown'}" due to conditional language`);
+              return false;
+            }
+            return true;
+          });
+          if (journeys.length !== journeysBeforeConditionalFilter) {
+            console.warn(`⚠️ [JOURNEYS-QUALITY] Removed ${journeysBeforeConditionalFilter - journeys.length} journey(s) with conditional/hypothetical wording`);
+          }
           if (hasNoActionableSignals && journeys.length > 0) {
             console.warn(`⚠️ [JOURNEYS-QUALITY] Playwright reported no forms, significant interactive elements, or structured menus — discarding ${journeys.length} AI journey(s) to avoid no-op flows`);
             journeys = [];
