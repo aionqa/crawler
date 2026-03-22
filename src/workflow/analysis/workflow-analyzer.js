@@ -5887,7 +5887,15 @@ IMPORTANT OUTPUT REQUIREMENTS:
           if (droppedEmptyJourneys > 0) {
             console.warn(`⚠️ [JOURNEYS-QUALITY] Removed ${droppedEmptyJourneys} journey(s) with no executable actions after selector validation`);
           }
-          const containsConditionalLanguage = (value) => /\b(if available|if present|if exists|maybe|might|try to|attempt to)\b/i.test(String(value || ''));
+          const containsConditionalLanguage = (value) => /\b(if available|if present|if exists|if expandable|where applicable|when applicable|maybe|might|try to|attempt to)\b/i.test(String(value || ''));
+          const isVerifyOnlyJourney = (journey) => {
+            const actions = Array.isArray(journey?.actions) ? journey.actions : [];
+            if (actions.length === 0) return true;
+            return actions.every((action) => {
+              const t = String(action?.type || action?.action_type || '').trim().toLowerCase();
+              return t === 'verify' || t === 'check';
+            });
+          };
           const journeysBeforeConditionalFilter = journeys.length;
           journeys = journeys.filter((journey) => {
             const summaryText = [
@@ -5898,6 +5906,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
             ].join(' ');
             if (containsConditionalLanguage(summaryText)) {
               console.warn(`⚠️ [JOURNEYS-QUALITY] Removing speculative journey "${journey?.journey_id || journey?.description || 'unknown'}" due to conditional language`);
+              return false;
+            }
+            if (isVerifyOnlyJourney(journey)) {
+              console.warn(`⚠️ [JOURNEYS-QUALITY] Removing verify-only journey "${journey?.journey_id || journey?.description || 'unknown'}"`);
               return false;
             }
             return true;
