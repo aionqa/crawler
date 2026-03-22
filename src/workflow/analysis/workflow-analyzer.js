@@ -1316,9 +1316,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         return true;
       });
+
+      const journeysWithExecutableActions = linkFilteredJourneys.filter((journey) => {
+        const acts = Array.isArray(journey.actions) ? journey.actions : [];
+        if (acts.length === 0) {
+          console.log(`⚠️ Skipping journey (no actions — omit from page journeys): ${journey.journey_id || journey.description || 'unknown'}`);
+          return false;
+        }
+        return true;
+      });
       
       // Convert journeys to legs for internal processing (backwards compatibility)
-      processedItems = this.convertJourneysToLegs(linkFilteredJourneys);
+      processedItems = this.convertJourneysToLegs(journeysWithExecutableActions);
     } else {
       processedItems = rawLegs.filter((leg) => {
         if (this.shouldSkipPlainHyperlinkJourneyItem(leg, workflowState, false)) {
@@ -3082,6 +3091,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
     
     if (journeysToSave && Array.isArray(journeysToSave) && journeysToSave.length > 0) {
+      journeysToSave = journeysToSave.filter((j) => Array.isArray(j?.actions) && j.actions.length > 0);
+    }
+    if (journeysToSave && Array.isArray(journeysToSave) && journeysToSave.length > 0) {
       let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
       let projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
       
@@ -4818,6 +4830,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
           + '- For non-reactive form submit journeys: when submit was attempted and page is in clean initial state after submit with NO visible validation/error text, treat as status="success" (submit likely reloaded/reset page).\n'
           + '- Use status="pending" only when there is genuinely insufficient evidence and no success/failure signal.\n';
       }
+      if (isPageSummaryStep) {
+        effectiveTemplate += '\n\nRUNTIME OVERRIDE (JOURNEYS — MANDATORY):\n'
+          + '- Top-level "journeys" (or page_summary.journeys) must list ONLY flows that are clearly interactive and have a verifiable on-page outcome.\n'
+          + '- Include: (1) each multi-field form or submit flow; (2) embedded/shared widgets such as chat or support; (3) interactive menus that expand, toggle, or reveal panels on this page (not plain header/footer links — those are in menu_items / link map); (4) buttons or controls that open modals, drawers, or wizards; (5) video or media players when there is a concrete control to exercise (play/pause/fullscreen) with an observable result.\n'
+          + '- Omit decorative regions, vague "click here" areas, and plain same-document navigation with no state change.\n'
+          + '- Every journey MUST have a non-empty "actions" array. Each action that interacts with the DOM MUST include a concrete Playwright-capable "selector" string (no placeholders like "selector" or "{{...}}").\n'
+          + '- If nothing qualifies, return an empty journeys array ([]).\n';
+      }
       const promptConfig = {
         user_message_template: effectiveTemplate,
         system_message: systemMessage,
@@ -5734,9 +5754,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
           console.log(`🔍 [JOURNEYS-EXTRACT] page_summary keys: ${Object.keys(parsedResponse.page_summary).join(', ')}`);
         }
         
-        if (parsedResponse.journeys && Array.isArray(parsedResponse.journeys)) {
-          journeys = parsedResponse.journeys;
-          console.log(`✅ [JOURNEYS-EXTRACT] Found ${journeys.length} journeys in response`);
+        const rawJourneysFromResponse = Array.isArray(parsedResponse.journeys)
+          ? parsedResponse.journeys
+          : (Array.isArray(parsedResponse.page_summary?.journeys) ? parsedResponse.page_summary.journeys : null);
+        if (rawJourneysFromResponse) {
+          journeys = rawJourneysFromResponse;
+          console.log(`✅ [JOURNEYS-EXTRACT] Found ${journeys.length} journeys in response (top-level or page_summary)`);
           let firstJourneyPreviewRaw = '';
           if (journeys.length > 0) {
             try {
@@ -5809,8 +5832,12 @@ IMPORTANT OUTPUT REQUIREMENTS:
             return !['input', 'select', 'textarea', 'checkbox', 'radio'].includes(elementType);
           });
           const interactiveElementsCount = significantInteractiveElements.length;
+          const menuTrees = workflowState.playwrightAnalysis?.menu_items || [];
+          const menuCount = Array.isArray(menuTrees)
+            ? menuTrees.filter((m) => Array.isArray(m?.items) && m.items.length > 0).length
+            : 0;
           const journeysCount = journeys.length;
-          const hasNoActionableSignals = formsCount === 0 && interactiveElementsCount === 0;
+          const hasNoActionableSignals = formsCount === 0 && interactiveElementsCount === 0 && menuCount === 0;
           workflowState.noActionableSignals = hasNoActionableSignals;
           
           console.log(`📊 [VALIDATION] Found ${formsCount} form(s), ${interactiveElementsCount} significant interactive element(s), ${journeysCount} journey(s) (one journey per logical flow, multiple actions per journey)`);
@@ -5827,48 +5854,40 @@ IMPORTANT OUTPUT REQUIREMENTS:
             return false;
           };
           let droppedInvalidActions = 0;
-          journeys = journeys.map((journey) => {
-            const actions = Array.isArray(journey?.actions) ? journey.actions : [];
-            const cleanedActions = actions.filter((action) => {
-              if (!actionRequiresSelector(action?.action_type || action?.type)) return true;
-              const ok = !hasInvalidSelector(action?.selector);
-              if (!ok) droppedInvalidActions++;
-              return ok;
-            });
-            const droppedCount = actions.length - cleanedActions.length;
-            if (cleanedActions.length === 0) {
-              return {
-                ...journey,
-                actions: cleanedActions,
-                status: 'skipped',
-                justification_status: 'skipped_insufficient_signal',
-                expected_outcome_verified: null,
-                ai_justification: journey?.ai_justification || (droppedCount > 0
-                  ? `Dropped ${droppedCount} invalid action(s) with unresolved selectors; marking journey as skipped.`
-                  : 'No executable actions were produced for this journey; marking as skipped.')
-              };
-            }
-            if (droppedCount > 0) {
-              return {
-                ...journey,
-                actions: cleanedActions,
-                ai_justification: journey?.ai_justification || `Dropped ${droppedCount} invalid action(s) with unresolved selectors.`,
-              };
-            }
-            return journey;
-          });
+          let droppedEmptyJourneys = 0;
+          journeys = journeys
+            .map((journey) => {
+              const actions = Array.isArray(journey?.actions) ? journey.actions : [];
+              const cleanedActions = actions.filter((action) => {
+                if (!actionRequiresSelector(action?.action_type || action?.type)) return true;
+                const ok = !hasInvalidSelector(action?.selector);
+                if (!ok) droppedInvalidActions++;
+                return ok;
+              });
+              const droppedCount = actions.length - cleanedActions.length;
+              if (cleanedActions.length === 0) {
+                droppedEmptyJourneys++;
+                return null;
+              }
+              if (droppedCount > 0) {
+                return {
+                  ...journey,
+                  actions: cleanedActions,
+                  ai_justification: journey?.ai_justification || `Dropped ${droppedCount} invalid action(s) with unresolved selectors.`,
+                };
+              }
+              return { ...journey, actions: cleanedActions };
+            })
+            .filter(Boolean);
           if (droppedInvalidActions > 0) {
             console.warn(`⚠️ [JOURNEYS-QUALITY] Dropped ${droppedInvalidActions} invalid action(s) with unresolved selectors/placeholders`);
           }
+          if (droppedEmptyJourneys > 0) {
+            console.warn(`⚠️ [JOURNEYS-QUALITY] Removed ${droppedEmptyJourneys} journey(s) with no executable actions after selector validation`);
+          }
           if (hasNoActionableSignals && journeys.length > 0) {
-            journeys = journeys.map((journey) => ({
-              ...journey,
-              actions: [],
-              status: 'skipped',
-              justification_status: 'skipped_insufficient_signal',
-              ai_justification: journey?.ai_justification || 'No actionable interactive elements were detected by Playwright analysis on this page.',
-              expected_outcome_verified: null
-            }));
+            console.warn(`⚠️ [JOURNEYS-QUALITY] Playwright reported no forms, significant interactive elements, or structured menus — discarding ${journeys.length} AI journey(s) to avoid no-op flows`);
+            journeys = [];
           }
           
           // Warn if no journeys but forms exist (AI might have missed the flow)
@@ -5960,6 +5979,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
           if (skippedNoActions > 0) {
             console.warn(`⚠️ [JOURNEYS-EXTRACT] Skipped ${skippedNoActions} journey(s) with no actions; ${validJourneys.length} executable`);
           }
+          journeys = validJourneys;
           if (journeys.length > 0) {
             workflowState.journeys = journeys;
             workflowState.journeysToExecute = validJourneys;
@@ -6174,22 +6194,6 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 confidence: journey.confidence
               };
               candidateLegs.push(journeyLeg);
-            } else {
-              // Journey has no actions - create a minimal leg with journey info
-              console.warn(`⚠️ [JOURNEY] Journey ${journey.journey_id || journeyIndex} has no actions, creating minimal leg`);
-              const minimalLeg = {
-                leg_id: journey.journey_id || `journey_${journeyIndex}`,
-                description: journey.description || journey.test_instructions || 'Journey from AI analysis',
-                type: 'custom',
-                selector: '',
-                test_instructions: journey.test_instructions || journey.description || '',
-                expected_outcome: journey.expected_outcome || '',
-                actions: [], // Empty actions array - will be populated during execution
-                journey_id: journey.journey_id || `journey_${journeyIndex}`,
-                priority: journey.priority || 'medium',
-                confidence: journey.confidence || 0
-              };
-              candidateLegs.push(minimalLeg);
             }
           }
           console.log(`[AI RESPONSE] Converted ${journeys.length} journeys to ${candidateLegs.length} legs`);
@@ -6206,15 +6210,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
         // CRITICAL: If no journeys found but legs/actions exist, convert them to journeys
         if (journeys.length === 0 && candidateLegs.length > 0) {
           console.log(`🔍 [JOURNEYS-CONVERT] No journeys found but ${candidateLegs.length} leg(s)/action(s) found, converting to journeys`);
-          journeys = candidateLegs.map((leg, idx) => ({
-            journey_id: leg.journey_id || leg.leg_id || leg.action_id || `journey_${idx + 1}`,
-            description: leg.description || leg.action_description || 'Journey',
-            expected_outcome: leg.expected_outcome || leg.expected_result || 'Complete journey',
-            actions: Array.isArray(leg.actions) ? leg.actions : (leg.action ? [leg.action] : []),
-            priority: leg.priority || 'medium',
-            confidence: leg.confidence || 0.8
-          }));
-          console.log(`✅ [JOURNEYS-CONVERT] Converted ${candidateLegs.length} leg(s)/action(s) to ${journeys.length} journey(s)`);
+          journeys = candidateLegs
+            .map((leg, idx) => ({
+              journey_id: leg.journey_id || leg.leg_id || leg.action_id || `journey_${idx + 1}`,
+              description: leg.description || leg.action_description || 'Journey',
+              expected_outcome: leg.expected_outcome || leg.expected_result || 'Complete journey',
+              actions: Array.isArray(leg.actions) ? leg.actions : (leg.action ? [leg.action] : []),
+              priority: leg.priority || 'medium',
+              confidence: leg.confidence || 0.8
+            }))
+            .filter((j) => Array.isArray(j.actions) && j.actions.length > 0);
+          console.log(`✅ [JOURNEYS-CONVERT] Converted ${candidateLegs.length} leg(s)/action(s) to ${journeys.length} journey(s) with actions`);
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-CONVERT] Converted ${candidateLegs.length} leg(s)/action(s) to journeys`, 'WORKFLOW-ANALYZER', {
               legs_count: candidateLegs.length,
@@ -6244,15 +6250,16 @@ IMPORTANT OUTPUT REQUIREMENTS:
             }
           }
           
-          if (pageIdToSave && projectIdToSave) {
+          if (pageIdToSave && projectIdToSave && journeys.length > 0) {
             try {
+              const cleanedConvertJourneys = journeys.map((j) => this.cleanJourneyForSave(j));
               const payload = {
                 saveLegs: true,
-                journeys: journeys,
+                journeys: cleanedConvertJourneys,
                 job_id: jobId
               };
               
-              console.log(`🔍 [JOURNEYS-CONVERT] Saving ${journeys.length} journey(s) after conversion to page ${pageIdToSave}`);
+              console.log(`🔍 [JOURNEYS-CONVERT] Saving ${cleanedConvertJourneys.length} journey(s) after conversion to page ${pageIdToSave}`);
               const response = await axios.post(
                 `${this.backendUrl}/api/pages/${pageIdToSave}/save-analysis`,
                 payload,
@@ -6368,42 +6375,35 @@ IMPORTANT OUTPUT REQUIREMENTS:
           
           if (pageIdToUse && projectIdToUse) {
             try {
-              // Use workflowId if available, otherwise use a dummy ID (backend will detect it doesn't exist)
-              const workflowIdForUrl = workflowState.workflowId || '000000000000000000000000';
-              
-              // CRITICAL: Verify journeys have actions before sending
-              const journeysWithActions = journeys.map(j => {
+              const journeysWithActions = journeys.filter((j) => Array.isArray(j.actions) && j.actions.length > 0);
+              if (journeysWithActions.length !== journeys.length) {
+                console.warn(`⚠️ [JOURNEYS-SAVE] Omitting ${journeys.length - journeysWithActions.length} journey(s) with no actions`);
+              }
+              journeysWithActions.forEach((j) => {
                 const actionsCount = Array.isArray(j.actions) ? j.actions.length : 0;
-                if (actionsCount === 0) {
-                  console.warn(`⚠️ [JOURNEYS-SAVE] Journey ${j.journey_id || 'no-id'} has NO actions array or empty actions array!`);
-                  if (jobId && this.backendLogger) {
-                    this.backendLogger.appendJobLog(jobId, 'warn', `⚠️ [JOURNEYS-SAVE] Journey ${j.journey_id || 'no-id'} has NO actions!`, 'WORKFLOW-ANALYZER', {
-                      journey_id: j.journey_id || 'no-id'
-                    });
-                  }
-                } else {
-                  console.log(`✅ [JOURNEYS-SAVE] Journey ${j.journey_id || 'no-id'} has ${actionsCount} action(s)`);
-                }
-                return j;
+                console.log(`✅ [JOURNEYS-SAVE] Journey ${j.journey_id || 'no-id'} has ${actionsCount} action(s)`);
               });
               
               // CRITICAL: Clean journeys to remove circular references before sending
               const cleanedJourneys = journeysWithActions.map(j => this.cleanJourneyForSave(j));
               
+              if (cleanedJourneys.length === 0) {
+                console.log(`⚠️ [JOURNEYS-SAVE] No journeys with actions to persist; skipping save-analysis`);
+              } else {
               const payload = {
                 saveLegs: true, // CRITICAL: Must be true for backend to process journeys (backend checks: if (saveLegs && journeys.length > 0))
                 journeys: cleanedJourneys,
                 job_id: jobId
               };
               
-              const totalActions = journeys.reduce((sum, j) => sum + (Array.isArray(j.actions) ? j.actions.length : 0), 0);
-              console.log(`🔍 [JOURNEYS-SAVE] Sending POST to ${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis with ${journeys.length} journey(s)`);
+              const totalActions = journeysWithActions.reduce((sum, j) => sum + (Array.isArray(j.actions) ? j.actions.length : 0), 0);
+              console.log(`🔍 [JOURNEYS-SAVE] Sending POST to ${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis with ${cleanedJourneys.length} journey(s)`);
               console.log(`🔍 [JOURNEYS-SAVE] Payload: saveLegs=${payload.saveLegs}, journeys.length=${payload.journeys.length}, job_id=${payload.job_id}`);
               console.log(`🔍 [JOURNEYS-SAVE] Total actions across all journeys: ${totalActions}`);
               
               if (jobId && this.backendLogger) {
-                await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [JOURNEYS-SAVE] Sending ${journeys.length} journey(s) with ${totalActions} total actions to backend`, 'WORKFLOW-ANALYZER', {
-                  journeys_count: journeys.length,
+                await this.backendLogger.appendJobLog(jobId, 'info', `🔍 [JOURNEYS-SAVE] Sending ${cleanedJourneys.length} journey(s) with ${totalActions} total actions to backend`, 'WORKFLOW-ANALYZER', {
+                  journeys_count: cleanedJourneys.length,
                   total_actions: totalActions,
                   page_id: workflowState.pageId
                 });
@@ -6417,13 +6417,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
                 }
               );
               
-              console.log(`💾 [JOURNEYS-SAVE] ✅ Successfully saved ${journeys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
+              console.log(`💾 [JOURNEYS-SAVE] ✅ Successfully saved ${cleanedJourneys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
               if (jobId && this.backendLogger) {
-                await this.backendLogger.appendJobLog(jobId, 'info', `💾 [JOURNEYS-SAVE] ✅ Successfully saved ${journeys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`, 'WORKFLOW-ANALYZER', {
-                  journeys_count: journeys.length,
+                await this.backendLogger.appendJobLog(jobId, 'info', `💾 [JOURNEYS-SAVE] ✅ Successfully saved ${cleanedJourneys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`, 'WORKFLOW-ANALYZER', {
+                  journeys_count: cleanedJourneys.length,
                   page_id: pageIdToUse,
                   response_status: response.status
                 });
+              }
               }
             } catch (journeySaveError) {
               console.error(`❌ [JOURNEYS-SAVE] Failed to save journeys: ${journeySaveError.message}`);
