@@ -4835,7 +4835,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
           + '- Top-level "journeys" (or page_summary.journeys) must list ONLY flows that are clearly interactive and have a verifiable on-page outcome.\n'
           + '- Include: (1) each multi-field form or submit flow; (2) embedded/shared widgets such as chat or support; (3) interactive menus that expand, toggle, or reveal panels on this page (not plain header/footer links — those are in menu_items / link map); (4) buttons or controls that open modals, drawers, or wizards; (5) video or media players when there is a concrete control to exercise (play/pause/fullscreen) with an observable result.\n'
           + '- Omit decorative regions, vague "click here" areas, and plain same-document navigation with no state change.\n'
+          + '- Never create hypothetical or conditional journeys (for example: "if available", "if present", "maybe", "try"). If a concrete element is not observed, do not emit that journey.\n'
           + '- Every journey MUST have a non-empty "actions" array. Each action that interacts with the DOM MUST include a concrete Playwright-capable "selector" string (no placeholders like "selector" or "{{...}}").\n'
+          + '- Every emitted journey must have at least one deterministic post-action verification signal (visible message/state change/url change) described in expected_outcome.\n'
           + '- If nothing qualifies, return an empty journeys array ([]).\n';
       }
       const promptConfig = {
