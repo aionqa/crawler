@@ -7070,6 +7070,51 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
 
         await collectAndSendCookies(page, jobId, currentUrl, context);
 
+        const execStoredOnly =
+          context.execute_stored_script_only === true || context.options?.execute_stored_script_only === true;
+        const rawStoredScript =
+          typeof context.stored_playwright_script === 'string' && context.stored_playwright_script.trim()
+            ? context.stored_playwright_script.trim()
+            : typeof context.options?.stored_playwright_script === 'string'
+              ? context.options.stored_playwright_script.trim()
+              : '';
+        if (execStoredOnly && rawStoredScript) {
+          await sendLog(
+            jobId,
+            'info',
+            '📜 Stored script run (Scripts UI): executing Playwright on this page; full page workflow is skipped.',
+            { mode }
+          );
+          const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+          const { default: EnhancedWorkflowExecutor } = await import('../workflow/execution/enhanced-workflow-executor.js');
+          const executor = new EnhancedWorkflowExecutor(backendUrl, null, backendLogger, context);
+          const execResult = await executor.executeScript(page, rawStoredScript, jobId);
+          const ok = execResult.success === true;
+          let finalTitle = '';
+          try {
+            finalTitle = await page.title();
+          } catch (_) {
+            finalTitle = '';
+          }
+          lastResult = {
+            success: ok,
+            mode: 'stored_script_only',
+            message: ok ? 'Stored Playwright script completed' : (execResult.error || 'Script execution failed'),
+            script_result: execResult.result ?? null,
+            script_error: execResult.error || null,
+            stored_script_id: context.stored_script_id || context.options?.stored_script_id || null,
+            url: page.url(),
+            title: finalTitle,
+            finalUrl: page.url(),
+            finalTitle,
+            startTime,
+            duration_ms: Date.now() - startTime,
+            interactive_elements: [],
+            non_interactive_elements: []
+          };
+          continue;
+        }
+
         const modeHandler = modeHandlers[mode];
         if (!modeHandler) {
           throw new Error(`Unknown mode: ${mode}`);
