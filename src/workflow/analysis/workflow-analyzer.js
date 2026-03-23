@@ -4968,16 +4968,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       } else if (skipScriptCacheForGeneratedEmailLogin) {
         console.log('ℹ️ [SCRIPTS-CACHE] Cache bypass for generate_login_script due to generated-email registration mode.');
       }
-      const effectiveUrlLower = String(
-        safeStepPayload?.current_url ||
-        safeStepPayload?.page_url ||
-        effectivePageUrl ||
-        ''
-      ).toLowerCase();
       const shouldForceGeneratedEmailRegistrationScript =
         step.id === 'generate_login_script' &&
-        Boolean(generatedEmailForCache?.address) &&
-        effectiveUrlLower.includes('app.aionqa.com/login');
+        Boolean(generatedEmailForCache?.address);
       if (shouldForceGeneratedEmailRegistrationScript) {
         aiResponse = {
           playwright_script: `const generatedEmail = String((context && context.generated_email && context.generated_email.address) || '').trim();
