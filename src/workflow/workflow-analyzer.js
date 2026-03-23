@@ -4004,22 +4004,39 @@ const onRegistrationRequest = (req) => {
   }
 };
 page.on('request', onRegistrationRequest);
-const registrationResponsePromise = page.waitForResponse((resp) => {
+const waitForRegisterResponse = (timeoutMs = 15000) => page.waitForResponse((resp) => {
   const respUrl = String(resp.url() || '').toLowerCase();
   const isRegisterEndpoint = respUrl.includes('/api/auth/register') || respUrl.includes('/auth/register') || respUrl.includes('/register');
   if (!isRegisterEndpoint) return false;
   const method = String(resp.request().method() || '').toUpperCase();
   return method === 'POST' || method === 'PUT';
-}, { timeout: 15000 }).catch(() => null);
+}, { timeout: timeoutMs }).catch(() => null);
+let registrationResponsePromise = waitForRegisterResponse(15000);
 await registerSubmit.click({ timeout: 5000, force: true });
 await page.waitForTimeout(1200);
-const registrationResponse = await registrationResponsePromise;
-page.off('request', onRegistrationRequest);
+let registrationResponse = await registrationResponsePromise;
 await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
 const postSubmitText = ((await page.textContent('body')) || '').toLowerCase();
-const hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(postSubmitText);
-const responseStatus = registrationResponse ? registrationResponse.status() : null;
+let hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(postSubmitText);
+let responseStatus = registrationResponse ? registrationResponse.status() : null;
+if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
+  registrationResponsePromise = waitForRegisterResponse(10000);
+  await passwordInput.press('Enter').catch(() => {});
+  await registerSubmit.click({ timeout: 5000, force: true }).catch(() => {});
+  await page.locator('form').first().evaluate((form) => {
+    if (!form) return;
+    if (typeof form.requestSubmit === 'function') form.requestSubmit();
+    else if (typeof form.submit === 'function') form.submit();
+  }).catch(() => {});
+  await page.waitForTimeout(1200);
+  registrationResponse = await registrationResponsePromise;
+  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+  const fallbackPostSubmitText = ((await page.textContent('body')) || '').toLowerCase();
+  hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(fallbackPostSubmitText);
+  responseStatus = registrationResponse ? registrationResponse.status() : null;
+}
 console.log('[REG-EVIDENCE] requestSeen=' + sawRegistrationRequest + ' responseStatus=' + (responseStatus || 'none') + ' successSignal=' + hasRegistrationSuccessSignal);
+page.off('request', onRegistrationRequest);
 if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
   throw new Error('Registration submit did not produce observable success evidence');
 }
