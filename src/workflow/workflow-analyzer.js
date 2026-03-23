@@ -4133,14 +4133,16 @@ return {
           }
 
           const currentUrl = String(page.url() || stepPayload.current_url || stepPayload.page_url || '').toLowerCase();
-          const hasErrorSignal = /(invalid|incorrect|error|failed|unauthorized|forbidden|required)/.test(bodyText);
+          const hasErrorSignal = /(invalid credentials|incorrect password|login failed|authentication failed|verification failed|error verifying|unauthorized|forbidden|required field)/.test(bodyText);
           // Include "logged in" signals (used by SDLC fixtures like /html/login-status.html).
           const hasSuccessSignal = /(login successful|successfully logged in|you are logged in|\blogged in\b|welcome|dashboard|signed in|profile)/.test(bodyText);
+          const isEmailVerificationUrl = currentUrl.includes('/verify-email') && currentUrl.includes('token=');
           const isLoginSuccessUrl =
             currentUrl.includes('login-success') ||
             currentUrl.includes('login-successful') ||
             currentUrl.includes('logged-in-success') ||
             currentUrl.includes('credentials-success') ||
+            isEmailVerificationUrl ||
             // Many of our SDLC fixtures redirect to URLs like:
             //   /html/login/specific-credentials-success.html
             //   /html/login/any-credentials-success.html
