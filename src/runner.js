@@ -695,17 +695,16 @@ async function executeLoginJob(job, streamInterval) {
     workflow_template_id: jobContext.workflow_template_id,
     project_id: job.project_id || jobContext.project_id || job.projectId || null,
     projectId: job.project_id || jobContext.projectId || null,
-    generated_email: (
+    generated_email:
       (jobContext.generated_email && typeof jobContext.generated_email === 'object')
         ? jobContext.generated_email
-        : ((jobContext.options?.generated_email && typeof jobContext.options.generated_email === 'object')
+        : (jobContext.options?.generated_email && typeof jobContext.options.generated_email === 'object')
             ? jobContext.options.generated_email
-            : ((job.options?.generated_email && typeof job.options.generated_email === 'object')
+            : (job.options?.generated_email && typeof job.options.generated_email === 'object')
                 ? job.options.generated_email
-        : ((jobContext.context?.generated_email && typeof jobContext.context.generated_email === 'object')
-            ? jobContext.context.generated_email
-            : null))
-    ),
+                : (jobContext.context?.generated_email && typeof jobContext.context.generated_email === 'object')
+                    ? jobContext.context.generated_email
+                    : null,
     // CRITICAL: Explicitly set credentials (don't rely on spread from jobContext)
     credentials: {
       username: finalCredentials.username,
