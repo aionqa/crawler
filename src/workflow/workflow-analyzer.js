@@ -3966,12 +3966,15 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             confidence: 0.8
           };
         }
-        if (generatedEmailAddress) {
+        if (currentUrl.includes('app.aionqa.com/login')) {
           aiResponse = {
-            playwright_script: `const generatedEmail = String((context && context.generated_email && context.generated_email.address) || '').trim();
-if (!generatedEmail) {
-  throw new Error('Generated email missing from context.generated_email.address');
-}
+            playwright_script: `const generatedEmail = String(
+  (context && context.generated_email && context.generated_email.address) ||
+  (context && context.options && context.options.generated_email && context.options.generated_email.address) ||
+  (input_credentials && input_credentials.username) ||
+  ''
+).trim();
+if (!generatedEmail) throw new Error('No email available for registration flow');
 const registrationPassword = 'AionQa!24680';
 const registrationName = 'Aion QA Auto';
 const clickFirstVisible = async (selectors = []) => {
