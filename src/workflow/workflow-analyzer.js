@@ -3977,53 +3977,22 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
 if (!generatedEmail) throw new Error('No email available for registration flow');
 const registrationPassword = 'AionQa!24680';
 const registrationName = 'Aion QA Auto';
-const clickFirstVisible = async (selectors = []) => {
-  for (const selector of selectors) {
-    const el = page.locator(selector).first();
-    const visible = await el.isVisible().catch(() => false);
-    if (!visible) continue;
-    const text = await el.innerText().catch(() => '');
-    if (/(google|github|oauth|apple|microsoft)/i.test(String(text || ''))) continue;
-    await el.click({ timeout: 5000 }).catch(() => {});
-    await page.waitForTimeout(500);
-    return selector;
-  }
-  return null;
-};
+const signUpLink = page.getByRole('link', { name: /^sign up$/i }).first();
+await signUpLink.waitFor({ state: 'visible', timeout: 10000 });
+await signUpLink.click({ timeout: 5000 });
+await page.waitForTimeout(700);
 
-await clickFirstVisible([
-  'a:has-text("Sign up")',
-  'button:has-text("Sign up")',
-  'a:has-text("Create account")',
-  'button:has-text("Create account")',
-  'a:has-text("Register")',
-  'button:has-text("Register")'
-]);
-
-const emailInput = page.locator('input[type="email"], input[name="email"], input#email').first();
-await emailInput.waitFor({ state: 'visible', timeout: 15000 });
+const nameInput = page.locator('#register-name').first();
+const emailInput = page.locator('#register-email').first();
+const passwordInput = page.locator('#register-password').first();
+await emailInput.waitFor({ state: 'visible', timeout: 12000 });
+await nameInput.fill(registrationName).catch(() => {});
 await emailInput.fill(generatedEmail);
-
-const nameInput = page.locator('input[name="name"], input[name="fullName"], input[placeholder*="name" i]').first();
-if (await nameInput.isVisible().catch(() => false)) {
-  await nameInput.fill(registrationName).catch(() => {});
-}
-
-const passwordInput = page.locator('input[name="password"], input[type="password"]').first();
-await passwordInput.waitFor({ state: 'visible', timeout: 15000 });
 await passwordInput.fill(registrationPassword);
 
-const confirmPasswordInput = page.locator('input[name="confirmPassword"], input[name="confirm_password"], input[placeholder*="confirm" i]').first();
-if (await confirmPasswordInput.isVisible().catch(() => false)) {
-  await confirmPasswordInput.fill(registrationPassword).catch(() => {});
-}
-
-await clickFirstVisible([
-  'button:has-text("Sign Up")',
-  'button:has-text("Sign up")',
-  'button:has-text("Create account")',
-  'button:has-text("Register")'
-]);
+const registerSubmit = page.getByRole('button', { name: /^sign up$/i }).first();
+await registerSubmit.waitFor({ state: 'visible', timeout: 12000 });
+await registerSubmit.click({ timeout: 5000 });
 await page.waitForTimeout(1200);
 const emailResult = await test.email.openLinkFromEmail({
   timeoutMs: 240000,
