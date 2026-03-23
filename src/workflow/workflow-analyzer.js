@@ -3992,8 +3992,22 @@ await passwordInput.fill(registrationPassword);
 
 const registerSubmit = page.locator('button.btn-primary:has-text("Sign Up"), button.btn-primary:has-text("Sign up")').first();
 await registerSubmit.waitFor({ state: 'visible', timeout: 12000 });
+const registrationResponsePromise = page.waitForResponse((resp) => {
+  const respUrl = String(resp.url() || '').toLowerCase();
+  const isRegisterEndpoint = respUrl.includes('/api/auth/register') || respUrl.includes('/auth/register') || respUrl.includes('/register');
+  if (!isRegisterEndpoint) return false;
+  const method = String(resp.request().method() || '').toUpperCase();
+  return method === 'POST' || method === 'PUT';
+}, { timeout: 15000 }).catch(() => null);
 await registerSubmit.click({ timeout: 5000 });
 await page.waitForTimeout(1200);
+const registrationResponse = await registrationResponsePromise;
+await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+const postSubmitText = ((await page.textContent('body')) || '').toLowerCase();
+const hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(postSubmitText);
+if (!registrationResponse && !hasRegistrationSuccessSignal) {
+  throw new Error('Registration submit did not produce observable success evidence');
+}
 const emailResult = await test.email.openLinkFromEmail({
   timeoutMs: 35000,
   pollIntervalMs: 4000,
