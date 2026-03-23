@@ -3982,6 +3982,8 @@ const clickFirstVisible = async (selectors = []) => {
     const el = page.locator(selector).first();
     const visible = await el.isVisible().catch(() => false);
     if (!visible) continue;
+    const text = await el.innerText().catch(() => '');
+    if (/(google|github|oauth|apple|microsoft)/i.test(String(text || ''))) continue;
     await el.click({ timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(500);
     return selector;
@@ -4017,12 +4019,10 @@ if (await confirmPasswordInput.isVisible().catch(() => false)) {
 }
 
 await clickFirstVisible([
+  'button:has-text("Sign Up")',
   'button:has-text("Sign up")',
   'button:has-text("Create account")',
-  'button:has-text("Register")',
-  'button:has-text("Continue")',
-  'button[type="submit"]',
-  'input[type="submit"]'
+  'button:has-text("Register")'
 ]);
 await page.waitForTimeout(1200);
 const emailResult = await test.email.openLinkFromEmail({
