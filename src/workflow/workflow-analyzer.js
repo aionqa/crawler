@@ -3986,16 +3986,16 @@ const nameInput = page.locator('#register-name').first();
 const emailInput = page.locator('#register-email').first();
 const passwordInput = page.locator('#register-password').first();
 await emailInput.waitFor({ state: 'visible', timeout: 12000 });
-await nameInput.fill(registrationName).catch(() => {});
+await nameInput.fill(registrationName);
 await emailInput.fill(generatedEmail);
 await passwordInput.fill(registrationPassword);
 
 const registerSubmit = page.locator('button.btn-primary:has-text("Sign Up"), button.btn-primary:has-text("Sign up")').first();
 await registerSubmit.waitFor({ state: 'visible', timeout: 12000 });
 await registerSubmit.click({ timeout: 5000 });
-await page.waitForTimeout(1200);
+await page.locator('text=/registration successful/i').first().waitFor({ state: 'visible', timeout: 15000 });
 const emailResult = await test.email.openLinkFromEmail({
-  timeoutMs: 240000,
+  timeoutMs: 45000,
   pollIntervalMs: 4000,
   preferLikelyVerification: true
 });
