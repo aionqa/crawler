@@ -3791,13 +3791,20 @@ IMPORTANT OUTPUT REQUIREMENTS:
         String(step.id || '').toLowerCase().includes('generate_login_script') ||
         String(step.name || '').toLowerCase().includes('generate login script') ||
         promptIdentifier === 'generate_login_script';
+      const generatedEmailContext =
+        (this.context?.generated_email && typeof this.context.generated_email === 'object')
+          ? this.context.generated_email
+          : ((this.context?.context?.generated_email && typeof this.context.context.generated_email === 'object')
+              ? this.context.context.generated_email
+              : null);
+      const generatedEmailAddress = String(generatedEmailContext?.address || '').trim();
 
       const isCacheableScriptStep =
         isGenerateLoginScriptStep ||
         promptIdentifier === 'generate_journey_script' ||
         String(step.id || '').toLowerCase().includes('generate_journey_script');
 
-      if (isCacheableScriptStep) {
+      if (isCacheableScriptStep && !generatedEmailAddress) {
         const projectIdForCache = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
         const pageIdForCache = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
         const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.currentItem;
@@ -3955,6 +3962,79 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             playwright_script: deterministicScript,
             reason: 'Deterministic login script generated to ensure stable credential-based submission.',
             confidence: 0.8
+          };
+        }
+        if (generatedEmailAddress) {
+          aiResponse = {
+            playwright_script: `const generatedEmail = String((context && context.generated_email && context.generated_email.address) || '').trim();
+if (!generatedEmail) {
+  throw new Error('Generated email missing from context.generated_email.address');
+}
+const registrationPassword = 'AionQa!24680';
+const registrationName = 'Aion QA Auto';
+const clickFirstVisible = async (selectors = []) => {
+  for (const selector of selectors) {
+    const el = page.locator(selector).first();
+    const visible = await el.isVisible().catch(() => false);
+    if (!visible) continue;
+    await el.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    return selector;
+  }
+  return null;
+};
+
+await clickFirstVisible([
+  'a:has-text("Sign up")',
+  'button:has-text("Sign up")',
+  'a:has-text("Create account")',
+  'button:has-text("Create account")',
+  'a:has-text("Register")',
+  'button:has-text("Register")'
+]);
+
+const emailInput = page.locator('input[type="email"], input[name="email"], input#email').first();
+await emailInput.waitFor({ state: 'visible', timeout: 15000 });
+await emailInput.fill(generatedEmail);
+
+const nameInput = page.locator('input[name="name"], input[name="fullName"], input[placeholder*="name" i]').first();
+if (await nameInput.isVisible().catch(() => false)) {
+  await nameInput.fill(registrationName).catch(() => {});
+}
+
+const passwordInput = page.locator('input[name="password"], input[type="password"]').first();
+await passwordInput.waitFor({ state: 'visible', timeout: 15000 });
+await passwordInput.fill(registrationPassword);
+
+const confirmPasswordInput = page.locator('input[name="confirmPassword"], input[name="confirm_password"], input[placeholder*="confirm" i]').first();
+if (await confirmPasswordInput.isVisible().catch(() => false)) {
+  await confirmPasswordInput.fill(registrationPassword).catch(() => {});
+}
+
+await clickFirstVisible([
+  'button:has-text("Sign up")',
+  'button:has-text("Create account")',
+  'button:has-text("Register")',
+  'button:has-text("Continue")',
+  'button[type="submit"]',
+  'input[type="submit"]'
+]);
+await page.waitForTimeout(1200);
+const emailResult = await test.email.openLinkFromEmail({
+  timeoutMs: 240000,
+  pollIntervalMs: 4000,
+  preferLikelyVerification: true
+});
+await page.waitForTimeout(1500);
+return {
+  success: true,
+  action: 'registration_submitted_and_verification_link_opened',
+  generated_email: generatedEmail,
+  verification: emailResult
+};`,
+            reason: 'Generated-email mode forces deterministic registration + email verification script.',
+            confidence: 0.9,
+            generated_email_mode: true
           };
         }
       }
@@ -9258,10 +9338,59 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
         };
         const delay = (ms) => new Promise((r) => setTimeout(r, ms));
         const pageText = await pageObj.locator('body').textContent().catch(() => '') || '';
+        const generatedEmailContextForExec =
+          (this.context?.generated_email && typeof this.context.generated_email === 'object')
+            ? this.context.generated_email
+            : ((this.context?.context?.generated_email && typeof this.context.context.generated_email === 'object')
+                ? this.context.context.generated_email
+                : null);
         const execContext = {
           pageUrl: (workflowState?.pageUrl) || (typeof pageObj?.url === 'function' ? pageObj.url() : '') || '',
           jobId: jobId || null,
-          currentJourney: workflowState?.currentJourney || null
+          currentJourney: workflowState?.currentJourney || null,
+          generated_email: generatedEmailContextForExec
+        };
+        if (execContext.generated_email?.variable_name && execContext.generated_email?.address) {
+          execContext[execContext.generated_email.variable_name] = execContext.generated_email.address;
+        }
+        const backendUrl = this.backendUrl;
+        const authHeaders = this.getAuthHeaders();
+        const generatedEmailForHelper = execContext.generated_email;
+        const extractLinksFromEmail = (message) => {
+          const links = [];
+          const seen = new Set();
+          const collect = (value) => {
+            const text = String(value || '');
+            const matches = text.match(/https?:\/\/[^\s"'<>]+/gi) || [];
+            for (const raw of matches) {
+              const cleaned = String(raw).replace(/[),.;!?]+$/, '');
+              if (!seen.has(cleaned)) {
+                seen.add(cleaned);
+                links.push(cleaned);
+              }
+            }
+          };
+          collect(message?.html);
+          collect(message?.text);
+          collect(message?.snippet);
+          collect(message?.preview);
+          return links;
+        };
+        const fetchInboxMessages = async ({ limit = 10 } = {}) => {
+          if (!generatedEmailForHelper?.inbox_id || !generatedEmailForHelper?.project_id) {
+            throw new Error('Generated email is not configured in context');
+          }
+          const safeLimit = Math.max(1, Number(limit) || 10);
+          const url = `${backendUrl}/api/emails/inboxes/${encodeURIComponent(generatedEmailForHelper.inbox_id)}/messages?project_id=${encodeURIComponent(generatedEmailForHelper.project_id)}&limit=${safeLimit}`;
+          const resp = await axios.get(url, { headers: authHeaders, timeout: 15000 });
+          const rawMessages = Array.isArray(resp?.data?.messages) ? resp.data.messages : [];
+          return rawMessages.map((m) => ({
+            ...m,
+            subject: m?.subject || '',
+            text: m?.text || m?.plain_text || '',
+            html: m?.html || '',
+            links: extractLinksFromEmail(m || {})
+          }));
         };
         const testHelper = {
           expect: (v) => ({
@@ -9271,7 +9400,62 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             toEqual: () => {},
             not: { toBe: () => {}, toContain: () => {} }
           }),
-          step: async (_, fn) => (typeof fn === 'function' ? await fn() : fn)
+          step: async (_, fn) => (typeof fn === 'function' ? await fn() : fn),
+          email: {
+            address: generatedEmailForHelper?.address || null,
+            inbox_id: generatedEmailForHelper?.inbox_id || null,
+            waitForMessage: async ({
+              timeoutMs = 180000,
+              pollIntervalMs = 5000,
+              subjectIncludes = null,
+              limit = 10
+            } = {}) => {
+              const started = Date.now();
+              while ((Date.now() - started) <= Number(timeoutMs || 180000)) {
+                const messages = await fetchInboxMessages({ limit });
+                const match = messages.find((m) => {
+                  if (!subjectIncludes) return true;
+                  return String(m?.subject || '').toLowerCase().includes(String(subjectIncludes).toLowerCase());
+                });
+                if (match) return match;
+                await delay(Math.max(1000, Number(pollIntervalMs) || 5000));
+              }
+              throw new Error('Timed out waiting for generated-email message');
+            },
+            getVerificationLink: async ({
+              subjectIncludes = null,
+              timeoutMs = 180000,
+              pollIntervalMs = 5000
+            } = {}) => {
+              const message = await testHelper.email.waitForMessage({ subjectIncludes, timeoutMs, pollIntervalMs, limit: 10 });
+              const links = extractLinksFromEmail(message);
+              if (!links.length) {
+                throw new Error('No links found in latest generated-email message');
+              }
+              const preferred = links.find((u) => /(verify|verification|confirm|activation|activate|register|signup)/i.test(String(u)));
+              return { link: preferred || links[0], links, subject: message?.subject || null, message };
+            },
+            openLink: async (url, { timeoutMs = 120000 } = {}) => {
+              if (!url || !/^https?:\/\//i.test(String(url))) {
+                throw new Error('openLink requires an absolute http(s) URL');
+              }
+              await wrappedPage.goto(String(url).trim(), { waitUntil: 'domcontentloaded', timeout: Math.max(1000, Number(timeoutMs) || 120000) });
+              return { clicked: String(url).trim() };
+            },
+            openLinkFromEmail: async ({
+              subjectIncludes = null,
+              timeoutMs = 180000,
+              pollIntervalMs = 5000
+            } = {}) => {
+              const linkResult = await testHelper.email.getVerificationLink({ subjectIncludes, timeoutMs, pollIntervalMs });
+              await testHelper.email.openLink(linkResult.link, { timeoutMs: 120000 });
+              return {
+                clicked: linkResult.link,
+                links_found: Array.isArray(linkResult.links) ? linkResult.links.length : 0,
+                subject: linkResult.subject || null
+              };
+            }
+          }
         };
         
         const buildFallbackJourneyScript = () => {
