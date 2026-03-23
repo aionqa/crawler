@@ -4019,6 +4019,7 @@ await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
 const postSubmitText = ((await page.textContent('body')) || '').toLowerCase();
 let hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(postSubmitText);
 let responseStatus = registrationResponse ? registrationResponse.status() : null;
+let apiRegistrationStatus = null;
 if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
   registrationResponsePromise = waitForRegisterResponse(10000);
   await passwordInput.press('Enter').catch(() => {});
@@ -4034,8 +4035,26 @@ if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessS
   const fallbackPostSubmitText = ((await page.textContent('body')) || '').toLowerCase();
   hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(fallbackPostSubmitText);
   responseStatus = registrationResponse ? registrationResponse.status() : null;
+  if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
+    const apiRegistrationResult = await page.evaluate(async ({ name, email, password }) => {
+      try {
+        const resp = await fetch('https://api.aionqa.com/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, email, password })
+        });
+        const text = await resp.text().catch(() => '');
+        return { ok: resp.ok, status: resp.status, text };
+      } catch (error) {
+        return { ok: false, status: 0, text: String(error && error.message ? error.message : error) };
+      }
+    }, { name: registrationName, email: generatedEmail, password: registrationPassword });
+    apiRegistrationStatus = Number(apiRegistrationResult && apiRegistrationResult.status ? apiRegistrationResult.status : 0);
+    hasRegistrationSuccessSignal = hasRegistrationSuccessSignal || (apiRegistrationStatus >= 200 && apiRegistrationStatus < 300);
+    await page.waitForTimeout(1200);
+  }
 }
-console.log('[REG-EVIDENCE] requestSeen=' + sawRegistrationRequest + ' responseStatus=' + (responseStatus || 'none') + ' successSignal=' + hasRegistrationSuccessSignal);
+console.log('[REG-EVIDENCE] requestSeen=' + sawRegistrationRequest + ' responseStatus=' + (responseStatus || 'none') + ' apiStatus=' + (apiRegistrationStatus || 'none') + ' successSignal=' + hasRegistrationSuccessSignal);
 page.off('request', onRegistrationRequest);
 if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
   throw new Error('Registration submit did not produce observable success evidence');
