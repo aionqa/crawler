@@ -9421,23 +9421,27 @@ return {
         };
         const fetchInboxMessages = async ({ limit = 10 } = {}) => {
           const activeGeneratedEmail = resolveGeneratedEmailForHelper();
-          if (!activeGeneratedEmail?.inbox_id || !activeGeneratedEmail?.project_id) {
+          if (!activeGeneratedEmail?.address) {
             throw new Error('Generated email is not configured in context');
           }
           const safeLimit = Math.max(1, Number(limit) || 10);
-          const url = `${backendUrl}/api/emails/inboxes/${encodeURIComponent(activeGeneratedEmail.inbox_id)}/messages?project_id=${encodeURIComponent(activeGeneratedEmail.project_id)}&limit=${safeLimit}`;
+          const runnerUrl = `${backendUrl}/api/runner/emails/messages?recipient=${encodeURIComponent(activeGeneratedEmail.address)}&limit=${safeLimit}&scanMax=250`;
+          const fallbackUrl = (activeGeneratedEmail?.inbox_id && activeGeneratedEmail?.project_id)
+            ? `${backendUrl}/api/emails/inboxes/${encodeURIComponent(activeGeneratedEmail.inbox_id)}/messages?project_id=${encodeURIComponent(activeGeneratedEmail.project_id)}&limit=${safeLimit}`
+            : null;
           let resp;
           try {
-            resp = await axios.get(url, { headers: { ...(authHeaders || {}), ...runnerTokenHeader }, timeout: 15000 });
+            resp = await axios.get(runnerUrl, { headers: { ...(authHeaders || {}), ...runnerTokenHeader }, timeout: 15000 });
           } catch (emailErr) {
-            const statusCode = Number(emailErr?.response?.status || 0);
-            if (statusCode === 401 && Object.keys(runnerTokenHeader).length > 0) {
-              resp = await axios.get(url, { headers: runnerTokenHeader, timeout: 15000 });
+            if (fallbackUrl) {
+              resp = await axios.get(fallbackUrl, { headers: { ...(authHeaders || {}), ...runnerTokenHeader }, timeout: 15000 });
             } else {
               throw emailErr;
             }
           }
-          const rawMessages = Array.isArray(resp?.data?.messages) ? resp.data.messages : [];
+          const rawMessages = Array.isArray(resp?.data?.messages)
+            ? resp.data.messages
+            : (Array.isArray(resp?.data?.emails) ? resp.data.emails : []);
           return rawMessages.map((m) => ({
             ...m,
             subject: m?.subject || '',
