@@ -696,6 +696,23 @@ async function executeLoginJob(job, streamInterval) {
   console.log(`[DEBUG] ✅ Credentials extracted and set in jobContext: username=${extractedCreds.username}, password=***`);
   
   const finalCredentials = jobContext.credentials;
+  const isValidGeneratedEmail = (value) => (
+    !!value &&
+    typeof value === 'object' &&
+    typeof value.address === 'string' &&
+    value.address.trim().length > 0 &&
+    typeof value.inbox_id === 'string' &&
+    value.inbox_id.trim().length > 0
+  );
+  const resolvedGeneratedEmail = isValidGeneratedEmail(jobContext.generated_email)
+    ? jobContext.generated_email
+    : isValidGeneratedEmail(jobContext.options?.generated_email)
+        ? jobContext.options.generated_email
+        : isValidGeneratedEmail(job.options?.generated_email)
+            ? job.options.generated_email
+            : isValidGeneratedEmail(jobContext.context?.generated_email)
+                ? jobContext.context.generated_email
+                : null;
   
   console.log(`[DEBUG] ✅ Credentials found: username=${finalCredentials.username}, password=${finalCredentials.password ? '***' : 'MISSING'}`);
   
@@ -705,16 +722,7 @@ async function executeLoginJob(job, streamInterval) {
     workflow_template_id: jobContext.workflow_template_id,
     project_id: job.project_id || jobContext.project_id || job.projectId || null,
     projectId: job.project_id || jobContext.projectId || null,
-    generated_email:
-      (jobContext.generated_email && typeof jobContext.generated_email === 'object')
-        ? jobContext.generated_email
-        : (jobContext.options?.generated_email && typeof jobContext.options.generated_email === 'object')
-            ? jobContext.options.generated_email
-            : (job.options?.generated_email && typeof job.options.generated_email === 'object')
-                ? job.options.generated_email
-                : (jobContext.context?.generated_email && typeof jobContext.context.generated_email === 'object')
-                    ? jobContext.context.generated_email
-                    : null,
+    generated_email: resolvedGeneratedEmail,
     // CRITICAL: Explicitly set credentials (don't rely on spread from jobContext)
     credentials: {
       username: finalCredentials.username,
@@ -724,6 +732,7 @@ async function executeLoginJob(job, streamInterval) {
     password: finalCredentials.password, // Also set top-level for fallback
     options: {
       ...(jobContext.options || {}),
+      ...(resolvedGeneratedEmail ? { generated_email: resolvedGeneratedEmail } : {}),
       openai_api_key: openaiApiKey,
       // CRITICAL: Also set credentials in options
       credentials: {
