@@ -3977,7 +3977,7 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
 if (!generatedEmail) throw new Error('No email available for registration flow');
 const registrationPassword = 'AionQa!24680';
 const registrationName = 'Aion QA Auto';
-const signUpLink = page.getByRole('link', { name: /^sign up$/i }).first();
+const signUpLink = page.locator('a:has-text("Sign up")').first();
 await signUpLink.waitFor({ state: 'visible', timeout: 10000 });
 await signUpLink.click({ timeout: 5000 });
 await page.waitForTimeout(700);
@@ -3990,7 +3990,7 @@ await nameInput.fill(registrationName).catch(() => {});
 await emailInput.fill(generatedEmail);
 await passwordInput.fill(registrationPassword);
 
-const registerSubmit = page.getByRole('button', { name: /^sign up$/i }).first();
+const registerSubmit = page.locator('button.btn-primary:has-text("Sign Up"), button.btn-primary:has-text("Sign up")').first();
 await registerSubmit.waitFor({ state: 'visible', timeout: 12000 });
 await registerSubmit.click({ timeout: 5000 });
 await page.waitForTimeout(1200);
