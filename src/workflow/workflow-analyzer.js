@@ -4020,6 +4020,7 @@ const postSubmitText = ((await page.textContent('body')) || '').toLowerCase();
 let hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(postSubmitText);
 let responseStatus = registrationResponse ? registrationResponse.status() : null;
 let apiRegistrationStatus = null;
+let apiRegistrationBodyPreview = '';
 if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
   registrationResponsePromise = waitForRegisterResponse(10000);
   await passwordInput.press('Enter').catch(() => {});
@@ -4042,11 +4043,12 @@ if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessS
       timeout: 12000
     }).catch(() => null);
     apiRegistrationStatus = apiResponse ? Number(apiResponse.status()) : 0;
+    apiRegistrationBodyPreview = apiResponse ? String(await apiResponse.text().catch(() => '')).replace(/\\s+/g, ' ').slice(0, 200) : '';
     hasRegistrationSuccessSignal = hasRegistrationSuccessSignal || (apiRegistrationStatus >= 200 && apiRegistrationStatus < 300);
     await page.waitForTimeout(1200);
   }
 }
-console.log('[REG-EVIDENCE] requestSeen=' + sawRegistrationRequest + ' responseStatus=' + (responseStatus || 'none') + ' apiStatus=' + (apiRegistrationStatus || 'none') + ' successSignal=' + hasRegistrationSuccessSignal);
+console.log('[REG-EVIDENCE] requestSeen=' + sawRegistrationRequest + ' responseStatus=' + (responseStatus || 'none') + ' apiStatus=' + (apiRegistrationStatus || 'none') + ' successSignal=' + hasRegistrationSuccessSignal + ' apiBody=' + apiRegistrationBodyPreview);
 page.off('request', onRegistrationRequest);
 if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
   throw new Error('Registration submit did not produce observable success evidence');
