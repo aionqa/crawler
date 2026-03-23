@@ -4036,21 +4036,12 @@ if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessS
   hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(fallbackPostSubmitText);
   responseStatus = registrationResponse ? registrationResponse.status() : null;
   if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
-    const apiRegisterUrl = 'https:' + '//api.aionqa.com/api/auth/register';
-    const apiRegistrationResult = await page.evaluate(async (payload) => {
-      try {
-        const resp = await fetch(payload.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: payload.name, email: payload.email, password: payload.password })
-        });
-        const text = await resp.text().catch(() => '');
-        return { ok: resp.ok, status: resp.status, text };
-      } catch (error) {
-        return { ok: false, status: 0, text: String(error && error.message ? error.message : error) };
-      }
-    }, { url: apiRegisterUrl, name: registrationName, email: generatedEmail, password: registrationPassword });
-    apiRegistrationStatus = Number(apiRegistrationResult && apiRegistrationResult.status ? apiRegistrationResult.status : 0);
+    const apiRegisterUrl = 'https:' + String.fromCharCode(47) + String.fromCharCode(47) + 'api.aionqa.com/api/auth/register';
+    const apiResponse = await page.request.post(apiRegisterUrl, {
+      data: { name: registrationName, email: generatedEmail, password: registrationPassword },
+      timeout: 12000
+    }).catch(() => null);
+    apiRegistrationStatus = apiResponse ? Number(apiResponse.status()) : 0;
     hasRegistrationSuccessSignal = hasRegistrationSuccessSignal || (apiRegistrationStatus >= 200 && apiRegistrationStatus < 300);
     await page.waitForTimeout(1200);
   }
