@@ -9339,9 +9339,20 @@ return {
           workflowState?.variablePool?.job?.generated_email,
           workflowState?.variablePool?.job?.options?.generated_email
         ];
+        try {
+          const candidateDebug = generatedEmailCandidates.map((value, idx) => ({
+            idx,
+            has: !!value,
+            type: value ? typeof value : 'null',
+            address: value && typeof value === 'object' ? String(value.address || '').slice(0, 80) : '',
+            inbox_id: value && typeof value === 'object' ? String(value.inbox_id || value.inboxId || '').slice(0, 80) : ''
+          }));
+          console.log(`[EMAIL-HELPER] generated-email candidates: ${JSON.stringify(candidateDebug)}`);
+        } catch (_) {}
         const generatedEmailContextForExec = generatedEmailCandidates
           .map((value) => normalizeGeneratedEmailContext(value))
           .find((value) => !!value) || null;
+        console.log(`[EMAIL-HELPER] resolved generated-email: ${generatedEmailContextForExec ? `address=${generatedEmailContextForExec.address}, inbox=${generatedEmailContextForExec.inbox_id}` : 'none'}`);
         const generatedEmailWithFallbacks = generatedEmailContextForExec
           ? {
               ...generatedEmailContextForExec,
