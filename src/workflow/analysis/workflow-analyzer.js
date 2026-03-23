@@ -11517,61 +11517,58 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         
         // Wrap locator method to also intercept methods on locators
         const originalLocator = pageObj.locator.bind(pageObj);
+        const locatorProxyCache = new WeakMap();
         const decorateLocator = (locator, selectorHint = '') => {
           if (!locator || typeof locator !== 'object') return locator;
-          if (locator.__aionqaGuardWrapped) return locator;
-          Object.defineProperty(locator, '__aionqaGuardWrapped', { value: true, enumerable: false, configurable: true });
+          if (locatorProxyCache.has(locator)) return locatorProxyCache.get(locator);
           
-          // Wrap locator methods
-          const wrapLocatorMethod = (methodName, originalLocatorMethod) => {
-            return async function(...args) {
-              await logAction(`locator(${String(selectorHint).substring(0, 80)}).${methodName}`, args);
-              if (socialAuthGuardEnabled && (methodName === 'click' || methodName === 'press' || methodName === 'check')) {
-                await ensureNoSocialAuthTarget(locator, selectorHint);
+          const chainMethods = new Set(['first', 'last', 'nth', 'filter', 'locator', 'getByRole', 'getByText', 'getByLabel', 'getByPlaceholder', 'getByTestId', 'and', 'or']);
+          const guardedActionMethods = new Set(['click', 'press', 'check']);
+          const loggedActionMethods = new Set(['click', 'fill', 'type', 'press', 'selectOption', 'check', 'uncheck', 'hover', 'screenshot']);
+          
+          const locatorProxy = new Proxy(locator, {
+            get(target, prop, receiver) {
+              const originalValue = Reflect.get(target, prop, receiver);
+              if (typeof originalValue !== 'function') return originalValue;
+              const methodName = String(prop);
+              const boundFn = originalValue.bind(target);
+              
+              if (chainMethods.has(methodName)) {
+                return function(...args) {
+                  const out = boundFn(...args);
+                  const nextHint = `${selectorHint} -> ${methodName}(${String(args?.[0] ?? '').substring(0, 50)})`;
+                  return decorateLocator(out, nextHint);
+                };
               }
-              const out = await originalLocatorMethod.apply(locator, args);
-              if (socialAuthGuardEnabled && (methodName === 'click' || methodName === 'press' || methodName === 'check')) {
-                const currentUrl = typeof pageObj?.url === 'function' ? String(pageObj.url() || '') : '';
-                if (isSocialAuthUrl(currentUrl)) {
-                  if (guardReturnUrl) {
-                    await pageObj.goto(guardReturnUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+              
+              if (loggedActionMethods.has(methodName)) {
+                return async function(...args) {
+                  await logAction(`locator(${String(selectorHint).substring(0, 80)}).${methodName}`, args);
+                  if (socialAuthGuardEnabled && guardedActionMethods.has(methodName)) {
+                    await ensureNoSocialAuthTarget(locatorProxy, selectorHint);
                   }
-                  throw new Error('Generated-email mode detected social auth redirect from locator interaction and blocked it.');
-                }
+                  const out = await boundFn(...args);
+                  if (socialAuthGuardEnabled && guardedActionMethods.has(methodName)) {
+                    const currentUrl = typeof pageObj?.url === 'function' ? String(pageObj.url() || '') : '';
+                    if (isSocialAuthUrl(currentUrl)) {
+                      if (guardReturnUrl) {
+                        await pageObj.goto(guardReturnUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+                      }
+                      throw new Error('Generated-email mode detected social auth redirect from locator interaction and blocked it.');
+                    }
+                  }
+                  return out;
+                };
               }
-              return out;
-            };
-          };
-          
-          const wrapReturningLocatorMethod = (methodName, buildHint) => {
-            if (!locator[methodName] || typeof locator[methodName] !== 'function') return;
-            const originalMethod = locator[methodName].bind(locator);
-            locator[methodName] = function(...args) {
-              const out = originalMethod(...args);
-              return decorateLocator(out, typeof buildHint === 'function' ? buildHint(args) : selectorHint);
-            };
-          };
-          
-          // Wrap actionable locator methods
-          ['click', 'fill', 'type', 'press', 'selectOption', 'check', 'uncheck', 'hover', 'screenshot'].forEach((methodName) => {
-            if (!locator[methodName] || typeof locator[methodName] !== 'function') return;
-            const originalMethod = locator[methodName].bind(locator);
-            locator[methodName] = wrapLocatorMethod(methodName, originalMethod);
+              
+              return function(...args) {
+                return boundFn(...args);
+              };
+            }
           });
           
-          // Wrap chaining methods that return another Locator so guard survives `.first().click()`, etc.
-          wrapReturningLocatorMethod('first', () => `${selectorHint} -> first()`);
-          wrapReturningLocatorMethod('last', () => `${selectorHint} -> last()`);
-          wrapReturningLocatorMethod('nth', (args) => `${selectorHint} -> nth(${args?.[0] ?? ''})`);
-          wrapReturningLocatorMethod('filter', () => `${selectorHint} -> filter(...)`);
-          wrapReturningLocatorMethod('locator', (args) => `${selectorHint} -> locator(${String(args?.[0] ?? '').substring(0, 50)})`);
-          wrapReturningLocatorMethod('getByRole', (args) => `${selectorHint} -> getByRole(${String(args?.[0] ?? '')})`);
-          wrapReturningLocatorMethod('getByText', (args) => `${selectorHint} -> getByText(${String(args?.[0] ?? '').substring(0, 50)})`);
-          wrapReturningLocatorMethod('getByLabel', (args) => `${selectorHint} -> getByLabel(${String(args?.[0] ?? '').substring(0, 50)})`);
-          wrapReturningLocatorMethod('getByPlaceholder', (args) => `${selectorHint} -> getByPlaceholder(${String(args?.[0] ?? '').substring(0, 50)})`);
-          wrapReturningLocatorMethod('getByTestId', (args) => `${selectorHint} -> getByTestId(${String(args?.[0] ?? '').substring(0, 50)})`);
-          
-          return locator;
+          locatorProxyCache.set(locator, locatorProxy);
+          return locatorProxy;
         };
         wrapper.locator = function(selector, options) {
           const locator = originalLocator(selector, options);
