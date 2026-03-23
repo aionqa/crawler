@@ -4089,14 +4089,18 @@ return {
           // URL alone is a weak signal (status pages still contain "login" in path).
           const hasLoginControls = hasPasswordField || hasEmailField || hasSubmitLikeButton;
           const looksLikeLoginFlow = hasLoginControls || (onLoginUrl && !hasSuccessSignal);
-          const workflowResultsText = (() => {
-            try {
-              return JSON.stringify(workflowState?.results || workflowState?.stepResults || {});
-            } catch (_) {
-              return '';
+          const resultCandidates = [
+            ...(Object.values(workflowState?.results || {})),
+            ...(Object.values(workflowState?.stepResults || {}))
+          ].map((entry) => (entry && typeof entry === 'object' && entry.result ? entry.result : entry));
+          const hasVerificationEvidence = resultCandidates.some((entry) => {
+            if (!entry || typeof entry !== 'object') return false;
+            if (entry.action === 'registration_submitted_and_verification_link_opened') return true;
+            if (entry.verification && typeof entry.verification === 'object') {
+              return Boolean(entry.verification.clicked || entry.verification.link || entry.verification.url);
             }
-          })();
-          const hasVerificationEvidence = /registration_submitted_and_verification_link_opened|verification_link_opened|openlinkfromemail|\"verification\"/i.test(workflowResultsText);
+            return false;
+          });
           const status = isLoginSuccessUrl
             ? 'success'
             : hasErrorSignal
