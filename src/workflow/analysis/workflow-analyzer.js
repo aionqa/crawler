@@ -2508,6 +2508,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       '=== GENERATED EMAIL AVAILABLE ===',
       `Use generated email address: ${generatedEmail.address}`,
       `Available as context.generated_email.address and context.${variableName}.`,
+      'If registration/sign-up is available, prefer registration via email/password before social auth and use the generated email address.',
       'When registration requires email verification, use test.email.waitForMessage() or test.email.getLatestMessageContent() to read message content.',
       'Extract/copy the critical verification URL with test.email.getVerificationLink(), then open it in browser via test.email.openLinkFromEmail() or test.email.openLink(url).'
     ].join('\n');
@@ -11678,6 +11679,30 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           collect(message?.preview);
           return links;
         };
+        const pickLikelyVerificationLink = (links, { matchText = null } = {}) => {
+          const all = Array.isArray(links) ? links.filter(Boolean).map((u) => String(u).trim()) : [];
+          if (!all.length) return null;
+          const needle = matchText ? String(matchText).toLowerCase() : null;
+          const baseFiltered = needle
+            ? all.filter((u) => u.toLowerCase().includes(needle))
+            : all;
+          const candidates = baseFiltered.length ? baseFiltered : all;
+
+          const scoreLink = (url) => {
+            const u = url.toLowerCase();
+            let score = 0;
+            if (/(verify|verification|confirm|confirmation|activate|activation)/.test(u)) score += 10;
+            if (/(signup|sign-up|register|registration|onboard)/.test(u)) score += 6;
+            if (/(token|code|magic|callback|auth|oauth)/.test(u)) score += 4;
+            if (/(unsubscribe|optout|opt-out|preferences|tracking|view-in-browser)/.test(u)) score -= 8;
+            return score;
+          };
+
+          const ranked = candidates
+            .map((url, idx) => ({ url, idx, score: scoreLink(url) }))
+            .sort((a, b) => (b.score - a.score) || (a.idx - b.idx));
+          return ranked[0] || null;
+        };
         const normalizeEmailMessage = (message) => {
           const normalized = message && typeof message === 'object' ? message : {};
           const links = extractLinksFromEmail(normalized);
@@ -11748,7 +11773,8 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
               timeoutMs = 180000,
               pollIntervalMs = 5000,
               matchText = null,
-              index = 0
+              index = 0,
+              preferLikelyVerification = true
             } = {}) => {
               const message = await testHelper.email.waitForMessage({ subjectIncludes, timeoutMs, pollIntervalMs, limit: 10 });
               const links = extractLinksFromEmail(message);
@@ -11758,8 +11784,15 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
               if (!filtered.length) {
                 throw new Error('No matching verification link found in email message');
               }
-              const resolvedIndex = Math.max(0, Number(index) || 0);
-              const link = filtered[Math.min(resolvedIndex, filtered.length - 1)];
+              let link = null;
+              if (preferLikelyVerification) {
+                const picked = pickLikelyVerificationLink(filtered, { matchText });
+                link = picked?.url || null;
+              }
+              if (!link) {
+                const resolvedIndex = Math.max(0, Number(index) || 0);
+                link = filtered[Math.min(resolvedIndex, filtered.length - 1)];
+              }
               return { link, links: filtered, all_links: links, subject: message?.subject || null, message };
             },
             openLink: async (url, { timeoutMs = 120000 } = {}) => {
@@ -11775,14 +11808,16 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
               timeoutMs = 180000,
               pollIntervalMs = 5000,
               matchText = null,
-              index = 0
+              index = 0,
+              preferLikelyVerification = true
             } = {}) => {
               const linkResult = await testHelper.email.getVerificationLink({
                 subjectIncludes,
                 timeoutMs,
                 pollIntervalMs,
                 matchText,
-                index
+                index,
+                preferLikelyVerification
               });
               await testHelper.email.openLink(linkResult.link, { timeoutMs: 120000 });
               return {
