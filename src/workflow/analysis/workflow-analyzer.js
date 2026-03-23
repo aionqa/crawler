@@ -4968,6 +4968,91 @@ IMPORTANT OUTPUT REQUIREMENTS:
       } else if (skipScriptCacheForGeneratedEmailLogin) {
         console.log('ℹ️ [SCRIPTS-CACHE] Cache bypass for generate_login_script due to generated-email registration mode.');
       }
+      const effectiveUrlLower = String(
+        safeStepPayload?.current_url ||
+        safeStepPayload?.page_url ||
+        effectivePageUrl ||
+        ''
+      ).toLowerCase();
+      const shouldForceGeneratedEmailRegistrationScript =
+        step.id === 'generate_login_script' &&
+        Boolean(generatedEmailForCache?.address) &&
+        effectiveUrlLower.includes('app.aionqa.com/login');
+      if (shouldForceGeneratedEmailRegistrationScript) {
+        aiResponse = {
+          playwright_script: `const generatedEmail = String((context && context.generated_email && context.generated_email.address) || '').trim();
+if (!generatedEmail) {
+  throw new Error('Generated email missing from context.generated_email.address');
+}
+const registrationPassword = 'AionQa!24680';
+const registrationName = 'Aion QA Auto';
+const clickFirstVisible = async (selectors = []) => {
+  for (const selector of selectors) {
+    const el = page.locator(selector).first();
+    const visible = await el.isVisible().catch(() => false);
+    if (!visible) continue;
+    await el.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(500);
+    return selector;
+  }
+  return null;
+};
+
+await clickFirstVisible([
+  'a:has-text("Sign up")',
+  'button:has-text("Sign up")',
+  'a:has-text("Create account")',
+  'button:has-text("Create account")',
+  'a:has-text("Register")',
+  'button:has-text("Register")'
+]);
+
+const emailInput = page.locator('input[type="email"], input[name="email"], input#email').first();
+await emailInput.waitFor({ state: 'visible', timeout: 15000 });
+await emailInput.fill(generatedEmail);
+
+const nameInput = page.locator('input[name="name"], input[name="fullName"], input[placeholder*="name" i]').first();
+if (await nameInput.isVisible().catch(() => false)) {
+  await nameInput.fill(registrationName).catch(() => {});
+}
+
+const passwordInput = page.locator('input[name="password"], input[type="password"]').first();
+await passwordInput.waitFor({ state: 'visible', timeout: 15000 });
+await passwordInput.fill(registrationPassword);
+
+const confirmPasswordInput = page.locator('input[name="confirmPassword"], input[name="confirm_password"], input[placeholder*="confirm" i]').first();
+if (await confirmPasswordInput.isVisible().catch(() => false)) {
+  await confirmPasswordInput.fill(registrationPassword).catch(() => {});
+}
+
+await clickFirstVisible([
+  'button:has-text("Sign up")',
+  'button:has-text("Create account")',
+  'button:has-text("Register")',
+  'button:has-text("Continue")',
+  'button[type="submit"]',
+  'input[type="submit"]'
+]);
+await page.waitForTimeout(1200);
+
+const emailResult = await test.email.openLinkFromEmail({
+  timeoutMs: 240000,
+  pollIntervalMs: 4000,
+  preferLikelyVerification: true
+});
+await page.waitForTimeout(1500);
+return {
+  success: true,
+  action: 'registration_submitted_and_verification_link_opened',
+  generated_email: generatedEmail,
+  verification: emailResult
+};`,
+          description: 'Forced generated-email registration script for app.aionqa.com/login',
+          expected_result: 'Sign-up is submitted with generated email and verification link from inbox is opened.',
+          forced_generated_email_registration_script: true
+        };
+        console.log('🛠️ Using forced generated-email registration script for app.aionqa.com/login.');
+      }
 
       // Reuse step classification for retry behavior
       const configuredRetries = Number.isFinite(step.config?.maxRetries) ? step.config.maxRetries : 1;
