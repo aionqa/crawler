@@ -11744,6 +11744,34 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
             };
             await pageObj.route('**/*', socialRouteBlocker).catch(() => {});
           }
+          
+          // Before executing generated script, bias the page toward email registration
+          // when a visible sign-up CTA exists alongside social OAuth options.
+          try {
+            const hasSocialOAuthCta = await pageObj
+              .locator('button:has-text("Continue with Google"), button:has-text("Continue with GitHub"), button:has-text("Sign in with Google"), button:has-text("Sign in with GitHub")')
+              .first()
+              .isVisible()
+              .catch(() => false);
+            if (hasSocialOAuthCta) {
+              const signupSelectors = [
+                'a:has-text("Sign up")',
+                'button:has-text("Sign up")',
+                'a:has-text("Create account")',
+                'button:has-text("Create account")',
+                'a:has-text("Register")',
+                'button:has-text("Register")'
+              ];
+              for (const selector of signupSelectors) {
+                const signupCta = pageObj.locator(selector).first();
+                const visible = await signupCta.isVisible().catch(() => false);
+                if (!visible) continue;
+                await signupCta.click({ timeout: 5000 }).catch(() => {});
+                await pageObj.waitForTimeout(700).catch(() => {});
+                break;
+              }
+            }
+          } catch {}
         }
         
         // Wrap page object to intercept ALL method calls
