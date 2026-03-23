@@ -4640,7 +4640,7 @@ return {
               script.includes('input_credentials.password');
             if (!usesCreds) {
               // Hard-guard: prepend usable variables and a short sanity log; keep script valid JS.
-              script = `const emailValue = input_credentials.username;\\nconst passwordValue = input_credentials.password;\\n` + script;
+              script = `const emailValue = input_credentials.username;\nconst passwordValue = input_credentials.password;\n` + script;
             }
 
             if (script !== before) {
