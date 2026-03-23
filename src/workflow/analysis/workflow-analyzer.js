@@ -2508,7 +2508,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
       '=== GENERATED EMAIL AVAILABLE ===',
       `Use generated email address: ${generatedEmail.address}`,
       `Available as context.generated_email.address and context.${variableName}.`,
-      'When registration requires email verification, wait for the email with test.email.waitForMessage() and open the link with test.email.clickFirstLinkInLatestMessage().'
+      'When registration requires email verification, use test.email.waitForMessage() or test.email.getLatestMessageContent() to read message content.',
+      'Extract/copy the critical verification URL with test.email.getVerificationLink(), then open it in browser via test.email.openLinkFromEmail() or test.email.openLink(url).'
     ].join('\n');
   }
 
@@ -11673,7 +11674,30 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           };
           collect(message?.html);
           collect(message?.text);
+          collect(message?.snippet);
+          collect(message?.preview);
           return links;
+        };
+        const normalizeEmailMessage = (message) => {
+          const normalized = message && typeof message === 'object' ? message : {};
+          const links = extractLinksFromEmail(normalized);
+          return {
+            ...normalized,
+            subject: normalized?.subject || '',
+            text: normalized?.text || normalized?.plain_text || '',
+            html: normalized?.html || '',
+            links
+          };
+        };
+        const fetchInboxMessages = async ({ limit = 10 } = {}) => {
+          if (!generatedEmailForHelper?.inbox_id || !generatedEmailForHelper?.project_id) {
+            throw new Error('Generated email is not configured in context');
+          }
+          const safeLimit = Math.max(1, Number(limit) || 10);
+          const url = `${backendUrl}/api/emails/inboxes/${encodeURIComponent(generatedEmailForHelper.inbox_id)}/messages?project_id=${encodeURIComponent(generatedEmailForHelper.project_id)}&limit=${safeLimit}`;
+          const resp = await axios.get(url, { headers: authHeaders, timeout: 15000 });
+          const rawMessages = Array.isArray(resp?.data?.messages) ? resp.data.messages : [];
+          return rawMessages.map((msg) => normalizeEmailMessage(msg));
         };
         const testHelper = {
           expect: (v) => ({
@@ -11687,20 +11711,18 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           email: {
             address: generatedEmailForHelper?.address || null,
             inbox_id: generatedEmailForHelper?.inbox_id || null,
+            listMessages: async ({ limit = 10 } = {}) => {
+              return await fetchInboxMessages({ limit });
+            },
             waitForMessage: async ({
               timeoutMs = 180000,
               pollIntervalMs = 5000,
               subjectIncludes = null,
               limit = 10
             } = {}) => {
-              if (!generatedEmailForHelper?.inbox_id || !generatedEmailForHelper?.project_id) {
-                throw new Error('Generated email is not configured in context');
-              }
               const started = Date.now();
               while ((Date.now() - started) <= Number(timeoutMs || 180000)) {
-                const url = `${backendUrl}/api/emails/inboxes/${encodeURIComponent(generatedEmailForHelper.inbox_id)}/messages?project_id=${encodeURIComponent(generatedEmailForHelper.project_id)}&limit=${Math.max(1, Number(limit) || 10)}`;
-                const resp = await axios.get(url, { headers: authHeaders, timeout: 15000 });
-                const messages = Array.isArray(resp?.data?.messages) ? resp.data.messages : [];
+                const messages = await fetchInboxMessages({ limit });
                 const match = messages.find((m) => {
                   if (!subjectIncludes) return true;
                   return String(m?.subject || '').toLowerCase().includes(String(subjectIncludes).toLowerCase());
@@ -11710,19 +11732,72 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
               }
               throw new Error('Timed out waiting for generated-email message');
             },
+            getLatestMessageContent: async ({
+              subjectIncludes = null,
+              timeoutMs = 180000,
+              pollIntervalMs = 5000,
+              limit = 10
+            } = {}) => {
+              return await testHelper.email.waitForMessage({ subjectIncludes, timeoutMs, pollIntervalMs, limit });
+            },
+            extractLinks: (message) => {
+              return extractLinksFromEmail(message || {});
+            },
+            getVerificationLink: async ({
+              subjectIncludes = null,
+              timeoutMs = 180000,
+              pollIntervalMs = 5000,
+              matchText = null,
+              index = 0
+            } = {}) => {
+              const message = await testHelper.email.waitForMessage({ subjectIncludes, timeoutMs, pollIntervalMs, limit: 10 });
+              const links = extractLinksFromEmail(message);
+              const filtered = matchText
+                ? links.filter((u) => String(u).toLowerCase().includes(String(matchText).toLowerCase()))
+                : links;
+              if (!filtered.length) {
+                throw new Error('No matching verification link found in email message');
+              }
+              const resolvedIndex = Math.max(0, Number(index) || 0);
+              const link = filtered[Math.min(resolvedIndex, filtered.length - 1)];
+              return { link, links: filtered, all_links: links, subject: message?.subject || null, message };
+            },
+            openLink: async (url, { timeoutMs = 120000 } = {}) => {
+              if (!url || !/^https?:\/\//i.test(String(url))) {
+                throw new Error('openLink requires an absolute http(s) URL');
+              }
+              const target = String(url).trim();
+              await wrappedPage.goto(target, { waitUntil: 'domcontentloaded', timeout: Math.max(1000, Number(timeoutMs) || 120000) });
+              return { clicked: target };
+            },
+            openLinkFromEmail: async ({
+              subjectIncludes = null,
+              timeoutMs = 180000,
+              pollIntervalMs = 5000,
+              matchText = null,
+              index = 0
+            } = {}) => {
+              const linkResult = await testHelper.email.getVerificationLink({
+                subjectIncludes,
+                timeoutMs,
+                pollIntervalMs,
+                matchText,
+                index
+              });
+              await testHelper.email.openLink(linkResult.link, { timeoutMs: 120000 });
+              return {
+                clicked: linkResult.link,
+                links_found: Array.isArray(linkResult.all_links) ? linkResult.all_links.length : 0,
+                filtered_links_found: Array.isArray(linkResult.links) ? linkResult.links.length : 0,
+                subject: linkResult.subject || null
+              };
+            },
             clickFirstLinkInLatestMessage: async ({
               subjectIncludes = null,
               timeoutMs = 180000,
               pollIntervalMs = 5000
             } = {}) => {
-              const message = await testHelper.email.waitForMessage({ subjectIncludes, timeoutMs, pollIntervalMs, limit: 10 });
-              const links = extractLinksFromEmail(message);
-              if (!links.length) {
-                throw new Error('No clickable links found in email message');
-              }
-              const target = links[0];
-              await wrappedPage.goto(target, { waitUntil: 'domcontentloaded', timeout: 120000 });
-              return { clicked: target, links_found: links.length, subject: message?.subject || null };
+              return await testHelper.email.openLinkFromEmail({ subjectIncludes, timeoutMs, pollIntervalMs, matchText: null, index: 0 });
             }
           }
         };
