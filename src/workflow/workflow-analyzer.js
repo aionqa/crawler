@@ -8762,7 +8762,9 @@ return {
         wrapper.press = wrapMethod('press', pageObj.press.bind(pageObj));
         wrapper.goto = wrapMethod('goto', pageObj.goto.bind(pageObj));
         wrapper.waitForTimeout = wrapMethod('waitForTimeout', pageObj.waitForTimeout.bind(pageObj));
-        wrapper.waitFor = wrapMethod('waitFor', pageObj.waitFor.bind(pageObj));
+        if (typeof pageObj.waitFor === 'function') {
+          wrapper.waitFor = wrapMethod('waitFor', pageObj.waitFor.bind(pageObj));
+        }
         wrapper.waitForLoadState = wrapMethod('waitForLoadState', pageObj.waitForLoadState.bind(pageObj));
         wrapper.waitForSelector = wrapMethod('waitForSelector', pageObj.waitForSelector.bind(pageObj));
         wrapper.selectOption = wrapMethod('selectOption', pageObj.selectOption.bind(pageObj));
@@ -8770,7 +8772,9 @@ return {
         wrapper.uncheck = wrapMethod('uncheck', pageObj.uncheck.bind(pageObj));
         wrapper.hover = wrapMethod('hover', pageObj.hover.bind(pageObj));
         wrapper.focus = wrapMethod('focus', pageObj.focus.bind(pageObj));
-        wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
+        if (typeof pageObj.blur === 'function') {
+          wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
+        }
         
         // Wrap locator method to also intercept methods on locators
         const originalLocator = pageObj.locator.bind(pageObj);
@@ -9320,11 +9324,17 @@ return {
             : ((this.context?.context?.generated_email && typeof this.context.context.generated_email === 'object')
                 ? this.context.context.generated_email
                 : null));
+        const generatedEmailWithFallbacks = generatedEmailContextForExec
+          ? {
+              ...generatedEmailContextForExec,
+              project_id: generatedEmailContextForExec.project_id || this.context?.project_id || this.context?.projectId || null
+            }
+          : null;
         const execContext = {
           pageUrl: (workflowState?.pageUrl) || (typeof pageObj?.url === 'function' ? pageObj.url() : '') || '',
           jobId: jobId || null,
           currentJourney: workflowState?.currentJourney || null,
-          generated_email: generatedEmailContextForExec
+          generated_email: generatedEmailWithFallbacks
         };
         if (execContext.generated_email?.variable_name && execContext.generated_email?.address) {
           execContext[execContext.generated_email.variable_name] = execContext.generated_email.address;
@@ -9386,6 +9396,7 @@ return {
               subjectIncludes = null,
               limit = 10
             } = {}) => {
+              console.log(`[EMAIL-HELPER] waitForMessage start inbox=${generatedEmailForHelper?.inbox_id || 'none'} project=${generatedEmailForHelper?.project_id || 'none'} timeoutMs=${timeoutMs}`);
               const started = Date.now();
               while ((Date.now() - started) <= Number(timeoutMs || 180000)) {
                 const messages = await fetchInboxMessages({ limit });
@@ -9393,7 +9404,10 @@ return {
                   if (!subjectIncludes) return true;
                   return String(m?.subject || '').toLowerCase().includes(String(subjectIncludes).toLowerCase());
                 });
-                if (match) return match;
+                if (match) {
+                  console.log(`[EMAIL-HELPER] message matched subject="${String(match?.subject || '').substring(0, 120)}" links=${Array.isArray(match?.links) ? match.links.length : 0}`);
+                  return match;
+                }
                 await delay(Math.max(1000, Number(pollIntervalMs) || 5000));
               }
               throw new Error('Timed out waiting for generated-email message');
