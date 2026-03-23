@@ -9371,6 +9371,20 @@ return {
         const backendUrl = this.backendUrl;
         const authHeaders = this.getAuthHeaders();
         const generatedEmailForHelper = execContext.generated_email;
+        const resolveGeneratedEmailForHelper = () => {
+          const helperCandidates = [
+            generatedEmailForHelper,
+            execContext.generated_email,
+            this.context?.generated_email,
+            this.context?.options?.generated_email,
+            this.context?.context?.generated_email,
+            workflowState?.variablePool?.generated_email,
+            workflowState?.variablePool?.context?.generated_email,
+            workflowState?.variablePool?.job?.generated_email,
+            workflowState?.variablePool?.job?.options?.generated_email
+          ];
+          return helperCandidates.map((value) => normalizeGeneratedEmailContext(value)).find((value) => !!value) || null;
+        };
         const extractLinksFromEmail = (message) => {
           const links = [];
           const seen = new Set();
@@ -9392,11 +9406,12 @@ return {
           return links;
         };
         const fetchInboxMessages = async ({ limit = 10 } = {}) => {
-          if (!generatedEmailForHelper?.inbox_id || !generatedEmailForHelper?.project_id) {
+          const activeGeneratedEmail = resolveGeneratedEmailForHelper();
+          if (!activeGeneratedEmail?.inbox_id || !activeGeneratedEmail?.project_id) {
             throw new Error('Generated email is not configured in context');
           }
           const safeLimit = Math.max(1, Number(limit) || 10);
-          const url = `${backendUrl}/api/emails/inboxes/${encodeURIComponent(generatedEmailForHelper.inbox_id)}/messages?project_id=${encodeURIComponent(generatedEmailForHelper.project_id)}&limit=${safeLimit}`;
+          const url = `${backendUrl}/api/emails/inboxes/${encodeURIComponent(activeGeneratedEmail.inbox_id)}/messages?project_id=${encodeURIComponent(activeGeneratedEmail.project_id)}&limit=${safeLimit}`;
           const resp = await axios.get(url, { headers: authHeaders, timeout: 15000 });
           const rawMessages = Array.isArray(resp?.data?.messages) ? resp.data.messages : [];
           return rawMessages.map((m) => ({
@@ -9425,7 +9440,8 @@ return {
               subjectIncludes = null,
               limit = 10
             } = {}) => {
-              console.log(`[EMAIL-HELPER] waitForMessage start inbox=${generatedEmailForHelper?.inbox_id || 'none'} project=${generatedEmailForHelper?.project_id || 'none'} timeoutMs=${timeoutMs}`);
+              const activeGeneratedEmail = resolveGeneratedEmailForHelper();
+              console.log(`[EMAIL-HELPER] waitForMessage start inbox=${activeGeneratedEmail?.inbox_id || 'none'} project=${activeGeneratedEmail?.project_id || 'none'} timeoutMs=${timeoutMs}`);
               const started = Date.now();
               while ((Date.now() - started) <= Number(timeoutMs || 180000)) {
                 const messages = await fetchInboxMessages({ limit });
