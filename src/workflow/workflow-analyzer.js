@@ -9324,14 +9324,19 @@ return {
           typeof value.inbox_id === 'string' &&
           value.inbox_id.trim().length > 0
         );
-        const generatedEmailContextForExec =
-          isValidGeneratedEmailContext(this.context?.generated_email)
-            ? this.context.generated_email
-            : (isValidGeneratedEmailContext(this.context?.options?.generated_email)
-                ? this.context.options.generated_email
-                : (isValidGeneratedEmailContext(this.context?.context?.generated_email)
-                    ? this.context.context.generated_email
-                    : null));
+        const generatedEmailCandidates = [
+          this.context?.generated_email,
+          this.context?.options?.generated_email,
+          this.context?.context?.generated_email,
+          this.context?.configuration?.generated_email,
+          this.context?.job?.generated_email,
+          this.context?.job?.options?.generated_email,
+          workflowState?.variablePool?.generated_email,
+          workflowState?.variablePool?.context?.generated_email,
+          workflowState?.variablePool?.job?.generated_email,
+          workflowState?.variablePool?.job?.options?.generated_email
+        ];
+        const generatedEmailContextForExec = generatedEmailCandidates.find((value) => isValidGeneratedEmailContext(value)) || null;
         const generatedEmailWithFallbacks = generatedEmailContextForExec
           ? {
               ...generatedEmailContextForExec,
