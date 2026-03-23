@@ -4089,10 +4089,20 @@ return {
           // URL alone is a weak signal (status pages still contain "login" in path).
           const hasLoginControls = hasPasswordField || hasEmailField || hasSubmitLikeButton;
           const looksLikeLoginFlow = hasLoginControls || (onLoginUrl && !hasSuccessSignal);
+          const workflowResultsText = (() => {
+            try {
+              return JSON.stringify(workflowState?.results || workflowState?.stepResults || {});
+            } catch (_) {
+              return '';
+            }
+          })();
+          const hasVerificationEvidence = /registration_submitted_and_verification_link_opened|verification_link_opened|openlinkfromemail|\"verification\"/i.test(workflowResultsText);
           const status = isLoginSuccessUrl
             ? 'success'
             : hasErrorSignal
               ? 'failure'
+              : hasVerificationEvidence
+                ? 'success'
               : (!looksLikeLoginFlow && hasSuccessSignal)
                 ? 'success'
                 : 'continue';
@@ -4102,7 +4112,7 @@ return {
             status,
             is_complete: isComplete,
             reason: 'AI provider unavailable on runner helper; used deterministic DOM-based login validation fallback.',
-            what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}, cookies=${Array.isArray(cookies) ? cookies.length : 0}`,
+            what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}, verificationEvidence=${hasVerificationEvidence}, cookies=${Array.isArray(cookies) ? cookies.length : 0}`,
             new_content_detected: status !== 'continue',
             content_type: 'page',
             needs_more_testing: !isComplete,
