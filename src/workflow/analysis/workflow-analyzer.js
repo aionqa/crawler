@@ -2466,7 +2466,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
    * Page prompt is fetched from backend and cached in workflowState._pagePromptCache.
    */
   async getEffectiveAdditionalPromptText(workflowState) {
-    const base = (this.context.additional_prompt_text || '').trim();
+    const generatedEmailPrompt = this.getGeneratedEmailPromptText();
+    const base = [this.context.additional_prompt_text || '', generatedEmailPrompt || ''].filter(Boolean).join('\n\n').trim();
     const pageId = workflowState?.pageId || this.context?.page_id || null;
     if (!pageId) return base;
     if (!workflowState._pagePromptCache) workflowState._pagePromptCache = {};
@@ -2487,6 +2488,28 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState._pagePromptCache[pageId] = '';
       return base;
     }
+  }
+
+  getGeneratedEmailContext() {
+    const direct = (this.context?.generated_email && typeof this.context.generated_email === 'object')
+      ? this.context.generated_email
+      : null;
+    const nested = (this.context?.context?.generated_email && typeof this.context.context.generated_email === 'object')
+      ? this.context.context.generated_email
+      : null;
+    return direct || nested || null;
+  }
+
+  getGeneratedEmailPromptText() {
+    const generatedEmail = this.getGeneratedEmailContext();
+    if (!generatedEmail?.address || !generatedEmail?.inbox_id) return '';
+    const variableName = generatedEmail.variable_name || 'generated_email';
+    return [
+      '=== GENERATED EMAIL AVAILABLE ===',
+      `Use generated email address: ${generatedEmail.address}`,
+      `Available as context.generated_email.address and context.${variableName}.`,
+      'When registration requires email verification, wait for the email with test.email.waitForMessage() and open the link with test.email.clickFirstLinkInLatestMessage().'
+    ].join('\n');
   }
 
   /**
@@ -3810,6 +3833,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
       visible_text: workflowState.visibleText,
       additional_prompt_text: effectiveAdditionalPrompt
     };
+    const generatedEmail = this.getGeneratedEmailContext();
+    if (generatedEmail) {
+      descriptionPayload.generated_email = generatedEmail;
+      descriptionPayload.generated_email_address = generatedEmail.address || null;
+    }
 
     const attachments = Array.isArray(step.config?.attachments)
       ? step.config.attachments
@@ -4196,6 +4224,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
       step_number: typeof stepIndex === 'number' ? stepIndex + 1 : null,
       total_steps: totalSteps
     };
+    const generatedEmail = this.getGeneratedEmailContext();
+    if (generatedEmail) {
+      stepPayload.generated_email = generatedEmail;
+      stepPayload.generated_email_address = generatedEmail.address || null;
+    }
     // CRITICAL: Strict validation - credentials MUST be valid in workflowState.inputCredentials, no fallbacks
     if (workflowState.inputCredentials) {
       const creds = workflowState.inputCredentials;
@@ -11615,7 +11648,32 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         const execContext = {
           pageUrl: (workflowState?.pageUrl) || (typeof pageObj?.url === 'function' ? pageObj.url() : '') || '',
           jobId: jobId || null,
-          currentJourney: workflowState?.currentJourney || null
+          currentJourney: workflowState?.currentJourney || null,
+          generated_email: this.getGeneratedEmailContext()
+        };
+        if (execContext.generated_email?.variable_name && execContext.generated_email?.address) {
+          execContext[execContext.generated_email.variable_name] = execContext.generated_email.address;
+        }
+        const backendUrl = this.backendUrl;
+        const authHeaders = this.getAuthHeaders();
+        const generatedEmailForHelper = execContext.generated_email;
+        const extractLinksFromEmail = (message) => {
+          const links = [];
+          const seen = new Set();
+          const collect = (value) => {
+            const text = String(value || '');
+            const matches = text.match(/https?:\/\/[^\s"'<>]+/gi) || [];
+            for (const raw of matches) {
+              const cleaned = String(raw).replace(/[),.;!?]+$/, '');
+              if (!seen.has(cleaned)) {
+                seen.add(cleaned);
+                links.push(cleaned);
+              }
+            }
+          };
+          collect(message?.html);
+          collect(message?.text);
+          return links;
         };
         const testHelper = {
           expect: (v) => ({
@@ -11625,7 +11683,48 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
             toEqual: () => {},
             not: { toBe: () => {}, toContain: () => {} }
           }),
-          step: async (_, fn) => (typeof fn === 'function' ? await fn() : fn)
+          step: async (_, fn) => (typeof fn === 'function' ? await fn() : fn),
+          email: {
+            address: generatedEmailForHelper?.address || null,
+            inbox_id: generatedEmailForHelper?.inbox_id || null,
+            waitForMessage: async ({
+              timeoutMs = 180000,
+              pollIntervalMs = 5000,
+              subjectIncludes = null,
+              limit = 10
+            } = {}) => {
+              if (!generatedEmailForHelper?.inbox_id || !generatedEmailForHelper?.project_id) {
+                throw new Error('Generated email is not configured in context');
+              }
+              const started = Date.now();
+              while ((Date.now() - started) <= Number(timeoutMs || 180000)) {
+                const url = `${backendUrl}/api/emails/inboxes/${encodeURIComponent(generatedEmailForHelper.inbox_id)}/messages?project_id=${encodeURIComponent(generatedEmailForHelper.project_id)}&limit=${Math.max(1, Number(limit) || 10)}`;
+                const resp = await axios.get(url, { headers: authHeaders, timeout: 15000 });
+                const messages = Array.isArray(resp?.data?.messages) ? resp.data.messages : [];
+                const match = messages.find((m) => {
+                  if (!subjectIncludes) return true;
+                  return String(m?.subject || '').toLowerCase().includes(String(subjectIncludes).toLowerCase());
+                });
+                if (match) return match;
+                await delay(Math.max(1000, Number(pollIntervalMs) || 5000));
+              }
+              throw new Error('Timed out waiting for generated-email message');
+            },
+            clickFirstLinkInLatestMessage: async ({
+              subjectIncludes = null,
+              timeoutMs = 180000,
+              pollIntervalMs = 5000
+            } = {}) => {
+              const message = await testHelper.email.waitForMessage({ subjectIncludes, timeoutMs, pollIntervalMs, limit: 10 });
+              const links = extractLinksFromEmail(message);
+              if (!links.length) {
+                throw new Error('No clickable links found in email message');
+              }
+              const target = links[0];
+              await wrappedPage.goto(target, { waitUntil: 'domcontentloaded', timeout: 120000 });
+              return { clicked: target, links_found: links.length, subject: message?.subject || null };
+            }
+          }
         };
         
         const buildFallbackJourneyScript = () => {
