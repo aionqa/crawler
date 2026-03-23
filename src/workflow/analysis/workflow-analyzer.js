@@ -4891,7 +4891,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
       
       let aiResponse;
       const isCacheableScriptStep = step.id === 'generate_login_script' || step.id === 'generate_journey_script';
-      if (isCacheableScriptStep) {
+      const generatedEmailForCache = this.getGeneratedEmailContext();
+      const skipScriptCacheForGeneratedEmailLogin =
+        step.id === 'generate_login_script' &&
+        Boolean(generatedEmailForCache?.address);
+      if (isCacheableScriptStep && !skipScriptCacheForGeneratedEmailLogin) {
         const projectIdForCache = workflowState.projectId || this.context?.project_id || stepContext?.projectId;
         const pageIdForCache = workflowState.pageId || this.context?.page_id || stepContext?.pageId;
         const currentJourney = workflowState.currentLeg || workflowState.currentJourney || workflowState.currentItem;
@@ -4961,6 +4965,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
             console.warn(`⚠️ [SCRIPTS-CACHE] Cache lookup failed for ${step.id}: ${cacheErr.message}`);
           }
         }
+      } else if (skipScriptCacheForGeneratedEmailLogin) {
+        console.log('ℹ️ [SCRIPTS-CACHE] Cache bypass for generate_login_script due to generated-email registration mode.');
       }
 
       // Reuse step classification for retry behavior
