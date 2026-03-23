@@ -11653,6 +11653,37 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         console.log(`📄 VAR_DUMP: executeInNodeContext called`);
         console.log(`📄 VAR_DUMP: credentials passed=${credentials ? JSON.stringify({username: credentials.username || 'MISSING', password: credentials.password ? '***' : 'MISSING'}) : 'NULL'}`);
         console.log(`📄 VAR_DUMP: jobId=${jobId}, backendUrl=${this.backendUrl}`);
+        if (socialAuthGuardEnabled) {
+          const loweredScript = String(scriptCode || '').toLowerCase();
+          if (
+            loweredScript.includes('continue with google') ||
+            loweredScript.includes('continue with github') ||
+            loweredScript.includes('accounts.google.com') ||
+            loweredScript.includes('github.com/login') ||
+            loweredScript.includes('oauth')
+          ) {
+            throw new Error('Generated-email mode rejected script containing social OAuth interactions. Use email/password registration flow.');
+          }
+          if (typeof pageObj?.route === 'function') {
+            const socialRouteBlocker = async (route) => {
+              try {
+                const req = route.request();
+                const url = typeof req?.url === 'function' ? req.url() : '';
+                const isNavRequest = typeof req?.isNavigationRequest === 'function' ? req.isNavigationRequest() : true;
+                if (isNavRequest && isSocialAuthUrl(url)) {
+                  await route.abort('blockedbyclient').catch(async () => {
+                    await route.abort().catch(() => {});
+                  });
+                  return;
+                }
+                await route.continue();
+              } catch {
+                try { await route.continue(); } catch {}
+              }
+            };
+            await pageObj.route('**/*', socialRouteBlocker).catch(() => {});
+          }
+        }
         
         // Wrap page object to intercept ALL method calls
         const executedActionLines = [];
