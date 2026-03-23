@@ -695,6 +695,13 @@ async function executeLoginJob(job, streamInterval) {
     workflow_template_id: jobContext.workflow_template_id,
     project_id: job.project_id || jobContext.project_id || job.projectId || null,
     projectId: job.project_id || jobContext.projectId || null,
+    generated_email: (
+      (jobContext.generated_email && typeof jobContext.generated_email === 'object')
+        ? jobContext.generated_email
+        : ((jobContext.context?.generated_email && typeof jobContext.context.generated_email === 'object')
+            ? jobContext.context.generated_email
+            : null)
+    ),
     // CRITICAL: Explicitly set credentials (don't rely on spread from jobContext)
     credentials: {
       username: finalCredentials.username,
@@ -718,6 +725,10 @@ async function executeLoginJob(job, streamInterval) {
   console.log(`[DEBUG] ✅ workflowExecutionContext.credentials:`, { 
     username: workflowExecutionContext.credentials.username, 
     password: workflowExecutionContext.credentials.password ? '***' : 'MISSING' 
+  });
+  console.log(`[DEBUG] ✅ workflowExecutionContext.generated_email:`, {
+    address: workflowExecutionContext.generated_email?.address || 'MISSING',
+    inbox_id: workflowExecutionContext.generated_email?.inbox_id || 'MISSING'
   });
 
   // Launch local browser (embedded) - viewport from project (strict 1920x1080 default)
