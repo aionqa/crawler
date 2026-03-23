@@ -3971,7 +3971,6 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             playwright_script: `const generatedEmail = String(
   (context && context.generated_email && context.generated_email.address) ||
   (context && context.options && context.options.generated_email && context.options.generated_email.address) ||
-  (input_credentials && input_credentials.username) ||
   ''
 ).trim();
 if (!generatedEmail) throw new Error('No email available for registration flow');
