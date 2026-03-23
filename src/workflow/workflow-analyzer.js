@@ -3979,19 +3979,22 @@ const registrationPassword = 'AionQa!24680';
 const registrationName = 'Aion QA Auto';
 const signUpLink = page.locator('a:has-text("Sign up")').first();
 await signUpLink.waitFor({ state: 'visible', timeout: 10000 });
-await signUpLink.click({ timeout: 5000 });
+console.log('[REG-DEBUG] signUpLinkVisible=' + (await signUpLink.isVisible().catch(() => false)));
+await signUpLink.click({ timeout: 5000, force: true });
 await page.waitForTimeout(700);
 
 const nameInput = page.locator('#register-name').first();
 const emailInput = page.locator('#register-email').first();
 const passwordInput = page.locator('#register-password').first();
 await emailInput.waitFor({ state: 'visible', timeout: 12000 });
+console.log('[REG-DEBUG] registerFieldsVisible=' + (await emailInput.isVisible().catch(() => false)));
 await nameInput.fill(registrationName);
 await emailInput.fill(generatedEmail);
 await passwordInput.fill(registrationPassword);
 
 const registerSubmit = page.locator('button.btn-primary:has-text("Sign Up"), button.btn-primary:has-text("Sign up")').first();
 await registerSubmit.waitFor({ state: 'visible', timeout: 12000 });
+console.log('[REG-DEBUG] registerSubmitText=' + (await registerSubmit.innerText().catch(() => 'missing')));
 let sawRegistrationRequest = false;
 const onRegistrationRequest = (req) => {
   const reqUrl = String(req.url() || '').toLowerCase();
@@ -4008,7 +4011,7 @@ const registrationResponsePromise = page.waitForResponse((resp) => {
   const method = String(resp.request().method() || '').toUpperCase();
   return method === 'POST' || method === 'PUT';
 }, { timeout: 15000 }).catch(() => null);
-await registerSubmit.click({ timeout: 5000 });
+await registerSubmit.click({ timeout: 5000, force: true });
 await page.waitForTimeout(1200);
 const registrationResponse = await registrationResponsePromise;
 page.off('request', onRegistrationRequest);
