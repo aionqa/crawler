@@ -9316,14 +9316,17 @@ return {
         };
         const delay = (ms) => new Promise((r) => setTimeout(r, ms));
         const pageText = await pageObj.locator('body').textContent().catch(() => '') || '';
-        const isValidGeneratedEmailContext = (value) => (
-          !!value &&
-          typeof value === 'object' &&
-          typeof value.address === 'string' &&
-          value.address.trim().length > 0 &&
-          typeof value.inbox_id === 'string' &&
-          value.inbox_id.trim().length > 0
-        );
+        const normalizeGeneratedEmailContext = (value) => {
+          if (!value || typeof value !== 'object') return null;
+          const address = String(value.address || '').trim();
+          const inboxId = String(value.inbox_id || value.inboxId || '').trim();
+          if (!address || !inboxId) return null;
+          return {
+            ...value,
+            address,
+            inbox_id: inboxId
+          };
+        };
         const generatedEmailCandidates = [
           this.context?.generated_email,
           this.context?.options?.generated_email,
@@ -9336,7 +9339,9 @@ return {
           workflowState?.variablePool?.job?.generated_email,
           workflowState?.variablePool?.job?.options?.generated_email
         ];
-        const generatedEmailContextForExec = generatedEmailCandidates.find((value) => isValidGeneratedEmailContext(value)) || null;
+        const generatedEmailContextForExec = generatedEmailCandidates
+          .map((value) => normalizeGeneratedEmailContext(value))
+          .find((value) => !!value) || null;
         const generatedEmailWithFallbacks = generatedEmailContextForExec
           ? {
               ...generatedEmailContextForExec,
