@@ -3971,6 +3971,12 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
             playwright_script: `const generatedEmail = String(
   (context && context.generated_email && context.generated_email.address) ||
   (context && context.options && context.options.generated_email && context.options.generated_email.address) ||
+  (context && typeof context.generated_email === 'string' ? context.generated_email : '') ||
+  (context && context.generated_email_address) ||
+  (context && context.options && context.options.generated_email_address) ||
+  (variable_pool && variable_pool.generated_email && variable_pool.generated_email.address) ||
+  (variable_pool && variable_pool.context && variable_pool.context.generated_email && variable_pool.context.generated_email.address) ||
+  (variable_pool && variable_pool.generated_email_address) ||
   ''
 ).trim();
 if (!generatedEmail) throw new Error('No email available for registration flow');
