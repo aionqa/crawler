@@ -9380,6 +9380,10 @@ return {
         }
         const backendUrl = this.backendUrl;
         const authHeaders = this.getAuthHeaders();
+        const runnerTokenHeader = (() => {
+          const token = String(this.context?.runner_token || process.env.RUNNER_TOKEN || '').trim();
+          return token ? { 'x-runner-token': token } : {};
+        })();
         const generatedEmailForHelper = execContext.generated_email;
         const resolveGeneratedEmailForHelper = () => {
           const helperCandidates = [
@@ -9422,7 +9426,17 @@ return {
           }
           const safeLimit = Math.max(1, Number(limit) || 10);
           const url = `${backendUrl}/api/emails/inboxes/${encodeURIComponent(activeGeneratedEmail.inbox_id)}/messages?project_id=${encodeURIComponent(activeGeneratedEmail.project_id)}&limit=${safeLimit}`;
-          const resp = await axios.get(url, { headers: authHeaders, timeout: 15000 });
+          let resp;
+          try {
+            resp = await axios.get(url, { headers: { ...(authHeaders || {}), ...runnerTokenHeader }, timeout: 15000 });
+          } catch (emailErr) {
+            const statusCode = Number(emailErr?.response?.status || 0);
+            if (statusCode === 401 && Object.keys(runnerTokenHeader).length > 0) {
+              resp = await axios.get(url, { headers: runnerTokenHeader, timeout: 15000 });
+            } else {
+              throw emailErr;
+            }
+          }
           const rawMessages = Array.isArray(resp?.data?.messages) ? resp.data.messages : [];
           return rawMessages.map((m) => ({
             ...m,
