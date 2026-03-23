@@ -603,6 +603,16 @@ async function executeLoginJob(job, streamInterval) {
     maxAttempts: job.maxAttempts || 2,
     context: {
       ...job.context,
+      options: {
+        ...(job.options || {}),
+        ...(job.context?.options || {})
+      },
+      generated_email:
+        (job.context?.generated_email && typeof job.context.generated_email === 'object')
+          ? job.context.generated_email
+          : ((job.options?.generated_email && typeof job.options.generated_email === 'object')
+              ? job.options.generated_email
+              : null),
       workflow_template_id: job.context?.workflow_template_id || job.workflow_template_id || job.options?.workflow_template_id
     }
   };
