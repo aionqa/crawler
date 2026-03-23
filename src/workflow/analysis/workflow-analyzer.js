@@ -11748,6 +11748,13 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           // Before executing generated script, bias the page toward email registration
           // when a visible sign-up CTA exists alongside social OAuth options.
           try {
+            if (guardReturnUrl) {
+              const currentUrl = typeof pageObj?.url === 'function' ? String(pageObj.url() || '') : '';
+              if (!currentUrl || currentUrl === 'about:blank') {
+                await pageObj.goto(guardReturnUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+                await pageObj.waitForTimeout(600).catch(() => {});
+              }
+            }
             const hasSocialOAuthCta = await pageObj
               .locator('button:has-text("Continue with Google"), button:has-text("Continue with GitHub"), button:has-text("Sign in with Google"), button:has-text("Sign in with GitHub")')
               .first()
