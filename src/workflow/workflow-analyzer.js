@@ -3992,6 +3992,15 @@ await passwordInput.fill(registrationPassword);
 
 const registerSubmit = page.locator('button.btn-primary:has-text("Sign Up"), button.btn-primary:has-text("Sign up")').first();
 await registerSubmit.waitFor({ state: 'visible', timeout: 12000 });
+let sawRegistrationRequest = false;
+const onRegistrationRequest = (req) => {
+  const reqUrl = String(req.url() || '').toLowerCase();
+  const method = String(req.method() || '').toUpperCase();
+  if ((reqUrl.includes('/api/auth/register') || reqUrl.includes('/auth/register') || reqUrl.includes('/register')) && (method === 'POST' || method === 'PUT')) {
+    sawRegistrationRequest = true;
+  }
+};
+page.on('request', onRegistrationRequest);
 const registrationResponsePromise = page.waitForResponse((resp) => {
   const respUrl = String(resp.url() || '').toLowerCase();
   const isRegisterEndpoint = respUrl.includes('/api/auth/register') || respUrl.includes('/auth/register') || respUrl.includes('/register');
@@ -4002,11 +4011,17 @@ const registrationResponsePromise = page.waitForResponse((resp) => {
 await registerSubmit.click({ timeout: 5000 });
 await page.waitForTimeout(1200);
 const registrationResponse = await registrationResponsePromise;
+page.off('request', onRegistrationRequest);
 await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
 const postSubmitText = ((await page.textContent('body')) || '').toLowerCase();
 const hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(postSubmitText);
-if (!registrationResponse && !hasRegistrationSuccessSignal) {
+const responseStatus = registrationResponse ? registrationResponse.status() : null;
+console.log('[REG-EVIDENCE] requestSeen=' + sawRegistrationRequest + ' responseStatus=' + (responseStatus || 'none') + ' successSignal=' + hasRegistrationSuccessSignal);
+if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
   throw new Error('Registration submit did not produce observable success evidence');
+}
+if (registrationResponse && Number(responseStatus || 0) >= 400 && !hasRegistrationSuccessSignal) {
+  throw new Error('Registration request failed with status ' + responseStatus);
 }
 const emailResult = await test.email.openLinkFromEmail({
   timeoutMs: 35000,
