@@ -3794,9 +3794,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const generatedEmailContext =
         (this.context?.generated_email && typeof this.context.generated_email === 'object')
           ? this.context.generated_email
+          : ((this.context?.options?.generated_email && typeof this.context.options.generated_email === 'object')
+              ? this.context.options.generated_email
           : ((this.context?.context?.generated_email && typeof this.context.context.generated_email === 'object')
               ? this.context.context.generated_email
-              : null);
+              : null));
       const generatedEmailAddress = String(generatedEmailContext?.address || '').trim();
 
       const isCacheableScriptStep =
@@ -9341,9 +9343,11 @@ return {
         const generatedEmailContextForExec =
           (this.context?.generated_email && typeof this.context.generated_email === 'object')
             ? this.context.generated_email
+            : ((this.context?.options?.generated_email && typeof this.context.options.generated_email === 'object')
+                ? this.context.options.generated_email
             : ((this.context?.context?.generated_email && typeof this.context.context.generated_email === 'object')
                 ? this.context.context.generated_email
-                : null);
+                : null));
         const execContext = {
           pageUrl: (workflowState?.pageUrl) || (typeof pageObj?.url === 'function' ? pageObj.url() : '') || '',
           jobId: jobId || null,
