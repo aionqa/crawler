@@ -11425,6 +11425,36 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           }
         };
         
+        const socialAuthTextPattern = /google|github|apple|microsoft|oauth|continue with|sign in with|sign up with/i;
+        const readLocatorSocialFingerprint = async (loc, fallback = '') => {
+          try {
+            const first = typeof loc?.first === 'function' ? loc.first() : loc;
+            const [innerText, textContent, ariaLabel, titleAttr, dataProvider, href] = await Promise.all([
+              first?.innerText?.({ timeout: 1000 }).catch(() => ''),
+              first?.textContent?.().catch(() => ''),
+              first?.getAttribute?.('aria-label').catch(() => ''),
+              first?.getAttribute?.('title').catch(() => ''),
+              first?.getAttribute?.('data-provider').catch(() => ''),
+              first?.getAttribute?.('href').catch(() => '')
+            ]);
+            return [fallback, innerText, textContent, ariaLabel, titleAttr, dataProvider, href]
+              .map((v) => String(v || '').trim())
+              .filter(Boolean)
+              .join(' | ');
+          } catch {
+            return String(fallback || '');
+          }
+        };
+        const ensureNoSocialAuthTarget = async (loc, fallback = '') => {
+          if (!socialAuthGuardEnabled) return;
+          const fingerprint = await readLocatorSocialFingerprint(loc, fallback);
+          const socialByText = socialAuthTextPattern.test(fingerprint);
+          const socialByUrl = isSocialAuthUrl(fingerprint);
+          if (socialByText || socialByUrl) {
+            throw new Error('Generated-email mode blocked social auth element interaction. Use email/password registration flow.');
+          }
+        };
+        
         // Wrap common Playwright methods to log execution
         const wrapMethod = (methodName, originalMethod) => {
           return async function(...args) {
@@ -11435,6 +11465,9 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
             }
             if (socialAuthGuardEnabled && (methodName === 'click' || methodName === 'press') && typeof args[0] === 'string' && hasSocialAuthSelectorHint(args[0])) {
               throw new Error('Generated-email mode blocks social auth button interactions. Use email/password registration flow.');
+            }
+            if (socialAuthGuardEnabled && methodName === 'click' && typeof args[0] === 'string') {
+              await ensureNoSocialAuthTarget(pageObj.locator(args[0]), args[0]);
             }
             if (methodName === 'waitForTimeout' && args.length > 0) {
               const raw = args[0];
@@ -11484,73 +11517,98 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         
         // Wrap locator method to also intercept methods on locators
         const originalLocator = pageObj.locator.bind(pageObj);
-        wrapper.locator = function(selector, options) {
-          const locator = originalLocator(selector, options);
+        const decorateLocator = (locator, selectorHint = '') => {
+          if (!locator || typeof locator !== 'object') return locator;
+          if (locator.__aionqaGuardWrapped) return locator;
+          Object.defineProperty(locator, '__aionqaGuardWrapped', { value: true, enumerable: false, configurable: true });
           
           // Wrap locator methods
           const wrapLocatorMethod = (methodName, originalLocatorMethod) => {
             return async function(...args) {
-              await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).${methodName}`, args);
-              if (socialAuthGuardEnabled && methodName === 'click') {
-                const selectorText = typeof selector === 'string' ? selector : '';
-                if (hasSocialAuthSelectorHint(selectorText)) {
-                  throw new Error('Generated-email mode blocks social auth locator interactions. Use email/password registration flow.');
-                }
+              await logAction(`locator(${String(selectorHint).substring(0, 80)}).${methodName}`, args);
+              if (socialAuthGuardEnabled && (methodName === 'click' || methodName === 'press' || methodName === 'check')) {
+                await ensureNoSocialAuthTarget(locator, selectorHint);
               }
               const out = await originalLocatorMethod.apply(locator, args);
-              if (socialAuthGuardEnabled && methodName === 'click') {
+              if (socialAuthGuardEnabled && (methodName === 'click' || methodName === 'press' || methodName === 'check')) {
                 const currentUrl = typeof pageObj?.url === 'function' ? String(pageObj.url() || '') : '';
                 if (isSocialAuthUrl(currentUrl)) {
                   if (guardReturnUrl) {
                     await pageObj.goto(guardReturnUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
                   }
-                  throw new Error('Generated-email mode detected social auth redirect from locator click and blocked it.');
+                  throw new Error('Generated-email mode detected social auth redirect from locator interaction and blocked it.');
                 }
               }
               return out;
             };
           };
           
-          // Wrap common locator methods
-          if (locator.click) {
-            const originalLocatorClick = locator.click.bind(locator);
-            locator.click = wrapLocatorMethod('click', originalLocatorClick);
-          }
-          if (locator.fill) {
-            const originalLocatorFill = locator.fill.bind(locator);
-            locator.fill = wrapLocatorMethod('fill', originalLocatorFill);
-          }
-          if (locator.type) {
-            const originalLocatorType = locator.type.bind(locator);
-            locator.type = wrapLocatorMethod('type', originalLocatorType);
-          }
-          if (locator.press) {
-            const originalLocatorPress = locator.press.bind(locator);
-            locator.press = wrapLocatorMethod('press', originalLocatorPress);
-          }
-          if (locator.selectOption) {
-            const originalLocatorSelectOption = locator.selectOption.bind(locator);
-            locator.selectOption = wrapLocatorMethod('selectOption', originalLocatorSelectOption);
-          }
-          if (locator.check) {
-            const originalLocatorCheck = locator.check.bind(locator);
-            locator.check = wrapLocatorMethod('check', originalLocatorCheck);
-          }
-          if (locator.uncheck) {
-            const originalLocatorUncheck = locator.uncheck.bind(locator);
-            locator.uncheck = wrapLocatorMethod('uncheck', originalLocatorUncheck);
-          }
-          if (locator.hover) {
-            const originalLocatorHover = locator.hover.bind(locator);
-            locator.hover = wrapLocatorMethod('hover', originalLocatorHover);
-          }
-          if (locator.screenshot) {
-            const originalLocatorScreenshot = locator.screenshot.bind(locator);
-            locator.screenshot = wrapLocatorMethod('screenshot', originalLocatorScreenshot);
-          }
+          const wrapReturningLocatorMethod = (methodName, buildHint) => {
+            if (!locator[methodName] || typeof locator[methodName] !== 'function') return;
+            const originalMethod = locator[methodName].bind(locator);
+            locator[methodName] = function(...args) {
+              const out = originalMethod(...args);
+              return decorateLocator(out, typeof buildHint === 'function' ? buildHint(args) : selectorHint);
+            };
+          };
+          
+          // Wrap actionable locator methods
+          ['click', 'fill', 'type', 'press', 'selectOption', 'check', 'uncheck', 'hover', 'screenshot'].forEach((methodName) => {
+            if (!locator[methodName] || typeof locator[methodName] !== 'function') return;
+            const originalMethod = locator[methodName].bind(locator);
+            locator[methodName] = wrapLocatorMethod(methodName, originalMethod);
+          });
+          
+          // Wrap chaining methods that return another Locator so guard survives `.first().click()`, etc.
+          wrapReturningLocatorMethod('first', () => `${selectorHint} -> first()`);
+          wrapReturningLocatorMethod('last', () => `${selectorHint} -> last()`);
+          wrapReturningLocatorMethod('nth', (args) => `${selectorHint} -> nth(${args?.[0] ?? ''})`);
+          wrapReturningLocatorMethod('filter', () => `${selectorHint} -> filter(...)`);
+          wrapReturningLocatorMethod('locator', (args) => `${selectorHint} -> locator(${String(args?.[0] ?? '').substring(0, 50)})`);
+          wrapReturningLocatorMethod('getByRole', (args) => `${selectorHint} -> getByRole(${String(args?.[0] ?? '')})`);
+          wrapReturningLocatorMethod('getByText', (args) => `${selectorHint} -> getByText(${String(args?.[0] ?? '').substring(0, 50)})`);
+          wrapReturningLocatorMethod('getByLabel', (args) => `${selectorHint} -> getByLabel(${String(args?.[0] ?? '').substring(0, 50)})`);
+          wrapReturningLocatorMethod('getByPlaceholder', (args) => `${selectorHint} -> getByPlaceholder(${String(args?.[0] ?? '').substring(0, 50)})`);
+          wrapReturningLocatorMethod('getByTestId', (args) => `${selectorHint} -> getByTestId(${String(args?.[0] ?? '').substring(0, 50)})`);
           
           return locator;
         };
+        wrapper.locator = function(selector, options) {
+          const locator = originalLocator(selector, options);
+          return decorateLocator(locator, typeof selector === 'string' ? selector : 'locator');
+        };
+        
+        // Wrap role/text based selectors that often bypass plain page.locator(...) wrapping.
+        if (typeof pageObj.getByRole === 'function') {
+          wrapper.getByRole = function(...args) {
+            const loc = pageObj.getByRole(...args);
+            return decorateLocator(loc, `getByRole(${String(args?.[0] ?? '')})`);
+          };
+        }
+        if (typeof pageObj.getByText === 'function') {
+          wrapper.getByText = function(...args) {
+            const loc = pageObj.getByText(...args);
+            return decorateLocator(loc, `getByText(${String(args?.[0] ?? '').substring(0, 50)})`);
+          };
+        }
+        if (typeof pageObj.getByLabel === 'function') {
+          wrapper.getByLabel = function(...args) {
+            const loc = pageObj.getByLabel(...args);
+            return decorateLocator(loc, `getByLabel(${String(args?.[0] ?? '').substring(0, 50)})`);
+          };
+        }
+        if (typeof pageObj.getByPlaceholder === 'function') {
+          wrapper.getByPlaceholder = function(...args) {
+            const loc = pageObj.getByPlaceholder(...args);
+            return decorateLocator(loc, `getByPlaceholder(${String(args?.[0] ?? '').substring(0, 50)})`);
+          };
+        }
+        if (typeof pageObj.getByTestId === 'function') {
+          wrapper.getByTestId = function(...args) {
+            const loc = pageObj.getByTestId(...args);
+            return decorateLocator(loc, `getByTestId(${String(args?.[0] ?? '').substring(0, 50)})`);
+          };
+        }
         
         // Wrap screenshot method to capture and log screenshots during script execution
         const originalScreenshot = pageObj.screenshot.bind(pageObj);
