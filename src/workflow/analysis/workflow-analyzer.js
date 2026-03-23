@@ -11322,6 +11322,24 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           console.warn(`Script preview: ${code.substring(0, 500)}`);
         }
       }
+      const generatedEmailContextForGuard = this.getGeneratedEmailContext();
+      const socialAuthGuardEnabled = Boolean(generatedEmailContextForGuard?.address);
+      const guardReturnUrl = String(this.context?.login_url || this.context?.start_url || '').trim();
+      const socialAuthHostPattern = /(^|\.)accounts\.google\.com$|(^|\.)github\.com$|(^|\.)appleid\.apple\.com$|(^|\.)login\.microsoftonline\.com$/i;
+      const isSocialAuthUrl = (value) => {
+        try {
+          const raw = String(value || '').trim();
+          if (!raw) return false;
+          const parsed = new URL(raw, guardReturnUrl || 'https://example.invalid');
+          return socialAuthHostPattern.test(parsed.hostname || '');
+        } catch {
+          return false;
+        }
+      };
+      const hasSocialAuthSelectorHint = (value) => {
+        const text = String(value || '').toLowerCase();
+        return /continue with google|continue with github|sign in with google|sign in with github|oauth|social/.test(text);
+      };
       
       // Wrap page object to intercept ALL Playwright method calls and log execution
       const createPageWrapperWithScreenshot = (pageObj, jobId, backendUrl, getAuthHeaders, stepInfo = null, recordAction = null) => {
@@ -11406,6 +11424,12 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           return async function(...args) {
             console.log(`🔍 Wrapper called for method: ${methodName}`);
             await logAction(methodName, args);
+            if (socialAuthGuardEnabled && methodName === 'goto' && typeof args[0] === 'string' && isSocialAuthUrl(args[0])) {
+              throw new Error('Generated-email mode blocks social auth navigation (Google/GitHub/OAuth). Use email/password registration flow.');
+            }
+            if (socialAuthGuardEnabled && (methodName === 'click' || methodName === 'press') && typeof args[0] === 'string' && hasSocialAuthSelectorHint(args[0])) {
+              throw new Error('Generated-email mode blocks social auth button interactions. Use email/password registration flow.');
+            }
             if (methodName === 'waitForTimeout' && args.length > 0) {
               const raw = args[0];
               if (typeof raw === 'function') {
@@ -11417,7 +11441,17 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
                 args[0] = 1000;
               }
             }
-            return await originalMethod.apply(pageObj, args);
+            const out = await originalMethod.apply(pageObj, args);
+            if (socialAuthGuardEnabled && (methodName === 'click' || methodName === 'goto' || methodName === 'press')) {
+              const currentUrl = typeof pageObj?.url === 'function' ? String(pageObj.url() || '') : '';
+              if (isSocialAuthUrl(currentUrl)) {
+                if (guardReturnUrl) {
+                  await pageObj.goto(guardReturnUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+                }
+                throw new Error('Generated-email mode detected social auth redirect and blocked it. Continue with email/password registration path.');
+              }
+            }
+            return out;
           };
         };
         
@@ -11451,7 +11485,23 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           const wrapLocatorMethod = (methodName, originalLocatorMethod) => {
             return async function(...args) {
               await logAction(`locator(${typeof selector === 'string' ? selector.substring(0, 50) : '...'}).${methodName}`, args);
-              return await originalLocatorMethod.apply(locator, args);
+              if (socialAuthGuardEnabled && methodName === 'click') {
+                const selectorText = typeof selector === 'string' ? selector : '';
+                if (hasSocialAuthSelectorHint(selectorText)) {
+                  throw new Error('Generated-email mode blocks social auth locator interactions. Use email/password registration flow.');
+                }
+              }
+              const out = await originalLocatorMethod.apply(locator, args);
+              if (socialAuthGuardEnabled && methodName === 'click') {
+                const currentUrl = typeof pageObj?.url === 'function' ? String(pageObj.url() || '') : '';
+                if (isSocialAuthUrl(currentUrl)) {
+                  if (guardReturnUrl) {
+                    await pageObj.goto(guardReturnUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+                  }
+                  throw new Error('Generated-email mode detected social auth redirect from locator click and blocked it.');
+                }
+              }
+              return out;
             };
           };
           
