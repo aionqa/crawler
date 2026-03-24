@@ -3802,6 +3802,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
               ? this.context.context.generated_email
               : null));
       const generatedEmailAddress = String(generatedEmailContext?.address || '').trim();
+      const generatedEmailModeEnabled = Boolean(generatedEmailAddress);
 
       const isCacheableScriptStep =
         isGenerateLoginScriptStep ||
