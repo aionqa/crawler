@@ -4591,7 +4591,21 @@ return {
         console.log(`🔍 Response keys: ${Object.keys(parsedResponse).join(', ')}`);
         // CRITICAL: For generate_login_script step, validate required playwright_script field
         if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
+          const loginScriptFallback = generatedEmailDeterministicFallbackResponse || deterministicLoginFallbackResponse;
           if (!parsedResponse.playwright_script) {
+            if (loginScriptFallback?.playwright_script) {
+              parsedResponse.playwright_script = loginScriptFallback.playwright_script;
+              parsedResponse.reason = `${parsedResponse.reason || ''} [fallback script injected: missing playwright_script]`.trim();
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(
+                  jobId,
+                  'warn',
+                  `⚠️ Missing playwright_script from AI for ${step.id || step.name}; injected deterministic fallback script`,
+                  'WORKFLOW-ANALYZER',
+                  { step_id: step.id, generated_email_mode: generatedEmailModeEnabled }
+                );
+              }
+            } else {
             const errorMessage = `Missing required field "playwright_script" in generate_login_script response for step "${step.name || step.id}"`;
             const missingPath = 'response.playwright_script';
             const fullContext = {
@@ -4613,10 +4627,24 @@ return {
               await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
             }
             throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nAvailable keys: ${Object.keys(parsedResponse).join(', ')}\nFull response: ${JSON.stringify(parsedResponse, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+            }
           }
           
           // Validate playwright_script is a string
           if (typeof parsedResponse.playwright_script !== 'string' || parsedResponse.playwright_script.trim().length === 0) {
+            if (loginScriptFallback?.playwright_script) {
+              parsedResponse.playwright_script = loginScriptFallback.playwright_script;
+              parsedResponse.reason = `${parsedResponse.reason || ''} [fallback script injected: invalid playwright_script]`.trim();
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(
+                  jobId,
+                  'warn',
+                  `⚠️ Invalid playwright_script from AI for ${step.id || step.name}; injected deterministic fallback script`,
+                  'WORKFLOW-ANALYZER',
+                  { step_id: step.id, generated_email_mode: generatedEmailModeEnabled }
+                );
+              }
+            } else {
             const errorMessage = `Invalid playwright_script value in generate_login_script response for step "${step.name || step.id}". Expected non-empty string, got: ${typeof parsedResponse.playwright_script}`;
             const fullContext = {
               step_id: step.id,
@@ -4635,6 +4663,7 @@ return {
               await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
             }
             throw new Error(`${errorMessage}\nplaywright_script value: ${JSON.stringify(parsedResponse.playwright_script)}\nFull response: ${JSON.stringify(parsedResponse, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+            }
           }
           
           console.log(`✅ playwright_script PRESENT in response: ${parsedResponse.playwright_script.length} chars`);
