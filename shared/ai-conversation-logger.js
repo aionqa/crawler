@@ -1161,8 +1161,22 @@ export class AIConversationLogger {
         project_id: payload?.project_id || sourcePayload?.project_id || this.context?.project_id,
         projectId: payload?.project_id || sourcePayload?.project_id || this.context?.project_id
       };
-      // AI service must be explicitly configured (no fallbacks). Use context.ai_services from helper config.
-      const aiServices = this.context?.ai_services || payload?.ai_services || sourcePayload?.ai_services;
+      // AI service must be explicitly configured (no fallbacks). Prefer ai_services; if absent,
+      // derive a single service from llm_config.endpoint for compatibility with login flows.
+      const endpointFromLlmConfig =
+        this.context?.llm_config?.endpoint ||
+        payload?.llm_config?.endpoint ||
+        sourcePayload?.llm_config?.endpoint ||
+        contextUpdate?.llm_config?.endpoint ||
+        null;
+
+      const aiServicesRaw = this.context?.ai_services || payload?.ai_services || sourcePayload?.ai_services;
+      const aiServices = (Array.isArray(aiServicesRaw) && aiServicesRaw.length > 0)
+        ? aiServicesRaw
+        : (endpointFromLlmConfig
+            ? [{ url: String(endpointFromLlmConfig).trim(), max_input_tokens: 128000, label: 'llm_config.endpoint' }]
+            : []);
+
       if (!Array.isArray(aiServices) || aiServices.length === 0) {
         throw new Error('AI not configured. Add at least one AI service in the helper config (e.g. OpenAI or LM Studio URL).');
       }
