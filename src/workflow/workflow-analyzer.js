@@ -4264,7 +4264,7 @@ return {
               { status, current_url: currentUrl, has_password_field: hasPasswordField, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
             );
           }
-        } else {
+        } else if (!aiResponse) {
         // SEO assistant is useful even without an AI provider; provide a deterministic best-effort analysis.
         // This keeps local scans testable when OPENAI_API_KEY is not configured.
         const isAiUnavailableError =
