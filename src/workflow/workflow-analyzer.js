@@ -4972,6 +4972,11 @@ return {
             parsedResponse.script ||
             parsedResponse.code ||
             parsedResponse.legScriptToExecute ||
+            ((isGenerateLoginScriptStep && generatedEmailDeterministicFallbackResponse?.playwright_script)
+              ? generatedEmailDeterministicFallbackResponse.playwright_script
+              : ((isGenerateLoginScriptStep && deterministicLoginFallbackResponse?.playwright_script)
+                ? deterministicLoginFallbackResponse.playwright_script
+                : null)) ||
             null;
 
           if (typeof fallbackScript === 'string' && fallbackScript.trim().length > 0) {
@@ -4989,6 +4994,15 @@ return {
             }
             
             if (cleanedFallback && cleanedFallback.trim().length > 0) {
+              if (isGenerateLoginScriptStep && !parsedResponse.playwright_script && jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(
+                  jobId,
+                  'warn',
+                  `⚠️ Generate Login Script returned no playable script; using deterministic fallback for execution`,
+                  'WORKFLOW-ANALYZER',
+                  { step_id: step.id, generated_email_mode: generatedEmailModeEnabled }
+                );
+              }
               workflowState.legScriptToExecute = cleanedFallback;
               if (!workflowState.context) {
                 workflowState.context = {};
