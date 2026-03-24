@@ -4968,9 +4968,26 @@ IMPORTANT OUTPUT REQUIREMENTS:
       } else if (skipScriptCacheForGeneratedEmailLogin) {
         console.log('ℹ️ [SCRIPTS-CACHE] Cache bypass for generate_login_script due to generated-email registration mode.');
       }
+      const pageUrlForForcedRegistration = String(
+        effectivePageUrl ||
+        workflowState?.pageUrl ||
+        workflowState?.currentUrl ||
+        ''
+      );
+      let isAppAionqaLoginPage = false;
+      try {
+        const parsed = new URL(pageUrlForForcedRegistration);
+        isAppAionqaLoginPage =
+          parsed.hostname.toLowerCase() === 'app.aionqa.com' &&
+          /^\/login(?:\/|$)/i.test(parsed.pathname || '/');
+      } catch (_) {
+        isAppAionqaLoginPage = false;
+      }
+
       const shouldForceGeneratedEmailRegistrationScript =
         step.id === 'generate_login_script' &&
-        Boolean(generatedEmailForCache?.address);
+        Boolean(generatedEmailForCache?.address) &&
+        isAppAionqaLoginPage;
       if (shouldForceGeneratedEmailRegistrationScript) {
         aiResponse = {
           playwright_script: `const generatedEmail = String((context && context.generated_email && context.generated_email.address) || '').trim();
