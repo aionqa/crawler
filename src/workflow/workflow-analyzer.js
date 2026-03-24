@@ -3787,6 +3787,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.log(`📄 VAR_DUMP: executeAIPromptStep - stepPayload.input_credentials=${stepPayload.input_credentials ? JSON.stringify({username: stepPayload.input_credentials.username || 'MISSING', password: stepPayload.input_credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
       
       let aiResponse;
+      let deterministicLoginFallbackResponse = null;
+      let generatedEmailDeterministicFallbackResponse = null;
       const isGenerateLoginScriptStep =
         String(step.id || '').toLowerCase().includes('generate_login_script') ||
         String(step.name || '').toLowerCase().includes('generate login script') ||
@@ -3959,15 +3961,13 @@ if (!hasPasswordField) {
 
 return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_step_submitted', used_username: usernameValue ? 'set' : 'missing' };
 `.trim();
-        if (!aiResponse) {
-          aiResponse = {
-            playwright_script: deterministicScript,
-            reason: 'Deterministic login script generated to ensure stable credential-based submission.',
-            confidence: 0.8
-          };
-        }
-        if (currentUrl.includes('app.aionqa.com/login')) {
-          aiResponse = {
+        deterministicLoginFallbackResponse = {
+          playwright_script: deterministicScript,
+          reason: 'Deterministic login script fallback used because AI was unavailable.',
+          confidence: 0.7
+        };
+        if (generatedEmailModeEnabled) {
+          generatedEmailDeterministicFallbackResponse = {
             playwright_script: `const generatedEmail = String(
   (context && context.generated_email && context.generated_email.address) ||
   (context && context.options && context.options.generated_email && context.options.generated_email.address) ||
@@ -3982,36 +3982,92 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
 if (!generatedEmail) throw new Error('No email available for registration flow');
 const registrationPassword = 'AionQa!24680';
 const registrationName = 'Aion QA Auto';
-const signUpLink = page.locator('a:has-text("Sign up")').first();
-await signUpLink.waitFor({ state: 'visible', timeout: 10000 });
-console.log('[REG-DEBUG] signUpLinkVisible=' + (await signUpLink.isVisible().catch(() => false)));
-await signUpLink.click({ timeout: 5000, force: true });
-await page.waitForTimeout(700);
+const looksSocialAuth = (txt) => /(google|github|apple|facebook|microsoft|oauth|sso|continue with)/i.test(String(txt || ''));
+const pickFirstVisible = async (selectors, timeoutMs = 5000) => {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    for (const selector of selectors) {
+      const candidate = page.locator(selector).first();
+      const count = await candidate.count().catch(() => 0);
+      if (!count) continue;
+      const visible = await candidate.isVisible().catch(() => false);
+      if (!visible) continue;
+      const labelText = await candidate.innerText().catch(() => '');
+      if (looksSocialAuth(labelText)) continue;
+      return candidate;
+    }
+    await page.waitForTimeout(120);
+  }
+  return null;
+};
 
-const nameInput = page.locator('#register-name').first();
-const emailInput = page.locator('#register-email').first();
-const passwordInput = page.locator('#register-password').first();
-await emailInput.waitFor({ state: 'visible', timeout: 12000 });
-console.log('[REG-DEBUG] registerFieldsVisible=' + (await emailInput.isVisible().catch(() => false)));
-await nameInput.fill(registrationName);
+const registrationEntry = await pickFirstVisible([
+  'a:has-text("Sign up")',
+  'a:has-text("Sign Up")',
+  'button:has-text("Sign up")',
+  'button:has-text("Sign Up")',
+  'a:has-text("Create account")',
+  'button:has-text("Create account")',
+  'a:has-text("Register")',
+  'button:has-text("Register")'
+], 9000);
+if (registrationEntry) {
+  console.log('[REG-DEBUG] registrationEntry=' + (await registrationEntry.innerText().catch(() => 'unknown')));
+  await registrationEntry.click({ timeout: 5000, force: true }).catch(() => {});
+  await page.waitForTimeout(700);
+}
+
+const nameInput = await pickFirstVisible([
+  'input[name*="name" i]:not([type="hidden"])',
+  'input[id*="name" i]:not([type="hidden"])',
+  'input[placeholder*="name" i]:not([type="hidden"])'
+], 5000);
+const emailInput = await pickFirstVisible([
+  'input[type="email"]',
+  'input[name*="email" i]:not([type="hidden"])',
+  'input[id*="email" i]:not([type="hidden"])',
+  'input[placeholder*="email" i]:not([type="hidden"])'
+], 12000);
+const passwordInput = await pickFirstVisible([
+  'input[type="password"]:not([type="hidden"])',
+  'input[name*="password" i]:not([type="hidden"])',
+  'input[id*="password" i]:not([type="hidden"])',
+  'input[placeholder*="password" i]:not([type="hidden"])'
+], 8000);
+
+if (!emailInput || !passwordInput) {
+  throw new Error('Registration form fields were not detected on page');
+}
+console.log('[REG-DEBUG] registerFieldsVisible=true');
+if (nameInput) await nameInput.fill(registrationName).catch(() => {});
 await emailInput.fill(generatedEmail);
 await passwordInput.fill(registrationPassword);
 
-const registerSubmit = page.locator('button.btn-primary:has-text("Sign Up"), button.btn-primary:has-text("Sign up")').first();
-await registerSubmit.waitFor({ state: 'visible', timeout: 12000 });
-console.log('[REG-DEBUG] registerSubmitText=' + (await registerSubmit.innerText().catch(() => 'missing')));
+const registerSubmit = await pickFirstVisible([
+  'button:has-text("Sign up")',
+  'button:has-text("Sign Up")',
+  'button:has-text("Create account")',
+  'button:has-text("Create Account")',
+  'button:has-text("Register")',
+  'button[type="submit"]',
+  'input[type="submit"]'
+], 12000);
+if (!registerSubmit) {
+  throw new Error('Registration submit control not detected on page');
+}
+console.log('[REG-DEBUG] registerSubmitText=' + (await registerSubmit.innerText().catch(() => 'submit')));
 let sawRegistrationRequest = false;
 const onRegistrationRequest = (req) => {
   const reqUrl = String(req.url() || '').toLowerCase();
   const method = String(req.method() || '').toUpperCase();
-  if ((reqUrl.includes('/api/auth/register') || reqUrl.includes('/auth/register') || reqUrl.includes('/register')) && (method === 'POST' || method === 'PUT')) {
+  if ((/register|sign-?up|create-account/.test(reqUrl)) && (method === 'POST' || method === 'PUT')) {
     sawRegistrationRequest = true;
   }
 };
 page.on('request', onRegistrationRequest);
 const waitForRegisterResponse = (timeoutMs = 15000) => page.waitForResponse((resp) => {
   const respUrl = String(resp.url() || '').toLowerCase();
-  const isRegisterEndpoint = respUrl.includes('/api/auth/register') || respUrl.includes('/auth/register') || respUrl.includes('/register');
+  const isRegisterEndpoint = /register|sign-?up|create-account/.test(respUrl);
   if (!isRegisterEndpoint) return false;
   const method = String(resp.request().method() || '').toUpperCase();
   return method === 'POST' || method === 'PUT';
@@ -4024,8 +4080,6 @@ await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
 const postSubmitText = ((await page.textContent('body')) || '').toLowerCase();
 let hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(postSubmitText);
 let responseStatus = registrationResponse ? registrationResponse.status() : null;
-let apiRegistrationStatus = null;
-let apiRegistrationBodyPreview = '';
 if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
   registrationResponsePromise = waitForRegisterResponse(10000);
   await passwordInput.press('Enter').catch(() => {});
@@ -4041,19 +4095,8 @@ if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessS
   const fallbackPostSubmitText = ((await page.textContent('body')) || '').toLowerCase();
   hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(fallbackPostSubmitText);
   responseStatus = registrationResponse ? registrationResponse.status() : null;
-  if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
-    const apiRegisterUrl = 'https:' + String.fromCharCode(47) + String.fromCharCode(47) + 'api.aionqa.com/api/auth/register';
-    const apiResponse = await page.request.post(apiRegisterUrl, {
-      data: { name: registrationName, email: generatedEmail, password: registrationPassword },
-      timeout: 12000
-    }).catch(() => null);
-    apiRegistrationStatus = apiResponse ? Number(apiResponse.status()) : 0;
-    apiRegistrationBodyPreview = apiResponse ? String(await apiResponse.text().catch(() => '')).replace(/\\s+/g, ' ').slice(0, 200) : '';
-    hasRegistrationSuccessSignal = hasRegistrationSuccessSignal || (apiRegistrationStatus >= 200 && apiRegistrationStatus < 300);
-    await page.waitForTimeout(1200);
-  }
 }
-console.log('[REG-EVIDENCE] requestSeen=' + sawRegistrationRequest + ' responseStatus=' + (responseStatus || 'none') + ' apiStatus=' + (apiRegistrationStatus || 'none') + ' successSignal=' + hasRegistrationSuccessSignal + ' apiBody=' + apiRegistrationBodyPreview);
+console.log('[REG-EVIDENCE] requestSeen=' + sawRegistrationRequest + ' responseStatus=' + (responseStatus || 'none') + ' successSignal=' + hasRegistrationSuccessSignal);
 page.off('request', onRegistrationRequest);
 if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessSignal) {
   throw new Error('Registration submit did not produce observable success evidence');
@@ -4073,7 +4116,7 @@ return {
   generated_email: generatedEmail,
   verification: emailResult
 };`,
-            reason: 'Generated-email mode forces deterministic registration + email verification script.',
+            reason: 'Deterministic registration fallback used because AI was unavailable.',
             confidence: 0.9,
             generated_email_mode: true
           };
@@ -4114,9 +4157,22 @@ return {
           stepNameLower.includes('content optimizer') ||
           stepNameLower.includes('content optimization');
 
+        if (isGenerateLoginScriptStep && aiErrorText.includes('AI not configured')) {
+          aiResponse = generatedEmailDeterministicFallbackResponse || deterministicLoginFallbackResponse;
+          if (aiResponse && jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `⚠️ AI unavailable for ${step.id || step.name}; using deterministic login/registration script fallback`,
+              'WORKFLOW-ANALYZER',
+              { step_id: step.id, prompt: promptIdentifier, generated_email_mode: generatedEmailModeEnabled }
+            );
+          }
+        }
+
         // Some helpers run without local AI provider configured.
         // For login validation steps, provide deterministic DOM-based fallback instead of hard-failing.
-        if (isLoginValidationStep && aiErrorText.includes('AI not configured')) {
+        if (!aiResponse && isLoginValidationStep && aiErrorText.includes('AI not configured')) {
           let bodyText = '';
           let hasPasswordField = false;
           let hasEmailField = false;
