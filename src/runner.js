@@ -349,6 +349,10 @@ async function pollForJob() {
         console.error(`   Status: ${error.response.status}`);
         console.error(`   Response:`, error.response.data);
       }
+      // Backend looks degraded/unreachable; avoid tripling load by probing other queues immediately.
+      if (isRetryableBackendError(error)) {
+        return null;
+      }
     }
   }
 
@@ -370,6 +374,9 @@ async function pollForJob() {
       console.error(`❌ Authentication failed when polling for security jobs!`);
     } else {
       console.error(`❌ Error polling for security jobs:`, error.message);
+      if (isRetryableBackendError(error)) {
+        return null;
+      }
     }
   }
 
