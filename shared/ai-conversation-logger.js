@@ -1265,10 +1265,60 @@ export class AIConversationLogger {
           const status = err.response?.status || err.status;
           const isHttpError = status != null && (status < 200 || status >= 300);
           const msg = err.message || String(err);
+          const code = String(err?.code || '').toUpperCase();
+          const lowerMsg = String(msg || '').toLowerCase();
+          const isNetworkDnsError =
+            ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH'].includes(code) ||
+            lowerMsg.includes('getaddrinfo') ||
+            lowerMsg.includes('enotfound') ||
+            lowerMsg.includes('socket hang up');
           if (attemptNumber === 1) {
             console.warn(`[AI-CALL] ⚠️ AI service failed (${chosen.label || serviceUrl}): ${msg}${isHttpError ? ` (HTTP ${status})` : ''}`);
           }
-          // No fallbacks: fail immediately, do not try next AI service
+          const hasAnotherService = idx < (eligibleServices.length - 1);
+          if (isNetworkDnsError && hasAnotherService) {
+            console.warn(`[AI-CALL] ↪️ Retrying with next AI service due to network/DNS failure (${code || 'no_code'})`);
+            continue;
+          }
+          // Backward-compatible alias rescue: old helper endpoint names like ai-service-xxxx may become stale after container redeploy.
+          if (isNetworkDnsError && serviceUrl && /ai-service-[a-z0-9-]+/i.test(String(serviceUrl))) {
+            try {
+              const aliasUrl = new URL(String(serviceUrl));
+              aliasUrl.hostname = 'aionqa-ai-service';
+              contextUpdate.llm_config = { ...this.context?.llm_config, endpoint: aliasUrl.toString() };
+              const aliasClient = this.getOpenAIClient(contextUpdate);
+              response = await aliasClient.responses.create(openaiRequest);
+              let aliasRaw = typeof response?.output_text === 'string' && response.output_text.trim()
+                ? response.output_text
+                : '';
+              if (!aliasRaw && Array.isArray(response?.output)) {
+                for (const item of response.output) {
+                  if (item?.type === 'message' && Array.isArray(item.content)) {
+                    for (const part of item.content) {
+                      if (part?.type === 'output_text' && part.text != null) {
+                        aliasRaw = String(part.text).trim();
+                        if (aliasRaw) break;
+                      }
+                    }
+                  }
+                  if (aliasRaw) break;
+                }
+              }
+              if (!aliasRaw || !aliasRaw.trim()) {
+                throw new Error('alias_endpoint_empty_response');
+              }
+              let jsonContent = aliasRaw.trim();
+              const codeBlockMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+              if (codeBlockMatch) jsonContent = codeBlockMatch[1].trim();
+              const extracted = extractFirstCompleteJSON(jsonContent);
+              if (extracted) jsonContent = extracted;
+              aiResponse = JSON.parse(jsonContent);
+              console.warn(`[AI-CALL] ✅ Recovered AI call via alias endpoint: ${aliasUrl.toString()}`);
+              break;
+            } catch (aliasErr) {
+              lastError = aliasErr;
+            }
+          }
           throw lastError;
         }
       }
