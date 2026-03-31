@@ -1280,13 +1280,13 @@ export class AIConversationLogger {
             console.warn(`[AI-CALL] ↪️ Retrying with next AI service due to network/DNS failure (${code || 'no_code'})`);
             continue;
           }
-          // Optional alias rescue is env-driven to avoid hardcoded host assumptions.
-          // Enable by setting AI_SERVICE_ALIAS_HOST and optionally AI_SERVICE_STALE_HOST_REGEX.
+          // Optional alias rescue is fully env-driven to avoid hardcoded host assumptions.
+          // Enable by setting AI_SERVICE_ALIAS_HOST and (optionally) AI_SERVICE_STALE_HOST_REGEX.
           const aliasHost = String(process.env.AI_SERVICE_ALIAS_HOST || '').trim();
           let staleHostRegex = null;
           if (aliasHost) {
             try {
-              const rawPattern = String(process.env.AI_SERVICE_STALE_HOST_REGEX || '^ai-service-[a-z0-9-]+$').trim();
+              const rawPattern = String(process.env.AI_SERVICE_STALE_HOST_REGEX || '').trim();
               staleHostRegex = rawPattern ? new RegExp(rawPattern, 'i') : null;
             } catch (regexErr) {
               console.warn(`[AI-CALL] Invalid AI_SERVICE_STALE_HOST_REGEX, alias rescue disabled: ${regexErr.message}`);
@@ -1296,7 +1296,7 @@ export class AIConversationLogger {
           if (isNetworkDnsError && serviceUrl && aliasHost) {
             try {
               const aliasUrl = new URL(String(serviceUrl));
-              if (!staleHostRegex || !staleHostRegex.test(String(aliasUrl.hostname || ''))) {
+              if (staleHostRegex && !staleHostRegex.test(String(aliasUrl.hostname || ''))) {
                 throw new Error('alias_host_pattern_not_matched');
               }
               if (String(aliasUrl.hostname || '').toLowerCase() === aliasHost.toLowerCase()) {
