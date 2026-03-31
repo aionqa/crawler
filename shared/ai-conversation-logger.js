@@ -757,7 +757,6 @@ export class AIConversationLogger {
     const effectiveJobId = (this.context && (this.context.job_id || this.context.jobId)) ? (this.context.job_id || this.context.jobId) : jobId;
     // Track pending conversation ID for error handling
     let pendingConversationId = null;
-    let pendingChatContextId = null;
     let userMessageText = null; // Store for error handling
     
     try {
@@ -992,80 +991,9 @@ export class AIConversationLogger {
       console.log(`[AI-CALL] 📋 Context: job=${effectiveJobId}, agent=${agentName}, url=${pageUrl || 'N/A'}`);
       console.log(`[AI-CALL] 📊 Schema: ${prompt.response_schema_description?.substring(0, 100) || 'N/A'}...`);
       
-      // 6. Log request immediately with pending status (before making OpenAI call)
-      let pendingConversationId = null;
-      let pendingChatContextId = null;
-      if (effectiveJobId && this.backendUrl) {
-        try {
-          const purpose = this.generateAIPurpose(promptSlug, sourcePayload || payload, pageUrl);
-          const pendingConversationIdValue = `ai-conv-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-          const stepName = sourcePayload?.step_name || sourcePayload?.stepId || 'AI Request';
-          const requestTree = {
-            model: model,
-            prompt: promptSlug,
-            page: pageUrl || 'Unknown',
-            step: stepName,
-            parameters: {
-              reasoning_enabled: useReasoning,
-              websearch_enabled: useWebsearch,
-              text_format: textFormat,
-              reasoning_effort: reasoningEffort,
-              verbosity: verbosity,
-              store_logs: storeLogs
-            },
-            request: openaiRequest
-          };
-          // Create pending AI conversation entry (include full_request so Chat tab has request content)
-          const pendingConversationData = {
-            job_id: effectiveJobId,
-            agent_name: agentName,
-            conversation_type: promptSlug,
-            text_request: (userMessageText != null ? String(userMessageText) : '').substring(0, 500), // Preview of request
-            source_payload: sourcePayload || payload,
-            ai_response: null, // No response yet
-            human_request: purpose,
-            human_response: '⏳ Waiting for AI response...',
-            screenshot_id: screenshotId,
-            page_url: pageUrl,
-            timestamp: new Date(),
-            status: 'pending', // Mark as pending
-            attachments: [],
-            metadata: {
-              prompt_slug: promptSlug,
-              pending: true,
-              request_sent_at: new Date().toISOString(),
-              full_request: JSON.stringify(requestTree, null, 2),
-              model: model,
-              model_params: {
-                reasoning_enabled: useReasoning,
-                websearch_enabled: useWebsearch,
-                text_format: textFormat,
-                reasoning_effort: reasoningEffort,
-                verbosity: verbosity,
-                store_logs: storeLogs
-              }
-            },
-            conversation_id: pendingConversationIdValue
-          };
-          
-          const pendingResponse = await fetch(`${this.backendUrl}/ai-conversations`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(pendingConversationData)
-          });
-          
-          if (pendingResponse.ok) {
-            const pendingResult = await pendingResponse.json();
-            pendingConversationId = pendingResult.conversation_id;
-            pendingChatContextId = pendingResult.chat_context_id;
-            console.log(`[AI-CALL] 📤 Request logged with pending status (conversation_id: ${pendingConversationId})`);
-          } else {
-            console.warn(`[AI-CALL] ⚠️ Failed to log pending request: ${pendingResponse.status}`);
-          }
-        } catch (pendingLogError) {
-          console.warn(`[AI-CALL] ⚠️ Error logging pending request: ${pendingLogError.message}`);
-          // Continue with API call even if pending log fails
-        }
+      // 6. Prepare conversation metadata for AI service reporting (AI service is the only reporter)
+      if (effectiveJobId) {
+        pendingConversationId = `ai-conv-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       }
       
       // 6.5. Log AI conversation immediately to job logs with step name, page, and request JSON
@@ -1150,6 +1078,32 @@ export class AIConversationLogger {
         }
       }
       
+      const aiServiceConversationPayload = {
+        conversation_id: pendingConversationId || conversationKey || null,
+        agent_name: agentName,
+        conversation_type: promptSlug,
+        text_request: (userMessageText != null ? String(userMessageText) : '').substring(0, 500),
+        human_request: this.generateAIPurpose(promptSlug, sourcePayload || payload, pageUrl),
+        human_response: null,
+        source_payload: sourcePayload || payload,
+        screenshot_id: screenshotId || null,
+        page_url: pageUrl || null,
+        full_request: JSON.stringify(openaiRequest, null, 2),
+        metadata: {
+          prompt_slug: promptSlug,
+          model: model,
+          model_params: {
+            reasoning_enabled: useReasoning,
+            websearch_enabled: useWebsearch,
+            text_format: textFormat,
+            reasoning_effort: reasoningEffort,
+            verbosity: verbosity,
+            store_logs: storeLogs
+          }
+        }
+      };
+      openaiRequest.aionqa_conversation = aiServiceConversationPayload;
+
       // 7. Make OpenAI call (after ensuring budget)
       if (effectiveJobId) {
         await this.ensureAiBudget(effectiveJobId);
@@ -1425,86 +1379,7 @@ export class AIConversationLogger {
       );
       
       if (conversationRecord) {
-        // Update the pending conversation with the actual response
-        // Add model and params to metadata
-        const enhancedMetadata = {
-          ...conversationRecord.metadata,
-          model: model,
-          model_params: {
-            reasoning_enabled: useReasoning,
-            websearch_enabled: useWebsearch,
-            text_format: textFormat,
-            reasoning_effort: reasoningEffort,
-            verbosity: verbosity,
-            store_logs: storeLogs
-          }
-        };
-        // Structured request context for UI expand/collapse (page_url, visible_text, interactive_elements, etc.)
-        const payloadComponents = this.buildRequestContextComponents(conversationRecord.sourcePayload || payload);
-
-        await this.sendAIConversation(
-          effectiveJobId,
-          agentName,
-          promptSlug,
-          conversationRecord.textRequest,
-          conversationRecord.sourcePayload,
-          conversationRecord.aiResponse,
-          conversationRecord.screenshotId || screenshotId,
-          pageUrl,
-          {
-            human_request: conversationRecord.humanRequest,
-            human_response: conversationRecord.humanResponse,
-            attachments: conversationRecord.attachments,
-            metadata: enhancedMetadata,
-            cost: conversationRecord.cost,
-            usage: conversationRecord.usage,
-            status: 'success', // Update status from pending to success
-            conversation_id: pendingConversationId || conversationKey || null,
-            payload_components: payloadComponents
-          }
-        );
-      } else if (pendingConversationId && effectiveJobId && this.backendUrl) {
-        // If conversationRecord wasn't created but we have a pending conversation, update it directly
-        try {
-          const purpose = this.generateAIPurpose(promptSlug, sourcePayload || payload, pageUrl);
-          const updateData = {
-            job_id: effectiveJobId,
-            agent_name: agentName,
-            conversation_type: promptSlug,
-            text_request: (userMessageText != null ? String(userMessageText) : '').substring(0, 500),
-            source_payload: sourcePayload || payload,
-            ai_response: aiResponse,
-            human_request: purpose,
-            human_response: `AI completed: ${purpose}`,
-            screenshot_id: screenshotId,
-            page_url: pageUrl,
-            timestamp: new Date(),
-            status: 'success', // Update from pending to success
-            usage: response.usage,
-            cost: this.calculateCost(response.usage, response.model),
-            conversation_id: pendingConversationId,
-            metadata: {
-              model: model,
-              model_params: {
-                reasoning_enabled: useReasoning,
-                websearch_enabled: useWebsearch,
-                text_format: textFormat,
-                reasoning_effort: reasoningEffort,
-                verbosity: verbosity,
-                store_logs: storeLogs
-              }
-            }
-          };
-          
-          await fetch(`${this.backendUrl}/ai-conversations`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updateData)
-          });
-          console.log(`[AI-CALL] ✅ Updated pending conversation ${pendingConversationId} with response`);
-        } catch (updateError) {
-          console.warn(`[AI-CALL] ⚠️ Failed to update pending conversation: ${updateError.message}`);
-        }
+        // Conversation is reported by ai-service only; keep local record for job logs/attachments.
       }
       
       console.log(`[AI-CALL] ✅ AI call completed: ${promptSlug} (${response.usage?.total_tokens || 0} tokens)`);
@@ -1529,37 +1404,7 @@ export class AIConversationLogger {
     } catch (error) {
       console.error(`[AI-CALL] ❌ AI call failed for prompt "${promptSlug}":`, error.message);
       
-      // Update pending conversation to failed status if it exists
-      if (pendingConversationId && effectiveJobId && this.backendUrl) {
-        try {
-          const purpose = this.generateAIPurpose(promptSlug, sourcePayload || payload, pageUrl);
-          const failureData = {
-            job_id: effectiveJobId,
-            agent_name: agentName,
-            conversation_type: promptSlug,
-            text_request: userMessageText?.substring(0, 500) || 'AI request',
-            source_payload: sourcePayload || payload,
-            ai_response: null,
-            human_request: purpose,
-            human_response: `❌ Failed: ${error.message}`,
-            screenshot_id: screenshotId,
-            page_url: pageUrl,
-            timestamp: new Date(),
-            status: 'failed', // Update from pending to failed
-            error: error.message,
-            conversation_id: pendingConversationId
-          };
-          
-          await fetch(`${this.backendUrl}/ai-conversations`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(failureData)
-          });
-          console.log(`[AI-CALL] ❌ Updated pending conversation ${pendingConversationId} with failure status`);
-        } catch (updateError) {
-          console.warn(`[AI-CALL] ⚠️ Failed to update pending conversation to failed: ${updateError.message}`);
-        }
-      }
+      // Conversation failure status is reported by ai-service only.
       
       // Log failed request (fallback if pending conversation wasn't created)
       if (!pendingConversationId) {
@@ -1581,26 +1426,7 @@ export class AIConversationLogger {
         
         if (failureRecord) {
           try {
-            await this.sendAIConversation(
-              effectiveJobId,
-              agentName,
-              promptSlug,
-              failureRecord.textRequest,
-              failureRecord.sourcePayload,
-              failureRecord.aiResponse,
-              failureRecord.screenshotId || screenshotId,
-              pageUrl,
-              {
-                human_request: failureRecord.humanRequest,
-                human_response: failureRecord.humanResponse,
-                attachments: failureRecord.attachments,
-                metadata: failureRecord.metadata,
-                cost: failureRecord.cost,
-                usage: failureRecord.usage,
-                status: 'failed',
-                error: error.message
-              }
-            );
+            // Conversation failure status is reported by ai-service only.
           } catch (conversationError) {
             console.warn(`[AI-CALL] ⚠️ Failed to record failed conversation: ${conversationError.message}`);
           }
@@ -1679,6 +1505,8 @@ export class AIConversationLogger {
    * @param {Object} structuredResponse - StructuredAIResponse object
    */
   async sendStructuredConversation(structuredResponse) {
+    console.log('[AI-CONVERSATION] ℹ️ Skipping crawler-side chat reporting; AI service reports conversations.');
+    return { skipped: true, reporter: 'ai-service' };
     console.log(`[AI-CONVERSATION] 🚀 Sending structured AI conversation for job ${structuredResponse.metadata.job_id} by agent ${structuredResponse.metadata.agent_name}`);
     try {
       const conversationData = {
@@ -1718,6 +1546,8 @@ export class AIConversationLogger {
    * @param {Object} options - Additional options for enhanced payload structure
    */
   async sendAIConversation(jobId, agentName, conversationType, textRequest, sourcePayload, aiResponse, screenshotId = null, pageUrl = null, options = {}) {
+    console.log('[AI-CONVERSATION] ℹ️ Skipping crawler-side chat reporting; AI service reports conversations.');
+    return { skipped: true, reporter: 'ai-service' };
     // Extract approach/mode from sourcePayload or options to create separate conversations
     const mode = sourcePayload?.mode || options?.mode || 'auto';
     const approach = sourcePayload?.approach || options?.approach || mode;
@@ -2835,6 +2665,8 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
    * @param {string} pageUrl - Page URL
    */
   async sendEnhancedAIConversation(jobId, agentName, conversationType, textRequest, aiResponse, payloadComponents = [], screenshotData = [], pageUrl = null, options = {}) {
+    console.log('[AI-CONVERSATION] ℹ️ Skipping crawler-side chat reporting; AI service reports conversations.');
+    return { skipped: true, reporter: 'ai-service' };
     // Extract approach/mode from options to create separate conversations
     const mode = options?.mode || 'auto';
     const approach = options?.approach || mode;
@@ -2898,6 +2730,8 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
    * @param {Array} flowSteps - Array of flow steps with screenshots and actions
    */
   async sendConversationFlow(jobId, agentName, pageUrl, flowSteps = [], options = {}) {
+    console.log('[AI-CONVERSATION] ℹ️ Skipping crawler-side chat reporting; AI service reports conversations.');
+    return { skipped: true, reporter: 'ai-service' };
     // Extract approach/mode from options to create separate conversations
     const mode = options?.mode || 'auto';
     const approach = options?.approach || mode;
