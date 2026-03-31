@@ -1280,11 +1280,29 @@ export class AIConversationLogger {
             console.warn(`[AI-CALL] ↪️ Retrying with next AI service due to network/DNS failure (${code || 'no_code'})`);
             continue;
           }
-          // Backward-compatible alias rescue: old helper endpoint names like ai-service-xxxx may become stale after container redeploy.
-          if (isNetworkDnsError && serviceUrl && /ai-service-[a-z0-9-]+/i.test(String(serviceUrl))) {
+          // Optional alias rescue is env-driven to avoid hardcoded host assumptions.
+          // Enable by setting AI_SERVICE_ALIAS_HOST and optionally AI_SERVICE_STALE_HOST_REGEX.
+          const aliasHost = String(process.env.AI_SERVICE_ALIAS_HOST || '').trim();
+          let staleHostRegex = null;
+          if (aliasHost) {
+            try {
+              const rawPattern = String(process.env.AI_SERVICE_STALE_HOST_REGEX || '^ai-service-[a-z0-9-]+$').trim();
+              staleHostRegex = rawPattern ? new RegExp(rawPattern, 'i') : null;
+            } catch (regexErr) {
+              console.warn(`[AI-CALL] Invalid AI_SERVICE_STALE_HOST_REGEX, alias rescue disabled: ${regexErr.message}`);
+              staleHostRegex = null;
+            }
+          }
+          if (isNetworkDnsError && serviceUrl && aliasHost) {
             try {
               const aliasUrl = new URL(String(serviceUrl));
-              aliasUrl.hostname = 'aionqa-ai-service';
+              if (!staleHostRegex || !staleHostRegex.test(String(aliasUrl.hostname || ''))) {
+                throw new Error('alias_host_pattern_not_matched');
+              }
+              if (String(aliasUrl.hostname || '').toLowerCase() === aliasHost.toLowerCase()) {
+                throw new Error('alias_host_same_as_source');
+              }
+              aliasUrl.hostname = aliasHost;
               contextUpdate.llm_config = { ...this.context?.llm_config, endpoint: aliasUrl.toString() };
               const aliasClient = this.getOpenAIClient(contextUpdate);
               response = await aliasClient.responses.create(openaiRequest);
