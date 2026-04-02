@@ -1236,10 +1236,7 @@ export class AIConversationLogger {
             }
             try {
               aiResponse = JSON.parse(jsonContent);
-              // Success: valid response from this service
-              if (attemptNumber === 1 && idx > 0) {
-                console.log(`[AI-CALL] ✅ Succeeded with fallback service ${idx + 1}/${eligibleServices.length}: ${chosen.label || serviceUrl}`);
-              }
+              // Success: valid response from configured service
               break;
             } catch (parseErr) {
               if (parseErr instanceof SyntaxError && expectsJson) {
@@ -1251,10 +1248,6 @@ export class AIConversationLogger {
                     break;
                   } catch (_) {}
                 }
-              }
-              if (parseAttempt === 1 && expectsJson && parseErr instanceof SyntaxError) {
-                console.warn(`[AI-CALL] ⚠️ JSON parse failed (${parseErr.message}), retrying request once...`);
-                continue;
               }
               throw parseErr;
             }
@@ -1274,68 +1267,6 @@ export class AIConversationLogger {
             lowerMsg.includes('socket hang up');
           if (attemptNumber === 1) {
             console.warn(`[AI-CALL] ⚠️ AI service failed (${chosen.label || serviceUrl}): ${msg}${isHttpError ? ` (HTTP ${status})` : ''}`);
-          }
-          const hasAnotherService = idx < (eligibleServices.length - 1);
-          if (isNetworkDnsError && hasAnotherService) {
-            console.warn(`[AI-CALL] ↪️ Retrying with next AI service due to network/DNS failure (${code || 'no_code'})`);
-            continue;
-          }
-          // Optional alias rescue is fully env-driven to avoid hardcoded host assumptions.
-          // Enable by setting AI_SERVICE_ALIAS_HOST and (optionally) AI_SERVICE_STALE_HOST_REGEX.
-          const aliasHost = String(process.env.AI_SERVICE_ALIAS_HOST || '').trim();
-          let staleHostRegex = null;
-          if (aliasHost) {
-            try {
-              const rawPattern = String(process.env.AI_SERVICE_STALE_HOST_REGEX || '').trim();
-              staleHostRegex = rawPattern ? new RegExp(rawPattern, 'i') : null;
-            } catch (regexErr) {
-              console.warn(`[AI-CALL] Invalid AI_SERVICE_STALE_HOST_REGEX, alias rescue disabled: ${regexErr.message}`);
-              staleHostRegex = null;
-            }
-          }
-          if (isNetworkDnsError && serviceUrl && aliasHost) {
-            try {
-              const aliasUrl = new URL(String(serviceUrl));
-              if (staleHostRegex && !staleHostRegex.test(String(aliasUrl.hostname || ''))) {
-                throw new Error('alias_host_pattern_not_matched');
-              }
-              if (String(aliasUrl.hostname || '').toLowerCase() === aliasHost.toLowerCase()) {
-                throw new Error('alias_host_same_as_source');
-              }
-              aliasUrl.hostname = aliasHost;
-              contextUpdate.llm_config = { ...this.context?.llm_config, endpoint: aliasUrl.toString() };
-              const aliasClient = this.getOpenAIClient(contextUpdate);
-              response = await aliasClient.responses.create(openaiRequest);
-              let aliasRaw = typeof response?.output_text === 'string' && response.output_text.trim()
-                ? response.output_text
-                : '';
-              if (!aliasRaw && Array.isArray(response?.output)) {
-                for (const item of response.output) {
-                  if (item?.type === 'message' && Array.isArray(item.content)) {
-                    for (const part of item.content) {
-                      if (part?.type === 'output_text' && part.text != null) {
-                        aliasRaw = String(part.text).trim();
-                        if (aliasRaw) break;
-                      }
-                    }
-                  }
-                  if (aliasRaw) break;
-                }
-              }
-              if (!aliasRaw || !aliasRaw.trim()) {
-                throw new Error('alias_endpoint_empty_response');
-              }
-              let jsonContent = aliasRaw.trim();
-              const codeBlockMatch = jsonContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-              if (codeBlockMatch) jsonContent = codeBlockMatch[1].trim();
-              const extracted = extractFirstCompleteJSON(jsonContent);
-              if (extracted) jsonContent = extracted;
-              aiResponse = JSON.parse(jsonContent);
-              console.warn(`[AI-CALL] ✅ Recovered AI call via alias endpoint: ${aliasUrl.toString()}`);
-              break;
-            } catch (aliasErr) {
-              lastError = aliasErr;
-            }
           }
           throw lastError;
         }
