@@ -71,14 +71,65 @@ export function isNetworkUnreachableError(error) {
   if (!error) return false;
   const codes = collectDeepErrorCodes(error);
   const msg = `${String(error.message || '')} ${collectDeepMessages(error)}`.toLowerCase();
+  if (String(error.syscall || '').toLowerCase() === 'getaddrinfo') return true;
   return (
     codes.some((code) =>
-      ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH'].includes(code)
+      ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH', 'ERR_NETWORK', 'ECONNABORTED'].includes(code)
     ) ||
     msg.includes('getaddrinfo') ||
+    /getaddrinfo\s+enotfound/i.test(msg) ||
     msg.includes('enotfound') ||
     msg.includes('socket hang up')
   );
+}
+
+/**
+ * Append stable AI service URLs (Docker DNS + optional managed) when the backend/helper only lists
+ * an ephemeral ai-service-* hostname. Ensures makeAICallWithPrompt's outer service loop can advance
+ * after DNS failures, and matches collectAiServiceBaseUrlCandidates fallbacks.
+ * @param {Array<{url?: string, max_input_tokens?: number, label?: string}>|null|undefined} aiServices
+ * @returns {typeof aiServices}
+ */
+export function mergeDnsFailoverAiServices(aiServices) {
+  if (!Array.isArray(aiServices) || aiServices.length === 0) return aiServices;
+  const seen = new Set();
+  const out = [];
+  const norm = (u) => {
+    try {
+      return new URL(u).href.replace(/\/$/, '');
+    } catch {
+      return String(u || '').trim().replace(/\/$/, '');
+    }
+  };
+  for (const s of aiServices) {
+    if (!s || !s.url) continue;
+    const key = norm(s.url);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  const fallbacks = [
+    { url: 'http://aionqa-ai-service:5000', max_input_tokens: 128000, label: 'failover-stable-docker-ai-service' }
+  ];
+  const rawManaged = process.env.AIONQA_MANAGED_AI_FALLBACK_URL;
+  const managedDisabled =
+    rawManaged != null && ['0', 'false', 'off'].includes(String(rawManaged).trim().toLowerCase());
+  const managedUrl = managedDisabled
+    ? ''
+    : String(rawManaged != null && String(rawManaged).trim() !== '' ? rawManaged : 'https://ai.aionqa.com')
+        .trim()
+        .replace(/\/$/, '');
+  if (managedUrl) {
+    fallbacks.push({ url: managedUrl, max_input_tokens: 128000, label: 'failover-managed-ai' });
+  }
+  for (const f of fallbacks) {
+    const key = norm(f.url);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(f);
+    }
+  }
+  return out;
 }
 
 /**
