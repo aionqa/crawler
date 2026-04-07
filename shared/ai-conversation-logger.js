@@ -9,7 +9,7 @@ import { StructuredAIResponse } from './structured-ai-response.js';
 import OpenAI from 'openai';
 import { chromium } from 'playwright';
 import axios from 'axios';
-import { createOpenAIClient, isNetworkUnreachableError, mergeDnsFailoverAiServices } from '../src/openai-client-factory.js';
+import { createOpenAIClient, isNetworkUnreachableError } from '../src/openai-client-factory.js';
 
 /**
  * Extract the first complete JSON object or array from a string that may contain
@@ -1130,8 +1130,6 @@ export class AIConversationLogger {
         : (endpointFromLlmConfig
             ? [{ url: String(endpointFromLlmConfig).trim(), max_input_tokens: 128000, label: 'llm_config.endpoint' }]
             : []);
-      aiServices = mergeDnsFailoverAiServices(aiServices);
-
       if (!Array.isArray(aiServices) || aiServices.length === 0) {
         throw new Error('AI not configured. Add at least one AI service in the helper config (e.g. OpenAI or LM Studio URL).');
       }

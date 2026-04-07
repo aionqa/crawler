@@ -9,10 +9,9 @@ import { getAIServiceToken, getAIServiceTokenInternal, invalidateAIServiceToken 
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 // Prefer context.ai_services (injected by backend / helper config).
-// For local Docker runs, we also support env AI_SERVICE_URL as a fallback.
 const AI_SERVICE_TOKEN = process.env.RUNNER_TOKEN || process.env.AI_SERVICE_TOKEN;
 
-/** Deduped ordered list: primary + other ai_services + env + stable Docker DNS name (helpers may mint ephemeral ai-service-xxxxxx that is not resolvable from the crawler network). */
+/** Deduped ordered list from configured AI services only (no synthetic fallbacks). */
 function collectAiServiceBaseUrlCandidates(primaryUrl, context) {
   const seen = new Set();
   const out = [];
@@ -28,19 +27,6 @@ function collectAiServiceBaseUrlCandidates(primaryUrl, context) {
       if (s?.url) push(String(s.url).trim());
     }
   }
-  if (process.env.AI_SERVICE_URL) push(String(process.env.AI_SERVICE_URL).trim());
-  push('http://aionqa-ai-service:5000');
-  // Last resort: managed AI (same contract as shared docker-engine helpers) when self-hosted
-  // ephemeral hostnames (ai-service-xxxxxx) are not resolvable from the crawler network.
-  const rawManaged = process.env.AIONQA_MANAGED_AI_FALLBACK_URL;
-  const managedDisabled =
-    rawManaged != null && ['0', 'false', 'off'].includes(String(rawManaged).trim().toLowerCase());
-  const managedUrl = managedDisabled
-    ? ''
-    : String(rawManaged != null && String(rawManaged).trim() !== '' ? rawManaged : 'https://ai.aionqa.com')
-        .trim()
-        .replace(/\/$/, '');
-  if (managedUrl) push(managedUrl);
   return out;
 }
 
@@ -86,63 +72,7 @@ export function isNetworkUnreachableError(error) {
 }
 
 /**
- * Append stable AI service URLs (Docker DNS + optional managed) when the backend/helper only lists
- * an ephemeral ai-service-* hostname. Ensures makeAICallWithPrompt's outer service loop can advance
- * after DNS failures, and matches collectAiServiceBaseUrlCandidates fallbacks.
- * @param {Array<{url?: string, max_input_tokens?: number, label?: string}>|null|undefined} aiServices
- * @returns {typeof aiServices}
- */
-export function mergeDnsFailoverAiServices(aiServices) {
-  if (!Array.isArray(aiServices) || aiServices.length === 0) return aiServices;
-  const seen = new Set();
-  const out = [];
-  const norm = (u) => {
-    try {
-      return new URL(u).href.replace(/\/$/, '');
-    } catch {
-      return String(u || '').trim().replace(/\/$/, '');
-    }
-  };
-  let maxInputAmongConfigured = 128000;
-  for (const s of aiServices) {
-    if (!s || !s.url) continue;
-    const mt = Number(s.max_input_tokens);
-    const effectiveMt = Number.isFinite(mt) && mt > 0 ? mt : 32000;
-    maxInputAmongConfigured = Math.max(maxInputAmongConfigured, effectiveMt);
-    const key = norm(s.url);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(s);
-  }
-  // Failover entries must stay eligible when the primary service advertises a higher context window
-  // than 128k; otherwise eligibleServices filters them out and DNS failover never runs.
-  const failoverTokenLimit = Math.max(128000, maxInputAmongConfigured);
-  const fallbacks = [
-    { url: 'http://aionqa-ai-service:5000', max_input_tokens: failoverTokenLimit, label: 'failover-stable-docker-ai-service' }
-  ];
-  const rawManaged = process.env.AIONQA_MANAGED_AI_FALLBACK_URL;
-  const managedDisabled =
-    rawManaged != null && ['0', 'false', 'off'].includes(String(rawManaged).trim().toLowerCase());
-  const managedUrl = managedDisabled
-    ? ''
-    : String(rawManaged != null && String(rawManaged).trim() !== '' ? rawManaged : 'https://ai.aionqa.com')
-        .trim()
-        .replace(/\/$/, '');
-  if (managedUrl) {
-    fallbacks.push({ url: managedUrl, max_input_tokens: failoverTokenLimit, label: 'failover-managed-ai' });
-  }
-  for (const f of fallbacks) {
-    const key = norm(f.url);
-    if (!seen.has(key)) {
-      seen.add(key);
-      out.push(f);
-    }
-  }
-  return out;
-}
-
-/**
- * Create OpenAI client that uses the configured AI service, with DNS/network failover to other configured URLs and stable Docker hostnames.
+ * Create OpenAI client that uses configured AI services only.
  * @param {Object} context - Job context containing llm_config.endpoint (from helper ai_services), project_id, job_id
  * @param {string} fallbackApiKey - Fallback API key for backward compatibility (deprecated)
  * @returns {OpenAI} OpenAI client instance
