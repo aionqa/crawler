@@ -72,6 +72,8 @@ export function isNetworkUnreachableError(error) {
   const codes = collectDeepErrorCodes(error);
   const msg = `${String(error.message || '')} ${collectDeepMessages(error)}`.toLowerCase();
   if (String(error.syscall || '').toLowerCase() === 'getaddrinfo') return true;
+  // Ephemeral helper hostnames (ai-service-*) often fail with ENOTFOUND from sibling crawler containers.
+  if (/ai-service-[a-z0-9-]+/i.test(msg) && (msg.includes('enotfound') || msg.includes('getaddrinfo'))) return true;
   return (
     codes.some((code) =>
       ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH', 'ERR_NETWORK', 'ECONNABORTED'].includes(code)
@@ -101,15 +103,21 @@ export function mergeDnsFailoverAiServices(aiServices) {
       return String(u || '').trim().replace(/\/$/, '');
     }
   };
+  let maxInputAmongConfigured = 128000;
   for (const s of aiServices) {
     if (!s || !s.url) continue;
+    const mt = Number(s.max_input_tokens);
+    if (Number.isFinite(mt) && mt > 0) maxInputAmongConfigured = Math.max(maxInputAmongConfigured, mt);
     const key = norm(s.url);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(s);
   }
+  // Failover entries must stay eligible when the primary service advertises a higher context window
+  // than 128k; otherwise eligibleServices filters them out and DNS failover never runs.
+  const failoverTokenLimit = Math.max(128000, maxInputAmongConfigured);
   const fallbacks = [
-    { url: 'http://aionqa-ai-service:5000', max_input_tokens: 128000, label: 'failover-stable-docker-ai-service' }
+    { url: 'http://aionqa-ai-service:5000', max_input_tokens: failoverTokenLimit, label: 'failover-stable-docker-ai-service' }
   ];
   const rawManaged = process.env.AIONQA_MANAGED_AI_FALLBACK_URL;
   const managedDisabled =
@@ -120,7 +128,7 @@ export function mergeDnsFailoverAiServices(aiServices) {
         .trim()
         .replace(/\/$/, '');
   if (managedUrl) {
-    fallbacks.push({ url: managedUrl, max_input_tokens: 128000, label: 'failover-managed-ai' });
+    fallbacks.push({ url: managedUrl, max_input_tokens: failoverTokenLimit, label: 'failover-managed-ai' });
   }
   for (const f of fallbacks) {
     const key = norm(f.url);

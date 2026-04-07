@@ -5391,8 +5391,14 @@ return {
             break;
           }
 
-          // Deterministic fallback for page discovery when helper token/config is unavailable.
-          if (isPageSummaryStep && (aiErrorText.includes('AI not configured') || aiErrorText.includes('Invalid token'))) {
+          // Deterministic fallback for page discovery when helper token/config is unavailable,
+          // or when the AI endpoint is unreachable (DNS/network), matching SEO/content optimizer behavior.
+          if (
+            isPageSummaryStep &&
+            (aiErrorText.includes('AI not configured') ||
+              aiErrorText.includes('Invalid token') ||
+              isAiUnavailableError)
+          ) {
             const interactive = Array.isArray(stepPayload?.interactive_elements) ? stepPayload.interactive_elements : [];
             const forms = Array.isArray(stepPayload?.forms) ? stepPayload.forms : [];
             const pageUrl = String(stepPayload?.page_url || page.url() || '');
