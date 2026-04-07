@@ -107,7 +107,8 @@ export function mergeDnsFailoverAiServices(aiServices) {
   for (const s of aiServices) {
     if (!s || !s.url) continue;
     const mt = Number(s.max_input_tokens);
-    if (Number.isFinite(mt) && mt > 0) maxInputAmongConfigured = Math.max(maxInputAmongConfigured, mt);
+    const effectiveMt = Number.isFinite(mt) && mt > 0 ? mt : 32000;
+    maxInputAmongConfigured = Math.max(maxInputAmongConfigured, effectiveMt);
     const key = norm(s.url);
     if (seen.has(key)) continue;
     seen.add(key);
