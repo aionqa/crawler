@@ -9,7 +9,7 @@ import { StructuredAIResponse } from './structured-ai-response.js';
 import OpenAI from 'openai';
 import { chromium } from 'playwright';
 import axios from 'axios';
-import { createOpenAIClient } from '../src/openai-client-factory.js';
+import { createOpenAIClient, isNetworkUnreachableError } from '../src/openai-client-factory.js';
 
 /**
  * Extract the first complete JSON object or array from a string that may contain
@@ -1259,13 +1259,7 @@ export class AIConversationLogger {
           const status = err.response?.status || err.status;
           const isHttpError = status != null && (status < 200 || status >= 300);
           const msg = err.message || String(err);
-          const code = String(err?.code || '').toUpperCase();
-          const lowerMsg = String(msg || '').toLowerCase();
-          const isNetworkDnsError =
-            ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH'].includes(code) ||
-            lowerMsg.includes('getaddrinfo') ||
-            lowerMsg.includes('enotfound') ||
-            lowerMsg.includes('socket hang up');
+          const isNetworkDnsError = isNetworkUnreachableError(err);
           if (attemptNumber === 1) {
             console.warn(`[AI-CALL] ⚠️ AI service failed (${chosen.label || serviceUrl}): ${msg}${isHttpError ? ` (HTTP ${status})` : ''}`);
           }

@@ -30,15 +30,51 @@ function collectAiServiceBaseUrlCandidates(primaryUrl, context) {
   }
   if (process.env.AI_SERVICE_URL) push(String(process.env.AI_SERVICE_URL).trim());
   push('http://aionqa-ai-service:5000');
+  // Last resort: managed AI (same contract as shared docker-engine helpers) when self-hosted
+  // ephemeral hostnames (ai-service-xxxxxx) are not resolvable from the crawler network.
+  const rawManaged = process.env.AIONQA_MANAGED_AI_FALLBACK_URL;
+  const managedDisabled =
+    rawManaged != null && ['0', 'false', 'off'].includes(String(rawManaged).trim().toLowerCase());
+  const managedUrl = managedDisabled
+    ? ''
+    : String(rawManaged != null && String(rawManaged).trim() !== '' ? rawManaged : 'https://ai.aionqa.com')
+        .trim()
+        .replace(/\/$/, '');
+  if (managedUrl) push(managedUrl);
   return out;
 }
 
-function isNetworkUnreachableError(error) {
+/** Walk Axios/Node error chains (cause, AggregateError) so DNS failures still trigger failover. */
+function collectDeepErrorCodes(error, depth = 0) {
+  if (!error || depth > 8) return [];
+  const out = [];
+  const c = error.code;
+  if (c) out.push(String(c).toUpperCase());
+  if (error.cause) out.push(...collectDeepErrorCodes(error.cause, depth + 1));
+  if (Array.isArray(error.errors)) {
+    for (const e of error.errors) out.push(...collectDeepErrorCodes(e, depth + 1));
+  }
+  return out;
+}
+
+function collectDeepMessages(error, depth = 0) {
+  if (!error || depth > 8) return '';
+  const parts = [String(error.message || '')];
+  if (error.cause) parts.push(collectDeepMessages(error.cause, depth + 1));
+  if (Array.isArray(error.errors)) {
+    for (const e of error.errors) parts.push(collectDeepMessages(e, depth + 1));
+  }
+  return parts.filter(Boolean).join(' ');
+}
+
+export function isNetworkUnreachableError(error) {
   if (!error) return false;
-  const code = String(error.code || '').toUpperCase();
-  const msg = String(error.message || '').toLowerCase();
+  const codes = collectDeepErrorCodes(error);
+  const msg = `${String(error.message || '')} ${collectDeepMessages(error)}`.toLowerCase();
   return (
-    ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH'].includes(code) ||
+    codes.some((code) =>
+      ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH'].includes(code)
+    ) ||
     msg.includes('getaddrinfo') ||
     msg.includes('enotfound') ||
     msg.includes('socket hang up')
