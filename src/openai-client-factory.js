@@ -30,6 +30,28 @@ function collectAiServiceBaseUrlCandidates(primaryUrl, context) {
   return out;
 }
 
+/** Prefer resolvable URLs first when multiple ai_services exist (helper-local ai-service-xxxxx last). */
+function aiServiceUrlLooksEphemeral(url) {
+  try {
+    const u = new URL(url);
+    return /^ai-service-[a-z0-9-]+$/i.test(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function prioritizeAiServiceUrlCandidates(urls) {
+  if (!Array.isArray(urls) || urls.length < 2) return urls;
+  const copy = [...urls];
+  copy.sort((a, b) => {
+    const aEp = aiServiceUrlLooksEphemeral(a);
+    const bEp = aiServiceUrlLooksEphemeral(b);
+    if (aEp === bEp) return 0;
+    return aEp ? 1 : -1;
+  });
+  return copy;
+}
+
 /** Walk Axios/Node error chains (cause, AggregateError) so DNS failures still trigger failover. */
 function collectDeepErrorCodes(error, depth = 0) {
   if (!error || depth > 8) return [];
@@ -107,7 +129,9 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
     throw new Error('AI not configured. Set the project\'s AI service (Settings → LLM / endpoint) or add at least one AI service in the helper config.');
   }
 
-  const aiServiceUrlCandidates = collectAiServiceBaseUrlCandidates(aiServiceUrl, context);
+  const aiServiceUrlCandidates = prioritizeAiServiceUrlCandidates(
+    collectAiServiceBaseUrlCandidates(aiServiceUrl, context)
+  );
   console.log(`[OpenAI-Client] Using AI Service: ${aiServiceUrl} for project ${projectId}${jobId ? ` (job: ${jobId})` : ''}${aiServiceUrlCandidates.length > 1 ? ` (${aiServiceUrlCandidates.length} URL candidates for DNS/network failover)` : ''}`);
 
   const isInvalidTokenError = (error) => {
