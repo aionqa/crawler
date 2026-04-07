@@ -12,8 +12,41 @@ const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 // For local Docker runs, we also support env AI_SERVICE_URL as a fallback.
 const AI_SERVICE_TOKEN = process.env.RUNNER_TOKEN || process.env.AI_SERVICE_TOKEN;
 
+/** Deduped ordered list: primary + other ai_services + env + stable Docker DNS name (helpers may mint ephemeral ai-service-xxxxxx that is not resolvable from the crawler network). */
+function collectAiServiceBaseUrlCandidates(primaryUrl, context) {
+  const seen = new Set();
+  const out = [];
+  const push = (u) => {
+    const t = typeof u === 'string' ? u.trim() : '';
+    if (!t || seen.has(t)) return;
+    seen.add(t);
+    out.push(t);
+  };
+  push(primaryUrl);
+  if (Array.isArray(context?.ai_services)) {
+    for (const s of context.ai_services) {
+      if (s?.url) push(String(s.url).trim());
+    }
+  }
+  if (process.env.AI_SERVICE_URL) push(String(process.env.AI_SERVICE_URL).trim());
+  push('http://aionqa-ai-service:5000');
+  return out;
+}
+
+function isNetworkUnreachableError(error) {
+  if (!error) return false;
+  const code = String(error.code || '').toUpperCase();
+  const msg = String(error.message || '').toLowerCase();
+  return (
+    ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENETUNREACH'].includes(code) ||
+    msg.includes('getaddrinfo') ||
+    msg.includes('enotfound') ||
+    msg.includes('socket hang up')
+  );
+}
+
 /**
- * Create OpenAI client that uses the configured AI service (no fallbacks).
+ * Create OpenAI client that uses the configured AI service, with DNS/network failover to other configured URLs and stable Docker hostnames.
  * @param {Object} context - Job context containing llm_config.endpoint (from helper ai_services), project_id, job_id
  * @param {string} fallbackApiKey - Fallback API key for backward compatibility (deprecated)
  * @returns {OpenAI} OpenAI client instance
@@ -48,14 +81,50 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
     throw new Error('AI not configured. Set the project\'s AI service (Settings → LLM / endpoint) or add at least one AI service in the helper config.');
   }
 
-  console.log(`[OpenAI-Client] Using AI Service: ${aiServiceUrl} for project ${projectId}${jobId ? ` (job: ${jobId})` : ''}`);
+  const aiServiceUrlCandidates = collectAiServiceBaseUrlCandidates(aiServiceUrl, context);
+  console.log(`[OpenAI-Client] Using AI Service: ${aiServiceUrl} for project ${projectId}${jobId ? ` (job: ${jobId})` : ''}${aiServiceUrlCandidates.length > 1 ? ` (${aiServiceUrlCandidates.length} URL candidates for DNS/network failover)` : ''}`);
+
   const isInvalidTokenError = (error) => {
     const status = error?.response?.status || error?.status;
     const msg = String(error?.message || '');
     const responseMsg = String(error?.response?.data?.error?.message || error?.response?.data?.error || '');
     return status === 401 || /invalid token/i.test(msg) || /invalid token/i.test(responseMsg);
   };
-  
+
+  const postToAiServiceWithFailover = async (requestBody, requestConfig, initialToken) => {
+    let currentToken = initialToken;
+    let lastError;
+    for (let i = 0; i < aiServiceUrlCandidates.length; i++) {
+      const baseUrl = String(aiServiceUrlCandidates[i]).replace(/\/$/, '');
+      const url = `${baseUrl}/api/ai/chat`;
+      let tried401 = false;
+      for (;;) {
+        try {
+          const response = await axios.post(url, requestBody, requestConfig(currentToken));
+          if (i > 0) {
+            console.log(`[OpenAI-Client] Failover succeeded using ${baseUrl}`);
+          }
+          return response;
+        } catch (e) {
+          lastError = e;
+          if (!tried401 && projectId && jobId && isInvalidTokenError(e)) {
+            tried401 = true;
+            console.warn('[OpenAI-Client] Invalid token detected, refreshing token and retrying once...');
+            invalidateAIServiceToken(jobId);
+            currentToken = await getAIServiceTokenInternal(projectId, jobId, true);
+            continue;
+          }
+          if (isNetworkUnreachableError(e) && i < aiServiceUrlCandidates.length - 1) {
+            console.warn(`[OpenAI-Client] Unreachable at ${baseUrl}: ${e.message}; trying next AI service URL...`);
+            break;
+          }
+          throw e;
+        }
+      }
+    }
+    throw lastError;
+  };
+
   // Create a custom OpenAI client that uses axios to call the AI service
   return new Proxy(new OpenAI({ apiKey: 'ai-service' }), {
     get(target, prop) {
@@ -107,20 +176,8 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                   },
                   timeout: 900000 // 15 minutes timeout for AI requests
                 });
-                let response;
-                try {
-                  response = await axios.post(`${aiServiceUrl}/api/ai/chat`, requestBody, requestConfig(token));
-                } catch (requestError) {
-                  if (projectId && jobId && isInvalidTokenError(requestError)) {
-                    console.warn(`[OpenAI-Client] Invalid token detected, refreshing token and retrying once...`);
-                    invalidateAIServiceToken(jobId);
-                    token = await getAIServiceTokenInternal(projectId, jobId, true);
-                    response = await axios.post(`${aiServiceUrl}/api/ai/chat`, requestBody, requestConfig(token));
-                  } else {
-                    throw requestError;
-                  }
-                }
-                
+                const response = await postToAiServiceWithFailover(requestBody, requestConfig, token);
+
                 // Return in OpenAI format
                 return response.data;
               } catch (error) {
@@ -187,20 +244,8 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                 },
                 timeout: 900000 // 15 minutes timeout for AI requests
               });
-              let response;
-              try {
-                response = await axios.post(`${aiServiceUrl}/api/ai/chat`, requestBody, requestConfig(token));
-              } catch (requestError) {
-                if (projectId && jobId && isInvalidTokenError(requestError)) {
-                  console.warn(`[OpenAI-Client] Invalid token detected, refreshing token and retrying once...`);
-                  invalidateAIServiceToken(jobId);
-                  token = await getAIServiceTokenInternal(projectId, jobId, true);
-                  response = await axios.post(`${aiServiceUrl}/api/ai/chat`, requestBody, requestConfig(token));
-                } else {
-                  throw requestError;
-                }
-              }
-              
+              const response = await postToAiServiceWithFailover(requestBody, requestConfig, token);
+
               // Return in OpenAI format
               return response.data;
             } catch (error) {

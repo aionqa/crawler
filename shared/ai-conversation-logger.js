@@ -1139,6 +1139,7 @@ export class AIConversationLogger {
       if (eligibleServices.length === 0) {
         throw new Error(`No AI service with sufficient context limit for this request (~${estimatedInputTokens} tokens). Add a service with max_input_tokens >= ${estimatedInputTokens} in the helper config.`);
       }
+      contextUpdate.ai_services = aiServices;
       let response;
       let finishReason = 'stop';
       let aiResponse;
@@ -1267,6 +1268,10 @@ export class AIConversationLogger {
             lowerMsg.includes('socket hang up');
           if (attemptNumber === 1) {
             console.warn(`[AI-CALL] ⚠️ AI service failed (${chosen.label || serviceUrl}): ${msg}${isHttpError ? ` (HTTP ${status})` : ''}`);
+          }
+          if (isNetworkDnsError && idx < eligibleServices.length - 1) {
+            console.warn('[AI-CALL] ⚠️ Trying next configured AI service after network/DNS failure...');
+            continue;
           }
           throw lastError;
         }
