@@ -63,6 +63,27 @@ function resolveActionSelectorFromForms(action, forms) {
 }
 
 /**
+ * While-loop condition paths use templates like `justify_journey.result.status`. After unwrapping
+ * `stepData.result` or `variablePool.steps[id].result`, the payload is often a flat object
+ * `{ status, reason, ... }` with no nested `.result`. Drop a redundant leading `result` segment
+ * in that case so condition evaluation matches Mongo-backed workflows and synthetic justify objects.
+ */
+function normalizeConditionRestSegments(rootObject, restSegments) {
+  if (!rootObject || typeof rootObject !== 'object' || !Array.isArray(restSegments) || restSegments.length === 0) {
+    return restSegments || [];
+  }
+  const segs = [...restSegments];
+  if (
+    segs[0] === 'result' &&
+    !Object.prototype.hasOwnProperty.call(rootObject, 'result') &&
+    segs.length > 1
+  ) {
+    segs.shift();
+  }
+  return segs;
+}
+
+/**
  * WorkflowAnalyzer - Updated 2025-10-15
  * Handles initial page analysis using Playwright + OpenAI
  * Creates workflow structure with testable legs
@@ -14758,6 +14779,12 @@ ${executableBody}`;
                   workflowState.variablePool.steps = workflowState.variablePool.steps || {};
                   workflowState.variablePool.steps['justify-journey'] = { result: syntheticJustify };
                   workflowState.variablePool.steps['justify_journey'] = { result: syntheticJustify };
+                  if (!workflowState.results) workflowState.results = {};
+                  workflowState.results.justify_journey = {
+                    result: syntheticJustify,
+                    synthetic: true,
+                    reason: 'journey_nested_step_error'
+                  };
                   console.log(`✅ [JOURNEY-${softStepError ? 'SOFT-WARNING' : 'FAIL'}] Marked journey ${journeyId} as ${softStepError ? 'pending-with-warning' : 'failure'} from step error handling`);
                   workflowState._journeyStepFailed = !softStepError;
                   break; // exit nested steps loop so iteration save runs and persists failure
@@ -15507,6 +15534,7 @@ ${executableBody}`;
             
             // Try each variant in multiple locations
             for (const variant of pathVariants) {
+              const [pathRootId, ...pathRestSegments] = variant.split('.');
               // Try in results namespace
               conditionValue = this.resolvePathValue(workflowState, variant, 'results');
               if (conditionValue !== undefined && conditionValue !== null) {
@@ -15516,11 +15544,11 @@ ${executableBody}`;
               
               // Try in variablePool.steps namespace
               if (workflowState.variablePool?.steps) {
-                const [stepId, ...restPath] = variant.split('.');
-                const stepResult = workflowState.variablePool.steps[stepId]?.result;
+                const stepResult = workflowState.variablePool.steps[pathRootId]?.result;
                 if (stepResult) {
                   let current = stepResult;
-                  for (const segment of restPath) {
+                  const segments = normalizeConditionRestSegments(current, pathRestSegments);
+                  for (const segment of segments) {
                     if (current && typeof current === 'object') {
                       current = current[segment];
                     } else {
@@ -15537,11 +15565,11 @@ ${executableBody}`;
               }
               
               // Try direct access on workflowState
-              const [stepId, ...restPath] = variant.split('.');
-              const stepData = workflowState[stepId];
+              const stepData = workflowState[pathRootId];
               if (stepData?.result) {
                 let current = stepData.result;
-                for (const segment of restPath) {
+                const segments = normalizeConditionRestSegments(current, pathRestSegments);
+                for (const segment of segments) {
                   if (current && typeof current === 'object') {
                     current = current[segment];
                   } else {
