@@ -22,6 +22,44 @@ function safeJsonClone(obj) {
  * keeps the same id across runs even when the testable website's DOM ids/selectors change.
  * Uses normalized description + action signatures (type + normalized selector/description).
  */
+/**
+ * True when Playwright extracted no forms, no interactive controls, no menu groups, and no javascript: links.
+ * Used to block hallucinated modal/form journeys on static documents (e.g. about pages, plain articles).
+ */
+function isPlaywrightNonInteractiveDocumentSurface(workflowState) {
+  const pa = workflowState?.playwrightAnalysis;
+  if (!pa || typeof pa !== 'object') return false;
+  const forms = Array.isArray(pa.forms) ? pa.forms : [];
+  const interactive = Array.isArray(pa.interactive_elements)
+    ? pa.interactive_elements
+    : Array.isArray(pa.interactiveElements)
+      ? pa.interactiveElements
+      : [];
+  if (forms.length > 0 || interactive.length > 0) return false;
+  const menus = Array.isArray(pa.menu_items) ? pa.menu_items : [];
+  if (menus.length > 0) return false;
+  const links = Array.isArray(pa.links) ? pa.links : [];
+  if (links.some((l) => l && l.is_script_href)) return false;
+  return true;
+}
+
+/** Selectors AI may use for verify/check-only flows on a document-only surface (must match extraction output). */
+function collectAllowedDocumentOnlySelectors(workflowState) {
+  const allowed = new Set();
+  const pa = workflowState?.playwrightAnalysis || {};
+  const nie = Array.isArray(pa.non_interactive_elements) ? pa.non_interactive_elements : [];
+  for (const el of nie) {
+    if (!el || typeof el !== 'object') continue;
+    const sel = String(el.selector || '').trim();
+    if (sel) allowed.add(sel);
+    const typ = String(el.type || '').trim().toLowerCase();
+    if (typ && ['h1', 'h2', 'h3', 'h4', 'p', 'article', 'main'].includes(typ)) {
+      allowed.add(typ);
+    }
+  }
+  return allowed;
+}
+
 function computeStableJourneyId(pageUrl, journey) {
   try {
     const crypto = require('crypto');
@@ -1100,6 +1138,156 @@ IMPORTANT OUTPUT REQUIREMENTS:
 - Site navigation menus are captured separately as "menu_items" (structured); do NOT model plain menu links as journeys. Only include a journey for a link if it runs javascript:, has an onclick handler, opens a same-page fragment/modal, or otherwise changes on-page state.`;
   }
 
+  appendDocumentOnlyJourneyGuardsIfNeeded(template, workflowState) {
+    if (!template || typeof template !== 'string') return template;
+    const pageUrl = String(workflowState?.pageUrl || workflowState?.context?.pageUrl || '');
+    if (isSearchEngineInfraUrl(pageUrl)) {
+      return `${template.trim()}
+
+CRITICAL (crawler infrastructure URL — robots.txt, sitemap, llms.txt, .well-known, etc.): Return an EMPTY "legs" array and do not output interactive "journeys". There is no form, modal, chat, or navigation flow to test on this resource.`;
+    }
+    if (!isPlaywrightNonInteractiveDocumentSurface(workflowState)) return template;
+    return `${template.trim()}
+
+CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwright analysis, no menu_items, no javascript: links): Do NOT invent modals, chat widgets, toggles, video players, or forms. Either return EMPTY legs/journeys, OR at most one journey containing only "verify" or "check" actions whose selectors are copied EXACTLY from non_interactive_elements (or the same tag names listed there, e.g. h1). Never invent IDs such as #page-header unless they appear in the provided JSON.`;
+  }
+
+  isSparseInteractiveCrawlSurface(workflowState) {
+    const pageUrl = String(workflowState?.pageUrl || workflowState?.context?.pageUrl || '');
+    if (isSearchEngineInfraUrl(pageUrl)) return true;
+    return isPlaywrightNonInteractiveDocumentSurface(workflowState);
+  }
+
+  /**
+   * Drop hallucinated interactive journeys on robots/sitemap/infra URLs and on static HTML with no controls.
+   * Optionally emit one verify journey tied to extracted non_interactive_elements.
+   */
+  filterImpossibleJourneysOnSparseSurface(rawJourneys, workflowState) {
+    if (!Array.isArray(rawJourneys) || !this.isSparseInteractiveCrawlSurface(workflowState)) {
+      return rawJourneys;
+    }
+    const pageUrl = String(workflowState?.pageUrl || workflowState?.context?.pageUrl || '');
+    if (isSearchEngineInfraUrl(pageUrl)) {
+      console.log('⚠️ Skipping all journeys: search-engine infrastructure URL');
+      return [];
+    }
+    const allowed = collectAllowedDocumentOnlySelectors(workflowState);
+    const isInteractiveActionType = (type) => {
+      const t = String(type || '').toLowerCase();
+      return Boolean(t && !['verify', 'check'].includes(t));
+    };
+
+    const kept = [];
+    for (const journey of rawJourneys) {
+      if (!journey || typeof journey !== 'object') continue;
+      const actions = Array.isArray(journey.actions) ? journey.actions : [];
+      if (actions.length === 0) continue;
+      if (actions.some((a) => isInteractiveActionType(a?.type))) {
+        console.log(
+          `⚠️ Dropping journey on document-only surface (interactive action): ${journey.journey_id || journey.description || 'unknown'}`
+        );
+        continue;
+      }
+      const selectorsOk = actions.every((a) => {
+        const sel = String(a?.selector || a?.element_info?.selector || '').trim();
+        if (!sel || allowed.size === 0) return false;
+        return allowed.has(sel);
+      });
+      if (!selectorsOk) {
+        console.log(
+          `⚠️ Dropping verify journey on document-only surface (selector not from non_interactive analysis): ${journey.journey_id || journey.description || 'unknown'}`
+        );
+        continue;
+      }
+      kept.push(journey);
+    }
+
+    if (kept.length === 0) {
+      const nie = workflowState?.playwrightAnalysis?.non_interactive_elements || [];
+      const first = Array.isArray(nie) ? nie.find((e) => e && String(e.selector || '').trim()) : null;
+      if (first && String(first.selector).trim()) {
+        const sel = String(first.selector).trim();
+        console.log(`✅ Emitting canonical read-only verify journey for document-only surface: ${sel}`);
+        return [
+          {
+            journey_id: 'journey_readonly_primary_content',
+            description: 'Verify primary static content is visible',
+            test_instructions:
+              'Open the page and confirm the primary content from non_interactive_elements is visible. No interactive controls are expected.',
+            expected_outcome: 'Static content is visible; page state unchanged.',
+            priority: 'low',
+            confidence: 0.88,
+            actions: [
+              {
+                action_id: 'a1',
+                type: 'verify',
+                description: 'Verify primary static content is visible',
+                selector: sel,
+                element_info: typeof first === 'object' ? { ...first } : {},
+                interactive_element: first
+              }
+            ]
+          }
+        ];
+      }
+      return [];
+    }
+    if (kept.length > 1) {
+      console.log(`✅ Collapsing ${kept.length} verify journeys on document-only surface to one canonical journey`);
+      return [kept[0]];
+    }
+    return kept;
+  }
+
+  filterImpossibleLegsOnSparseSurface(rawLegs, workflowState) {
+    if (!Array.isArray(rawLegs) || !this.isSparseInteractiveCrawlSurface(workflowState)) {
+      return rawLegs;
+    }
+    const pageUrl = String(workflowState?.pageUrl || workflowState?.context?.pageUrl || '');
+    if (isSearchEngineInfraUrl(pageUrl)) {
+      return [];
+    }
+    const allowed = collectAllowedDocumentOnlySelectors(workflowState);
+    const out = [];
+    for (const leg of rawLegs) {
+      if (!leg || typeof leg !== 'object') continue;
+      const t = String(leg.type || leg.action || '').toLowerCase();
+      if (['click', 'form_submit', 'input', 'navigation_toggle', 'toggle', 'custom', 'submit', 'form'].includes(t)) {
+        console.log(`⚠️ Dropping leg on document-only surface: ${leg.leg_id || leg.description || 'unknown'} (${t})`);
+        continue;
+      }
+      if (t === 'verify' || t === 'check') {
+        const sel = String(leg.selector || leg.element_info?.selector || '').trim();
+        if (!sel || allowed.size === 0 || !allowed.has(sel)) {
+          console.log(`⚠️ Dropping verify leg on document-only surface (selector not in analysis): ${sel || '(empty)'}`);
+          continue;
+        }
+      }
+      out.push(leg);
+    }
+    if (out.length === 0) {
+      const nie = workflowState?.playwrightAnalysis?.non_interactive_elements || [];
+      const first = Array.isArray(nie) ? nie.find((e) => e && String(e.selector || '').trim()) : null;
+      if (first && String(first.selector).trim()) {
+        const sel = String(first.selector).trim();
+        return [
+          {
+            leg_id: 'readonly_primary_content',
+            type: 'verify',
+            description: 'Verify primary static content is visible',
+            selector: sel,
+            expected_outcome: 'Static content is visible',
+            test_instructions: 'Confirm primary content from analysis is visible',
+            priority: 'low',
+            confidence: 0.88,
+            element_info: typeof first === 'object' ? { ...first, selector: sel } : { selector: sel }
+          }
+        ];
+      }
+    }
+    return out;
+  }
+
   /**
    * Match Playwright-extracted link entry by CSS selector (AI legs often carry selector + implicit href).
    */
@@ -1307,10 +1495,18 @@ IMPORTANT OUTPUT REQUIREMENTS:
     let processedItems = rawLegs;
     
     if (hasJourneys) {
-      console.log(`✅ Received journeys format from AI, processing ${rawLegs.length} journeys`);
-      
+      const surfaceFilteredJourneys = this.filterImpossibleJourneysOnSparseSurface(rawLegs, workflowState);
+      if (surfaceFilteredJourneys.length !== rawLegs.length) {
+        console.log(
+          `✅ Document/infra surface journey filter: ${rawLegs.length} → ${surfaceFilteredJourneys.length} journey(s)`
+        );
+      }
+      const journeysForProcessing = surfaceFilteredJourneys;
+
+      console.log(`✅ Received journeys format from AI, processing ${journeysForProcessing.length} journeys`);
+
       const seenSelectors = new Set();
-      const dedupedJourneys = rawLegs.filter(journey => {
+      const dedupedJourneys = journeysForProcessing.filter((journey) => {
         const actions = Array.isArray(journey.actions) ? journey.actions : [];
         const primaryAction = actions.find(action => {
           const actionType = (action?.type || '').toLowerCase();
@@ -1358,6 +1554,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
         return true;
       });
+      processedItems = this.filterImpossibleLegsOnSparseSurface(processedItems, workflowState);
     }
 
     const normalizeType = (rawType) => {
@@ -3852,8 +4049,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const contextInfo = this.resolveStepContext(step, stepContext, this.workflowTemplate?.steps);
     const requirementText = contextInfo.requirementText;
     const decoratedTemplate = appendRequirementToTemplate(customTemplate, requirementText);
-    const templateForExecution = this.enforceLegInstructionsInTemplate(decoratedTemplate);
-    
+    const templateForExecution = this.appendDocumentOnlyJourneyGuardsIfNeeded(
+      this.enforceLegInstructionsInTemplate(decoratedTemplate),
+      workflowState
+    );
+
     const effectiveAdditionalPrompt = await this.getEffectiveAdditionalPromptText(workflowState);
     const descriptionPayload = {
       page_title: workflowState.pageTitle,
@@ -7563,7 +7763,10 @@ return {
     const contextInfo = this.resolveStepContext(step, stepContext, this.workflowTemplate?.steps);
     const requirementText = contextInfo.requirementText;
     const decoratedTemplate = appendRequirementToTemplate(customTemplate, requirementText);
-    const templateForExecution = this.enforceLegInstructionsInTemplate(decoratedTemplate);
+    const templateForExecution = this.appendDocumentOnlyJourneyGuardsIfNeeded(
+      this.enforceLegInstructionsInTemplate(decoratedTemplate),
+      workflowState
+    );
 
     const legsFromPageSummary = Array.isArray(workflowState.pageDescription?.legs)
       ? workflowState.pageDescription.legs
