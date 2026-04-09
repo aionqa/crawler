@@ -10273,6 +10273,11 @@ return {
       }
     }
 
+    // Cypress/jQuery-style :contains() is not valid in Playwright selectors; use :has-text().
+    // cleanScript may also quote selectors like 'button:contains("Label")' which Playwright still rejects.
+    s = s.replace(/:contains\(\s*"((?:[^"\\]|\\.)*)"\s*\)/g, ':has-text("$1")');
+    s = s.replace(/:contains\(\s*'((?:[^'\\]|\\.)*)'\s*\)/g, ":has-text('$1')");
+
     // Repair a common LLM bug in selector maps:
     //   const selectors = { interest2, notif1, terms, ... };
     // This is valid syntax but will throw ReferenceError if those vars don't exist.
