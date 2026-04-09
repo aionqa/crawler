@@ -7181,8 +7181,8 @@ return {
         }
       }
 
-      // Store result - storeStepResult will structure it according to schema
-      this.storeStepResult(step, parsedResponse, workflowState);
+      // Store result - storeStepResult will structure it according to schema (must await: while-loop / nested steps read results immediately after)
+      await this.storeStepResult(step, parsedResponse, workflowState);
       
       // CRITICAL: After storing step result, ensure journeys are saved to backend
       // This is a final safety net to ensure journeys are saved even if earlier save attempts failed
@@ -12502,7 +12502,7 @@ ${executableBody}`;
       }
 
       workflowState.lastExecutionResult = executionResult;
-      this.storeStepResult(step, executionResult, workflowState);
+      await this.storeStepResult(step, executionResult, workflowState);
       
       console.log(`✅ Code execution completed. Page changed: ${pageChanged}`);
       
@@ -12518,7 +12518,7 @@ ${executableBody}`;
         pageChanged: (workflowState.urlBeforeAction || '') !== urlAfterAction
       };
       workflowState.lastExecutionResult = errorResult;
-      this.storeStepResult(step, errorResult, workflowState);
+      await this.storeStepResult(step, errorResult, workflowState);
       
       // If next step is self-adjustable-ai-workflow, don't throw - let workflow continue
       if (nextStep && nextStep.type === 'self-adjustable-ai-workflow') {
@@ -14509,41 +14509,39 @@ ${executableBody}`;
             
             if (isConditionStep) {
               // CRITICAL: Store result immediately after step execution for condition evaluation
-              // Wait a bit for storeStepResult to complete (it's async)
-              await new Promise(resolve => setTimeout(resolve, 100));
+              // storeStepResult is awaited for ai-prompt / execute-code-from-variable; keep a short buffer for any trailing async writes
+              await new Promise(resolve => setTimeout(resolve, 50));
               
               // Try multiple locations where storeStepResult might have stored it
-              // storeStepResult stores in: workflowState[step.id].result, workflowState.results[step.id].result, workflowState.variablePool.steps[slug].result
-              const stepId = nestedStep.id;
+              // Nested while-loop steps use nestedStepWithId (e.g. test_journey_iteratively::1::justify_journey); storeStepResult keys by step.id
+              const canonicalStepId = nestedStepWithId.id;
+              const templateStepId = nestedStep.id;
               const stepSlug = nestedStep.slug || this.generateSlug(nestedStep.name || 'step');
               
               let stepResult = null;
               
-              // Try by step ID first
-              if (workflowState[stepId]?.result) {
-                stepResult = workflowState[stepId].result;
-                console.log(`✅ Found determine_completion result in workflowState[${stepId}].result`);
-              } else if (workflowState.results?.[stepId]?.result) {
-                stepResult = workflowState.results[stepId].result;
-                console.log(`✅ Found determine_completion result in workflowState.results[${stepId}].result`);
-              } else if (workflowState.variablePool?.steps?.[stepId]?.result) {
-                stepResult = workflowState.variablePool.steps[stepId].result;
-                console.log(`✅ Found determine_completion result in workflowState.variablePool.steps[${stepId}].result`);
-              } else if (workflowState.variablePool?.steps?.[stepSlug]?.result) {
-                stepResult = workflowState.variablePool.steps[stepSlug].result;
-                console.log(`✅ Found determine_completion result in workflowState.variablePool.steps[${stepSlug}].result`);
-              } else if (workflowState[stepId]) {
-                stepResult = workflowState[stepId];
-                console.log(`✅ Found determine_completion result in workflowState[${stepId}] (direct)`);
-              } else if (workflowState.results?.[stepId]) {
-                stepResult = workflowState.results[stepId];
-                console.log(`✅ Found determine_completion result in workflowState.results[${stepId}] (direct)`);
-              }
+              const tryReadResult = (id, label) => {
+                if (!id || stepResult) return;
+                if (workflowState[id]?.result) {
+                  stepResult = workflowState[id].result;
+                  console.log(`✅ Found condition-step result in workflowState[${id}].result (${label})`);
+                } else if (workflowState.results?.[id]?.result) {
+                  stepResult = workflowState.results[id].result;
+                  console.log(`✅ Found condition-step result in workflowState.results[${id}].result (${label})`);
+                } else if (workflowState.variablePool?.steps?.[id]?.result) {
+                  stepResult = workflowState.variablePool.steps[id].result;
+                  console.log(`✅ Found condition-step result in workflowState.variablePool.steps[${id}].result (${label})`);
+                }
+              };
               
-              console.log(`🔍 Looking for determine_completion result from step ${nestedStep.id}`);
-              console.log(`🔍 workflowState[${nestedStep.id}]:`, workflowState[nestedStep.id] ? 'exists' : 'missing');
-              console.log(`🔍 workflowState.results[${nestedStep.id}]:`, workflowState.results?.[nestedStep.id] ? 'exists' : 'missing');
-              console.log(`🔍 workflowState.variablePool.steps[${nestedStep.id}]:`, workflowState.variablePool?.steps?.[nestedStep.id] ? 'exists' : 'missing');
+              tryReadResult(canonicalStepId, 'nested-id');
+              tryReadResult(templateStepId, 'template-id');
+              tryReadResult(stepSlug, 'slug');
+              
+              console.log(`🔍 Looking for justify/determine result from step ${nestedStep.id} (stored as ${canonicalStepId})`);
+              console.log(`🔍 workflowState[${canonicalStepId}]:`, workflowState[canonicalStepId] ? 'exists' : 'missing');
+              console.log(`🔍 workflowState.results[${canonicalStepId}]:`, workflowState.results?.[canonicalStepId] ? 'exists' : 'missing');
+              console.log(`🔍 workflowState.variablePool.steps[${canonicalStepId}]:`, workflowState.variablePool?.steps?.[canonicalStepId] ? 'exists' : 'missing');
               
               if (stepResult) {
                 const normalizedResult = stepResult?.result || stepResult;
