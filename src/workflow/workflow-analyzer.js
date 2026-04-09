@@ -11780,7 +11780,8 @@ return {
             `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys/${legId}/complete`,
             {
               final_result: finalResult,
-              error: error
+              error: error,
+              job_id: jobId
             },
             {
               headers: this.getAuthHeaders()
