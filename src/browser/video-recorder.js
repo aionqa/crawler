@@ -22,6 +22,80 @@ class VideoRecorder {
     this.activeRecordings = new Map(); // jobId -> recording info
   }
 
+  registerPageVideoHandle(videoHandleSet, targetPage, jobId) {
+    if (!videoHandleSet || !targetPage || typeof targetPage.video !== 'function') {
+      return;
+    }
+    try {
+      const handle = targetPage.video();
+      if (handle) {
+        videoHandleSet.add(handle);
+      }
+    } catch (error) {
+      console.warn(`[VIDEO-RECORDER] Unable to register page video handle for job ${jobId}:`, error.message);
+    }
+  }
+
+  async getVideoDurationSeconds(videoPath) {
+    if (!videoPath) return null;
+    try {
+      const { stdout } = await execFileAsync('ffprobe', [
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        videoPath
+      ], { timeout: 30000 });
+      const parsed = Number(String(stdout || '').trim());
+      return Number.isFinite(parsed) ? parsed : null;
+    } catch (error) {
+      console.warn(`[VIDEO-RECORDER] Failed to probe video duration for ${videoPath}:`, error.message);
+      return null;
+    }
+  }
+
+  async collectVideoCandidates(jobId, videoHandles = new Set()) {
+    const candidates = [];
+    for (const handle of Array.from(videoHandles)) {
+      if (!handle || typeof handle.path !== 'function') {
+        continue;
+      }
+      try {
+        const candidatePath = await handle.path();
+        if (!candidatePath) {
+          continue;
+        }
+        const stats = await fs.promises.stat(candidatePath);
+        if (!stats || stats.size <= 0) {
+          continue;
+        }
+        const durationSeconds = await this.getVideoDurationSeconds(candidatePath);
+        candidates.push({
+          path: candidatePath,
+          size: stats.size,
+          durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0
+        });
+      } catch (error) {
+        console.warn(`[VIDEO-RECORDER] Failed to collect video candidate for job ${jobId}:`, error.message);
+      }
+    }
+    return candidates;
+  }
+
+  selectBestVideoCandidate(candidates = []) {
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      return null;
+    }
+    const sorted = [...candidates].sort((a, b) => {
+      const aDuration = Number.isFinite(a.durationSeconds) ? a.durationSeconds : 0;
+      const bDuration = Number.isFinite(b.durationSeconds) ? b.durationSeconds : 0;
+      if (Math.abs(bDuration - aDuration) > 0.05) {
+        return bDuration - aDuration;
+      }
+      return (b.size || 0) - (a.size || 0);
+    });
+    return sorted[0] || null;
+  }
+
   /**
    * Start recording for a job
    * Playwright's context.recordVideo will handle the actual recording
@@ -33,6 +107,21 @@ class VideoRecorder {
     console.log(`🎬 [VIDEO-RECORDER] Starting video recording for job ${jobId}`);
 
     const startTime = Date.now();
+
+    const pageVideoHandles = new Set();
+    const onContextPage = (newPage) => {
+      this.registerPageVideoHandle(pageVideoHandles, newPage, jobId);
+    };
+
+    this.registerPageVideoHandle(pageVideoHandles, page, jobId);
+    if (context && typeof context.pages === 'function') {
+      for (const existingPage of context.pages()) {
+        this.registerPageVideoHandle(pageVideoHandles, existingPage, jobId);
+      }
+    }
+    if (context && typeof context.on === 'function') {
+      context.on('page', onContextPage);
+    }
     
     // Start activity detection
     const activityDetector = new ActivityDetector(page, startTime);
@@ -46,7 +135,9 @@ class VideoRecorder {
       startedAt: new Date(),
       videoPath: null, // Will be set when video is saved
       segments: [],
-      activityDetector
+      activityDetector,
+      pageVideoHandles,
+      onContextPage
     };
 
     this.activeRecordings.set(jobId, recordingInfo);
@@ -71,12 +162,21 @@ class VideoRecorder {
     try {
       const { context, page } = recording;
 
-      // Retrieve video reference before context shutdown
-      const video = page && typeof page.video === 'function' ? page.video() : null;
-      if (!video) {
-        console.error(`[VIDEO-RECORDER] No Playwright video handle available for job ${jobId}`);
-        this.activeRecordings.delete(jobId);
-        return null;
+      if (recording.pageVideoHandles) {
+        this.registerPageVideoHandle(recording.pageVideoHandles, page, jobId);
+        if (context && typeof context.pages === 'function') {
+          for (const currentPage of context.pages()) {
+            this.registerPageVideoHandle(recording.pageVideoHandles, currentPage, jobId);
+          }
+        }
+      }
+
+      if (context && recording.onContextPage && typeof context.off === 'function') {
+        try {
+          context.off('page', recording.onContextPage);
+        } catch (_) {
+          // Ignore listener cleanup errors.
+        }
       }
 
       // Ensure the context is closed so Playwright finalises the video file
@@ -88,8 +188,25 @@ class VideoRecorder {
         }
       }
 
-      const videoPath = await video.path();
-      console.log(`[VIDEO-RECORDER] Video saved to: ${videoPath}`);
+      const videoCandidates = await this.collectVideoCandidates(jobId, recording.pageVideoHandles || new Set());
+      const selectedVideo = this.selectBestVideoCandidate(videoCandidates);
+      if (!selectedVideo) {
+        console.error(`[VIDEO-RECORDER] No finalized Playwright video file found for job ${jobId}`);
+        this.activeRecordings.delete(jobId);
+        return null;
+      }
+
+      const videoPath = selectedVideo.path;
+      const staleVideoPaths = videoCandidates
+        .map(candidate => candidate.path)
+        .filter(candidatePath => candidatePath && candidatePath !== videoPath);
+      console.log(`[VIDEO-RECORDER] Selected video for upload: ${videoPath}`);
+      if (videoCandidates.length > 1) {
+        const candidatesSummary = videoCandidates
+          .map(candidate => `${path.basename(candidate.path)}:${candidate.durationSeconds.toFixed(3)}s`)
+          .join(', ');
+        console.log(`[VIDEO-RECORDER] Video candidates (${videoCandidates.length}): ${candidatesSummary}`);
+      }
 
       // Stop activity detection
       if (recording.activityDetector) {
@@ -99,16 +216,22 @@ class VideoRecorder {
       // Gather metadata
       const stats = await fs.promises.stat(videoPath);
       const originalFileSize = stats.size;
-      const originalDuration = Math.floor((Date.now() - recording.startTime) / 1000);
+      const probedOriginalDuration = await this.getVideoDurationSeconds(videoPath);
+      const originalDuration = Number.isFinite(probedOriginalDuration) && probedOriginalDuration > 0
+        ? probedOriginalDuration
+        : Math.max(0.1, (Date.now() - recording.startTime) / 1000);
+      const fallbackInactiveMarkers = recording.activityDetector
+        ? recording.activityDetector.getInactiveMarkers({ useCompressedTimeline: false })
+        : [];
 
       console.log(`[VIDEO-RECORDER] Original video size: ${(originalFileSize / (1024 * 1024)).toFixed(2)} MB`);
-      console.log(`[VIDEO-RECORDER] Original video duration: ${originalDuration} seconds`);
+      console.log(`[VIDEO-RECORDER] Original video duration: ${originalDuration.toFixed(3)} seconds`);
 
       // Compress inactive periods if activity detector is available
       let finalVideoPath = videoPath;
       let finalFileSize = originalFileSize;
       let finalDuration = originalDuration;
-      let inactiveMarkers = [];
+      let inactiveMarkers = fallbackInactiveMarkers;
       
       if (recording.activityDetector) {
         try {
@@ -116,15 +239,55 @@ class VideoRecorder {
             jobId,
             videoPath,
             recording.activityDetector,
-            recording.startTime
+            recording.startTime,
+            originalDuration
           );
-          finalVideoPath = compressionResult.path;
-          finalFileSize = compressionResult.size;
-          finalDuration = compressionResult.duration;
-          inactiveMarkers = compressionResult.inactiveMarkers;
-          
-          // Delete original if we created a compressed version
+
           if (compressionResult.path !== videoPath) {
+            const measuredCompressedDuration = await this.getVideoDurationSeconds(compressionResult.path);
+            const effectiveCompressedDuration = Number.isFinite(measuredCompressedDuration) && measuredCompressedDuration > 0
+              ? measuredCompressedDuration
+              : compressionResult.duration;
+            const expectedCompressedDuration = Number(compressionResult.duration);
+            const suspiciousCompression =
+              !Number.isFinite(effectiveCompressedDuration) ||
+              effectiveCompressedDuration <= 0.75 ||
+              (Number.isFinite(expectedCompressedDuration) && expectedCompressedDuration > 0 && effectiveCompressedDuration < (expectedCompressedDuration * 0.5));
+
+            if (suspiciousCompression) {
+              console.warn(
+                `[VIDEO-RECORDER] Compression output looks invalid (expected=${Number.isFinite(expectedCompressedDuration) ? expectedCompressedDuration.toFixed(3) : 'n/a'}s, actual=${Number.isFinite(effectiveCompressedDuration) ? effectiveCompressedDuration.toFixed(3) : 'n/a'}s). Using original video.`
+              );
+              try {
+                await fs.promises.unlink(compressionResult.path);
+              } catch (_) {
+                // Ignore cleanup errors for rejected compressed output.
+              }
+              finalVideoPath = videoPath;
+              finalFileSize = originalFileSize;
+              finalDuration = originalDuration;
+              inactiveMarkers = fallbackInactiveMarkers;
+            } else {
+              finalVideoPath = compressionResult.path;
+              finalFileSize = compressionResult.size;
+              finalDuration = effectiveCompressedDuration;
+              inactiveMarkers = Array.isArray(compressionResult.inactiveMarkers) && compressionResult.inactiveMarkers.length > 0
+                ? compressionResult.inactiveMarkers
+                : fallbackInactiveMarkers;
+            }
+          } else {
+            finalVideoPath = videoPath;
+            finalFileSize = compressionResult.size || originalFileSize;
+            finalDuration = Number.isFinite(compressionResult.duration) && compressionResult.duration > 0
+              ? compressionResult.duration
+              : originalDuration;
+            inactiveMarkers = Array.isArray(compressionResult.inactiveMarkers) && compressionResult.inactiveMarkers.length > 0
+              ? compressionResult.inactiveMarkers
+              : fallbackInactiveMarkers;
+          }
+
+          // Delete original if we accepted a compressed version
+          if (finalVideoPath !== videoPath) {
             try {
               await fs.promises.unlink(videoPath);
               console.log(`[VIDEO-RECORDER] Deleted original uncompressed video`);
@@ -134,11 +297,16 @@ class VideoRecorder {
           }
           
           console.log(`[VIDEO-RECORDER] Compressed video size: ${(finalFileSize / (1024 * 1024)).toFixed(2)} MB`);
-          console.log(`[VIDEO-RECORDER] Compressed video duration: ${finalDuration} seconds`);
-          console.log(`[VIDEO-RECORDER] Compression ratio: ${(originalDuration / finalDuration).toFixed(2)}x`);
+          console.log(`[VIDEO-RECORDER] Compressed video duration: ${Number(finalDuration).toFixed(3)} seconds`);
+          if (finalDuration > 0) {
+            console.log(`[VIDEO-RECORDER] Compression ratio: ${(originalDuration / finalDuration).toFixed(2)}x`);
+          }
         } catch (compressionError) {
           console.error(`[VIDEO-RECORDER] Failed to compress video, using original:`, compressionError.message);
-          // Continue with original video
+          finalVideoPath = videoPath;
+          finalFileSize = originalFileSize;
+          finalDuration = originalDuration;
+          inactiveMarkers = fallbackInactiveMarkers;
         }
       }
 
@@ -161,6 +329,14 @@ class VideoRecorder {
         console.log(`[VIDEO-RECORDER] Cleaned up local video file`);
       } catch (cleanupError) {
         console.warn(`[VIDEO-RECORDER] Failed to cleanup local file:`, cleanupError.message);
+      }
+      for (const stalePath of staleVideoPaths) {
+        if (!stalePath || stalePath === finalVideoPath) continue;
+        try {
+          await fs.promises.unlink(stalePath);
+        } catch (_) {
+          // Ignore cleanup failures for non-selected page videos.
+        }
       }
 
       // Remove from active recordings
@@ -186,10 +362,13 @@ class VideoRecorder {
   /**
    * Compress inactive periods in video using ffmpeg
    */
-  async compressInactivePeriods(jobId, videoPath, activityDetector, recordingStartTime) {
+  async compressInactivePeriods(jobId, videoPath, activityDetector, recordingStartTime, sourceDurationSeconds = null) {
     const compressedPath = videoPath.replace('.webm', '_compressed.webm');
     const timeline = activityDetector.getCompressedTimeline();
     const inactiveMarkers = activityDetector.getInactiveMarkers();
+    const sourceDuration = Number.isFinite(sourceDurationSeconds) && sourceDurationSeconds > 0
+      ? sourceDurationSeconds
+      : await this.getVideoDurationSeconds(videoPath);
     
     if (timeline.timeline.length === 0 || timeline.compressionRatio <= 1.1) {
       // No meaningful compression possible
@@ -197,15 +376,13 @@ class VideoRecorder {
       return {
         path: videoPath,
         size: (await fs.promises.stat(videoPath)).size,
-        duration: timeline.originalDuration / 1000,
-        inactiveMarkers: []
+        duration: Number.isFinite(sourceDuration) && sourceDuration > 0 ? sourceDuration : (timeline.originalDuration / 1000),
+        inactiveMarkers
       };
     }
     
     console.log(`[VIDEO-RECORDER] Compressing video: ${timeline.timeline.length} segments, compression ratio: ${timeline.compressionRatio.toFixed(2)}x`);
     
-    // Build ffmpeg filter complex to concatenate segments with time compression
-    const filterParts = [];
     const inputs = [];
     let inputIndex = 0;
     
@@ -214,49 +391,70 @@ class VideoRecorder {
     const segmentsContent = [];
     
     for (const segment of timeline.timeline) {
-      const originalStart = (segment.originalStart - recordingStartTime) / 1000;
-      const originalDuration = segment.duration / 1000;
-      const displayDuration = (segment.displayEnd - segment.displayStart) / 1000;
-      const outpoint = originalStart + originalDuration;
-      if (!Number.isFinite(originalStart) || !Number.isFinite(originalDuration) || !Number.isFinite(outpoint) || originalDuration <= 0) {
+      let originalStart = (segment.originalStart - recordingStartTime) / 1000;
+      let originalDuration = segment.duration / 1000;
+      let displayDuration = (segment.displayEnd - segment.displayStart) / 1000;
+
+      if (!Number.isFinite(originalStart) || !Number.isFinite(originalDuration) || originalDuration <= 0) {
         console.warn(`[VIDEO-RECORDER] Skipping segment with invalid times (originalStart=${originalStart}, originalDuration=${originalDuration})`);
         continue;
       }
-      if (segment.type === 'active') {
-        // Active segments: use normally with speed=1.0
-        segmentsContent.push(`file '${videoPath}'\ninpoint ${originalStart.toFixed(3)}\noutpoint ${outpoint.toFixed(3)}\n`);
-      } else {
-        // Inactive segments: speed up if compressed
-        if (segment.compressed && originalDuration > displayDuration) {
-          const speed = originalDuration / displayDuration;
-          // Use setpts filter to speed up
-          const tempSegment = videoPath.replace('.webm', `_segment_${inputIndex}.webm`);
-          
-          await execFileAsync('ffmpeg', [
-            '-y',
-            '-i', videoPath,
-            '-ss', originalStart.toFixed(3),
-            '-t', originalDuration.toFixed(3),
-            '-filter:v', `setpts=PTS/${speed.toFixed(3)}`,
-            '-an', // Remove audio for speed changes
-            tempSegment
-          ]);
-          
-          segmentsContent.push(`file '${tempSegment}'\n`);
-          inputs.push(tempSegment);
-        } else {
-          // Show in full if not compressed
-          segmentsContent.push(`file '${videoPath}'\ninpoint ${originalStart.toFixed(3)}\noutpoint ${outpoint.toFixed(3)}\n`);
+
+      if (Number.isFinite(sourceDuration) && sourceDuration > 0) {
+        if (originalStart >= sourceDuration) {
+          continue;
+        }
+        originalStart = Math.max(0, originalStart);
+        const maxDuration = Math.max(0, sourceDuration - originalStart);
+        if (maxDuration <= 0.04) {
+          continue;
+        }
+        originalDuration = Math.min(originalDuration, maxDuration);
+        if (displayDuration > originalDuration) {
+          displayDuration = originalDuration;
         }
       }
+
+      if (!Number.isFinite(displayDuration) || displayDuration <= 0 || !Number.isFinite(originalDuration) || originalDuration <= 0) {
+        continue;
+      }
+
+      const tempSegment = videoPath.replace('.webm', `_segment_${inputIndex}.webm`);
+      inputIndex += 1;
+      const ffmpegArgs = [
+        '-y',
+        '-ss', originalStart.toFixed(3),
+        '-t', originalDuration.toFixed(3),
+        '-i', videoPath
+      ];
+
+      if (segment.type === 'inactive' && segment.compressed && originalDuration > displayDuration) {
+        const speed = originalDuration / displayDuration;
+        ffmpegArgs.push('-filter:v', `setpts=PTS/${speed.toFixed(3)}`);
+      }
+
+      ffmpegArgs.push(
+        '-an',
+        '-c:v', 'libvpx',
+        '-quality', 'good',
+        '-speed', '0',
+        '-b:v', '1M',
+        '-maxrate', '1M',
+        '-bufsize', '2M',
+        tempSegment
+      );
+
+      await execFileAsync('ffmpeg', ffmpegArgs, { timeout: 600000 });
+      segmentsContent.push(`file '${tempSegment}'\n`);
+      inputs.push(tempSegment);
     }
     if (segmentsContent.length === 0) {
       console.warn('[VIDEO-RECORDER] No valid segments after filtering (invalid/NaN times), using original video');
       return {
         path: videoPath,
         size: (await fs.promises.stat(videoPath)).size,
-        duration: timeline.originalDuration / 1000,
-        inactiveMarkers: []
+        duration: Number.isFinite(sourceDuration) && sourceDuration > 0 ? sourceDuration : (timeline.originalDuration / 1000),
+        inactiveMarkers
       };
     }
     
@@ -292,11 +490,12 @@ class VideoRecorder {
     }
     
     const stats = await fs.promises.stat(compressedPath);
+    const compressedDuration = await this.getVideoDurationSeconds(compressedPath);
     
     return {
       path: compressedPath,
       size: stats.size,
-      duration: timeline.displayDuration / 1000,
+      duration: Number.isFinite(compressedDuration) && compressedDuration > 0 ? compressedDuration : (timeline.displayDuration / 1000),
       inactiveMarkers
     };
   }

@@ -281,12 +281,36 @@ class ActivityDetector {
   }
 
   /**
-   * Get inactive period markers for timeline visualization
+   * Get inactive period markers for timeline visualization.
+   * @param {Object} options
+   * @param {boolean} options.useCompressedTimeline - When true, markers use compressed display timeline.
    */
-  getInactiveMarkers() {
+  getInactiveMarkers(options = {}) {
+    const { useCompressedTimeline = true } = options;
     const markers = [];
+
+    if (!useCompressedTimeline) {
+      for (const period of this.activityPeriods) {
+        if (period.type !== 'inactive') continue;
+        const durationMs = period.end - period.start;
+        if (!Number.isFinite(durationMs) || durationMs < this.minInactiveDuration) continue;
+
+        const startSeconds = (period.start - this.recordingStartTime) / 1000;
+        const endSeconds = (period.end - this.recordingStartTime) / 1000;
+        if (!Number.isFinite(startSeconds) || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) continue;
+
+        const durationSeconds = durationMs / 1000;
+        markers.push({
+          start: Math.max(0, startSeconds),
+          end: Math.max(0, endSeconds),
+          originalDuration: durationSeconds,
+          compressedDuration: durationSeconds
+        });
+      }
+      return markers;
+    }
+
     const compressedTimeline = this.getCompressedTimeline();
-    
     for (const segment of compressedTimeline.timeline) {
       if (segment.type === 'inactive' && segment.compressed) {
         markers.push({
@@ -297,7 +321,7 @@ class ActivityDetector {
         });
       }
     }
-    
+
     return markers;
   }
 }
