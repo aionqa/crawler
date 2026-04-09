@@ -342,8 +342,9 @@ class VideoRecorder {
 
       console.log(`✅ [VIDEO-RECORDER] Video uploaded successfully`);
 
-      // Construct backend proxy URL for video access (use localhost for external access)
-      const publicBackendUrl = this.backendUrl.replace('http://back:', 'http://localhost:');
+      // Construct backend proxy URL for video access.
+      // Never persist internal helper URLs like http://back:4000 or localhost in cloud jobs.
+      const publicBackendUrl = this.resolvePublicBackendUrl();
       const backendVideoUrl = `${publicBackendUrl}/stream-video?key=${encodeURIComponent(key)}`;
       
       // Notify backend about the video with backend proxy URL
@@ -381,6 +382,56 @@ class VideoRecorder {
       console.error(`[VIDEO-RECORDER] Failed to upload video:`, error.message);
       throw error;
     }
+  }
+
+  resolvePublicBackendUrl() {
+    const normalizeBase = (value) => {
+      if (typeof value !== 'string') return null;
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      return trimmed.replace(/\/+$/, '');
+    };
+
+    const envCandidates = [
+      process.env.BACKEND_PUBLIC_URL,
+      process.env.PUBLIC_BACKEND_URL,
+      process.env.API_PUBLIC_URL,
+      process.env.API_URL,
+      this.backendUrl
+    ].map(normalizeBase).filter(Boolean);
+
+    const isInternalHost = (hostnameRaw) => {
+      const hostname = String(hostnameRaw || '').trim().toLowerCase();
+      if (!hostname) return true;
+      if (hostname === 'back' || hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
+        return true;
+      }
+      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) {
+        const parts = hostname.split('.').map(Number);
+        if (parts[0] === 10) return true;
+        if (parts[0] === 127) return true;
+        if (parts[0] === 192 && parts[1] === 168) return true;
+        if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+      }
+      return false;
+    };
+
+    for (const candidate of envCandidates) {
+      try {
+        const parsed = new URL(candidate);
+        if (!isInternalHost(parsed.hostname)) {
+          return `${parsed.protocol}//${parsed.host}`;
+        }
+      } catch (_error) {
+        // Ignore invalid candidates.
+      }
+    }
+
+    const nodeEnv = String(process.env.NODE_ENV || '').toLowerCase();
+    if (nodeEnv === 'production') {
+      return 'https://api.aionqa.com';
+    }
+    return 'http://localhost:4000';
   }
 
   /**
