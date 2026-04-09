@@ -1,6 +1,6 @@
 /**
  * Crawler/indexing infrastructure URLs — not human-facing HTML pages.
- * SEO/content optimizer steps should not run AI or persist analysis for these.
+ * Skip for crawl queue, link discovery, recursive crawl targets, SEO/content steps, and backend discover.
  */
 export function isSearchEngineInfraUrl(urlString) {
   if (urlString == null || urlString === '') return false;

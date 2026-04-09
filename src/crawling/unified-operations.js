@@ -14,6 +14,7 @@ import WorkflowAnalyzer from '../workflow/analysis/workflow-analyzer.js';
 import WorkflowExecutor from '../workflow/execution/workflow-executor.js';
 import OptimizedWorkflowAnalyzer from '../workflow/analysis/optimized-workflow-analyzer.js';
 import axios from 'axios';
+import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -345,6 +346,10 @@ async function recordApiDomainClassification(jobId, projectId, apiUrl, pageUrl, 
 // Returns the pageId from the backend
 async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null, allowSubdomains = false, domainScope = null) {
   try {
+    if (isSearchEngineInfraUrl(pageUrl)) {
+      console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping crawler infrastructure URL: ${pageUrl}`);
+      return null;
+    }
     // Domain filtering: Only send internal pages to backend
     if (baseUrl && !isWithinDomain(pageUrl, baseUrl, allowSubdomains, domainScope)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageUrl}`);
@@ -418,6 +423,10 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
 // Returns the pageId from the backend
 async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allowSubdomains = false, domainScope = null) {
   try {
+    if (isSearchEngineInfraUrl(pageData?.url)) {
+      console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping crawler infrastructure URL: ${pageData.url}`);
+      return null;
+    }
     // Domain filtering: Only send internal pages to backend
     if (baseUrl && !isWithinDomain(pageData.url, baseUrl, allowSubdomains, domainScope)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageData.url}`);
@@ -3034,7 +3043,12 @@ const modeHandlers = {
           if (parentJobId && crawlableInternalLinks.length > 0) {
             const linksToReport = crawlableInternalLinks
               .map((link) => (link?.urlWithoutHash || link?.href || '').trim())
-              .filter((u) => u && (u.startsWith('http://') || u.startsWith('https://')));
+              .filter(
+                (u) =>
+                  u &&
+                  (u.startsWith('http://') || u.startsWith('https://')) &&
+                  !isSearchEngineInfraUrl(u)
+              );
             if (linksToReport.length > 0) {
               try {
                 const reportUrl = `${backendUrl}/jobs/${parentJobId}/domain-crawl/report-links`;
@@ -3082,6 +3096,7 @@ const modeHandlers = {
               if (!isWithinDomain(urlToCheck, seedUrl, allowSubdomains, domainScope)) continue;
               // Login pages (configured) are for auth only — never queue as a page to test
               if (isLoginPageUrl(urlToCheck, loginUrls)) continue;
+              if (isSearchEngineInfraUrl(urlToCheck)) continue;
               if (!visitedUrls.has(urlToCheck) && !analyzedPageUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
                 if (!isLoginJob) {
                   urlQueue.push({ url: urlToCheck, depth: depth + 1 });
@@ -4683,6 +4698,17 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       await sendLog(jobId, 'info', `⏭️ Skipping URL outside crawl domain: ${normalizedUrl} (seed: ${startUrl})`, { page_url: currentUrl, mode: approach });
       continue;
     }
+
+    if (isSearchEngineInfraUrl(normalizedUrl) || isSearchEngineInfraUrl(currentUrl)) {
+      await sendLog(
+        jobId,
+        'info',
+        `⏭️ Skipping crawler infrastructure URL (robots.txt, sitemap, .well-known, etc.): ${normalizedUrl}`,
+        { page_url: currentUrl, mode: approach }
+      );
+      visitedUrls.add(normalizedUrl);
+      continue;
+    }
     
     // Skip if already visited (by base URL, without hash)
     if (visitedUrls.has(normalizedUrl)) {
@@ -4936,6 +4962,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           const urlToCheck = link.urlWithoutHash || link.href.split('#')[0];
           // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
           if (!isWithinDomain(urlToCheck, startUrl, allowSubdomains, domainScope)) continue;
+          if (isSearchEngineInfraUrl(urlToCheck)) continue;
           if (!visitedUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
             urlQueue.push({ url: urlToCheck, depth: depth + 1 });
             newLinksAdded++;
