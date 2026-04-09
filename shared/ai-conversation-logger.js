@@ -9,7 +9,7 @@ import { StructuredAIResponse } from './structured-ai-response.js';
 import OpenAI from 'openai';
 import { chromium } from 'playwright';
 import axios from 'axios';
-import { createOpenAIClient, isNetworkUnreachableError } from '../src/openai-client-factory.js';
+import { createOpenAIClient, isNetworkUnreachableError, isTransientGatewayError } from '../src/openai-client-factory.js';
 
 /**
  * Extract the first complete JSON object or array from a string that may contain
@@ -1262,8 +1262,13 @@ export class AIConversationLogger {
           if (attemptNumber === 1) {
             console.warn(`[AI-CALL] ⚠️ AI service failed (${chosen.label || serviceUrl}): ${msg}${isHttpError ? ` (HTTP ${status})` : ''}`);
           }
-          if (isNetworkDnsError && idx < eligibleServices.length - 1) {
-            console.warn('[AI-CALL] ⚠️ Trying next configured AI service after network/DNS failure...');
+          if (
+            (isNetworkDnsError || isTransientGatewayError(err)) &&
+            idx < eligibleServices.length - 1
+          ) {
+            console.warn(
+              `[AI-CALL] ⚠️ Trying next configured AI service after ${isNetworkDnsError ? 'network/DNS failure' : 'transient gateway error'}...`
+            );
             continue;
           }
           throw lastError;

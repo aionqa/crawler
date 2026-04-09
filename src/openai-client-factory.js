@@ -93,6 +93,15 @@ export function isNetworkUnreachableError(error) {
   );
 }
 
+/** ALB/proxy timeouts (504), upstream overload (502/503), rate limits (429), request timeout (408). */
+const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
+
+export function isTransientGatewayError(error) {
+  const status = error?.response?.status ?? error?.status;
+  if (status == null) return false;
+  return TRANSIENT_HTTP_STATUSES.has(Number(status));
+}
+
 /**
  * Create OpenAI client that uses configured AI services only.
  * @param {Object} context - Job context containing llm_config.endpoint (from helper ai_services), project_id, job_id
@@ -141,6 +150,8 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
     return status === 401 || /invalid token/i.test(msg) || /invalid token/i.test(responseMsg);
   };
 
+  const MAX_TRANSIENT_RETRIES = 3;
+
   const postToAiServiceWithFailover = async (requestBody, requestConfig, initialToken) => {
     let currentToken = initialToken;
     let lastError;
@@ -148,6 +159,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
       const baseUrl = String(aiServiceUrlCandidates[i]).replace(/\/$/, '');
       const url = `${baseUrl}/api/ai/chat`;
       let tried401 = false;
+      let transientAttempts = 0;
       for (;;) {
         try {
           const response = await axios.post(url, requestBody, requestConfig(currentToken));
@@ -162,6 +174,16 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
             console.warn('[OpenAI-Client] Invalid token detected, refreshing token and retrying once...');
             invalidateAIServiceToken(jobId);
             currentToken = await getAIServiceTokenInternal(projectId, jobId, true);
+            continue;
+          }
+          if (isTransientGatewayError(e) && transientAttempts < MAX_TRANSIENT_RETRIES) {
+            transientAttempts++;
+            const delayMs = Math.min(8000, 500 * 2 ** (transientAttempts - 1));
+            const st = e.response?.status ?? e.status ?? '?';
+            console.warn(
+              `[OpenAI-Client] Transient HTTP ${st} from ${baseUrl}; retry ${transientAttempts}/${MAX_TRANSIENT_RETRIES} in ${delayMs}ms...`
+            );
+            await new Promise((r) => setTimeout(r, delayMs));
             continue;
           }
           if (isNetworkUnreachableError(e) && i < aiServiceUrlCandidates.length - 1) {
