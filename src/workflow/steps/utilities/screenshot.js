@@ -22,6 +22,10 @@ export async function executeScreenshotStep(page, step, workflowState, jobId, pa
     screenshotOptions.quality = quality;
   }
 
+  // Default 90s: full-page captures (SVG/heavy pages) often exceed Playwright's 30s screenshot limit.
+  const timeoutMs = typeof config.timeout === 'number' && config.timeout > 0 ? config.timeout : 90000;
+  screenshotOptions.timeout = timeoutMs;
+
   console.log('Screenshot options resolved:', screenshotOptions);
 
   const screenshot = await page.screenshot(screenshotOptions);
