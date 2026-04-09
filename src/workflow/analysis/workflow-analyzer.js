@@ -16984,6 +16984,12 @@ ${executableBody}`;
         }
       }
     }
+
+    // Intermediate AI steps may report failure / verified=false while the leg was finalized as an
+    // insufficient-signal skip (e.g. justify_journey path missing). Do not upgrade that to failure.
+    if (finalLegStatus === 'skipped' && finalLegResult === 'skipped_insufficient_signal') {
+      finalJustificationStatus = 'skipped_insufficient_signal';
+    }
     
     // CRITICAL: Update journey with final justification_status and ai_justification after while-loop completes
     // Check multiple locations: currentJourney (from template), currentItem (default), or find from journeysToExecute
@@ -17005,6 +17011,9 @@ ${executableBody}`;
           finalAiJustification = journey.ai_justification;
         }
         journey.justification_status = finalJustificationStatus || journey.justification_status || 'discovered';
+        if (finalLegResult === 'skipped_insufficient_signal') {
+          journey.final_result = finalLegResult;
+        }
         if (finalExpectedOutcomeVerified !== undefined) {
           journey.expected_outcome_verified = finalExpectedOutcomeVerified;
         }
@@ -17023,6 +17032,9 @@ ${executableBody}`;
               finalAiJustification = workflowState.journeys[journeysIndex].ai_justification;
             }
             workflowState.journeys[journeysIndex].justification_status = finalJustificationStatus || workflowState.journeys[journeysIndex].justification_status || 'discovered';
+            if (finalLegResult === 'skipped_insufficient_signal') {
+              workflowState.journeys[journeysIndex].final_result = finalLegResult;
+            }
             if (finalExpectedOutcomeVerified !== undefined) {
               workflowState.journeys[journeysIndex].expected_outcome_verified = finalExpectedOutcomeVerified;
             }
@@ -17037,6 +17049,7 @@ ${executableBody}`;
               ...journey,
               ai_justification: journey.ai_justification || finalAiJustification || null,
               justification_status: journey.justification_status || finalJustificationStatus || null,
+              final_result: journey.final_result || (finalLegResult === 'skipped_insufficient_signal' ? finalLegResult : null) || null,
               expected_outcome_verified: journey.expected_outcome_verified !== undefined ? journey.expected_outcome_verified : (finalExpectedOutcomeVerified !== undefined ? finalExpectedOutcomeVerified : undefined),
               verification_details: journey.verification_details || null
             };
