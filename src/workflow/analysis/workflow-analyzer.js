@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { isSearchEngineInfraUrl } from '../../utils/search-engine-infra-url.js';
 import { StaticNodeExecutor } from '../execution/static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../../step-requirements.js';
 import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
@@ -5068,6 +5069,38 @@ return {
         console.log('🛠️ Using forced generated-email registration script for app.aionqa.com/login.');
       }
 
+      const stepIdForInfra = String(step.id || '').toLowerCase();
+      const stepNameForInfra = String(step.name || '').toLowerCase();
+      const isSeoAssistantStepForInfra =
+        stepIdForInfra === 'seo_analysis' ||
+        stepIdForInfra.includes('seo_assistant') ||
+        stepNameForInfra.includes('seo assistant') ||
+        stepNameForInfra.includes('seo analysis');
+      const isContentOptimizerStepForInfra =
+        stepIdForInfra === 'content_optimization_analysis' ||
+        stepIdForInfra.includes('content_optimizer') ||
+        stepNameForInfra.includes('content optimizer') ||
+        stepNameForInfra.includes('content optimization');
+      if (
+        !aiResponse &&
+        (isSeoAssistantStepForInfra || isContentOptimizerStepForInfra) &&
+        isSearchEngineInfraUrl(String(effectivePageUrl || ''))
+      ) {
+        aiResponse = {
+          skipped_search_engine_infra_url: true,
+          reason: 'Crawler infrastructure URL (robots.txt, sitemap, .well-known, etc.); not scored as a normal page.'
+        };
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            `ℹ️ Skipped SEO/content optimizer AI step for search-engine infrastructure URL: ${effectivePageUrl}`,
+            'WORKFLOW-ANALYZER',
+            { step_id: step.id, page_url: effectivePageUrl }
+          );
+        }
+      }
+
       // Reuse step classification for retry behavior
       const configuredRetries = Number.isFinite(step.config?.maxRetries) ? step.config.maxRetries : 1;
       const maxAttempts = Math.max(1, configuredRetries + 1);
@@ -5205,7 +5238,7 @@ return {
           }
 
           // SEO/content analysis should still be testable locally even when no AI provider is configured.
-          if (isSeoAssistantStep && isAiUnavailableError) {
+          if (isSeoAssistantStep && isAiUnavailableError && !isSearchEngineInfraUrl(String(effectivePageUrl || ''))) {
             const html = String(safeStepPayload.page_content || safeStepPayload.pageContent || '');
             const titleFromHtml = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').trim();
             const metaDesc = (html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
@@ -5330,7 +5363,7 @@ return {
             break;
           }
 
-          if (isContentOptimizerStep && isAiUnavailableError) {
+          if (isContentOptimizerStep && isAiUnavailableError && !isSearchEngineInfraUrl(String(effectivePageUrl || ''))) {
             const html = String(safeStepPayload.page_content || safeStepPayload.pageContent || '');
             const visible = String(safeStepPayload.visible_text || workflowState.visibleText || '');
             const words = visible.split(/\\s+/).filter(Boolean);
@@ -6812,7 +6845,13 @@ return {
       // The save-data step type is deprecated in this workflow engine, so AI-produced analysis
       // must be saved as part of the step execution.
       const rawContentAnalysis = parsedResponse?.content_analysis;
-      if (rawContentAnalysis && typeof rawContentAnalysis === 'object' && !Array.isArray(rawContentAnalysis)) {
+      const pageUrlForSeoContentInfra = String(workflowState.pageUrl || effectivePageUrl || '');
+      if (
+        rawContentAnalysis &&
+        typeof rawContentAnalysis === 'object' &&
+        !Array.isArray(rawContentAnalysis) &&
+        !isSearchEngineInfraUrl(pageUrlForSeoContentInfra)
+      ) {
         const normalizePriority = (value) => {
           const v = String(value || '').trim().toLowerCase();
           if (v === 'high' || v === 'h') return 'high';
@@ -6888,7 +6927,12 @@ return {
       // Some AI clients return a top-level object, others nest under `result`.
       // Accept both so the SEO assistant step always persists its output.
       const rawSeoAnalysis = parsedResponse?.seo_analysis ?? parsedResponse?.result?.seo_analysis;
-      if (rawSeoAnalysis && typeof rawSeoAnalysis === 'object' && !Array.isArray(rawSeoAnalysis)) {
+      if (
+        rawSeoAnalysis &&
+        typeof rawSeoAnalysis === 'object' &&
+        !Array.isArray(rawSeoAnalysis) &&
+        !isSearchEngineInfraUrl(pageUrlForSeoContentInfra)
+      ) {
         const normalizeSeoPriority = (value) => {
           const v = String(value || '').trim().toLowerCase();
           if (v === 'high' || v === 'h') return 'high';

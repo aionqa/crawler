@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
 import { StaticNodeExecutor } from './static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../step-requirements.js';
 
@@ -4127,6 +4128,39 @@ return {
           };
         }
       }
+
+      const stepIdForInfra = String(step.id || '').toLowerCase();
+      const stepNameForInfra = String(step.name || '').toLowerCase();
+      const isSeoAssistantStepForInfra =
+        stepIdForInfra === 'seo_analysis' ||
+        stepIdForInfra.includes('seo_assistant') ||
+        stepNameForInfra.includes('seo assistant') ||
+        stepNameForInfra.includes('seo analysis');
+      const isContentOptimizerStepForInfra =
+        stepIdForInfra === 'content_optimization_analysis' ||
+        stepIdForInfra.includes('content_optimizer') ||
+        stepNameForInfra.includes('content optimizer') ||
+        stepNameForInfra.includes('content optimization');
+      if (
+        !aiResponse &&
+        (isSeoAssistantStepForInfra || isContentOptimizerStepForInfra) &&
+        isSearchEngineInfraUrl(String(effectivePageUrl || ''))
+      ) {
+        aiResponse = {
+          skipped_search_engine_infra_url: true,
+          reason: 'Crawler infrastructure URL (robots.txt, sitemap, .well-known, etc.); not scored as a normal page.'
+        };
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            `ℹ️ Skipped SEO/content optimizer AI step for search-engine infrastructure URL: ${effectivePageUrl}`,
+            'WORKFLOW-ANALYZER',
+            { step_id: step.id, page_url: effectivePageUrl }
+          );
+        }
+      }
+
       try {
         if (!aiResponse) {
           aiResponse = await this.aiLogger.makeAICallWithPrompt(
@@ -4278,7 +4312,7 @@ return {
           aiErrorText.toLowerCase().includes('api key') ||
           aiErrorText.toLowerCase().includes('not provided');
 
-        if (isSeoAssistantStep && isAiUnavailableError) {
+        if (isSeoAssistantStep && isAiUnavailableError && !isSearchEngineInfraUrl(String(effectivePageUrl || ''))) {
           const html = String(stepPayload.page_content || stepPayload.pageContent || '');
           const titleFromHtml = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').trim();
           const metaDesc = (html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i)?.[1] || '').trim();
@@ -4416,7 +4450,7 @@ return {
               { score, opportunities: opportunities.length }
             );
           }
-        } else if (isContentOptimizerStep && isAiUnavailableError) {
+        } else if (isContentOptimizerStep && isAiUnavailableError && !isSearchEngineInfraUrl(String(effectivePageUrl || ''))) {
           const html = String(stepPayload.page_content || stepPayload.pageContent || '');
           const visible = String(stepPayload.visible_text || workflowState.visibleText || '');
           const words = visible.split(/\s+/).filter(Boolean);
