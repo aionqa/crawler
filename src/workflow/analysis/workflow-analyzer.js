@@ -156,7 +156,7 @@ class WorkflowAnalyzer {
       'execute-code-from-variable': 120000, // 2 minutes
       'while-loop': 600000,          // 10 minutes - Journey iteration (generate+execute+justify per stage) needs multiple AI calls
       'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
-      'screenshot': 60000,           // 1 minute - Quick operation
+      'screenshot': 90000,           // 90s — align with screenshot step Playwright default; full-page captures often exceed 60s
       'cookie-collect': 120000,      // 2 minutes - browser cookies + optional backend save (GET job, POST project cookies)
       'content-change': 60000,       // 1 minute - Variable operations
       'var-dump': 60000,            // 1 minute - Quick operation
