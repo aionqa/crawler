@@ -3371,6 +3371,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
       screenshotOptions.quality = quality;
     }
 
+    // Default 90s: full-page captures (SVG/heavy pages) often exceed Playwright's 30s default.
+    const timeoutMs = typeof config.timeout === 'number' && config.timeout > 0 ? config.timeout : 90000;
+    screenshotOptions.timeout = timeoutMs;
+
     console.log('Screenshot options resolved:', screenshotOptions);
 
     const screenshot = await page.screenshot(screenshotOptions);
