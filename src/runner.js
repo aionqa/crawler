@@ -13,6 +13,7 @@ import { join } from 'path';
 import { spawn } from 'child_process';
 import axios from 'axios';
 import https from 'https';
+import { promises as dnsPromises } from 'dns';
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import express from 'express';
@@ -914,6 +915,9 @@ async function executeCrawlJob(job, streamInterval) {
   if (operation === 'availability_check') {
     return executeAvailabilityCheckJob(job);
   }
+  if (operation === 'dns_certificate_scan') {
+    return executeDnsCertificateScanJob(job);
+  }
 
   // Extract job parameters
   // CRITICAL: URL can be at job.url, job.start_url, or job.seed_url (from jobs collection)
@@ -1431,6 +1435,266 @@ async function checkSingleUrlAvailability(url, timeoutMs) {
       error: error.message
     };
   }
+}
+
+function normalizeScanTargetUrl(rawUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) {
+    throw new Error('Missing target URL');
+  }
+  const withScheme = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+  return new URL(withScheme);
+}
+
+function buildDnsError(error) {
+  if (!error) return null;
+  return {
+    code: error.code || null,
+    message: String(error.message || error)
+  };
+}
+
+async function resolveDnsRecords(hostname) {
+  const lookupStartedAt = Date.now();
+  let lookup = [];
+  let lookupError = null;
+  try {
+    lookup = await dnsPromises.lookup(hostname, { all: true });
+  } catch (error) {
+    lookupError = buildDnsError(error);
+  }
+
+  const recordResolvers = {
+    A: async () => dnsPromises.resolve4(hostname),
+    AAAA: async () => dnsPromises.resolve6(hostname),
+    CNAME: async () => dnsPromises.resolveCname(hostname),
+    MX: async () => dnsPromises.resolveMx(hostname),
+    NS: async () => dnsPromises.resolveNs(hostname),
+    TXT: async () => dnsPromises.resolveTxt(hostname)
+  };
+
+  const records = {};
+  const errors = {};
+
+  await Promise.all(Object.entries(recordResolvers).map(async ([recordType, resolver]) => {
+    try {
+      const values = await resolver();
+      if (recordType === 'TXT') {
+        records[recordType] = values.map((chunk) => Array.isArray(chunk) ? chunk.join('') : String(chunk));
+      } else if (recordType === 'MX') {
+        records[recordType] = values
+          .map((mx) => ({ exchange: mx.exchange || null, priority: Number(mx.priority) || 0 }))
+          .sort((a, b) => a.priority - b.priority);
+      } else {
+        records[recordType] = values;
+      }
+    } catch (error) {
+      records[recordType] = [];
+      errors[recordType] = buildDnsError(error);
+    }
+  }));
+
+  const addressMap = new Map();
+  const addAddress = (address, family, source) => {
+    if (!address) return;
+    const key = `${String(address)}|${Number(family) || 0}`;
+    if (addressMap.has(key)) return;
+    addressMap.set(key, {
+      address: String(address),
+      family: Number(family) || null,
+      source
+    });
+  };
+
+  for (const row of lookup) {
+    addAddress(row?.address, row?.family, 'lookup');
+  }
+  for (const ip of records.A || []) {
+    addAddress(ip, 4, 'A');
+  }
+  for (const ip of records.AAAA || []) {
+    addAddress(ip, 6, 'AAAA');
+  }
+
+  const addresses = Array.from(addressMap.values());
+  const hasAnyRecords = addresses.length > 0 || Object.values(records).some((entry) => Array.isArray(entry) && entry.length > 0);
+
+  return {
+    ok: hasAnyRecords,
+    checked_at: new Date().toISOString(),
+    hostname,
+    lookup_time_ms: Date.now() - lookupStartedAt,
+    lookup,
+    addresses,
+    records,
+    errors: {
+      ...(lookupError ? { lookup: lookupError } : {}),
+      ...errors
+    }
+  };
+}
+
+async function collectCertificateInfo(targetUrl, timeoutMs) {
+  const checkedAt = new Date().toISOString();
+  if (!(targetUrl instanceof URL)) {
+    return {
+      ok: false,
+      status: 'invalid_target',
+      message: 'Invalid URL',
+      checked_at: checkedAt
+    };
+  }
+  if (targetUrl.protocol !== 'https:') {
+    return {
+      ok: false,
+      status: 'invalid_target',
+      message: 'Certificate check requires HTTPS URL',
+      checked_url: targetUrl.toString(),
+      checked_at: checkedAt
+    };
+  }
+
+  const startedAt = Date.now();
+  return new Promise((resolve) => {
+    const req = https.request({
+      hostname: targetUrl.hostname,
+      port: targetUrl.port || 443,
+      path: `${targetUrl.pathname || '/'}${targetUrl.search || ''}`,
+      method: 'GET',
+      timeout: timeoutMs,
+      rejectUnauthorized: false
+    }, (res) => {
+      const responseTimeMs = Date.now() - startedAt;
+      const socket = res.socket;
+      const cert = socket?.getPeerCertificate?.();
+
+      if (!cert || Object.keys(cert).length === 0) {
+        resolve({
+          ok: false,
+          status: 'no_certificate',
+          message: 'No peer certificate',
+          checked_url: targetUrl.toString(),
+          response_time_ms: responseTimeMs,
+          checked_at: checkedAt
+        });
+        return;
+      }
+
+      const now = new Date();
+      const validTo = cert.valid_to ? new Date(cert.valid_to) : null;
+      const validFrom = cert.valid_from ? new Date(cert.valid_from) : null;
+      const isExpired = validTo ? now > validTo : true;
+      const notYetValid = validFrom ? now < validFrom : false;
+      const ok = !isExpired && !notYetValid;
+
+      resolve({
+        ok,
+        status: ok ? 'ok' : (isExpired ? 'expired' : 'not_yet_valid'),
+        checked_url: targetUrl.toString(),
+        hostname: targetUrl.hostname,
+        http_status: Number.isFinite(Number(res.statusCode)) ? Number(res.statusCode) : null,
+        response_time_ms: responseTimeMs,
+        protocol: socket?.getProtocol?.() || null,
+        cipher: socket?.getCipher?.() || null,
+        subject: cert.subject || null,
+        issuer: cert.issuer || null,
+        subject_alt_name: cert.subjectaltname || null,
+        serial_number: cert.serialNumber || null,
+        fingerprint_sha1: cert.fingerprint || null,
+        fingerprint_sha256: cert.fingerprint256 || null,
+        valid_from: validFrom ? validFrom.toISOString() : null,
+        valid_to: validTo ? validTo.toISOString() : null,
+        days_until_expiry: validTo ? Math.floor((validTo - now) / (24 * 60 * 60 * 1000)) : null,
+        checked_at: checkedAt
+      });
+    });
+
+    req.on('error', (error) => {
+      resolve({
+        ok: false,
+        status: 'error',
+        message: String(error.message || error),
+        checked_url: targetUrl.toString(),
+        response_time_ms: Date.now() - startedAt,
+        checked_at: checkedAt
+      });
+    });
+
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({
+        ok: false,
+        status: 'timeout',
+        message: 'Connection timeout',
+        checked_url: targetUrl.toString(),
+        response_time_ms: Date.now() - startedAt,
+        checked_at: checkedAt
+      });
+    });
+
+    req.end();
+  });
+}
+
+async function executeDnsCertificateScanJob(job) {
+  const jobId = job.id;
+  const context = job.context || {};
+  const timeoutMs = Math.min(Math.max(Number(job.options?.timeout_ms) || DEFAULT_AVAILABILITY_TIMEOUT_MS, 1000), 60000);
+
+  const targetUrl = normalizeScanTargetUrl(
+    context.target_url ||
+    job.start_url ||
+    job.url ||
+    context.base_url ||
+    ''
+  );
+
+  const host = targetUrl.hostname;
+  await appendJobLog(jobId, 'info', `🌐 Starting DNS + certificate scan for ${targetUrl.toString()}`, {
+    target_url: targetUrl.toString(),
+    hostname: host,
+    timeout_ms: timeoutMs
+  });
+
+  const dns = await resolveDnsRecords(host);
+  const certificate = await collectCertificateInfo(targetUrl, timeoutMs);
+
+  await appendJobLog(
+    jobId,
+    dns.ok ? 'info' : 'warn',
+    `🌐 DNS info collected (${dns.addresses.length} address${dns.addresses.length === 1 ? '' : 'es'})`,
+    {
+      hostname: host,
+      addresses: dns.addresses.length,
+      has_lookup_error: !!dns.errors?.lookup
+    }
+  );
+
+  await appendJobLog(
+    jobId,
+    certificate.ok ? 'info' : 'warn',
+    `🔐 Certificate check ${certificate.ok ? 'passed' : `reported ${certificate.status || 'unknown status'}`}`,
+    {
+      target_url: targetUrl.toString(),
+      cert_status: certificate.status || null,
+      valid_to: certificate.valid_to || null,
+      days_until_expiry: certificate.days_until_expiry ?? null
+    }
+  );
+
+  const healthy = dns.ok && certificate.ok;
+  return {
+    success: true,
+    dns_certificate: {
+      checked_at: new Date().toISOString(),
+      target_url: targetUrl.toString(),
+      hostname: host,
+      timeout_ms: timeoutMs,
+      healthy,
+      dns,
+      certificate
+    }
+  };
 }
 
 /**
