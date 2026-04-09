@@ -918,6 +918,9 @@ async function executeCrawlJob(job, streamInterval) {
   if (operation === 'dns_certificate_scan') {
     return executeDnsCertificateScanJob(job);
   }
+  if (operation === 'complexities_scan') {
+    return executeComplexitiesScanJob(job);
+  }
 
   // Extract job parameters
   // CRITICAL: URL can be at job.url, job.start_url, or job.seed_url (from jobs collection)
@@ -1694,6 +1697,583 @@ async function executeDnsCertificateScanJob(job) {
       dns,
       certificate
     }
+  };
+}
+
+const LEGACY_STACK_RULES = [
+  {
+    key: 'angularjs-1x',
+    label: 'AngularJS 1.x',
+    severity: 'high',
+    scriptRegex: /(?:^|[\/._-])angular(?:\.min)?\.js(?:\?|$)/i,
+    htmlRegex: /\bng-app\b|angular\.module\s*\(/i
+  },
+  {
+    key: 'jquery-1x-2x',
+    label: 'jQuery 1.x/2.x',
+    severity: 'high',
+    scriptRegex: /jquery(?:[-.]|\.min\.)(?:1|2)\./i,
+    htmlRegex: /\$\.(?:browser|live|delegate)\s*\(|jQuery\.(?:browser|fn\.live)\b/i
+  },
+  {
+    key: 'backbone',
+    label: 'Backbone.js',
+    severity: 'medium',
+    scriptRegex: /backbone(?:\.min)?\.js/i,
+    htmlRegex: /\bBackbone\./i
+  },
+  {
+    key: 'prototype-js',
+    label: 'Prototype.js',
+    severity: 'high',
+    scriptRegex: /(?:^|[\/._-])prototype(?:\.min)?\.js(?:\?|$)/i,
+    htmlRegex: /\bPrototype\./i
+  },
+  {
+    key: 'dojo',
+    label: 'Dojo',
+    severity: 'medium',
+    scriptRegex: /(?:^|[\/._-])dojo(?:\.min)?\.js(?:\?|$)|\/dojo\/dojo\.js/i,
+    htmlRegex: /require\s*\(\s*\[\s*["']dojo\//i
+  },
+  {
+    key: 'mootools',
+    label: 'MooTools',
+    severity: 'medium',
+    scriptRegex: /mootools(?:\.min)?\.js/i,
+    htmlRegex: /\bMooTools\b/i
+  },
+  {
+    key: 'extjs',
+    label: 'Ext JS',
+    severity: 'high',
+    scriptRegex: /ext(?:\.all)?(?:\.min)?\.js/i,
+    htmlRegex: /\bExt\./i
+  },
+  {
+    key: 'requirejs',
+    label: 'RequireJS/AMD bootstrap',
+    severity: 'medium',
+    scriptRegex: /require(?:\.min)?\.js/i,
+    htmlRegex: /\bdefine\s*\(\s*\[|\brequirejs\b/i
+  },
+  {
+    key: 'document-write',
+    label: 'document.write usage',
+    severity: 'medium',
+    htmlRegex: /document\.write\s*\(/i
+  }
+];
+
+function normalizeUrlForComplexityMatching(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  const value = rawUrl.trim();
+  if (!value) return '';
+  try {
+    const parsed = new URL(value);
+    return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
+  } catch {
+    return value.split('#')[0].split('?')[0].trim().replace(/\/+$/, '');
+  }
+}
+
+function extractHtmlAttr(tagSource, attrName) {
+  if (!tagSource || !attrName) return '';
+  const escaped = String(attrName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const attrRegex = new RegExp(`\\b${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>"']+))`, 'i');
+  const match = String(tagSource).match(attrRegex);
+  if (!match) return '';
+  return (match[1] || match[2] || match[3] || '').trim();
+}
+
+function truncateEvidence(value, maxLength = 180) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength)}...`;
+}
+
+function severityRank(severity) {
+  const map = { none: 0, low: 1, medium: 2, high: 3, critical: 4 };
+  return map[String(severity || '').toLowerCase()] || 0;
+}
+
+function detectLegacyStackSignals({ html, scriptSources = [] }) {
+  const htmlText = String(html || '');
+  const joinedScripts = scriptSources.join('\n');
+  const hits = [];
+  for (const rule of LEGACY_STACK_RULES) {
+    let evidence = '';
+    let matched = false;
+
+    if (rule.scriptRegex) {
+      for (const src of scriptSources) {
+        if (rule.scriptRegex.test(src)) {
+          matched = true;
+          evidence = src;
+          break;
+        }
+      }
+      if (!matched && rule.scriptRegex.test(joinedScripts)) {
+        matched = true;
+      }
+    }
+
+    if (!matched && rule.htmlRegex && rule.htmlRegex.test(htmlText)) {
+      matched = true;
+      evidence = rule.key;
+    }
+
+    if (matched) {
+      hits.push({
+        key: rule.key,
+        label: rule.label,
+        severity: rule.severity,
+        evidence: truncateEvidence(evidence || rule.label, 180)
+      });
+    }
+  }
+  return hits;
+}
+
+function buildComplexitySeverity(score) {
+  if (score >= 24) return 'critical';
+  if (score >= 14) return 'high';
+  if (score >= 7) return 'medium';
+  if (score > 0) return 'low';
+  return 'none';
+}
+
+function analyzeComplexityForPage(pageLike, wsBucket = null) {
+  const pageId = pageLike?._id ? String(pageLike._id) : '';
+  const pageUrl = String(pageLike?.url || '').trim();
+  const pageTitle = String(pageLike?.title || '').trim();
+  const html = typeof pageLike?.content === 'string' ? pageLike.content : '';
+  const existingComplexities = pageLike?.complexities_analysis && typeof pageLike.complexities_analysis === 'object'
+    ? pageLike.complexities_analysis
+    : null;
+
+  const wsMessageCount = Number(wsBucket?.message_count) || 0;
+  const wsEndpointsFromMessages = Array.isArray(wsBucket?.endpoints)
+    ? wsBucket.endpoints.filter(Boolean).slice(0, 25)
+    : [];
+
+  if (!html && wsMessageCount === 0 && existingComplexities) {
+    return {
+      ...existingComplexities,
+      page_id: pageId || String(existingComplexities.page_id || ''),
+      url: pageUrl || String(existingComplexities.url || ''),
+      title: pageTitle || String(existingComplexities.title || ''),
+      analyzed_at: new Date().toISOString(),
+      source: 'existing_analysis'
+    };
+  }
+
+  let pageOrigin = '';
+  try {
+    pageOrigin = new URL(pageUrl).origin;
+  } catch {
+    pageOrigin = '';
+  }
+
+  const iframeTags = html ? (html.match(/<iframe\b[^>]*>/gi) || []) : [];
+  const iframeSamples = [];
+  let iframeExternalCount = 0;
+  for (const tag of iframeTags.slice(0, 60)) {
+    const rawSrc = extractHtmlAttr(tag, 'src');
+    if (!rawSrc) continue;
+    let normalizedSrc = rawSrc;
+    let isExternal = false;
+    try {
+      const resolved = new URL(rawSrc, pageUrl || undefined);
+      normalizedSrc = resolved.toString();
+      isExternal = Boolean(pageOrigin && resolved.origin && resolved.origin !== pageOrigin);
+    } catch {
+      isExternal = false;
+    }
+    if (isExternal) iframeExternalCount += 1;
+    if (iframeSamples.length < 12) {
+      iframeSamples.push({
+        src: truncateEvidence(normalizedSrc, 220),
+        external: isExternal
+      });
+    }
+  }
+
+  const scriptSrcMatches = [...html.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/gi)];
+  const scriptSources = [...new Set(scriptSrcMatches.map((m) => String(m?.[1] || '').trim()).filter(Boolean))].slice(0, 200);
+  const inlineScriptCount = (html.match(/<script\b(?![^>]*\bsrc=)[^>]*>/gi) || []).length;
+  const inlineEventHandlerCount = (html.match(/\son[a-z]+\s*=/gi) || []).length;
+
+  let thirdPartyScriptCount = 0;
+  for (const src of scriptSources) {
+    try {
+      const resolved = new URL(src, pageUrl || undefined);
+      if (pageOrigin && resolved.origin && resolved.origin !== pageOrigin) {
+        thirdPartyScriptCount += 1;
+      }
+    } catch {
+      // Ignore malformed script URLs.
+    }
+  }
+
+  const staticWsLiterals = [...new Set(
+    (html.match(/wss?:\/\/[^\s"'<>`]+/gi) || [])
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+  )].slice(0, 30);
+  const staticWsCtorCount = (html.match(/new\s+WebSocket\s*\(/gi) || []).length;
+
+  const websocketEndpointSet = new Set([...wsEndpointsFromMessages, ...staticWsLiterals]);
+  const websocketEndpoints = [...websocketEndpointSet].slice(0, 30);
+  const websocketEndpointCount = websocketEndpointSet.size;
+
+  const legacyHits = detectLegacyStackSignals({ html, scriptSources }).slice(0, 20);
+  const highLegacyHits = legacyHits.filter((hit) => hit.severity === 'high').length;
+
+  const findings = [];
+  if (iframeTags.length > 0) {
+    findings.push({
+      key: 'iframes',
+      severity: iframeExternalCount > 0 ? 'high' : 'medium',
+      summary: `${iframeTags.length} iframe(s), ${iframeExternalCount} external`,
+      evidence: iframeSamples.slice(0, 6)
+    });
+  }
+  if (legacyHits.length > 0) {
+    findings.push({
+      key: 'legacy_stack',
+      severity: highLegacyHits > 0 ? 'high' : 'medium',
+      summary: `${legacyHits.length} legacy stack signal(s) detected`,
+      evidence: legacyHits.slice(0, 8)
+    });
+  }
+  if (websocketEndpointCount > 0 || wsMessageCount > 0) {
+    findings.push({
+      key: 'websockets',
+      severity: wsMessageCount >= 400 ? 'high' : 'medium',
+      summary: `${websocketEndpointCount} endpoint(s), ${wsMessageCount} captured message(s)`,
+      evidence: websocketEndpoints.slice(0, 8).map((entry) => ({ endpoint: truncateEvidence(entry, 220) }))
+    });
+  }
+  if (inlineScriptCount >= 20 || inlineEventHandlerCount >= 12) {
+    findings.push({
+      key: 'inline_behavior',
+      severity: inlineScriptCount >= 60 || inlineEventHandlerCount >= 30 ? 'high' : 'medium',
+      summary: `${inlineScriptCount} inline script tag(s), ${inlineEventHandlerCount} inline event handler(s)`,
+      evidence: []
+    });
+  }
+  if (thirdPartyScriptCount >= 10) {
+    findings.push({
+      key: 'third_party_scripts',
+      severity: thirdPartyScriptCount >= 20 ? 'high' : 'medium',
+      summary: `${thirdPartyScriptCount} third-party script source(s)`,
+      evidence: scriptSources.slice(0, 8).map((entry) => ({ src: truncateEvidence(entry, 220) }))
+    });
+  }
+
+  let score = 0;
+  score += Math.min(iframeTags.length, 12);
+  score += Math.min(iframeExternalCount * 2, 12);
+  score += Math.min(legacyHits.length * 3, 15);
+  score += Math.min(websocketEndpointCount, 8);
+  if (wsMessageCount >= 50) score += 2;
+  if (wsMessageCount >= 250) score += 3;
+  if (wsMessageCount >= 1000) score += 3;
+  if (inlineScriptCount >= 20) score += 2;
+  if (inlineScriptCount >= 50) score += 3;
+  if (inlineEventHandlerCount >= 12) score += 2;
+  if (inlineEventHandlerCount >= 30) score += 3;
+  if (thirdPartyScriptCount >= 10) score += 2;
+  if (thirdPartyScriptCount >= 20) score += 3;
+  score = Math.min(score, 100);
+
+  const severity = buildComplexitySeverity(score);
+
+  return {
+    page_id: pageId,
+    url: pageUrl,
+    title: pageTitle,
+    score,
+    severity,
+    findings,
+    metrics: {
+      iframe_total: iframeTags.length,
+      iframe_external: iframeExternalCount,
+      legacy_signal_count: legacyHits.length,
+      legacy_signals: legacyHits,
+      websocket_endpoint_count: websocketEndpointCount,
+      websocket_message_count: wsMessageCount,
+      websocket_static_literal_count: staticWsLiterals.length,
+      websocket_ctor_count: staticWsCtorCount,
+      script_src_count: scriptSources.length,
+      third_party_script_count: thirdPartyScriptCount,
+      inline_script_count: inlineScriptCount,
+      inline_event_handler_count: inlineEventHandlerCount
+    },
+    analyzed_at: new Date().toISOString(),
+    source: html ? 'page_content' : 'partial_content'
+  };
+}
+
+function buildComplexitiesSummary(pageResults, websocketStats, targetUrl) {
+  const severityCounts = { critical: 0, high: 0, medium: 0, low: 0, none: 0 };
+  const totals = {
+    iframes: 0,
+    external_iframes: 0,
+    legacy_signals: 0,
+    websocket_endpoints: 0,
+    websocket_messages: 0,
+    inline_scripts: 0,
+    inline_event_handlers: 0,
+    third_party_scripts: 0
+  };
+  const findingRollup = new Map();
+
+  for (const page of pageResults) {
+    const sev = String(page?.severity || 'none').toLowerCase();
+    if (severityCounts[sev] == null) severityCounts.none += 1;
+    else severityCounts[sev] += 1;
+
+    const m = page?.metrics || {};
+    totals.iframes += Number(m.iframe_total) || 0;
+    totals.external_iframes += Number(m.iframe_external) || 0;
+    totals.legacy_signals += Number(m.legacy_signal_count) || 0;
+    totals.websocket_endpoints += Number(m.websocket_endpoint_count) || 0;
+    totals.websocket_messages += Number(m.websocket_message_count) || 0;
+    totals.inline_scripts += Number(m.inline_script_count) || 0;
+    totals.inline_event_handlers += Number(m.inline_event_handler_count) || 0;
+    totals.third_party_scripts += Number(m.third_party_script_count) || 0;
+
+    const findings = Array.isArray(page?.findings) ? page.findings : [];
+    for (const finding of findings) {
+      const key = String(finding?.key || 'other');
+      if (!findingRollup.has(key)) {
+        findingRollup.set(key, {
+          key,
+          pages_affected: 0,
+          highest_severity: 'none'
+        });
+      }
+      const bucket = findingRollup.get(key);
+      bucket.pages_affected += 1;
+      if (severityRank(finding?.severity) > severityRank(bucket.highest_severity)) {
+        bucket.highest_severity = finding.severity;
+      }
+    }
+  }
+
+  const pagesWithFindings = pageResults.filter((page) => Array.isArray(page?.findings) && page.findings.length > 0).length;
+  const topFindings = [...findingRollup.values()]
+    .sort((a, b) => {
+      if (b.pages_affected !== a.pages_affected) return b.pages_affected - a.pages_affected;
+      return severityRank(b.highest_severity) - severityRank(a.highest_severity);
+    })
+    .slice(0, 12);
+
+  const pagesSorted = [...pageResults]
+    .sort((a, b) => {
+      if ((b.score || 0) !== (a.score || 0)) return (b.score || 0) - (a.score || 0);
+      const bFindings = Array.isArray(b.findings) ? b.findings.length : 0;
+      const aFindings = Array.isArray(a.findings) ? a.findings.length : 0;
+      if (bFindings !== aFindings) return bFindings - aFindings;
+      return String(a.url || '').localeCompare(String(b.url || ''));
+    })
+    .slice(0, 200);
+
+  return {
+    generated_at: new Date().toISOString(),
+    target_url: targetUrl,
+    pages_analyzed: pageResults.length,
+    pages_with_findings: pagesWithFindings,
+    severity_counts: severityCounts,
+    totals,
+    websocket_source: {
+      total_messages: Number(websocketStats?.total_messages) || 0,
+      sampled_messages: Number(websocketStats?.sampled_messages) || 0,
+      unique_endpoints: Number(websocketStats?.unique_endpoints) || 0
+    },
+    top_findings: topFindings,
+    pages: pagesSorted
+  };
+}
+
+async function persistComplexitiesAnalysis(jobId, pageResults) {
+  let saved = 0;
+  let failed = 0;
+
+  for (const page of pageResults) {
+    const pageId = String(page?.page_id || '').trim();
+    if (!pageId) continue;
+
+    try {
+      await axios.post(
+        `${BACKEND_URL}/api/pages/${pageId}/save-analysis`,
+        {
+          saveLegs: false,
+          saveInteractiveElements: false,
+          saveNonInteractiveElements: false,
+          saveLinks: false,
+          saveCookies: false,
+          saveSeoData: false,
+          saveContentData: false,
+          saveAccessibilityData: false,
+          saveComplianceData: false,
+          saveComplexitiesData: true,
+          complexitiesData: page,
+          job_id: jobId
+        },
+        {
+          headers: getAuthHeaders(),
+          timeout: 20000
+        }
+      );
+      saved += 1;
+    } catch (error) {
+      failed += 1;
+      console.warn(`[COMPLEXITIES] Failed to persist page ${pageId}: ${error.message}`);
+    }
+  }
+
+  return { saved, failed };
+}
+
+async function collectFallbackComplexityPage(targetUrl) {
+  if (!targetUrl) return null;
+  try {
+    const response = await axios.get(targetUrl, {
+      timeout: 20000,
+      maxContentLength: 2 * 1024 * 1024,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AionQA-Complexities/1.0)' },
+      responseType: 'text',
+      validateStatus: (status) => status >= 200 && status < 500
+    });
+    const body = typeof response.data === 'string' ? response.data : '';
+    if (!body) return null;
+    const titleMatch = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const title = titleMatch ? String(titleMatch[1] || '').replace(/\s+/g, ' ').trim() : '';
+    return {
+      url: targetUrl,
+      title,
+      content: body
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+async function executeComplexitiesScanJob(job) {
+  const jobId = job.id;
+  const context = job.context || {};
+  const rawProjectId = job.project_id || context.project_id || job.projectId || null;
+  const projectId = rawProjectId && typeof rawProjectId === 'object'
+    ? (rawProjectId.$oid || rawProjectId.toString?.() || '')
+    : String(rawProjectId || '');
+  if (!projectId) {
+    throw new Error('Complexities scan job missing project_id');
+  }
+
+  const maxPages = Math.min(Math.max(Number(context.max_pages || job.options?.max_pages) || 200, 1), 1000);
+  const includeExistingPages = context.include_existing_pages !== false && job.options?.include_existing_pages !== false;
+
+  const targetUrl = normalizeScanTargetUrl(
+    context.target_url ||
+    job.start_url ||
+    job.url ||
+    context.base_url ||
+    ''
+  ).toString();
+
+  await appendJobLog(jobId, 'info', `🧠 Starting complexities scan for ${targetUrl}`, {
+    project_id: projectId,
+    target_url: targetUrl,
+    max_pages: maxPages,
+    include_existing_pages: includeExistingPages
+  });
+
+  const sourceResponse = await axios.get(
+    `${BACKEND_URL}/api/runner/projects/${projectId}/complexities-source`,
+    {
+      params: { limit: maxPages },
+      headers: getAuthHeaders(),
+      timeout: 90000
+    }
+  );
+
+  const source = sourceResponse.data || {};
+  const sourcePages = Array.isArray(source.pages) ? source.pages : [];
+  const websocketStats = source.websocket || {};
+  const wsByPage = new Map();
+  const wsByPageRows = Array.isArray(websocketStats.by_page) ? websocketStats.by_page : [];
+  for (const row of wsByPageRows) {
+    const key = normalizeUrlForComplexityMatching(row?.normalized_page_url || row?.page_url || '');
+    if (!key) continue;
+    wsByPage.set(key, row);
+  }
+
+  await appendJobLog(jobId, 'info', `🧠 Source snapshot loaded (${sourcePages.length} page(s), ${Number(websocketStats.total_messages) || 0} websocket message(s))`, {
+    pages: sourcePages.length,
+    websocket_messages: Number(websocketStats.total_messages) || 0,
+    websocket_sampled: Number(websocketStats.sampled_messages) || 0
+  });
+
+  const pageResults = [];
+  if (includeExistingPages) {
+    for (const page of sourcePages) {
+      const pageKey = normalizeUrlForComplexityMatching(page?.url || '');
+      const wsBucket = pageKey ? wsByPage.get(pageKey) : null;
+      const analyzed = analyzeComplexityForPage(page, wsBucket);
+      if (analyzed) pageResults.push(analyzed);
+    }
+  }
+
+  if (pageResults.length === 0) {
+    const fallbackPage = await collectFallbackComplexityPage(targetUrl);
+    if (fallbackPage) {
+      const fallbackAnalyzed = analyzeComplexityForPage(fallbackPage, null);
+      if (fallbackAnalyzed) {
+        try {
+          const discover = await axios.post(
+            `${BACKEND_URL}/api/pages/discover`,
+            {
+              project_id: projectId,
+              job_id: String(jobId),
+              url: fallbackPage.url,
+              title: fallbackPage.title || 'Scanned page',
+              content: fallbackPage.content,
+              analyzed: true
+            },
+            {
+              headers: getAuthHeaders(),
+              timeout: 30000
+            }
+          );
+          const fallbackPageId = discover?.data?.page?._id ? String(discover.data.page._id) : '';
+          fallbackAnalyzed.page_id = fallbackPageId;
+        } catch (persistError) {
+          console.warn(`[COMPLEXITIES] Failed to upsert fallback page: ${persistError.message}`);
+        }
+        pageResults.push(fallbackAnalyzed);
+      }
+    }
+  }
+
+  const persistStats = await persistComplexitiesAnalysis(jobId, pageResults);
+  const summary = buildComplexitiesSummary(pageResults, websocketStats, targetUrl);
+
+  await appendJobLog(jobId, 'info', `✅ Complexities scan completed (${summary.pages_analyzed} page(s), ${summary.pages_with_findings} with findings)`, {
+    pages_analyzed: summary.pages_analyzed,
+    pages_with_findings: summary.pages_with_findings,
+    severity_counts: summary.severity_counts,
+    pages_saved: persistStats.saved,
+    pages_failed: persistStats.failed
+  });
+
+  return {
+    success: true,
+    complexities_summary: summary,
+    pages_saved: persistStats.saved,
+    pages_failed: persistStats.failed
   };
 }
 
