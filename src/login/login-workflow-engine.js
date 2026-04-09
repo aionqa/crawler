@@ -239,8 +239,31 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
     }
   }
   
-  const success = loginStatus === 'success' || (finalResult?.is_complete === true && loginStatus !== 'failure');
-  
+  let success = loginStatus === 'success' || (finalResult?.is_complete === true && loginStatus !== 'failure');
+
+  // Guard: AI can mis-read /verify-email when the API returned 400 and the UI shows "Verification Failed".
+  try {
+    if (success && page && typeof page.url === 'function') {
+      const u = String(page.url() || '').toLowerCase();
+      if (u.includes('/verify-email')) {
+        const bodyText = ((await page.textContent('body')) || '').toLowerCase();
+        if (
+          /verification failed|email verification failed|failed to verify|invalid token|expired|unable to verify|could not verify/.test(
+            bodyText
+          )
+        ) {
+          console.warn(
+            '🔒 Login success overridden: /verify-email page shows a failure state in the DOM'
+          );
+          success = false;
+          loginStatus = 'failure';
+        }
+      }
+    }
+  } catch (guardErr) {
+    console.warn(`⚠️ verify-email DOM guard skipped: ${guardErr?.message || guardErr}`);
+  }
+
   const validateStatus = validateResult ? (typeof validateResult.status === 'string' ? validateResult.status : (validateResult.status?.status || 'N/A')) : 'N/A';
   const determineStatus = determineResult ? (typeof determineResult.status === 'string' ? determineResult.status : (determineResult.status?.status || 'N/A')) : 'N/A';
   console.log(`🔍 Login status check: validate_login_success=${validateStatus}, determine_completion=${determineStatus}, final=${loginStatus}, success=${success}`);

@@ -4194,12 +4194,13 @@ return {
           // Include "logged in" signals (used by SDLC fixtures like /html/login-status.html).
           const hasSuccessSignal = /(login successful|successfully logged in|you are logged in|\blogged in\b|welcome|dashboard|signed in|profile)/.test(bodyText);
           const isEmailVerificationUrl = currentUrl.includes('/verify-email') && currentUrl.includes('token=');
+          // verify-email is only a success URL when there is no explicit failure copy (invalid/expired token, etc.).
           const isLoginSuccessUrl =
             currentUrl.includes('login-success') ||
             currentUrl.includes('login-successful') ||
             currentUrl.includes('logged-in-success') ||
             currentUrl.includes('credentials-success') ||
-            isEmailVerificationUrl ||
+            (isEmailVerificationUrl && !hasErrorSignal) ||
             // Many of our SDLC fixtures redirect to URLs like:
             //   /html/login/specific-credentials-success.html
             //   /html/login/any-credentials-success.html
