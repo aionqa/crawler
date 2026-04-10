@@ -10817,6 +10817,47 @@ return {
       }
     );
 
+    // Fix unquoted :has-text selectors used directly in page.* calls, e.g.
+    // page.click(button:has-text("Open Form Modal"))
+    s = s.replace(
+      /page\.(click|fill|check|uncheck|waitForSelector)\(\s*([A-Za-z][A-Za-z0-9_-]*:has-text\("([^"]+)"\))\s*\)/g,
+      (_m, method, selectorExpr) => `page.${method}(${JSON.stringify(String(selectorExpr || ''))})`
+    );
+    s = s.replace(
+      /page\.(click|fill|check|uncheck|waitForSelector)\(\s*([A-Za-z][A-Za-z0-9_-]*:has-text\("([^"]+)"\))\s*,/g,
+      (_m, method, selectorExpr) => `page.${method}(${JSON.stringify(String(selectorExpr || ''))},`
+    );
+
+    // Fix unquoted id selectors in page.* calls, e.g.
+    // page.fill(#name) or page.fill(#name, value)
+    s = s.replace(
+      /page\.(click|fill|check|uncheck|waitForSelector)\(\s*(#[A-Za-z0-9_-]+)\s*\)/g,
+      (_m, method, selectorExpr) => `page.${method}(${JSON.stringify(String(selectorExpr || ''))})`
+    );
+    s = s.replace(
+      /page\.(click|fill|check|uncheck|waitForSelector)\(\s*(#[A-Za-z0-9_-]+)\s*,/g,
+      (_m, method, selectorExpr) => `page.${method}(${JSON.stringify(String(selectorExpr || ''))},`
+    );
+
+    // Fix a common unquoted class/tag selector form observed in waits, e.g. page.waitForSelector(div.modal)
+    s = s.replace(
+      /page\.waitForSelector\(\s*(div\.[A-Za-z0-9_-]+)\s*\)/g,
+      (_m, selectorExpr) => `page.waitForSelector(${JSON.stringify(String(selectorExpr || ''))})`
+    );
+    s = s.replace(
+      /page\.waitForSelector\(\s*(div\.[A-Za-z0-9_-]+)\s*,/g,
+      (_m, selectorExpr) => `page.waitForSelector(${JSON.stringify(String(selectorExpr || ''))},`
+    );
+
+    // Drop leaked `await el.fill(...)` lines when `el` is never declared in script scope.
+    const hasBareElFillWithoutDeclaration =
+      /await\s+el\.fill\(/.test(s) &&
+      !/\b(const|let|var)\s+el\b/.test(s) &&
+      !/\(\s*el\s*[,)]/.test(s);
+    if (hasBareElFillWithoutDeclaration) {
+      s = s.replace(/^\s*await\s+el\.fill\([^)]*\)\s*;?\s*$/gm, '');
+    }
+
     // Cypress-style `page.$(text=Label)` is not valid Playwright (`$` expects a CSS selector string).
     s = s.replace(/page\.\$\(\s*text\s*=\s*([^)]+?)\s*\)/gi, (_m, rawLabel) => {
       let label = String(rawLabel || '').trim();
