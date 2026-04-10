@@ -17586,8 +17586,13 @@ ${executableBody}`;
         }
       }
     } else if (loopExitedEarly && iteration > 0) {
-      // No determine_completion result; do not assume success (pure justification).
-      if (insufficientSignalForJourney) {
+      // When the while condition turns false naturally and execution itself succeeded,
+      // treat this as success even if determine_completion/justify payload is missing.
+      if (executionSucceeded) {
+        finalLegStatus = 'success';
+        finalLegResult = 'success';
+        finalLegError = null;
+      } else if (insufficientSignalForJourney) {
         finalLegStatus = 'skipped';
         finalLegResult = 'skipped_insufficient_signal';
         finalLegError = workflowState.lastExecutionResult?.error || 'Insufficient signal for reliable journey execution';
