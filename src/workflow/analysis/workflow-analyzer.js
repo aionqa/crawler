@@ -215,7 +215,7 @@ class WorkflowAnalyzer {
       'execute-code-from-variable': 120000, // 2 minutes
       'while-loop': 600000,          // 10 minutes - Journey iteration (generate+execute+justify per stage) needs multiple AI calls
       'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
-      'screenshot': 90000,           // 90s — align with screenshot step Playwright default; full-page captures often exceed 60s
+      'screenshot': 240000,          // 4m — full-page + heavy SVG/test pages often exceed 90s in production crawls
       'cookie-collect': 120000,      // 2 minutes - browser cookies + optional backend save (GET job, POST project cookies)
       'content-change': 60000,       // 1 minute - Variable operations
       'var-dump': 60000,            // 1 minute - Quick operation
@@ -3241,7 +3241,17 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           : null;
         const nextStepIsAdjustable = nextStep && nextStep.type === 'self-adjustable-ai-workflow';
         
-        // No fallbacks: fail the job immediately on any step failure
+        // Template-controlled: explicit continueOnError allows non-critical steps (e.g. screenshot) to skip without aborting journeys/analysis.
+        if (step.continueOnError === true) {
+          await this.sendLogToBackend(effectiveJobId, 'warn', `⚠️ Step "${step.name || step.id}" failed but continueOnError=true — continuing workflow`, 'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            step_name: step.name || step.type,
+            step_type: step.type,
+            step_order: i + 1,
+            error: stepError.message,
+          });
+          continue;
+        }
         throw stepError;
       }
     }
@@ -3590,8 +3600,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       screenshotOptions.quality = quality;
     }
 
-    // Default 90s: full-page captures (SVG/heavy pages) often exceed Playwright's 30s default.
-    const timeoutMs = typeof config.timeout === 'number' && config.timeout > 0 ? config.timeout : 90000;
+    // Default 240s: full-page captures (SVG/heavy dogfood pages) often exceed 90s under load.
+    const timeoutMs = typeof config.timeout === 'number' && config.timeout > 0 ? config.timeout : 240000;
     screenshotOptions.timeout = timeoutMs;
 
     console.log('Screenshot options resolved:', screenshotOptions);
