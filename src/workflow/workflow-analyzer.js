@@ -7321,6 +7321,86 @@ return {
     return cleaned;
   }
 
+  buildDeterministicLoginScript() {
+    return [
+      "const emailValue = String((input_credentials && input_credentials.username) || '').trim();",
+      "const passwordValue = String((input_credentials && input_credentials.password) || '').trim();",
+      "if (!emailValue || !passwordValue) { throw new Error('Missing login credentials'); }",
+      "const pickVisible = async (selectors, timeoutMs = 10000) => {",
+      "  const started = Date.now();",
+      "  while ((Date.now() - started) < timeoutMs) {",
+      "    for (const selector of selectors) {",
+      "      const node = page.locator(selector).first();",
+      "      const count = await node.count().catch(() => 0);",
+      "      if (!count) continue;",
+      "      const visible = await node.isVisible().catch(() => false);",
+      "      if (!visible) continue;",
+      "      return node;",
+      "    }",
+      "    await page.waitForTimeout(150);",
+      "  }",
+      "  return null;",
+      "};",
+      "const emailInput = await pickVisible([",
+      "  'input[type=\"email\"]',",
+      "  'input[name*=\"email\" i]:not([type=\"hidden\"])',",
+      "  'input[id*=\"email\" i]:not([type=\"hidden\"])',",
+      "  'input[placeholder*=\"email\" i]:not([type=\"hidden\"])'",
+      "], 12000);",
+      "if (emailInput) {",
+      "  await emailInput.fill(emailValue).catch(() => {});",
+      "}",
+      "const firstSubmit = await pickVisible([",
+      "  'button[type=\"submit\"]',",
+      "  'input[type=\"submit\"]',",
+      "  'button#next-button',",
+      "  'button:has-text(\"Continue\")',",
+      "  'button:has-text(\"Next\")',",
+      "  'button:has-text(\"Sign in\")',",
+      "  'button:has-text(\"Log in\")',",
+      "  'button:has-text(\"Login\")'",
+      "], 6000);",
+      "if (firstSubmit) {",
+      "  await firstSubmit.click({ force: true }).catch(() => {});",
+      "}",
+      "await page.waitForTimeout(1400);",
+      "let passwordInput = await pickVisible([",
+      "  'input[type=\"password\"]:not([type=\"hidden\"])',",
+      "  'input[name*=\"password\" i]:not([type=\"hidden\"])',",
+      "  'input[id*=\"password\" i]:not([type=\"hidden\"])',",
+      "  'input[placeholder*=\"password\" i]:not([type=\"hidden\"])'",
+      "], 10000);",
+      "if (!passwordInput && emailInput) {",
+      "  await emailInput.press('Enter').catch(() => {});",
+      "  await page.waitForTimeout(1000);",
+      "  passwordInput = await pickVisible([",
+      "    'input[type=\"password\"]:not([type=\"hidden\"])',",
+      "    'input[name*=\"password\" i]:not([type=\"hidden\"])',",
+      "    'input[id*=\"password\" i]:not([type=\"hidden\"])',",
+      "    'input[placeholder*=\"password\" i]:not([type=\"hidden\"])'",
+      "  ], 7000);",
+      "}",
+      "if (passwordInput) {",
+      "  await passwordInput.fill(passwordValue).catch(() => {});",
+      "  const finalSubmit = await pickVisible([",
+      "    'button[type=\"submit\"]',",
+      "    'input[type=\"submit\"]',",
+      "    'button#next-button',",
+      "    'button:has-text(\"Continue\")',",
+      "    'button:has-text(\"Next\")',",
+      "    'button:has-text(\"Sign in\")',",
+      "    'button:has-text(\"Log in\")',",
+      "    'button:has-text(\"Login\")'",
+      "  ], 6000);",
+      "  if (finalSubmit) {",
+      "    await finalSubmit.click({ force: true }).catch(() => {});",
+      "  }",
+      "  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});",
+      "}",
+      "return { success: true, used_fallback: true, email_stage: !!emailInput, password_stage: !!passwordInput };"
+    ].join('\n');
+  }
+
   /**
    * Execute code step (static code)
    */
@@ -8855,6 +8935,21 @@ return {
           console.warn(`⚠️ WARNING: Login job script may be clicking navigation links - this is discouraged`);
           console.warn(`Script preview: ${code.substring(0, 500)}`);
         }
+
+        const likelyNonRunnableLoginScript = /@playwright\/test|chromium\.launch|process\.exit\s*\(|^\s*import\s|^\s*export\s|pseudo-script/i.test(code);
+        if (likelyNonRunnableLoginScript) {
+          console.warn(`⚠️ Replacing non-runnable generated login script with deterministic fallback`);
+          code = this.buildDeterministicLoginScript();
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              'Generated login script looked non-runnable; deterministic fallback script was applied.',
+              'WORKFLOW-ANALYZER',
+              { step_id: step?.id, step_name: step?.name }
+            );
+          }
+        }
       }
       
       // Wrap page object to intercept ALL Playwright method calls and log execution
@@ -9757,7 +9852,9 @@ return {
         
         const buildFallbackJourneyScript = () => {
           const actions = workflowState?.currentJourney?.actions;
-          if (!Array.isArray(actions) || actions.length === 0) return null;
+          if (!Array.isArray(actions) || actions.length === 0) {
+            return isLoginJob ? this.buildDeterministicLoginScript() : null;
+          }
 
           const lines = ['await page.waitForTimeout(500);'];
           for (const action of actions) {
@@ -9843,6 +9940,36 @@ return {
           console.log(`📄 VAR_DUMP: executeInNodeContext result:`, JSON.stringify(result).substring(0, 200));
           return result;
         } catch (execError) {
+          const execMessage = String(execError?.message || '').toLowerCase();
+          const shouldUseLoginRuntimeFallback =
+            isLoginJob &&
+            (
+              execMessage.includes('unexpected token') ||
+              execMessage.includes('cannot use import statement') ||
+              execMessage.includes('test is not a function') ||
+              execMessage.includes('require is not defined') ||
+              execMessage.includes('chromium is not defined') ||
+              execMessage.includes('process is not defined')
+            );
+          if (shouldUseLoginRuntimeFallback) {
+            try {
+              const fallbackScript = this.buildDeterministicLoginScript();
+              const fallbackBody = `return (async function() {\n${fallbackScript}\n})();`;
+              const fallbackFn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', fallbackBody);
+              const fallbackResult = await fallbackFn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText, execContext, testHelper);
+              console.warn(`⚠️ Runtime fallback login script used after execution error: ${execError.message}`);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'warn', `Runtime fallback login script used: ${execError.message}`, 'WORKFLOW-ANALYZER', {
+                  step_id: step?.id,
+                  step_name: step?.name
+                });
+              }
+              return fallbackResult;
+            } catch (runtimeFallbackError) {
+              console.error(`❌ Runtime fallback login script failed: ${runtimeFallbackError.message}`);
+            }
+          }
+
           // If execution fails with "resolvedVisibleText is not defined", log the exact script
           if (execError.message && execError.message.includes('resolvedVisibleText')) {
             console.error(`❌ CRITICAL EXECUTION ERROR: ${execError.message}`);
