@@ -12793,13 +12793,28 @@ ${executableBody}`;
           });
           const ariaInvalidEls = Array.from(document.querySelectorAll('[aria-invalid="true"]')).filter(isUserVisible);
 
-          const sampleInvalid = invalidEls.slice(0, 6).map((el) => ({
-            tag: String(el.tagName || '').toLowerCase(),
-            id: el.id || null,
-            name: el.getAttribute('name') || null,
-            type: el.getAttribute('type') || null,
-            validationMessage: el.validationMessage || null,
-          }));
+          const sampleInvalid = invalidEls.slice(0, 6).map((el) => {
+            const v = el.validity || {};
+            return {
+              tag: String(el.tagName || '').toLowerCase(),
+              id: el.id || null,
+              name: el.getAttribute('name') || null,
+              type: el.getAttribute('type') || null,
+              validationMessage: el.validationMessage || null,
+              validity: {
+                valueMissing: !!v.valueMissing,
+                patternMismatch: !!v.patternMismatch,
+                typeMismatch: !!v.typeMismatch,
+                tooLong: !!v.tooLong,
+                tooShort: !!v.tooShort,
+                rangeUnderflow: !!v.rangeUnderflow,
+                rangeOverflow: !!v.rangeOverflow,
+                stepMismatch: !!v.stepMismatch,
+                badInput: !!v.badInput,
+                customError: !!v.customError,
+              },
+            };
+          });
 
           const sampleErrors = Array.from(
             document.querySelectorAll('.error, .errors, .invalid-feedback, [role="alert"], [aria-live="assertive"]')
@@ -12823,9 +12838,27 @@ ${executableBody}`;
       const hasInlineErrorCopy = (validationCheck?.error_text_samples || []).some((t) =>
         /(error|failed|invalid|required|please)/i.test(String(t || ''))
       );
-      const hasSurfacedConstraintMessage = (validationCheck?.invalid_samples || []).some((s) =>
-        String(s.validationMessage || '').trim().length > 0
-      );
+      // Browsers populate validationMessage for plain empty required fields (valueMissing) even when no submit
+      // was attempted — same false-positive class as :invalid on a fresh wizard step; ignore those alone.
+      const isTrivialValueMissingOnly = (validity) => {
+        const v = validity && typeof validity === 'object' ? validity : {};
+        if (!v.valueMissing) return false;
+        return !(
+          v.patternMismatch ||
+          v.typeMismatch ||
+          v.tooLong ||
+          v.tooShort ||
+          v.rangeUnderflow ||
+          v.rangeOverflow ||
+          v.stepMismatch ||
+          v.badInput ||
+          v.customError
+        );
+      };
+      const hasSurfacedConstraintMessage = (validationCheck?.invalid_samples || []).some((s) => {
+        if (isTrivialValueMissingOnly(s.validity)) return false;
+        return String(s.validationMessage || '').trim().length > 0;
+      });
       const hasBlockingValidation = hasInlineErrorCopy || hasSurfacedConstraintMessage;
 
       const executionResult = {
