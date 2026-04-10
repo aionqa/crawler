@@ -9233,6 +9233,8 @@ return {
           { pattern: /\bcreds\.username\b/gi, replacement: "input_credentials.username" },
           { pattern: /\bcreds\.password\b/gi, replacement: "input_credentials.password" },
           { pattern: /\binput_input_credentials\b/gi, replacement: "input_credentials" },
+          { pattern: /process\.env\.GENERATED_EMAIL_ADDRESS/gi, replacement: "input_credentials.username" },
+          { pattern: /process\.env\.GENERATED_PASSWORD/gi, replacement: "input_credentials.password" },
         ];
         
         let finalReplacementCount = 0;
@@ -12697,10 +12699,11 @@ return {
           should_continue: invertCondition ? !condition : condition
         });
         
-        // Small delay between iterations
-        // CRITICAL: Stop after first iteration (one per job) - ignore condition
-        if (iteration >= 1) {
-          console.log(`🛑 Stopping after first iteration (one per job enforced)`);
+        // Small delay between iterations.
+        // Keep one-iteration enforcement for non-login loops, but allow multi-step login loops
+        // (email -> password -> post-login) to continue until condition/maxIterations.
+        if (!isLoginLoop && iteration >= 1) {
+          console.log(`🛑 Stopping after first iteration (non-login one-per-job enforcement)`);
           break;
         }
         
