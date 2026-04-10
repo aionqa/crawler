@@ -102,6 +102,36 @@ function resolveActionSelectorFromForms(action, forms) {
 }
 
 /**
+ * Extract explicit demo/test credentials printed on the page (info banners, instructions).
+ * Conservative: requires context cues or a known fixture URL so we do not mis-parse generic labels.
+ */
+function extractDeclaredLoginCredentialsFromVisibleText(visibleText, pageUrl = '') {
+  const text = String(visibleText || '').replace(/\s+/g, ' ').trim();
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const urlStr = String(pageUrl || '');
+  const urlHint = /specific-credentials|credentials\.html|login\/.*credential/i.test(urlStr);
+  const copyHint =
+    lower.includes('specific credentials') ||
+    (lower.includes('only accepts') && lower.includes('credential')) ||
+    lower.includes('required credentials') ||
+    (lower.includes('use username') && lower.includes('password'));
+  if (!urlHint && !copyHint) return null;
+
+  const userRe = /\bUsername\s*:\s*(?:\*\*)?([^\s*<]+?)(?:\*\*)?(?=\s|$)/i;
+  const passRe = /\bPassword\s*:\s*(?:\*\*)?([^\s*<]+?)(?:\*\*)?(?=\s|$)/i;
+  const um = text.match(userRe);
+  const pm = text.match(passRe);
+  if (!um || !pm) return null;
+  const username = String(um[1] || '').trim();
+  const password = String(pm[1] || '').trim();
+  if (!username || !password || username.length < 2 || password.length < 4) return null;
+  if (/^(email|required|your|enter|here)$/i.test(username)) return null;
+
+  return { username, password };
+}
+
+/**
  * While-loop condition paths use templates like `justify_journey.result.status`. After unwrapping
  * `stepData.result` or `variablePool.steps[id].result`, the payload is often a flat object
  * `{ status, reason, ... }` with no nested `.result`. Drop a redundant leading `result` segment
@@ -4965,6 +4995,32 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       }
     }
 
+    const isGenerateJourneyScriptStep =
+      step.id === 'generate_journey_script' ||
+      (typeof step.id === 'string' && step.id.includes('generate_journey_script')) ||
+      (step.name && String(step.name).includes('Generate Journey Action Script'));
+    if (isGenerateJourneyScriptStep && !stepPayload.input_credentials) {
+      const vt = workflowState.visibleText || stepPayload.visible_text || '';
+      const pageUrlForCreds =
+        workflowState.pageUrl ||
+        workflowState.currentUrl ||
+        stepPayload.page_url ||
+        page.url?.() ||
+        '';
+      const extracted = extractDeclaredLoginCredentialsFromVisibleText(vt, pageUrlForCreds);
+      if (extracted && extracted.username && extracted.password) {
+        stepPayload.input_credentials = extracted;
+        stepPayload.page_declared_credentials = true;
+        if (!workflowState.inputCredentials) {
+          workflowState.inputCredentials = extracted;
+        }
+        workflowState.pageDeclaredCredentials = true;
+        console.log(
+          `🔑 Page-declared credentials injected for journey script step: username=${extracted.username}`
+        );
+      }
+    }
+
     if (workflowState.lastDialogMessage) {
       stepPayload.last_dialog_message = workflowState.lastDialogMessage;
     }
@@ -5110,7 +5166,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- Every selector must be a concrete string literal or a const initialized to a concrete string before use.\n'
           + '- Do not click same-page hash anchors (href contains "#") unless currentJourney explicitly requires anchor navigation.\n'
           + '- Do not emit pseudo helpers; use only real Playwright API calls (e.g., page.waitForTimeout(300)).\n'
-          + '- page.waitForSelector must always be called as page.waitForSelector(\"<valid selector>\", { ...options }).\n';
+          + '- page.waitForSelector must always be called as page.waitForSelector(\"<valid selector>\", { ...options }).\n'
+          + '- CREDENTIALS: If input_credentials is present in the payload, you MUST use input_credentials.username and input_credentials.password for every username/password fill. Never shorten or substitute generic placeholders (e.g. \'test\', \'user\', \'demo\', \'password\') when real values are provided.\n'
+          + '- If input_credentials is absent, read exact required username/password from visible_text (info banners, labels, error text) or currentJourney test instructions and use those exact string literals in fill(); never invent credentials.\n';
       }
       if (isJustifyJourneyStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
@@ -6016,13 +6074,63 @@ return {
         
         // CRITICAL: Store playwright_script as legScriptToExecute for ALL AI prompt steps that return it
         // This is used by execute-code-from-variable steps
-        const playwrightScript = parsedResponse.playwright_script != null && typeof parsedResponse.playwright_script === 'string' ? parsedResponse.playwright_script : '';
+        let playwrightScript = parsedResponse.playwright_script != null && typeof parsedResponse.playwright_script === 'string' ? parsedResponse.playwright_script : '';
         if (playwrightScript) {
           console.log(`✅ playwright_script found: ${playwrightScript.length} chars`);
           console.log(`📄 VAR_DUMP: playwright_script length=${playwrightScript.length}`);
           console.log(`📄 VAR_DUMP: playwright_script preview: ${playwrightScript.substring(0, 300)}`);
-          
-          // CRITICAL: Verify script uses input_credentials (only for login steps)
+
+          const isCredSensitiveScript =
+            (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) ||
+            promptIdentifier === 'generate_journey_script' ||
+            String(step.id || '').toLowerCase().includes('generate_journey_script') ||
+            String(step.name || '').toLowerCase().includes('generate journey action script');
+          if (isCredSensitiveScript) {
+            const before = playwrightScript;
+            let script = String(before || '');
+            script = script.replace(/(['"])test@example\.com\1/gi, 'input_credentials.username');
+            script = script.replace(/(['"])user@example\.com\1/gi, 'input_credentials.username');
+            script = script.replace(/(['"])testpass123\1/gi, 'input_credentials.password');
+            script = script.replace(/(['"])password123\1/gi, 'input_credentials.password');
+            script = script.replace(/\bconst\s+emailValue\s*=\s*(['"]).*?@.*?\1\s*;/gi, 'const emailValue = input_credentials.username;');
+            script = script.replace(/\blet\s+emailValue\s*=\s*(['"]).*?@.*?\1\s*;/gi, 'let emailValue = input_credentials.username;');
+            script = script.replace(/\bconst\s+passwordValue\s*=\s*(['"]).{3,}\1\s*;/gi, 'const passwordValue = input_credentials.password;');
+            script = script.replace(/\blet\s+passwordValue\s*=\s*(['"]).{3,}\1\s*;/gi, 'let passwordValue = input_credentials.password;');
+            const credPack = stepPayload.input_credentials || workflowState.inputCredentials;
+            if (
+              workflowState.pageDeclaredCredentials &&
+              credPack &&
+              credPack.username &&
+              String(credPack.username) !== 'test'
+            ) {
+              script = script.replace(
+                /\.fill\(\s*([^,)]+)\s*,\s*['"]test['"]\s*\)/g,
+                '.fill($1, String(input_credentials.username))'
+              );
+            }
+            const usesCreds =
+              script.includes('input_credentials') ||
+              script.includes('input_credentials.username') ||
+              script.includes('input_credentials.password');
+            if (!usesCreds) {
+              script = `const emailValue = input_credentials.username;\nconst passwordValue = input_credentials.password;\n` + script;
+            }
+            if (script !== before) {
+              playwrightScript = script;
+              parsedResponse.playwright_script = script;
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(
+                  jobId,
+                  'warn',
+                  `🛡️ Rewrote playwright_script to enforce input_credentials (journey/login script hardening)`,
+                  'WORKFLOW-ANALYZER',
+                  { step_id: step.id, step_name: step.name, prompt: promptIdentifier }
+                );
+              }
+            }
+          }
+
+          // CRITICAL: Verify script uses input_credentials (login steps; journey steps after rewrite above)
           if (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) {
             const scriptUsesCredentials = playwrightScript.includes('input_credentials') ||
                                          playwrightScript.includes('input_credentials.username') ||
@@ -6036,10 +6144,10 @@ return {
               console.log(`✅ Generated script uses input_credentials`);
             }
           }
-          
+
           // Note: We rely on AI to generate appropriate scripts without hardcoded pattern checks
           // The AI should analyze the page state and generate scripts accordingly
-          
+
           // Upload playwright script as downloadable file
           let scriptUrl = null;
           if (jobId) {
