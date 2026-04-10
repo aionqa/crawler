@@ -170,12 +170,20 @@ export class WorkflowStepExecutor {
     
     try {
       const page = await this.getPageForJob(jobId, context);
-      
+      const { resolveScreenshotFullPage } = await import('./utils/resolve-screenshot-full-page.js');
+      const fullPage = await resolveScreenshotFullPage(page, {
+        fullPage: parameters.fullPage !== false,
+        allowRiskyFullPageOnImageDocument: parameters.allowRiskyFullPageOnImageDocument === true
+      });
+      if (parameters.fullPage !== false && !fullPage) {
+        console.log('[WorkflowStepExecutor] Viewport screenshot for image/SVG document (fullPage skipped)');
+      }
+
       const screenshotOptions = {
-        fullPage: parameters.fullPage || true,
+        fullPage,
         type: 'png'
       };
-      
+
       const screenshotBuffer = await page.screenshot(screenshotOptions);
       const screenshotBase64 = screenshotBuffer.toString('base64');
       

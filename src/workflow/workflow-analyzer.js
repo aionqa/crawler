@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
+import { resolveScreenshotFullPage } from './utils/resolve-screenshot-full-page.js';
 import { StaticNodeExecutor } from './static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../step-requirements.js';
 
@@ -2621,7 +2622,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
   async executeScreenshotStep(page, step, workflowState, jobId, pageId) {
     console.log(`📸 Taking screenshot (${step.name})`);
     const config = step.config || {};
-    const fullPage = config.fullPage !== false;
+    const requestedFullPage = config.fullPage !== false;
+    const fullPage = await resolveScreenshotFullPage(page, config);
+    if (requestedFullPage && !fullPage) {
+      console.log('📸 Standalone image/SVG document: viewport screenshot only (fullPage skipped to avoid capture timeout)');
+    }
     const upload = config.upload !== false;
     const format = (config.format || config.type || 'png').toLowerCase();
     const quality = typeof config.quality === 'number' ? config.quality : 90;
