@@ -10904,6 +10904,20 @@ return {
       );
     }
 
+    // Another frequent truncation: helper body leaks without its function wrapper, e.g.
+    //   const el = await page.$(selector); if (!el) return false; await el.fill(value); return true;
+    // This causes "selector is not defined" at runtime and should be dropped.
+    const hasBrokenFillBySelectorFragment =
+      /const\s+el\s*=\s*await\s+page\.\$\(\s*selector\s*\)\s*;/.test(s) &&
+      /await\s+el\.fill\(\s*value\s*\)\s*;/.test(s) &&
+      !/\b(function\s+fillIfExists|const\s+fillIfExists|let\s+fillIfExists)\b/.test(s);
+    if (hasBrokenFillBySelectorFragment) {
+      s = s.replace(
+        /const\s+el\s*=\s*await\s+page\.\$\(\s*selector\s*\)\s*;\s*if\s*\(!el\)\s*return\s+false\s*;\s*await\s+el\.fill\(\s*value\s*\)\s*;\s*return\s+true\s*;\s*/m,
+        ''
+      );
+    }
+
     const definesSafeClick = /\b(function\s+safeClick|const\s+safeClick|let\s+safeClick)\b/.test(s);
     const definesEnsureChecked = /\b(function\s+ensureChecked|const\s+ensureChecked|let\s+ensureChecked)\b/.test(s);
     const definesSafeFill = /\b(function\s+safeFill|const\s+safeFill|let\s+safeFill)\b/.test(s);
