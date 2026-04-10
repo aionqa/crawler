@@ -6153,14 +6153,16 @@ return {
           if (isCredSensitiveScript) {
             const before = playwrightScript;
             let script = String(before || '');
-            script = script.replace(/(['"])test@example\.com\1/gi, 'input_credentials.username');
-            script = script.replace(/(['"])user@example\.com\1/gi, 'input_credentials.username');
-            script = script.replace(/(['"])testpass123\1/gi, 'input_credentials.password');
-            script = script.replace(/(['"])password123\1/gi, 'input_credentials.password');
-            script = script.replace(/\bconst\s+emailValue\s*=\s*(['"]).*?@.*?\1\s*;/gi, 'const emailValue = input_credentials.username;');
-            script = script.replace(/\blet\s+emailValue\s*=\s*(['"]).*?@.*?\1\s*;/gi, 'let emailValue = input_credentials.username;');
-            script = script.replace(/\bconst\s+passwordValue\s*=\s*(['"]).{3,}\1\s*;/gi, 'const passwordValue = input_credentials.password;');
-            script = script.replace(/\blet\s+passwordValue\s*=\s*(['"]).{3,}\1\s*;/gi, 'let passwordValue = input_credentials.password;');
+            const safeUsernameExpr = "String(((input_credentials && input_credentials.username) || ''))";
+            const safePasswordExpr = "String(((input_credentials && input_credentials.password) || ''))";
+            script = script.replace(/(['"])test@example\.com\1/gi, safeUsernameExpr);
+            script = script.replace(/(['"])user@example\.com\1/gi, safeUsernameExpr);
+            script = script.replace(/(['"])testpass123\1/gi, safePasswordExpr);
+            script = script.replace(/(['"])password123\1/gi, safePasswordExpr);
+            script = script.replace(/\bconst\s+emailValue\s*=\s*(['"]).*?@.*?\1\s*;/gi, `const emailValue = ${safeUsernameExpr};`);
+            script = script.replace(/\blet\s+emailValue\s*=\s*(['"]).*?@.*?\1\s*;/gi, `let emailValue = ${safeUsernameExpr};`);
+            script = script.replace(/\bconst\s+passwordValue\s*=\s*(['"]).{3,}\1\s*;/gi, `const passwordValue = ${safePasswordExpr};`);
+            script = script.replace(/\blet\s+passwordValue\s*=\s*(['"]).{3,}\1\s*;/gi, `let passwordValue = ${safePasswordExpr};`);
             const credPack = stepPayload.input_credentials || workflowState.inputCredentials;
             if (
               workflowState.pageDeclaredCredentials &&
@@ -6170,7 +6172,7 @@ return {
             ) {
               script = script.replace(
                 /\.fill\(\s*([^,)]+)\s*,\s*['"]test['"]\s*\)/g,
-                '.fill($1, String(input_credentials.username))'
+                `.fill($1, ${safeUsernameExpr})`
               );
             }
             const usesCreds =
@@ -6178,7 +6180,7 @@ return {
               script.includes('input_credentials.username') ||
               script.includes('input_credentials.password');
             if (!usesCreds) {
-              script = `const emailValue = input_credentials.username;\nconst passwordValue = input_credentials.password;\n` + script;
+              script = `const emailValue = ${safeUsernameExpr};\nconst passwordValue = ${safePasswordExpr};\n` + script;
             }
             if (script !== before) {
               playwrightScript = script;
