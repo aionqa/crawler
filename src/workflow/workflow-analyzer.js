@@ -7284,6 +7284,11 @@ return {
     cleaned = cleaned.replace(/const\s+\{[^}]*\}\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
     cleaned = cleaned.replace(/const\s+\w+\s*=\s*require\s*\([^)]*\)\s*;?\s*/g, '');
     cleaned = cleaned.replace(/require\s*\([^)]*\)\s*;?\s*/g, '');
+    // Remove ESM imports/exports (dynamic Function execution is CommonJS-like)
+    cleaned = cleaned.replace(/^\s*import\s+[\s\S]*?from\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
+    cleaned = cleaned.replace(/^\s*import\s+['"][^'"]+['"]\s*;?\s*$/gm, '');
+    cleaned = cleaned.replace(/^\s*export\s+default\s+/gm, '');
+    cleaned = cleaned.replace(/^\s*export\s+\{[\s\S]*?\}\s*;?\s*$/gm, '');
     
     // Remove module.exports
     cleaned = cleaned.replace(/module\.exports\s*=\s*[^;]+;?\s*/g, '');
@@ -7918,6 +7923,12 @@ return {
           }
           if (rawCode.includes('creds.password')) {
             rawCode = rawCode.replace(/creds\.password/gi, "input_credentials.password");
+          }
+          if (rawCode.includes('process.env.GENERATED_EMAIL_ADDRESS')) {
+            rawCode = rawCode.replace(/process\.env\.GENERATED_EMAIL_ADDRESS/gi, "input_credentials.username");
+          }
+          if (rawCode.includes('process.env.GENERATED_PASSWORD')) {
+            rawCode = rawCode.replace(/process\.env\.GENERATED_PASSWORD/gi, "input_credentials.password");
           }
         } else {
           console.log(`🔧 No variables found, skipping replacement`);
@@ -8803,8 +8814,17 @@ return {
                         workflowState?.variablePool?.job?.preventNavigation === true;
       
       if (isLoginJob) {
+        // Login scripts should interact with the current login page only.
+        // AI often emits page.goto(...) wrappers; strip those lines instead of failing immediately.
+        const gotoRegex = /\b(?:await\s+)?page\.goto\s*\([\s\S]*?\)\s*;?/gi;
+        const gotoMatches = code.match(gotoRegex) || [];
+        if (gotoMatches.length > 0) {
+          code = code.replace(gotoRegex, '');
+          console.warn(`⚠️ Removed ${gotoMatches.length} page.goto() call(s) from login script before execution`);
+        }
+
         // Check for forbidden navigation patterns
-        const hasPageGoto = code.includes('page.goto(') || code.includes('page.goto(');
+        const hasPageGoto = code.includes('page.goto(');
         const hasNavigationLinks = code.includes('click(') && (
           code.includes('/courses') || 
           code.includes('/home') || 
