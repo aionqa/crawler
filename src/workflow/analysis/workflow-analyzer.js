@@ -5962,7 +5962,7 @@ return {
         const isGenerateJourneyScriptStep = step.id === 'generate_journey_script' || step.name?.includes('Generate Journey Action Script');
         if (isGenerateLoginScriptStep || isGenerateJourneyScriptStep) {
           const requiredStringFields = isGenerateJourneyScriptStep
-            ? ['playwright_script', 'description', 'expected_result']
+            ? ['description', 'expected_result']
             : ['playwright_script'];
 
           for (const fieldName of requiredStringFields) {
@@ -5992,7 +5992,72 @@ return {
             }
           }
 
-          console.log(`✅ playwright_script PRESENT in response: ${parsedResponse.playwright_script.length} chars`);
+          const rawPlaywrightScript = parsedResponse.playwright_script;
+          if (typeof rawPlaywrightScript !== 'string') {
+            const stepTypeLabel = isGenerateJourneyScriptStep ? 'generate_journey_script' : 'generate_login_script';
+            const errorMessage = `Missing or invalid required field "playwright_script" in ${stepTypeLabel} response for step "${step.name || step.id}"`;
+            const fullContext = {
+              step_id: step.id,
+              step_name: step.name,
+              step_type: step.type,
+              step_config: step.config,
+              missing_or_invalid_field: 'playwright_script',
+              field_value_type: typeof rawPlaywrightScript,
+              field_value_preview: rawPlaywrightScript,
+              available_keys: Object.keys(parsedResponse),
+              full_response: parsedResponse
+            };
+            console.error(`❌ ${errorMessage}`);
+            console.error(`❌ Available keys: ${Object.keys(parsedResponse).join(', ')}`);
+            console.error(`❌ Full response:`, JSON.stringify(parsedResponse, null, 2));
+            console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+            }
+            throw new Error(`${errorMessage}\nAvailable keys: ${Object.keys(parsedResponse).join(', ')}\nFull response: ${JSON.stringify(parsedResponse, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+          }
+          if (isGenerateLoginScriptStep && rawPlaywrightScript.trim().length === 0) {
+            const errorMessage = `Missing or invalid required field "playwright_script" in generate_login_script response for step "${step.name || step.id}"`;
+            const fullContext = {
+              step_id: step.id,
+              step_name: step.name,
+              step_type: step.type,
+              step_config: step.config,
+              missing_or_invalid_field: 'playwright_script',
+              field_value_type: typeof rawPlaywrightScript,
+              field_value_preview: rawPlaywrightScript,
+              available_keys: Object.keys(parsedResponse),
+              full_response: parsedResponse
+            };
+            console.error(`❌ ${errorMessage}`);
+            console.error(`❌ Available keys: ${Object.keys(parsedResponse).join(', ')}`);
+            console.error(`❌ Full response:`, JSON.stringify(parsedResponse, null, 2));
+            console.error(`❌ Full step context:`, JSON.stringify(fullContext, null, 2));
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
+            }
+            throw new Error(`${errorMessage}\nAvailable keys: ${Object.keys(parsedResponse).join(', ')}\nFull response: ${JSON.stringify(parsedResponse, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
+          }
+
+          if (isGenerateJourneyScriptStep && rawPlaywrightScript.trim().length === 0) {
+            console.log(`✅ playwright_script accepted as intentional no-op for generate_journey_script (0 chars)`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(
+                jobId,
+                'info',
+                'Accepted empty playwright_script for generate_journey_script; treating as intentional no-op for this iteration.',
+                'WORKFLOW-ANALYZER',
+                {
+                  step_id: step.id,
+                  step_name: step.name,
+                  description_preview: String(parsedResponse.description || '').substring(0, 200),
+                  expected_result_preview: String(parsedResponse.expected_result || '').substring(0, 200)
+                }
+              );
+            }
+          } else {
+            console.log(`✅ playwright_script PRESENT in response: ${rawPlaywrightScript.length} chars`);
+          }
         }
         
         // Extract summary information based on response content
@@ -11407,6 +11472,41 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       }
       throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
     }
+
+    const isJourneyScriptExecutionStep =
+      sourceField === 'journeyScriptToExecute' ||
+      step.id === 'execute_journey_script' ||
+      step.name?.includes('Execute Journey Action Script');
+    const skipEmptyJourneyScriptExecution = async (phase, metadata = {}) => {
+      const skipMessage = `No journey script generated (${phase}); skipping execute-code-from-variable step.`;
+      const skipResult = {
+        success: true,
+        skipped: true,
+        skip_reason: 'empty_journey_script',
+        source_field: sourceField,
+        phase,
+        execution_failed: false,
+        error: null,
+        message: skipMessage
+      };
+      workflowState.lastExecutedActionLines = [];
+      workflowState.lastExecutionResult = skipResult;
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'info',
+          skipMessage,
+          'WORKFLOW-ANALYZER',
+          {
+            step_id: step.id,
+            step_name: step.name,
+            source_field: sourceField,
+            ...metadata
+          }
+        );
+      }
+      return skipResult;
+    };
     
     // Resolve the path with slug support
     let code = null;
@@ -11493,11 +11593,18 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       
       // If still not found, fail with detailed error
       if (!code) {
-        const errorMessage = `Missing required field "${sourceField}" for step "${step.name || step.id}"`;
-        const missingPath = `workflowState.${sourceField}`;
         const workflowKeys = Object.keys(workflowState || {});
         const contextKeys = workflowState.context ? Object.keys(workflowState.context) : [];
         const varPoolPageKeys = workflowState.variablePool?.page ? Object.keys(workflowState.variablePool.page) : [];
+        if (isJourneyScriptExecutionStep) {
+          return await skipEmptyJourneyScriptExecution('resolve-path', {
+            workflow_state_keys_count: workflowKeys.length,
+            context_keys_count: contextKeys.length,
+            variable_pool_page_keys_count: varPoolPageKeys.length
+          });
+        }
+        const errorMessage = `Missing required field "${sourceField}" for step "${step.name || step.id}"`;
+        const missingPath = `workflowState.${sourceField}`;
         const fullContext = {
           step_id: step.id,
           step_name: step.name,
@@ -11695,6 +11802,12 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     console.log(`🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
     
     if (!code || code.trim().length === 0) {
+      if (isJourneyScriptExecutionStep) {
+        return await skipEmptyJourneyScriptExecution('post-clean', {
+          original_code_type: typeof code,
+          original_code_length: typeof code === 'string' ? code.length : 0
+        });
+      }
       throw new Error(`Script is empty after cleaning for step: ${step.name}`);
     }
     
