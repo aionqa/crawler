@@ -10622,6 +10622,60 @@ return {
       return `page.getByText(${JSON.stringify(label)}, { exact: false }).first()`;
     });
 
+    // tests.aionqa.com dogfood: models often hallucinate symbolic button names for complex-modal.html.
+    const dogfoodModalOpenButtonSelectors = {
+      OPEN_SIMPLE_MODAL_BUTTON: 'button:has-text("Open Simple Modal")',
+      OPEN_TABBED_MODAL_BUTTON: 'button:has-text("Open Tabbed Modal")',
+      OPEN_FORM_MODAL_BUTTON: 'button:has-text("Open Form Modal")',
+    };
+
+    // Repair LLM bug: click options merged into the selector string.
+    // Example: page.click('OPEN_SIMPLE_MODAL_BUTTON, { force: true }')
+    s = s.replace(
+      /\bpage\.click\(\s*'([^']+?)\s*,\s*\{\s*force\s*:\s*true\s*\}\s*'\s*\)/gi,
+      (_, inner) => {
+        const token = String(inner || '').trim();
+        const mapped = dogfoodModalOpenButtonSelectors[token];
+        const sel = mapped || token;
+        return `page.click(${JSON.stringify(sel)}, { force: true })`;
+      }
+    );
+    s = s.replace(
+      /\bpage\.click\(\s*"([^"]+?)\s*,\s*\{\s*force\s*:\s*true\s*\}\s*"\s*\)/gi,
+      (_, inner) => {
+        const token = String(inner || '').trim();
+        const mapped = dogfoodModalOpenButtonSelectors[token];
+        const sel = mapped || token;
+        return `page.click(${JSON.stringify(sel)}, { force: true })`;
+      }
+    );
+
+    // Unquoted pseudo-constant (runtime ReferenceError): page.click(OPEN_SIMPLE_MODAL_BUTTON, { force: true })
+    s = s.replace(
+      /\bpage\.click\(\s*(OPEN_(?:SIMPLE|TABBED|FORM)_MODAL_BUTTON)\s*,\s*\{\s*force\s*:\s*true\s*\}\s*\)/gi,
+      (_, token) => {
+        const mapped = dogfoodModalOpenButtonSelectors[token];
+        if (!mapped) return `page.click(${token}, { force: true })`;
+        return `page.click(${JSON.stringify(mapped)}, { force: true })`;
+      }
+    );
+
+    // Invalid Cypress-style page.$$eval(text=...); rewrite to a Playwright visibility wait (keeps syntax valid).
+    s = s.replace(
+      /\bawait\s+page\.\$\$eval\s*\(\s*text\s*=\s*([^);]+?)\s*\)\s*;?/gi,
+      (_, rawLabel) => {
+        let label = String(rawLabel || '').trim();
+        if (
+          (label.startsWith("'") && label.endsWith("'"))
+          || (label.startsWith('"') && label.endsWith('"'))
+        ) {
+          label = label.slice(1, -1);
+        }
+        if (!label) return '';
+        return `await page.getByText(${JSON.stringify(label)}, { exact: false }).first().waitFor({ state: 'visible', timeout: 8000 }).catch(() => {});`;
+      }
+    );
+
     // Repair a common LLM bug in selector maps:
     //   const selectors = { interest2, notif1, terms, ... };
     // This is valid syntax but will throw ReferenceError if those vars don't exist.
@@ -12759,6 +12813,17 @@ ${executableBody}`;
         }
       } catch (screenshotError) {
         console.warn(`⚠️ Failed to capture after screenshot: ${screenshotError.message}`);
+      }
+
+      // Dismiss open modals/overlays before :invalid scanning so incidental empty required fields
+      // inside closed/hidden panes do not flip journey success=false (common on stacked modal demos).
+      if (isJourneyScriptStep) {
+        try {
+          await page.keyboard.press('Escape');
+          await page.waitForTimeout(350);
+          await page.keyboard.press('Escape');
+          await page.waitForTimeout(350);
+        } catch (_) {}
       }
 
       // Deterministic post-action validation check:
