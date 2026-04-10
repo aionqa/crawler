@@ -3418,11 +3418,24 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 job_id: effectiveJobId
               };
               
-              const response = await axios.post(
-                `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
-                payload,
-                { headers: this.getAuthHeaders() }
-              );
+              const postOpts = { headers: this.getAuthHeaders(), timeout: 120000 };
+              let response;
+              for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                  response = await axios.post(
+                    `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
+                    payload,
+                    postOpts
+                  );
+                  break;
+                } catch (postErr) {
+                  const msg = String(postErr?.message || '');
+                  const retryable =
+                    attempt < 2 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
+                  if (!retryable) throw postErr;
+                  await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+                }
+              }
               
               console.log(`✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) at workflow completion. Response status: ${response.status}`);
               await this.sendLogToBackend(effectiveJobId, 'info', `✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) at workflow completion`, 'WORKFLOW-ANALYZER', {
@@ -12749,13 +12762,36 @@ ${executableBody}`;
       }
 
       // Deterministic post-action validation check:
-      // If the page shows HTML5 invalid controls or obvious inline validation errors, treat execution as not successful
+      // If the page shows surfaced constraint messages or obvious inline validation errors, treat execution as not successful
       // even if the script didn't throw. This prevents false "success" on incomplete form submissions.
+      //
+      // NOTE: Do not treat mere :invalid (e.g. empty required inputs on a newly revealed wizard step) as blocking.
+      // Those are normal after SPA/multi-step "Next" transitions and incorrectly flipped success=false, which then
+      // cascaded to journey failure despite a successful script run.
       let validationCheck = null;
       try {
         validationCheck = await page.evaluate(() => {
-          const invalidEls = Array.from(document.querySelectorAll(':invalid'));
-          const ariaInvalidEls = Array.from(document.querySelectorAll('[aria-invalid="true"]'));
+          const isUserVisible = (el) => {
+            if (!(el instanceof HTMLElement)) return false;
+            const style = window.getComputedStyle(el);
+            if (style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+            let node = el;
+            while (node && node !== document.documentElement) {
+              if (node instanceof HTMLElement && window.getComputedStyle(node).display === 'none') {
+                return false;
+              }
+              node = node.parentElement;
+            }
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          };
+
+          const invalidEls = Array.from(document.querySelectorAll(':invalid')).filter((el) => {
+            const pane = el.closest('.step-content');
+            if (pane && !pane.classList.contains('active')) return false;
+            return isUserVisible(el);
+          });
+          const ariaInvalidEls = Array.from(document.querySelectorAll('[aria-invalid="true"]')).filter(isUserVisible);
 
           const sampleInvalid = invalidEls.slice(0, 6).map((el) => ({
             tag: String(el.tagName || '').toLowerCase(),
@@ -12768,6 +12804,7 @@ ${executableBody}`;
           const sampleErrors = Array.from(
             document.querySelectorAll('.error, .errors, .invalid-feedback, [role="alert"], [aria-live="assertive"]')
           )
+            .filter(isUserVisible)
             .slice(0, 6)
             .map((el) => (el.textContent || '').trim())
             .filter(Boolean);
@@ -12783,14 +12820,17 @@ ${executableBody}`;
         // Best-effort only.
       }
 
-      const hasBlockingValidation =
-        (validationCheck?.invalid_count || 0) > 0 ||
-        (validationCheck?.aria_invalid_count || 0) > 0 ||
-        (validationCheck?.error_text_samples || []).some((t) => /(error|failed|invalid|required|please)/i.test(String(t || '')));
+      const hasInlineErrorCopy = (validationCheck?.error_text_samples || []).some((t) =>
+        /(error|failed|invalid|required|please)/i.test(String(t || ''))
+      );
+      const hasSurfacedConstraintMessage = (validationCheck?.invalid_samples || []).some((s) =>
+        String(s.validationMessage || '').trim().length > 0
+      );
+      const hasBlockingValidation = hasInlineErrorCopy || hasSurfacedConstraintMessage;
 
       const executionResult = {
         ...result,
-        // success means: script executed AND we have no obvious client-side validation blockers.
+        // success means: script completed without throw AND the page shows no surfaced validation/error chrome.
         success: !hasBlockingValidation,
         urlBeforeAction,
         urlAfterAction,
