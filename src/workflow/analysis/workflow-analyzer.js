@@ -12822,16 +12822,10 @@ ${executableBody}`;
         }
       }
       
-      // CRITICAL: Check URL after execution to detect navigation
-      const urlAfterAction = page.url();
-      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - urlAfterAction=${urlAfterAction}`);
-      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - urlChanged=${urlBeforeAction !== urlAfterAction}`);
-      if (urlBeforeAction !== urlAfterAction) {
-        console.log(`📄 VAR_DUMP: URL changed from ${urlBeforeAction} to ${urlAfterAction}`);
-        // Note: We rely on AI to determine if navigation is appropriate based on page analysis
-        // No hardcoded URL pattern checks - AI should analyze page state dynamically
-      }
-      workflowState.urlAfterAction = urlAfterAction;
+      // URL right after script may still reflect the old document while navigation is in flight.
+      const urlImmediatelyAfterScript = page.url();
+      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - urlImmediatelyAfterScript=${urlImmediatelyAfterScript}`);
+      workflowState.urlAfterAction = urlImmediatelyAfterScript;
       
       // Log successful execution
       const successMessage = executedScriptUrl
@@ -12850,7 +12844,7 @@ ${executableBody}`;
               step_name: step.name,
               execution_time_ms: executionTime,
               url_before: urlBeforeAction,
-              url_after: page.url(),
+              url_after: urlImmediatelyAfterScript,
               result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500),
               script_download_url: executedScriptUrl
             }
@@ -12871,9 +12865,15 @@ ${executableBody}`;
       } catch (waitError) {
         console.log(`⚠️ Page wait warning: ${waitError.message}`);
       }
-      
-      // Capture URL after action (already captured above, just update state)
+
+      // Re-read URL after navigation/DOM settle so pageChanged and validation see the terminal document.
+      const urlAfterAction = page.url();
+      workflowState.urlAfterAction = urlAfterAction;
       const pageChanged = urlBeforeAction !== urlAfterAction;
+      console.log(`📄 VAR_DUMP: executeCodeFromVariableStep - urlAfterAction=${urlAfterAction} urlChanged=${pageChanged}`);
+      if (urlImmediatelyAfterScript !== urlAfterAction) {
+        console.log(`📄 VAR_DUMP: URL settled from ${urlImmediatelyAfterScript} to ${urlAfterAction}`);
+      }
       
       // Update workflow state with current page URL in case navigation occurred
       if (pageChanged) {
@@ -13039,6 +13039,15 @@ ${executableBody}`;
       });
       let hasBlockingValidation = hasInlineErrorCopy || hasSurfacedConstraintMessage;
 
+      // GET/form flows often land on a completion URL while the DOM still triggers noisy heuristics.
+      if (isJourneyScriptStep && hasBlockingValidation && pageChanged) {
+        const u = String(urlAfterAction || '').toLowerCase();
+        if (/(complete|success|thank|confirm|submitted|done)(?:[._-]|$)/i.test(u) || /survey-complete|thank-you|confirmation/i.test(u)) {
+          hasBlockingValidation = false;
+          console.log('✅ Completion-like URL after navigation — not treating validation scan as blocking for journey execution');
+        }
+      }
+
       // Journey scripts often complete a happy-path submit while :invalid or generic alert nodes still
       // appear in the DOM (SPA timing, duplicate fields, or success regions matching broad selectors).
       // If we see an unambiguous post-submit success signal, do not treat validation noise as failure.
@@ -13062,9 +13071,12 @@ ${executableBody}`;
             const bodyText = (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';
             const phrases = [
               'submitted successfully',
+              'survey has been submitted',
               'form submitted',
               'successfully submitted',
+              'thank you',
               'thank you for your',
+              'appreciate your feedback',
               'message sent',
               'registration complete',
               'order confirmed',
