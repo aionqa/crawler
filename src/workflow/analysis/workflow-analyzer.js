@@ -15281,7 +15281,16 @@ ${executableBody}`;
           
           try {
             // Get timeout for nested step
-            const nestedStepTimeout = this.getStepTimeout(nestedStep);
+            const nestedStepTimeoutRaw = this.getStepTimeout(nestedStep);
+            const nestedLabel = `${nestedStep.type || ''} ${nestedStep.name || ''} ${nestedStep.id || ''}`.toLowerCase();
+            const isJourneyExecutionNestedStep =
+              String(nestedStep.type || '').toLowerCase() === 'execute-code-from-variable' &&
+              /(journey|action\s*script|leg)/i.test(nestedLabel);
+            // Journey execution steps can include heavy DOM transitions/modals and should not be cut
+            // by strict template-level 60s overrides before executeCodeFromVariableStep finishes.
+            const nestedStepTimeout = isJourneyExecutionNestedStep
+              ? Math.max(nestedStepTimeoutRaw, 90000)
+              : nestedStepTimeoutRaw;
             console.log(`⏱️  Nested step "${nestedStep.name || nestedStep.id}" timeout: ${Math.round(nestedStepTimeout / 1000)}s`);
             await this.sendLogToBackend(jobId, 'info', `🔄 While-loop iteration ${iteration}: running nested step ${nestedIdx + 1}/${nestedSteps.length} (${nestedStep.name || nestedStep.id}, type: ${nestedStep.type})`, 'WORKFLOW-ANALYZER', { iteration, nestedIdx, stepId: nestedStepId, stepType: nestedStep.type });
             
