@@ -12924,7 +12924,60 @@ ${executableBody}`;
         if (isTrivialValueMissingOnly(s.validity)) return false;
         return String(s.validationMessage || '').trim().length > 0;
       });
-      const hasBlockingValidation = hasInlineErrorCopy || hasSurfacedConstraintMessage;
+      let hasBlockingValidation = hasInlineErrorCopy || hasSurfacedConstraintMessage;
+
+      // Journey scripts often complete a happy-path submit while :invalid or generic alert nodes still
+      // appear in the DOM (SPA timing, duplicate fields, or success regions matching broad selectors).
+      // If we see an unambiguous post-submit success signal, do not treat validation noise as failure.
+      if (isJourneyScriptStep && hasBlockingValidation) {
+        try {
+          const hasPositiveSubmissionSignal = await page.evaluate(() => {
+            const isUserVisible = (el) => {
+              if (!(el instanceof HTMLElement)) return false;
+              const style = window.getComputedStyle(el);
+              if (style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+              let node = el;
+              while (node && node !== document.documentElement) {
+                if (node instanceof HTMLElement && window.getComputedStyle(node).display === 'none') {
+                  return false;
+                }
+                node = node.parentElement;
+              }
+              const rect = el.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            };
+            const bodyText = (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';
+            const phrases = [
+              'submitted successfully',
+              'form submitted',
+              'successfully submitted',
+              'thank you for your',
+              'message sent',
+              'registration complete',
+              'order confirmed',
+              'logged in successfully',
+            ];
+            if (phrases.some((p) => bodyText.includes(p))) return true;
+            const candidates = document.querySelectorAll(
+              '.result, [class*="success"], [data-testid="success"], [data-testid="form-success"]'
+            );
+            for (const el of Array.from(candidates)) {
+              if (!isUserVisible(el)) continue;
+              const rt = (el.textContent || '').toLowerCase();
+              if (rt.includes('success') && (rt.includes('submit') || rt.includes('form') || rt.includes('message'))) {
+                return true;
+              }
+            }
+            return false;
+          });
+          if (hasPositiveSubmissionSignal) {
+            hasBlockingValidation = false;
+            console.log('✅ Positive submission signal detected — not treating validation scan as blocking for journey execution');
+          }
+        } catch (_) {
+          // best-effort only
+        }
+      }
 
       const executionResult = {
         ...result,
@@ -17141,8 +17194,17 @@ ${executableBody}`;
         finalLegStatus = 'success';
         finalLegResult = 'success';
       } else if (lastAiStatus === 'failure') {
-        finalLegStatus = insufficientSignalForJourney ? 'skipped' : 'failure';
-        finalLegResult = insufficientSignalForJourney ? 'skipped_insufficient_signal' : 'failure';
+        // Verifier false negatives are common on SPAs: Playwright run + post-execution validation may be clean
+        // while the justify step still returns failure. Trust deterministic execution evidence when present.
+        if (executionSucceeded) {
+          finalLegStatus = 'success';
+          finalLegResult = 'success';
+          finalLegError = null;
+          console.log('✅ Overriding AI failure: journey script execution succeeded (no blocking validation / throw)');
+        } else {
+          finalLegStatus = insufficientSignalForJourney ? 'skipped' : 'failure';
+          finalLegResult = insufficientSignalForJourney ? 'skipped_insufficient_signal' : 'failure';
+        }
       } else {
         if (insufficientSignalForJourney) {
           finalLegStatus = 'skipped';
@@ -17156,7 +17218,11 @@ ${executableBody}`;
           finalLegResult = 'pending';
         }
       }
-      finalLegError = lastAiReason || finalLegError;
+      if (finalLegStatus === 'success') {
+        finalLegError = null;
+      } else {
+        finalLegError = lastAiReason || finalLegError;
+      }
     }
 
     // Only check determine_completion status if AI justification did not already set a final status
