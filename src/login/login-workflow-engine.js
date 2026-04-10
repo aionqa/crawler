@@ -160,7 +160,9 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
     }
   };
 
-  const aiLogger = new AIConversationLogger(backendUrl, normalizedContext.runner_token);
+  // Pass normalized job context so AI logger can resolve ai_services/llm endpoint
+  // for helper-driven login jobs without relying on implicit globals.
+  const aiLogger = new AIConversationLogger(backendUrl, normalizedContext.runner_token, normalizedContext);
 
   const analyzer = new WorkflowAnalyzer(backendUrl, aiLogger, normalizedContext);
   const analysisResult = await analyzer.analyzePage(page, jobId, null, projectId);

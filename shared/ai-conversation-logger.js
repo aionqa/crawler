@@ -173,6 +173,45 @@ export class AIConversationLogger {
     return total;
   }
 
+  collectAiServicesFromContext(payload = null, sourcePayload = null) {
+    const candidates = [
+      this.context?.ai_services,
+      payload?.ai_services,
+      sourcePayload?.ai_services,
+      this.context?.context?.ai_services,
+      payload?.context?.ai_services,
+      sourcePayload?.context?.ai_services,
+      this.context?.options?.ai_services,
+      payload?.options?.ai_services,
+      sourcePayload?.options?.ai_services,
+    ];
+    for (const candidate of candidates) {
+      if (Array.isArray(candidate) && candidate.length > 0) {
+        return candidate;
+      }
+    }
+    return [];
+  }
+
+  collectLlmEndpointFromContext(payload = null, sourcePayload = null) {
+    const endpointCandidates = [
+      this.context?.llm_config?.endpoint,
+      payload?.llm_config?.endpoint,
+      sourcePayload?.llm_config?.endpoint,
+      this.context?.context?.llm_config?.endpoint,
+      payload?.context?.llm_config?.endpoint,
+      sourcePayload?.context?.llm_config?.endpoint,
+      this.context?.options?.llm_config?.endpoint,
+      payload?.options?.llm_config?.endpoint,
+      sourcePayload?.options?.llm_config?.endpoint,
+    ];
+    for (const endpoint of endpointCandidates) {
+      const normalized = typeof endpoint === 'string' ? endpoint.trim() : '';
+      if (normalized) return normalized;
+    }
+    return null;
+  }
+
   /**
    * Get OpenAI client (lazy initialization with current context)
    * Updates context if provided
@@ -900,7 +939,7 @@ export class AIConversationLogger {
       
       // OpenAI-mode detection: gpt-5-nano default and 128K max_output only for AI services in OpenAI mode.
       // Other modes (LM Studio, Ollama) keep gpt-5-mini default and conservative token limits.
-      const aiServicesForMode = this.context?.ai_services || payload?.ai_services || sourcePayload?.ai_services;
+      const aiServicesForMode = this.collectAiServicesFromContext(payload, sourcePayload);
       const primaryService = Array.isArray(aiServicesForMode) && aiServicesForMode.length > 0 ? aiServicesForMode[0] : null;
       const primaryUrl = primaryService?.url ? String(primaryService.url) : '';
       const isOpenAIMode = primaryService?.mode === 'openai' || (primaryUrl && primaryUrl.includes('api.openai.com'));
@@ -1112,19 +1151,32 @@ export class AIConversationLogger {
       const contextUpdate = {
         job_id: effectiveJobId,
         jobId: effectiveJobId,
-        project_id: payload?.project_id || sourcePayload?.project_id || this.context?.project_id,
-        projectId: payload?.project_id || sourcePayload?.project_id || this.context?.project_id
+        project_id:
+          payload?.project_id ||
+          sourcePayload?.project_id ||
+          payload?.context?.project_id ||
+          sourcePayload?.context?.project_id ||
+          this.context?.project_id ||
+          this.context?.context?.project_id,
+        projectId:
+          payload?.project_id ||
+          sourcePayload?.project_id ||
+          payload?.projectId ||
+          sourcePayload?.projectId ||
+          payload?.context?.project_id ||
+          sourcePayload?.context?.project_id ||
+          payload?.context?.projectId ||
+          sourcePayload?.context?.projectId ||
+          this.context?.project_id ||
+          this.context?.projectId ||
+          this.context?.context?.project_id ||
+          this.context?.context?.projectId
       };
       // AI service must be explicitly configured (no fallbacks). Prefer ai_services; if absent,
       // derive a single service from llm_config.endpoint for compatibility with login flows.
-      const endpointFromLlmConfig =
-        this.context?.llm_config?.endpoint ||
-        payload?.llm_config?.endpoint ||
-        sourcePayload?.llm_config?.endpoint ||
-        contextUpdate?.llm_config?.endpoint ||
-        null;
+      const endpointFromLlmConfig = this.collectLlmEndpointFromContext(payload, sourcePayload);
 
-      const aiServicesRaw = this.context?.ai_services || payload?.ai_services || sourcePayload?.ai_services;
+      const aiServicesRaw = this.collectAiServicesFromContext(payload, sourcePayload);
       let aiServices = (Array.isArray(aiServicesRaw) && aiServicesRaw.length > 0)
         ? aiServicesRaw
         : (endpointFromLlmConfig
