@@ -204,40 +204,65 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
   // determine_completion is used inside the loop to decide if we should continue
   const finalResult = validateResult || determineResult;
   
+  const extractStatusLikeValue = (value) => {
+    if (typeof value === 'string') return value;
+    if (!value || typeof value !== 'object') return null;
+    if (typeof value.value === 'string') return value.value;
+    if (typeof value.status === 'string') return value.status;
+    if (value.status && typeof value.status === 'object' && typeof value.status.value === 'string') return value.status.value;
+    if (typeof value.completion_status === 'string') return value.completion_status;
+    if (value.completion_status && typeof value.completion_status === 'object' && typeof value.completion_status.value === 'string') {
+      return value.completion_status.value;
+    }
+    return null;
+  };
+
   // CRITICAL: Extract status as string - handle nested structures
   let loginStatus = null;
   if (finalResult) {
     // Try direct status field first
-    if (typeof finalResult.status === 'string') {
-      loginStatus = finalResult.status;
+    const directStatus = extractStatusLikeValue(finalResult.status);
+    if (directStatus) {
+      loginStatus = directStatus;
     } 
     // Try nested status (e.g., result.status.status)
     else if (finalResult.status && typeof finalResult.status === 'object') {
       if (typeof finalResult.status.status === 'string') {
         loginStatus = finalResult.status.status;
+      } else if (typeof finalResult.status.value === 'string') {
+        loginStatus = finalResult.status.value;
       } else if (typeof finalResult.status.completion_status === 'string') {
         loginStatus = finalResult.status.completion_status;
       }
     }
     // Try completion_status field
-    else if (typeof finalResult.completion_status === 'string') {
-      loginStatus = finalResult.completion_status;
+    else {
+      const completionStatus = extractStatusLikeValue(finalResult.completion_status);
+      if (completionStatus) {
+        loginStatus = completionStatus;
+      }
     }
   }
   
   // CRITICAL: If loginStatus is still null, try extracting from determineResult directly
   // (This handles cases where finalResult extraction failed but determineResult has the status)
   if (!loginStatus && determineResult) {
-    if (typeof determineResult.status === 'string') {
-      loginStatus = determineResult.status;
+    const determineStatus = extractStatusLikeValue(determineResult.status);
+    if (determineStatus) {
+      loginStatus = determineStatus;
     } else if (determineResult.status && typeof determineResult.status === 'object') {
       if (typeof determineResult.status.status === 'string') {
         loginStatus = determineResult.status.status;
+      } else if (typeof determineResult.status.value === 'string') {
+        loginStatus = determineResult.status.value;
       } else if (typeof determineResult.status.completion_status === 'string') {
         loginStatus = determineResult.status.completion_status;
       }
-    } else if (typeof determineResult.completion_status === 'string') {
-      loginStatus = determineResult.completion_status;
+    } else {
+      const determineCompletionStatus = extractStatusLikeValue(determineResult.completion_status);
+      if (determineCompletionStatus) {
+        loginStatus = determineCompletionStatus;
+      }
     }
   }
   
@@ -327,6 +352,23 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
     } catch (cookieError) {
       console.warn(`⚠️ Failed to collect cookies from page context: ${cookieError.message}`);
     }
+  }
+
+  // Heuristic success: if script moved to authenticated app area and auth/session cookies are present,
+  // trust runtime evidence over conservative UI-only validator outputs.
+  try {
+    const currentUrl = page && typeof page.url === 'function' ? String(page.url() || '') : '';
+    const normalizedUrl = currentUrl.toLowerCase();
+    const leftLoginPage = normalizedUrl && !/\/login(?:[/?#]|$)/.test(normalizedUrl);
+    const landedOnAppArea = /\/dashboard(?:[/?#]|$)|\/n\/dashboard(?:[/?#]|$)|\/app(?:[/?#]|$)|\/home(?:[/?#]|$)/.test(normalizedUrl);
+    const hasAuthCookie = cookies.some((cookie) => /auth|token|session|id_token|refresh|sso/i.test(String(cookie?.name || '')));
+    if (!success && cookies.length >= 5 && hasAuthCookie && leftLoginPage && landedOnAppArea) {
+      success = true;
+      loginStatus = 'success';
+      console.log(`✅ Login success inferred from runtime evidence: url=${currentUrl}, authCookies=${cookies.length}`);
+    }
+  } catch (heuristicError) {
+    console.warn(`⚠️ Login heuristic check skipped: ${heuristicError?.message || heuristicError}`);
   }
 
   return {
