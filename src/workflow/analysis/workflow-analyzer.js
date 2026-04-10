@@ -10789,6 +10789,34 @@ return {
     s = s.replace(/:contains\(\s*"((?:[^"\\]|\\.)*)"\s*\)/g, ':has-text("$1")');
     s = s.replace(/:contains\(\s*'((?:[^'\\]|\\.)*)'\s*\)/g, ":has-text('$1')");
 
+    // Replace dynamic template-literal button :has-text selectors with getByRole(name).
+    // This avoids occasional CSS parser corruption with generated values containing parentheses/quotes.
+    s = s.replace(
+      /page\.locator\(\s*`button:has-text\(\s*"\$\{([^}]+)\}"\s*\)`\s*\)/g,
+      (_m, labelExpr) => `page.getByRole('button', { name: String(${String(labelExpr || '').trim()}) })`
+    );
+
+    // Replace multi-selector button :has-text chains with a role-based name regex.
+    // Example:
+    //   page.locator('button:has-text("Login"), button:has-text("Login (Any Credentials)")').first()
+    // -> page.getByRole('button', { name: /Login|Login \(Any Credentials\)/i }).first()
+    s = s.replace(
+      /page\.locator\(\s*(['"])([^'"`]*button:has-text\([^'"`]*\)(?:[^'"`]*,\s*button:has-text\([^'"`]*\))+[^'"`]*)\1\s*\)\.first\(\)/g,
+      (_m, _quote, selectorChain) => {
+        const selector = String(selectorChain || '');
+        const labels = [];
+        const labelRegex = /button:has-text\(\s*["']([^"']+)["']\s*\)/g;
+        let match;
+        while ((match = labelRegex.exec(selector)) !== null) {
+          const label = String(match[1] || '').trim();
+          if (label) labels.push(label);
+        }
+        if (labels.length < 2) return _m;
+        const escaped = labels.map((v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+        return `page.getByRole('button', { name: /${escaped.join('|')}/i }).first()`;
+      }
+    );
+
     // Cypress-style `page.$(text=Label)` is not valid Playwright (`$` expects a CSS selector string).
     s = s.replace(/page\.\$\(\s*text\s*=\s*([^)]+?)\s*\)/gi, (_m, rawLabel) => {
       let label = String(rawLabel || '').trim();
