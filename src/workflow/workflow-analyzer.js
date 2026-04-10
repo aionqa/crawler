@@ -8903,8 +8903,8 @@ return {
           console.warn(`⚠️ Removed ${gotoMatches.length} page.goto() call(s) from login script before execution`);
         }
 
-        // Check for forbidden navigation patterns
-        const hasPageGoto = code.includes('page.goto(');
+        // Use a word boundary so aliases like vpage.goto(...) are not mistaken for page.goto(...)
+        const hasPageGoto = /\bpage\.goto\s*\(/.test(code);
         const hasNavigationLinks = code.includes('click(') && (
           code.includes('/courses') || 
           code.includes('/home') || 

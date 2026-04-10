@@ -11735,8 +11735,16 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       }
       
       if (isLoginJob) {
-        // Check for forbidden navigation patterns
-        const hasPageGoto = code.includes('page.goto(') || code.includes('page.goto(');
+        // Login scripts should interact with the current login page only.
+        // Strip direct page.goto(...) calls (AI often adds redundant navigations).
+        const gotoStripRegex = /\b(?:await\s+)?page\.goto\s*\([\s\S]*?\)\s*;?/gi;
+        const gotoStripped = code.match(gotoStripRegex) || [];
+        if (gotoStripped.length > 0) {
+          code = code.replace(gotoStripRegex, '');
+          console.warn(`⚠️ Removed ${gotoStripped.length} page.goto() call(s) from login script before execution`);
+        }
+        // Use a word boundary so aliases like vpage.goto(...) are not mistaken for page.goto(...)
+        const hasPageGoto = /\bpage\.goto\s*\(/.test(code);
         const hasNavigationLinks = code.includes('click(') && (
           code.includes('/courses') || 
           code.includes('/home') || 
