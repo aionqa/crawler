@@ -10596,6 +10596,19 @@ return {
     s = s.replace(/:contains\(\s*"((?:[^"\\]|\\.)*)"\s*\)/g, ':has-text("$1")');
     s = s.replace(/:contains\(\s*'((?:[^'\\]|\\.)*)'\s*\)/g, ":has-text('$1')");
 
+    // Cypress-style `page.$(text=Label)` is not valid Playwright (`$` expects a CSS selector string).
+    s = s.replace(/page\.\$\(\s*text\s*=\s*([^)]+?)\s*\)/gi, (_m, rawLabel) => {
+      let label = String(rawLabel || '').trim();
+      if (
+        (label.startsWith("'") && label.endsWith("'"))
+        || (label.startsWith('"') && label.endsWith('"'))
+      ) {
+        label = label.slice(1, -1);
+      }
+      if (!label) return 'page.locator("body")';
+      return `page.getByText(${JSON.stringify(label)}, { exact: false }).first()`;
+    });
+
     // Repair a common LLM bug in selector maps:
     //   const selectors = { interest2, notif1, terms, ... };
     // This is valid syntax but will throw ReferenceError if those vars don't exist.
@@ -11506,8 +11519,11 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     }
     
     try {
-      const timeout = step.config?.timeout || 30000;
-      
+      const configuredTimeout = Number(step.config?.timeout) || 30000;
+      const stepLabel = `${String(step?.name || '')} ${String(step?.id || '')}`;
+      const isJourneyScriptStep = /journey|leg|execute.*action/i.test(stepLabel);
+      const timeout = isJourneyScriptStep ? Math.max(configuredTimeout, 90000) : configuredTimeout;
+
       // Capture URL before action
       const urlBeforeAction = page.url();
       workflowState.urlBeforeAction = urlBeforeAction;
@@ -12221,6 +12237,18 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           console.error(`❌ Failed to create page wrapper: ${wrapperError.message}`, wrapperError);
           // Fall back to original page object if wrapper creation fails
           wrappedPage = pageObj;
+        }
+
+        const playwrightTimeoutMs = Math.max(Number(timeout) || 30000, 60000);
+        try {
+          if (wrappedPage && typeof wrappedPage.setDefaultTimeout === 'function') {
+            wrappedPage.setDefaultTimeout(playwrightTimeoutMs);
+          }
+          if (wrappedPage && typeof wrappedPage.setDefaultNavigationTimeout === 'function') {
+            wrappedPage.setDefaultNavigationTimeout(playwrightTimeoutMs);
+          }
+        } catch (timeoutTuneErr) {
+          console.warn(`⚠️ Could not tune Playwright default timeouts: ${timeoutTuneErr.message}`);
         }
         
         // Verify wrapper is working - test that wrappedPage.click exists and is our wrapper
