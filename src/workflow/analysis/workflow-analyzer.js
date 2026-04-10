@@ -6287,7 +6287,17 @@ return {
           if (droppedEmptyJourneys > 0) {
             console.warn(`⚠️ [JOURNEYS-QUALITY] Removed ${droppedEmptyJourneys} journey(s) with no executable actions after selector validation`);
           }
-          const containsConditionalLanguage = (value) => /\b(if available|if present|if exists|if expandable|where applicable|when applicable|maybe|might|try to|attempt to)\b/i.test(String(value || ''));
+          if (journeys.length > 0 && this.isSparseInteractiveCrawlSurface(workflowState)) {
+            const beforeSparse = journeys.length;
+            journeys = this.filterImpossibleJourneysOnSparseSurface(journeys, workflowState);
+            if (journeys.length !== beforeSparse) {
+              console.log(`✅ [JOURNEYS-SPARSE] Surface filter: ${beforeSparse} → ${journeys.length} journey(s)`);
+            }
+          }
+          const containsConditionalLanguage = (value) =>
+            /\b(if available|if present|if exists|if any|if expandable|where applicable|when applicable|maybe|might|try to|attempt to)\b/i.test(
+              String(value || '')
+            );
           const isVerifyOnlyJourney = (journey) => {
             const actions = Array.isArray(journey?.actions) ? journey.actions : [];
             if (actions.length === 0) return true;
@@ -6309,6 +6319,9 @@ return {
               return false;
             }
             if (isVerifyOnlyJourney(journey)) {
+              if (isPlaywrightNonInteractiveDocumentSurface(workflowState)) {
+                return true;
+              }
               console.warn(`⚠️ [JOURNEYS-QUALITY] Removing verify-only journey "${journey?.journey_id || journey?.description || 'unknown'}"`);
               return false;
             }
@@ -6317,7 +6330,7 @@ return {
           if (journeys.length !== journeysBeforeConditionalFilter) {
             console.warn(`⚠️ [JOURNEYS-QUALITY] Removed ${journeysBeforeConditionalFilter - journeys.length} journey(s) with conditional/hypothetical wording`);
           }
-          if (hasNoActionableSignals && journeys.length > 0) {
+          if (hasNoActionableSignals && journeys.length > 0 && !isPlaywrightNonInteractiveDocumentSurface(workflowState)) {
             console.warn(`⚠️ [JOURNEYS-QUALITY] Playwright reported no forms, significant interactive elements, or structured menus — discarding ${journeys.length} AI journey(s) to avoid no-op flows`);
             journeys = [];
           }
@@ -6652,6 +6665,13 @@ return {
               confidence: leg.confidence || 0.8
             }))
             .filter((j) => Array.isArray(j.actions) && j.actions.length > 0);
+          if (journeys.length > 0 && this.isSparseInteractiveCrawlSurface(workflowState)) {
+            const beforeCv = journeys.length;
+            journeys = this.filterImpossibleJourneysOnSparseSurface(journeys, workflowState);
+            if (journeys.length !== beforeCv) {
+              console.log(`✅ [JOURNEYS-CONVERT-SPARSE] Surface filter: ${beforeCv} → ${journeys.length} journey(s)`);
+            }
+          }
           console.log(`✅ [JOURNEYS-CONVERT] Converted ${candidateLegs.length} leg(s)/action(s) to ${journeys.length} journey(s) with actions`);
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-CONVERT] Converted ${candidateLegs.length} leg(s)/action(s) to journeys`, 'WORKFLOW-ANALYZER', {
@@ -6719,6 +6739,22 @@ return {
         }
         
         
+        if (Array.isArray(journeys) && journeys.length > 0 && this.isSparseInteractiveCrawlSurface(workflowState)) {
+          const beforePersist = journeys.length;
+          journeys = this.filterImpossibleJourneysOnSparseSurface(journeys, workflowState);
+          if (journeys.length !== beforePersist) {
+            console.log(`✅ [JOURNEYS-SAVE-PRECHECK] Sparse filter: ${beforePersist} → ${journeys.length}`);
+          }
+          if (!workflowState.context) {
+            workflowState.context = {};
+          }
+          workflowState.journeys = journeys;
+          workflowState.journeysToExecute = journeys;
+          workflowState.context.journeysToExecute = journeys;
+          this.initializeVariablePool(workflowState);
+          this.saveVariable(workflowState, 'journeysToExecute', journeys, 'page', step);
+        }
+
         // CRITICAL: Save journeys IMMEDIATELY and INDEPENDENTLY of legs processing
         // Journeys must be saved even if legs conversion fails or legs are empty
         console.log(`🔍 [JOURNEYS-SAVE] Checking journeys: length=${journeys.length}, isArray=${Array.isArray(journeys)}`);
