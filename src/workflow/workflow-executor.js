@@ -1783,6 +1783,16 @@ class WorkflowExecutor {
       }
     }
 
+    if (this.context?.why_failure && effectiveJobId && this.backendLogger) {
+      await this.backendLogger.appendJobLog(
+        effectiveJobId,
+        'info',
+        'Failure-diagnosis mode: prioritize root-cause explanation in AI outputs (see FAILURE DIAGNOSIS CRAWL in job context).',
+        'WORKFLOW-EXECUTOR',
+        { workflow_id: workflowId, why_failure: true }
+      );
+    }
+
     let executedCount = 0;
 
     // CRITICAL: Pre-check database for already-executed OR currently-executing actions to avoid re-execution
