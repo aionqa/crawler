@@ -319,6 +319,21 @@ function isWithinDomain(pageUrl, baseUrl, allowSubdomains = false, domainScope =
   return isWithinProjectDomains(pageUrl, baseUrl, allowSubdomains, domainScope);
 }
 
+/**
+ * If the URL has a query or fragment, returns origin + pathname only.
+ * Used for a single recovery navigation when those parts commonly trigger
+ * third-party redirects (share/tracking) while the bare path stays on-site.
+ */
+function urlWithoutQueryAndFragment(url) {
+  try {
+    const u = new URL(url);
+    if (!u.search && !u.hash) return null;
+    return `${u.origin}${u.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
 async function recordApiDomainClassification(jobId, projectId, apiUrl, pageUrl, runnerToken = '') {
   try {
     await sendApiCallsToBackend(
@@ -2383,6 +2398,60 @@ const modeHandlers = {
             }
           } catch (urlError) {
             console.warn(`Could not get page URL: ${urlError.message}`);
+          }
+        }
+
+        // When the queued URL is in crawl scope but query/hash sends the browser off-domain (e.g. ?share=… → social login),
+        // retry once without query or fragment so the same path can be analyzed in-scope.
+        const strippedForRetry = urlWithoutQueryAndFragment(currentUrl);
+        if (
+          strippedForRetry &&
+          strippedForRetry !== currentUrl &&
+          isWithinDomain(strippedForRetry, seedUrl, allowSubdomains, domainScope) &&
+          !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope)
+        ) {
+          await sendLog(
+            jobId,
+            'info',
+            `🔁 In-scope URL with query/fragment redirected off-domain; retrying navigation without query or fragment: ${strippedForRetry}`,
+            {
+              component: 'CRAWLER-TEXT',
+              action: 'nav_retry_strip_query_cross_origin_redirect',
+              prior_final_url: finalUrl,
+              original_request: currentUrl
+            }
+          );
+          try {
+            let response = await page.goto(strippedForRetry, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            let status = response ? response.status() : null;
+            if (status && status >= 500) {
+              await sendLog(jobId, 'warn', `⚠️ Navigation returned HTTP ${status} for ${strippedForRetry} — retrying once after backoff...`, {
+                component: 'CRAWLER-TEXT',
+                action: 'nav_retry_5xx',
+                url: strippedForRetry,
+                status
+              });
+              await page.waitForTimeout(3000);
+              response = await page.goto(strippedForRetry, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              status = response ? response.status() : null;
+            }
+            lastNavHttpStatus = status ?? lastNavHttpStatus;
+            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
+              console.warn('Page DOM not fully loaded after 30s, continuing with analysis');
+            });
+            await page.waitForTimeout(1000);
+            try {
+              const newFinal = page.url();
+              if (newFinal !== strippedForRetry) {
+                await sendLog(jobId, 'info', `🔄 Page redirected from ${strippedForRetry} to ${newFinal}`);
+              }
+              finalUrl = newFinal;
+              redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
+            } catch (urlError) {
+              console.warn(`Could not get page URL after stripped navigation: ${urlError.message}`);
+            }
+          } catch (stripNavError) {
+            await sendLog(jobId, 'warn', `⚠️ Stripped-URL navigation failed: ${stripNavError.message}`);
           }
         }
         
