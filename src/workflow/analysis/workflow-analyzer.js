@@ -10912,6 +10912,23 @@ return {
 
     let s = script;
 
+    // Models often append Playwright timeout tuning after substantive actions; it adds noise to parsers
+    // and rarely affects outcomes. Drop trailing timeout lines (repeat to handle alternating order).
+    const stripTrailingTimeoutTuning = (text) => {
+      let t = text;
+      for (let i = 0; i < 4; i++) {
+        const next = t
+          .replace(/\n\s*await\s+page\.setDefaultTimeout\s*\([^)]*\)\s*;?\s*$/i, '')
+          .replace(/\n\s*await\s+page\.setDefaultNavigationTimeout\s*\([^)]*\)\s*;?\s*$/i, '')
+          .replace(/^\s*await\s+page\.setDefaultTimeout\s*\([^)]*\)\s*;?\s*$/i, '')
+          .replace(/^\s*await\s+page\.setDefaultNavigationTimeout\s*\([^)]*\)\s*;?\s*$/i, '');
+        if (next === t) break;
+        t = next;
+      }
+      return t;
+    };
+    s = stripTrailingTimeoutTuning(s.trimEnd());
+
     // Some models wrap the script in an async IIFE:
     //   (async () => { ... })();
     // If we execute that as a statement inside our own async wrapper without awaiting it,
@@ -12282,7 +12299,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
             jobId: jobId,
             level: 'debug',
-            message: executionStartMessage,
+            message: `${executionStartMessage}\nℹ️ Following [executing] lines are parsed from the script as a pre-run preview (not yet executed).`,
             component: 'WORKFLOW-ANALYZER',
             metadata: {
               step_id: step.id,
@@ -13627,6 +13644,11 @@ ${executableBody}`;
 
       workflowState.lastExecutionResult = executionResult;
       await this.storeStepResult(step, executionResult, workflowState);
+      // Avoid carrying a stale execution flag from an earlier step into downstream heuristics
+      // (e.g. inconclusive-retry detection uses executionErrorType + lastExecutionResult).
+      if (executionResult?.success !== false && !executionResult?.execution_failed) {
+        workflowState.executionErrorType = null;
+      }
       
       console.log(`✅ Code execution completed. Page changed: ${pageChanged}`);
       
@@ -16620,6 +16642,10 @@ ${executableBody}`;
             // Path-based condition reads sometimes still resolve a stale justify status (nested step ids,
             // structured AI payloads). Force one continuation pass so iteration 2 can regenerate script.
             workflowState._inconclusiveJourneyRetryContinue = true;
+            // execute-code-from-variable may have thrown after persisting _journeyStepFailed in the nested
+            // catch; that flag forces an immediate loop exit and prevented bounded retries. Clear it when
+            // we explicitly treat the failure as inconclusive / retryable.
+            delete workflowState._journeyStepFailed;
 
             console.log(`🟡 Overrode determine_completion -> continue due to inconclusive execution error`);
             if (jobId) {
@@ -16720,6 +16746,7 @@ ${executableBody}`;
               scanJustifyKeys(workflowState.results);
               scanJustifyKeys(workflowState.variablePool?.steps);
               workflowState._inconclusiveJourneyRetryContinue = true;
+              delete workflowState._journeyStepFailed;
               if (jobId) {
                 await this.sendLogToBackend(
                   jobId,
@@ -16736,7 +16763,7 @@ ${executableBody}`;
         }
 
         // Evaluate condition after nested steps
-        if (workflowState._journeyStepFailed) {
+        if (workflowState._journeyStepFailed && !workflowState._inconclusiveJourneyRetryContinue) {
           condition = false;
           delete workflowState._journeyStepFailed;
           console.log(`🛑 [WHILE-LOOP] Exiting loop after journey step failure (failure already persisted)`);
