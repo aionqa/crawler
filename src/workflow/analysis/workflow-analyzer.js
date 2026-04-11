@@ -14516,13 +14516,28 @@ ${executableBody}`;
     const timeout = options.timeout ?? 120000;
     const postOpts = { headers: this.getAuthHeaders(), timeout };
     let lastErr = null;
-    for (let attempt = 0; attempt < 6; attempt++) {
+    const enc = encodeURIComponent(pid);
+    const postSaveAnalysis = async () => {
       try {
         return await axios.post(
-          `${this.backendUrl}/api/runner/pages/${pid}/save-analysis`,
+          `${this.backendUrl}/api/runner/pages/${enc}/save-analysis`,
           payload,
           postOpts
         );
+      } catch (runnerErr) {
+        if (runnerErr.response?.status === 401) {
+          return await axios.post(
+            `${this.backendUrl}/api/pages/${enc}/save-analysis`,
+            payload,
+            postOpts
+          );
+        }
+        throw runnerErr;
+      }
+    };
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        return await postSaveAnalysis();
       } catch (postErr) {
         lastErr = postErr;
         const st = postErr.response?.status;
