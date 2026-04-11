@@ -2603,8 +2603,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     return firstSentence.length <= maxLen ? firstSentence : firstSentence.substring(0, maxLen - 3) + '...';
   }
 
-  async ensurePageId(workflowState, jobId) {
-    if (workflowState.pageId && workflowState.projectId) {
+  async ensurePageId(workflowState, jobId, options = {}) {
+    const forceDiscover = options.forceDiscover === true;
+    if (!forceDiscover && workflowState.pageId && workflowState.projectId) {
       return workflowState.pageId;
     }
     if (!workflowState.projectId) {
@@ -2647,6 +2648,25 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       console.warn(`⚠️ Failed to upsert page via /api/pages/discover: ${err.message}`);
       return null;
     }
+  }
+
+  /**
+   * Load page JSON via GET /pages/:id (runner/service auth). The API does not expose GET /api/pages/:id;
+   * using that path always returns 404 and breaks journey-save existence checks.
+   */
+  async fetchAutomationPageById(pageId, requestOptions = {}) {
+    const id = pageId != null ? String(pageId).trim() : '';
+    if (!id) {
+      const err = new Error('pageId required');
+      err.response = { status: 404 };
+      throw err;
+    }
+    const res = await axios.get(`${this.backendUrl}/pages/${encodeURIComponent(id)}`, {
+      headers: this.getAuthHeaders(),
+      timeout: requestOptions.timeout ?? 60000,
+      ...requestOptions,
+    });
+    return res.data;
   }
 
   /**
@@ -3613,20 +3633,20 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       
       if (pageIdToUse && projectIdToUse) {
         try {
-          // First ensure page exists, create if it doesn't
+          // First ensure page exists in Mongo (real GET /pages/:id), re-discover if missing/stale
           let pageExists = false;
           try {
-            await axios.get(`${this.backendUrl}/api/pages/${pageIdToUse}`, { headers: this.getAuthHeaders() });
+            await this.fetchAutomationPageById(pageIdToUse);
             pageExists = true;
           } catch (checkError) {
           if (checkError.response?.status === 404) {
-            console.log(`🔍 [JOURNEYS-FINAL] Page ${pageIdToUse} not found, creating it first`);
-            const newPageId = await this.ensurePageId(workflowState, effectiveJobId);
+            console.log(`🔍 [JOURNEYS-FINAL] Page ${pageIdToUse} not found via GET /pages/:id, re-running discover`);
+            const newPageId = await this.ensurePageId(workflowState, effectiveJobId, { forceDiscover: true });
             if (newPageId) {
-              pageIdToUse = newPageId;
-              workflowState.pageId = newPageId; // Update workflowState so subsequent calls use the correct ID
+              pageIdToUse = String(newPageId);
+              workflowState.pageId = pageIdToUse;
               pageExists = true;
-              console.log(`✅ [JOURNEYS-FINAL] Created page with ID: ${pageIdToUse}`);
+              console.log(`✅ [JOURNEYS-FINAL] Resolved page ID after discover: ${pageIdToUse}`);
             } else {
               throw new Error('Failed to create page');
             }
@@ -3640,11 +3660,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
             let existingJourneys = [];
             let skipCheck = false;
             try {
-              const pageCheckResponse = await axios.get(
-                `${this.backendUrl}/api/pages/${pageIdToUse}`,
-                { headers: this.getAuthHeaders() }
-              );
-              existingJourneys = pageCheckResponse.data?.journeys || [];
+              const pageDoc = await this.fetchAutomationPageById(pageIdToUse);
+              existingJourneys = pageDoc?.journeys || [];
             } catch (checkError) {
               if (checkError.response?.status === 404) {
                 // Page was just created, might not be immediately available - skip duplicate check and save all journeys
@@ -3664,16 +3681,15 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
               // CRITICAL: Clean journeys to remove circular references before sending
               const cleanedJourneys = newJourneys.map(j => this.cleanJourneyForSave(j));
               
-              const payload = {
-                saveLegs: true,
-                journeys: cleanedJourneys,
-                job_id: effectiveJobId
-              };
-              
               const postOpts = { headers: this.getAuthHeaders(), timeout: 120000 };
               let response;
-              for (let attempt = 0; attempt < 3; attempt++) {
+              for (let attempt = 0; attempt < 5; attempt++) {
                 try {
+                  const payload = {
+                    saveLegs: true,
+                    journeys: cleanedJourneys,
+                    job_id: effectiveJobId
+                  };
                   response = await axios.post(
                     `${this.backendUrl}/api/pages/${pageIdToUse}/save-analysis`,
                     payload,
@@ -3681,9 +3697,20 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                   );
                   break;
                 } catch (postErr) {
+                  const st = postErr.response?.status;
+                  if (st === 404 && attempt < 4 && workflowState.pageUrl) {
+                    console.warn(`⚠️ [JOURNEYS-FINAL] save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
+                    const recovered = await this.ensurePageId(workflowState, effectiveJobId, { forceDiscover: true });
+                    if (recovered) {
+                      pageIdToUse = String(recovered);
+                      workflowState.pageId = pageIdToUse;
+                      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+                      continue;
+                    }
+                  }
                   const msg = String(postErr?.message || '');
                   const retryable =
-                    attempt < 2 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
+                    attempt < 4 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
                   if (!retryable) throw postErr;
                   await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
                 }
@@ -6931,16 +6958,17 @@ return {
             
             if (pageIdToSave && projectIdToSave) {
               try {
-                // First verify page exists, create if it doesn't
+                // First verify page exists (GET /pages/:id), re-discover on real 404
                 try {
-                  await axios.get(`${this.backendUrl}/api/pages/${pageIdToSave}`, { headers: this.getAuthHeaders() });
+                  await this.fetchAutomationPageById(pageIdToSave);
                 } catch (checkError) {
                   if (checkError.response?.status === 404) {
-                    console.log(`🔍 [JOURNEYS-IMMEDIATE] Page ${pageIdToSave} not found, creating it first`);
-                    pageIdToSave = await this.ensurePageId(workflowState, jobId);
+                    console.log(`🔍 [JOURNEYS-IMMEDIATE] Page ${pageIdToSave} not found, re-running discover`);
+                    pageIdToSave = await this.ensurePageId(workflowState, jobId, { forceDiscover: true });
                     if (!pageIdToSave) {
                       throw new Error('Failed to create page');
                     }
+                    workflowState.pageId = String(pageIdToSave);
                   } else {
                     throw checkError;
                   }
@@ -7508,13 +7536,10 @@ return {
         let needsSave = true;
         if (pageIdToUse) {
           try {
-            const pageCheckResponse = await axios.get(
-              `${this.backendUrl}/api/pages/${pageIdToUse}`,
-              { headers: this.getAuthHeaders() }
-            );
-            if (pageCheckResponse.data && pageCheckResponse.data.journeys && Array.isArray(pageCheckResponse.data.journeys) && pageCheckResponse.data.journeys.length > 0) {
+            const pageDoc = await this.fetchAutomationPageById(pageIdToUse);
+            if (pageDoc && pageDoc.journeys && Array.isArray(pageDoc.journeys) && pageDoc.journeys.length > 0) {
               needsSave = false;
-              console.log(`✅ [JOURNEYS-FALLBACK] Journeys already saved to page (${pageCheckResponse.data.journeys.length} journeys found)`);
+              console.log(`✅ [JOURNEYS-FALLBACK] Journeys already saved to page (${pageDoc.journeys.length} journeys found)`);
             }
           } catch (checkError) {
             // Page might not exist yet, continue with save
@@ -7937,11 +7962,8 @@ return {
         if (pageIdToUse && projectIdToUse) {
           // Check if journeys were already saved
           try {
-            const pageCheckResponse = await axios.get(
-              `${this.backendUrl}/api/pages/${pageIdToUse}`,
-              { headers: this.getAuthHeaders() }
-            );
-            const existingJourneys = pageCheckResponse.data?.journeys || [];
+            const pageDoc = await this.fetchAutomationPageById(pageIdToUse);
+            const existingJourneys = pageDoc?.journeys || [];
             const existingJourneyIds = new Set(existingJourneys.map(j => j.journey_id));
             const newJourneys = journeysToSave.filter(j => !existingJourneyIds.has(j.journey_id));
             
@@ -8041,11 +8063,8 @@ return {
           try {
             // Check if journeys already exist
             try {
-              const pageCheck = await axios.get(
-                `${this.backendUrl}/api/pages/${pageIdFinal}`,
-                { headers: this.getAuthHeaders() }
-              );
-              const existing = pageCheck.data?.journeys || [];
+              const pageCheckDoc = await this.fetchAutomationPageById(pageIdFinal);
+              const existing = pageCheckDoc?.journeys || [];
               const existingIds = new Set(existing.map(j => j.journey_id));
               const newOnes = finalJourneysToSave.filter(j => !existingIds.has(j.journey_id));
               
