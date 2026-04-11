@@ -32,6 +32,7 @@ class WorkflowAnalyzer {
     this.context = context;
     this.workflowTemplate = null;
     this.workflowCapabilities = this.detectCapabilities([]);
+    this._runnerTokenSnapshot = String(context?.runner_token || process.env.RUNNER_TOKEN || '').trim();
   }
 
   /**
@@ -10249,12 +10250,28 @@ ${executableBody}`;
   }
 
   /**
-   * Get authentication headers for API calls
+   * Get authentication headers for API calls (aligned with analysis/workflow-analyzer).
    */
-  getAuthHeaders() {
+  getAuthHeaders(opts = {}) {
+    const authMode = opts.authMode || 'runner_first';
     const headers = {};
-    if (this.context.runner_token) {
-      headers['Authorization'] = `Bearer ${this.context.runner_token}`;
+    const ctxRunner = String(this.context?.runner_token || '').trim();
+    const envRunner = String(process.env.RUNNER_TOKEN || '').trim();
+    const runnerTok = ctxRunner || envRunner;
+    const serviceTok = String(process.env.BACKEND_SERVICE_TOKEN || process.env.SERVICE_TOKEN || '').trim();
+    let token = '';
+    if (authMode === 'service_only') {
+      token = serviceTok;
+    } else if (authMode === 'service_first') {
+      token = serviceTok || runnerTok;
+    } else {
+      token = runnerTok || serviceTok;
+    }
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+      if (runnerTok && token === runnerTok) {
+        headers['x-runner-token'] = runnerTok;
+      }
     }
     return headers;
   }

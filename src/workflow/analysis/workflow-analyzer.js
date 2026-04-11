@@ -332,8 +332,8 @@ class WorkflowAnalyzer {
     this.context = context;
     this.workflowTemplate = null;
     this.workflowCapabilities = this.detectCapabilities([]);
-    /** Snapshot runner token at construction for late-job API calls (avoids stale context-only tokens). */
-    this._runnerTokenSnapshot = String(process.env.RUNNER_TOKEN || context?.runner_token || '').trim();
+    /** Snapshot runner token at construction for late-job API calls (prefer job context over generic env). */
+    this._runnerTokenSnapshot = String(context?.runner_token || process.env.RUNNER_TOKEN || '').trim();
   }
 
   /**
@@ -3724,15 +3724,22 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 } catch (postErr) {
                   const st = postErr.response?.status;
                   if (st === 401 && attempt < 4) {
-                    const snapTok = String(this._runnerTokenSnapshot || '').trim();
-                    const envTok = String(process.env.RUNNER_TOKEN || '').trim();
-                    const refreshTok = envTok || snapTok;
-                    if (refreshTok) {
-                      this.context.runner_token = refreshTok;
-                      postOpts.headers = this.getAuthHeaders();
-                      await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
-                      continue;
+                    const modes = ['runner_refresh', 'service_only', 'service_first', 'runner_first'];
+                    const mode = modes[attempt] || 'runner_first';
+                    if (mode === 'runner_refresh') {
+                      const envTok = String(process.env.RUNNER_TOKEN || '').trim();
+                      const snapTok = String(this._runnerTokenSnapshot || '').trim();
+                      this.context.runner_token = envTok || snapTok || this.context.runner_token;
                     }
+                    const authMode =
+                      mode === 'service_only'
+                        ? 'service_only'
+                        : mode === 'service_first'
+                          ? 'service_first'
+                          : 'runner_first';
+                    postOpts.headers = this.getAuthHeaders({ authMode });
+                    await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+                    continue;
                   }
                   if (st === 404 && attempt < 4 && workflowState.pageUrl) {
                     console.warn(`⚠️ [JOURNEYS-FINAL] save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
@@ -9246,15 +9253,22 @@ return {
         } catch (postErr) {
           const st = postErr.response?.status;
           if (st === 401 && attempt < 4) {
-            const snapTok = String(this._runnerTokenSnapshot || '').trim();
-            const envTok = String(process.env.RUNNER_TOKEN || '').trim();
-            const refreshTok = envTok || snapTok;
-            if (refreshTok) {
-              this.context.runner_token = refreshTok;
-              postOpts.headers = this.getAuthHeaders();
-              await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
-              continue;
+            const modes = ['runner_refresh', 'service_only', 'service_first', 'runner_first'];
+            const mode = modes[attempt] || 'runner_first';
+            if (mode === 'runner_refresh') {
+              const envTok = String(process.env.RUNNER_TOKEN || '').trim();
+              const snapTok = String(this._runnerTokenSnapshot || '').trim();
+              this.context.runner_token = envTok || snapTok || this.context.runner_token;
             }
+            const authMode =
+              mode === 'service_only'
+                ? 'service_only'
+                : mode === 'service_first'
+                  ? 'service_first'
+                  : 'runner_first';
+            postOpts.headers = this.getAuthHeaders({ authMode });
+            await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+            continue;
           }
           const msg = String(postErr?.message || '');
           const retryable = attempt < 4 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
@@ -14436,14 +14450,30 @@ ${executableBody}`;
   }
 
   /**
-   * Get authentication headers for API calls
+   * Get authentication headers for API calls.
+   * Prefers job-scoped runner_token, then env RUNNER_TOKEN, then BACKEND_SERVICE_TOKEN / SERVICE_TOKEN
+   * (same bearer the back `authenticate` middleware accepts for service calls).
    */
-  getAuthHeaders() {
+  getAuthHeaders(opts = {}) {
+    const authMode = opts.authMode || 'runner_first';
     const headers = {};
-    const token = String(process.env.RUNNER_TOKEN || this.context?.runner_token || '').trim();
+    const ctxRunner = String(this.context?.runner_token || '').trim();
+    const envRunner = String(process.env.RUNNER_TOKEN || '').trim();
+    const runnerTok = ctxRunner || envRunner;
+    const serviceTok = String(process.env.BACKEND_SERVICE_TOKEN || process.env.SERVICE_TOKEN || '').trim();
+    let token = '';
+    if (authMode === 'service_only') {
+      token = serviceTok;
+    } else if (authMode === 'service_first') {
+      token = serviceTok || runnerTok;
+    } else {
+      token = runnerTok || serviceTok;
+    }
     if (token) {
-      headers['Authorization'] = `Bearer ${token}`;
-      headers['x-runner-token'] = token;
+      headers.Authorization = `Bearer ${token}`;
+      if (runnerTok && token === runnerTok) {
+        headers['x-runner-token'] = runnerTok;
+      }
     }
     return headers;
   }
