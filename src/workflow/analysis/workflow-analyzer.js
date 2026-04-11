@@ -5510,6 +5510,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- Do not click same-page hash anchors (href contains "#") unless currentJourney explicitly requires anchor navigation.\n'
           + '- Do not emit pseudo helpers; use only real Playwright API calls (e.g., page.waitForTimeout(300)).\n'
           + '- page.waitForSelector must always be called as page.waitForSelector(\"<valid selector>\", { ...options }).\n'
+          + '- Every string literal in waitForSelector/locator must be fully closed before the closing ); on the same line; never leave an opening quote unterminated (truncated selectors break parsing).\n'
           + '- CREDENTIALS: If input_credentials is present in the payload, you MUST use input_credentials.username and input_credentials.password for every username/password fill. Never shorten or substitute generic placeholders (e.g. \'test\', \'user\', \'demo\', \'password\') when real values are provided.\n'
           + '- If input_credentials is absent, read exact required username/password from visible_text (info banners, labels, error text) or currentJourney test instructions and use those exact string literals in fill(); never invent credentials.\n';
         if (stepPayload.journey_script_allows_form_mutations === false) {
@@ -11036,11 +11037,20 @@ return {
 
     const lines = ['await page.waitForLoadState(\'domcontentloaded\').catch(() => {});', 'await page.waitForTimeout(500);'];
     for (const action of actions) {
-      const selector =
+      let selector =
         action?.selector || action?.element_info?.selector || action?.element_info?.primary_selector;
       if (!selector || typeof selector !== 'string') continue;
 
       const actionType = String(action?.type || '').toLowerCase();
+      // When the journey row says "button" but live inventory maps the same label to an <a>, use the
+      // inventory selector so deterministic fallback matches real DOM (general SPA / marketing-card pattern).
+      if (['click', 'navigate', 'open', 'press', 'tap', 'hover'].includes(actionType)) {
+        const inv = inferInventorySemanticForJourneyAction(action, workflowState);
+        if (inv?.inventory_semantic === 'link' && inv.inventory_selector) {
+          selector = inv.inventory_selector;
+        }
+      }
+
       const safeSelector = JSON.stringify(selector);
       if (actionType === 'input') {
         const value =
@@ -11537,6 +11547,17 @@ return {
       return t;
     };
     s = stripTrailingTimeoutTuning(s.trimEnd());
+
+    // LLMs sometimes truncate inside the first argument to waitForSelector, producing a syntax error
+    // (e.g. await page.waitForSelector('sel). Replace those lines with a short bounded wait so the
+    // rest of the script can still parse; execute-code path may then use deterministic fallback if needed.
+    s = s.replace(
+      /^\s*await\s+page\.waitForSelector\(\s*(['"])(?:\\.|(?!\1).)*$/gm,
+      (full) => {
+        const indent = String(full.match(/^\s*/)?.[0] || '');
+        return `${indent}await page.waitForTimeout(500); /* repaired unterminated waitForSelector string */`;
+      }
+    );
 
     // Some models wrap the script in an async IIFE:
     //   (async () => { ... })();
@@ -14015,24 +14036,25 @@ const sleep = safeWait;
           const isSyntaxLike = /unexpected end of input|invalid or unexpected token|unexpected token|unexpected identifier|missing\s+[\)\}]|unterminated/i.test(message);
           if (!isSyntaxLike) throw syntaxError;
 
-          if (isJourneyScriptExecutionStep) {
+          const fallbackScript = buildFallbackJourneyScript();
+          if (fallbackScript) {
+            executableBody = 'return (async function() {\n' + fallbackScript + '\n})();';
+            fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
+            const logLabel = isJourneyScriptExecutionStep ? 'journey AI script' : 'script';
+            console.warn(`⚠️ Falling back to deterministic journey script (${logLabel} syntax error): ${message}`);
+            if (jobId && this.backendLogger) {
+              await this.backendLogger.appendJobLog(jobId, 'warn', `Fallback script used due to syntax error (${logLabel}): ${message}`, 'WORKFLOW-ANALYZER', {
+                step_id: step?.id,
+                step_name: step?.name,
+                fallback_script_preview: fallbackScript.substring(0, 300)
+              });
+            }
+          } else if (isJourneyScriptExecutionStep) {
             const journeySyntaxError = new Error(`Journey script syntax error: ${message}`);
             journeySyntaxError.name = 'JourneyScriptSyntaxError';
             throw journeySyntaxError;
-          }
-
-          const fallbackScript = buildFallbackJourneyScript();
-          if (!fallbackScript) throw syntaxError;
-
-          executableBody = 'return (async function() {\n' + fallbackScript + '\n})();';
-          fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
-          console.warn(`⚠️ Falling back to deterministic journey script due to syntax error: ${message}`);
-          if (jobId && this.backendLogger) {
-            await this.backendLogger.appendJobLog(jobId, 'warn', `Fallback script used due to syntax error: ${message}`, 'WORKFLOW-ANALYZER', {
-              step_id: step?.id,
-              step_name: step?.name,
-              fallback_script_preview: fallbackScript.substring(0, 300)
-            });
+          } else {
+            throw syntaxError;
           }
         }
 
