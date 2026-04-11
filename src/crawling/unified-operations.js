@@ -6900,9 +6900,8 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     
     if (workflowTemplateId && projectId) {
       try {
-        const axios = (await import('axios')).default;
         await sendLog(jobId, 'info', `🔍 Loading workflow template ${workflowTemplateId} to check for pre-navigation cookie steps...`);
-        const workflowResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/workflow-templates/${workflowTemplateId}`, {
+        const workflowResponse = await backendDiscoverAxios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/workflow-templates/${workflowTemplateId}`, {
           headers: {
             'Authorization': `Bearer ${context.runner_token || ''}`
           }
