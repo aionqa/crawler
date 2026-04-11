@@ -18,6 +18,20 @@ function safeJsonClone(obj) {
   return JSON.parse(JSON.stringify(obj, replacer));
 }
 
+/** Treat apex and www hostnames as the same origin for link promotion (avoids missing Next.js <Link> targets after redirects). */
+function isSameSiteOrigin(pageUrl, linkHref) {
+  try {
+    const base = new URL(pageUrl);
+    const target = new URL(linkHref, pageUrl);
+    if (base.origin === target.origin) return true;
+    const h1 = base.hostname.replace(/^www\./i, '');
+    const h2 = target.hostname.replace(/^www\./i, '');
+    return h1 === h2 && base.protocol === target.protocol;
+  } catch {
+    return /^(\/|\.\/|#)/.test(String(linkHref || '').trim());
+  }
+}
+
 /**
  * Compute a stable journey ID from page URL and journey content so the same logical journey
  * keeps the same id across runs even when the testable website's DOM ids/selectors change.
@@ -424,6 +438,39 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Wait for common SPA/skeleton indicators before DOM inventory so analysis sees hydrated controls.
+   * Uses only generic selectors (Next/React/Vue-style loading roots, aria-busy, nprogress).
+   */
+  async waitForSpaInteractiveReady(page) {
+    if (!page || typeof page.waitForLoadState !== 'function') return;
+    try {
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+    } catch (_) {}
+    const busySelectors = [
+      '#loading',
+      '[data-loading="true"]',
+      '[aria-busy="true"]',
+      '.page-loading',
+      '#app-loading',
+      '.nprogress-busy'
+    ];
+    for (const sel of busySelectors) {
+      try {
+        const loc = page.locator(sel).first();
+        const count = await loc.count();
+        if (!count) continue;
+        await loc.waitFor({ state: 'hidden', timeout: 14000 }).catch(async () => {
+          await loc.waitFor({ state: 'detached', timeout: 4000 }).catch(() => {});
+        });
+      } catch (_) {}
+    }
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  /**
    * Perform Playwright analysis to extract forms, links, interactive elements
    */
   async performPlaywrightAnalysis(page) {
@@ -793,6 +840,36 @@ class WorkflowAnalyzer {
         });
       }
 
+      // SPA frameworks often expose primary actions as same-origin <a href> (not button/[role=button]).
+      // Promote those links into interactive_elements so journey generation and hasActionableSignals reflect real UI.
+      try {
+        const pageUrlForOrigin = page.url();
+        const promotedKeys = new Set();
+        const maxPromote = 24;
+        for (const link of analysis.links) {
+          if (!link || analysis.interactive_elements.length >= maxPromote) break;
+          if (!link.href || !link.selector) continue;
+          const key = `${link.href}\0${link.selector}`;
+          if (promotedKeys.has(key)) continue;
+          const sameOrigin = isSameSiteOrigin(pageUrlForOrigin, link.href);
+          if (!sameOrigin) continue;
+          const t = String(link.text || '').trim();
+          if (t.length > 140) continue;
+          analysis.interactive_elements.push({
+            type: 'link',
+            text: link.text || '',
+            role: 'link',
+            onclick: link.onclick ? 'yes' : 'no',
+            selector: link.selector,
+            selectors: link.selectors || [],
+            href: link.href
+          });
+          promotedKeys.add(key);
+        }
+      } catch (promoteErr) {
+        console.warn(`Could not promote links to interactive_elements: ${promoteErr.message}`);
+      }
+
       try {
         analysis.menu_items = await this.extractMenuItemsTrees(page);
       } catch (menuErr) {
@@ -992,21 +1069,14 @@ class WorkflowAnalyzer {
     });
 
     if (links.length) {
-      let baseOrigin = null;
-      try {
-        baseOrigin = new URL(pageUrl).origin;
-      } catch (_) {
-        baseOrigin = null;
-      }
-
       links.forEach((link, index) => {
         if (!link.href) {
           return;
         }
 
-        if (baseOrigin) {
-          const isSameOrigin = link.href.startsWith(baseOrigin) || link.href.startsWith('/') || link.href.startsWith('./');
-          if (!isSameOrigin) {
+        if (pageUrl) {
+          const onSite = isSameSiteOrigin(pageUrl, link.href);
+          if (!onSite && !link.href.startsWith('/') && !link.href.startsWith('./')) {
             return;
           }
         }
@@ -3598,6 +3668,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
 
     // Ensure Playwright analysis exists (forms, links, interactive elements)
     if (!workflowState.playwrightAnalysis) {
+      await this.waitForSpaInteractiveReady(page);
       const analysis = await this.performPlaywrightAnalysis(page);
       workflowState.playwrightAnalysis = analysis;
     }
@@ -3919,6 +3990,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     // This prevents form fields from being lost when analysis runs multiple times
     const existingIECount = workflowState.playwrightAnalysis?.interactive_elements?.length || 0;
     
+    await this.waitForSpaInteractiveReady(page);
     const analysis = await this.performPlaywrightAnalysis(page);
     
     // If we had more interactive elements before and new analysis has fewer, preserve the existing ones
@@ -10324,6 +10396,20 @@ return {
       
       // Skip empty lines and comments
       if (!line || line.startsWith('//') || line.startsWith('/*') || line.startsWith('*')) {
+        continue;
+      }
+
+      // Skip LLM codegen scaffolding mistaken for real Playwright calls (e.g. add(`await page.fill('${sel}', ...)`))
+      if (/\$\{sel\}|\$\{value\}|\$\{option\}|\$\{key\}/.test(line)) {
+        continue;
+      }
+      if (/^\s*\}\s*else\s+if\s*\(\s*act\.type\s*===/.test(line)) {
+        continue;
+      }
+      if (/^\s*add\s*\(\s*[`'"]/.test(line)) {
+        continue;
+      }
+      if (/^\s*if\s*\(\s*!act\s*\|\|\s*!act\.type\s*\)/.test(line)) {
         continue;
       }
       
