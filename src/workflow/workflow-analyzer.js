@@ -17,6 +17,14 @@ function safeJsonClone(obj) {
   return JSON.parse(JSON.stringify(obj, replacer));
 }
 
+/** Normalize workflow step type strings (casing, underscores, legacy aliases). */
+function normalizeWorkflowStepType(type) {
+  const t = String(type ?? '').trim().toLowerCase().replace(/_/g, '-');
+  if (!t) return '';
+  if (t === 'aiprompt') return 'ai-prompt';
+  return t;
+}
+
 /** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
 const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -122,11 +130,12 @@ class WorkflowAnalyzer {
         'hardcoded-workflow-analysis': 120000, // 2 minutes
       };
 
-      const stepType = step.type || 'ai-prompt';
+      const stepType = normalizeWorkflowStepType(step.type) || 'ai-prompt';
       timeout = defaultTimeouts[stepType] || 120000; // Default: 2 minutes
     }
 
-    if (String(step.type || '').toLowerCase() === 'ai-prompt') {
+    // ai-prompt steps include attachment prep, nested AI, persistence — wall-clock often exceeds template 300s.
+    if (normalizeWorkflowStepType(step.type) === 'ai-prompt') {
       timeout = Math.max(timeout, 900000);
     }
 
@@ -2107,7 +2116,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         
         await Promise.race([
           (async () => {
-            switch (step.type) {
+            const stepTypeKey = normalizeWorkflowStepType(step.type);
+            switch (stepTypeKey) {
           case 'screenshot':
             await this.executeScreenshotStep(page, step, workflowState, effectiveJobId, pageId);
             break;
@@ -2279,7 +2289,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
             setTimeout(() => {
               if (!stepCompleted) {
                 // For for-each steps, check if page loaded successfully before failing
-                if (step.type === 'for-each' && pageLoadedSuccessfully) {
+                if (normalizeWorkflowStepType(step.type) === 'for-each' && pageLoadedSuccessfully) {
                   console.log(`⚠️ Step "${step.name || step.id}" timed out but page loaded successfully - allowing to continue`);
                   // Resolve instead of reject to allow step to continue
                   resolve();
@@ -13847,7 +13857,8 @@ ${executableBody}`;
    * Execute step by type (used by for-each to execute nested steps)
    */
   async executeStepByType(page, step, workflowState, jobId, stepContext = null) {
-    switch (step.type) {
+    const stepTypeKey = normalizeWorkflowStepType(step.type);
+    switch (stepTypeKey) {
       case 'screenshot':
         await this.executeScreenshotStep(page, step, workflowState, jobId, workflowState.pageId);
         break;

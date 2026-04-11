@@ -78,6 +78,17 @@ function collectAllowedDocumentOnlySelectors(workflowState) {
   return allowed;
 }
 
+/**
+ * Normalize workflow step type strings from templates/API (casing, underscores, legacy aliases)
+ * so timeout floors and switch dispatch stay consistent.
+ */
+function normalizeWorkflowStepType(type) {
+  const t = String(type ?? '').trim().toLowerCase().replace(/_/g, '-');
+  if (!t) return '';
+  if (t === 'aiprompt') return 'ai-prompt';
+  return t;
+}
+
 /** Normalize selector strings for inventory matching (whitespace + case). */
 function normalizeSelectorTokenForInventory(s) {
   return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -543,13 +554,14 @@ class WorkflowAnalyzer {
         'hardcoded-workflow-analysis': 120000, // 2 minutes
       };
 
-      const stepType = step.type || 'ai-prompt';
+      const stepType = normalizeWorkflowStepType(step.type) || 'ai-prompt';
       timeout = defaultTimeouts[stepType] || 120000; // Default: 2 minutes
     }
 
-    // ai-prompt: templates often ship timeout: 300000; backend/job restarts burn wall-clock while the outer
-    // Promise.race budget does not pause. Use the max allowed step window so recovery runs can finish.
-    if (String(step.type || '').toLowerCase() === 'ai-prompt') {
+    // ai-prompt: wall-clock includes attachment collection, nested auto page-description AI calls,
+    // main AI, journey extraction, and postRunnerSaveAnalysis (retries). Template timeout: 300000 is unsafe
+    // when restarts or slow API burn the outer Promise.race budget. Floor = max allowed step window.
+    if (normalizeWorkflowStepType(step.type) === 'ai-prompt') {
       const AI_PROMPT_FLOOR_MS = 900000;
       timeout = Math.max(timeout, AI_PROMPT_FLOOR_MS);
     }
@@ -3375,7 +3387,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         
         await Promise.race([
           (async () => {
-            switch (step.type) {
+            const stepTypeKey = normalizeWorkflowStepType(step.type);
+            switch (stepTypeKey) {
           case 'screenshot':
             await this.executeScreenshotStep(page, step, workflowState, effectiveJobId, pageId);
             break;
@@ -3559,7 +3572,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
             setTimeout(() => {
               if (!stepCompleted) {
                 // For for-each steps, check if page loaded successfully before failing
-                if (step.type === 'for-each' && pageLoadedSuccessfully) {
+                if (normalizeWorkflowStepType(step.type) === 'for-each' && pageLoadedSuccessfully) {
                   console.log(`⚠️ Step "${step.name || step.id}" timed out but page loaded successfully - allowing to continue`);
                   // Resolve instead of reject to allow step to continue
                   resolve();
@@ -20529,7 +20542,8 @@ const sleep = safeWait;
    * Execute step by type (used by for-each to execute nested steps)
    */
   async executeStepByType(page, step, workflowState, jobId, stepContext = null) {
-    switch (step.type) {
+    const stepTypeKey = normalizeWorkflowStepType(step.type);
+    switch (stepTypeKey) {
       case 'browser-config':
         await this.executeBrowserConfigStep(page, step, workflowState, jobId);
         break;
