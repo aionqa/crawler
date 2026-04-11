@@ -508,46 +508,54 @@ class WorkflowAnalyzer {
    * Range: 1 minute (60000ms) to 15 minutes (900000ms)
    */
   getStepTimeout(step) {
+    let timeout;
     // If step has explicit timeout config, use it (clamped to 1m-15m range)
     if (step.config?.timeout_ms !== undefined) {
-      const timeout = Math.max(60000, Math.min(900000, step.config.timeout_ms));
-      return timeout;
+      timeout = Math.max(60000, Math.min(900000, step.config.timeout_ms));
+    } else if (step.config?.timeout !== undefined) {
+      timeout = Math.max(60000, Math.min(900000, step.config.timeout));
+    } else {
+      // Step types that use project "Max time per subjob" from context (no hardcoded value)
+      const maxFromSettings = this.context?.max_job_duration_ms != null && Number.isFinite(Number(this.context.max_job_duration_ms))
+        ? Math.max(60000, Math.min(900000, Number(this.context.max_job_duration_ms)))
+        : DEFAULT_MAX_STEP_TIMEOUT_MS;
+
+      const defaultTimeouts = {
+        'ai-prompt': 900000,           // 15 minutes - AI calls can take time
+        'workflow-analysis': maxFromSettings,   // From project "Max time per subjob" (context.max_job_duration_ms)
+        'page-description': 120000,    // 2 minutes - Page analysis
+        'playwright-analysis': 120000, // 2 minutes - Playwright analysis
+        'execute-code': 120000,        // 2 minutes - Code execution
+        'execute-code-from-variable': 120000, // 2 minutes
+        'while-loop': 600000,          // 10 minutes - Journey iteration (generate+execute+justify per stage) needs multiple AI calls
+        'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
+        'screenshot': 240000,          // 4m — full-page + heavy SVG/test pages often exceed 90s in production crawls
+        'cookie-collect': 120000,      // 2 minutes - browser cookies + optional backend save (GET job, POST project cookies)
+        'content-change': 60000,       // 1 minute - Variable operations
+        'var-dump': 60000,            // 1 minute - Quick operation
+        'print': 30000,               // 30 seconds - Very quick
+        'sleep': 60000,               // 1 minute - Sleep operations
+        'page-discovery': maxFromSettings,     // From project "Max time per subjob" (context.max_job_duration_ms)
+        'sitemap-exploration': 240000, // 4 minutes - Sitemap exploration
+        'unlighthouse': 300000,       // 5 minutes - Performance audit
+        'save-data': 120000,          // 2 minutes - Data saving
+        'update-workflow': 120000,    // 2 minutes
+        'hardcoded-workflow-analysis': 120000, // 2 minutes
+      };
+
+      const stepType = step.type || 'ai-prompt';
+      timeout = defaultTimeouts[stepType] || 120000; // Default: 2 minutes
     }
-    if (step.config?.timeout !== undefined) {
-      const timeout = Math.max(60000, Math.min(900000, step.config.timeout));
-      return timeout;
+
+    // ai-prompt: workflow templates often cap at 300s; this step may run attachment prep, nested page-description,
+    // the model call, then several save-analysis persistence passes. Inner HTTP uses bounded timeouts; the outer
+    // step budget must not abort while persistence is still legitimately in flight.
+    if ((step.type || '') === 'ai-prompt') {
+      const AI_PROMPT_FLOOR_MS = 600000;
+      timeout = Math.max(timeout, AI_PROMPT_FLOOR_MS);
     }
 
-    // Step types that use project "Max time per subjob" from context (no hardcoded value)
-    const maxFromSettings = this.context?.max_job_duration_ms != null && Number.isFinite(Number(this.context.max_job_duration_ms))
-      ? Math.max(60000, Math.min(900000, Number(this.context.max_job_duration_ms)))
-      : DEFAULT_MAX_STEP_TIMEOUT_MS;
-
-    const defaultTimeouts = {
-      'ai-prompt': 900000,           // 15 minutes - AI calls can take time
-      'workflow-analysis': maxFromSettings,   // From project "Max time per subjob" (context.max_job_duration_ms)
-      'page-description': 120000,    // 2 minutes - Page analysis
-      'playwright-analysis': 120000, // 2 minutes - Playwright analysis
-      'execute-code': 120000,        // 2 minutes - Code execution
-      'execute-code-from-variable': 120000, // 2 minutes
-      'while-loop': 600000,          // 10 minutes - Journey iteration (generate+execute+justify per stage) needs multiple AI calls
-      'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
-      'screenshot': 240000,          // 4m — full-page + heavy SVG/test pages often exceed 90s in production crawls
-      'cookie-collect': 120000,      // 2 minutes - browser cookies + optional backend save (GET job, POST project cookies)
-      'content-change': 60000,       // 1 minute - Variable operations
-      'var-dump': 60000,            // 1 minute - Quick operation
-      'print': 30000,               // 30 seconds - Very quick
-      'sleep': 60000,               // 1 minute - Sleep operations
-      'page-discovery': maxFromSettings,     // From project "Max time per subjob" (context.max_job_duration_ms)
-      'sitemap-exploration': 240000, // 4 minutes - Sitemap exploration
-      'unlighthouse': 300000,       // 5 minutes - Performance audit
-      'save-data': 120000,          // 2 minutes - Data saving
-      'update-workflow': 120000,    // 2 minutes
-      'hardcoded-workflow-analysis': 120000, // 2 minutes
-    };
-
-    const stepType = step.type || 'ai-prompt';
-    return defaultTimeouts[stepType] || 120000; // Default: 2 minutes
+    return Math.min(timeout, 900000);
   }
 
   detectCapabilities(steps = []) {
@@ -7157,11 +7165,7 @@ return {
                 }
                 
                 console.log(`🔍 [JOURNEYS-IMMEDIATE] Saving ${journeys.length} journey(s) immediately after extraction to page ${pageIdToSave}`);
-                const response = await axios.post(
-                  `${this.backendUrl}/api/runner/pages/${pageIdToSave}/save-analysis`,
-                  payload,
-                  { headers: this.getAuthHeaders() }
-                );
+                const response = await this.postRunnerSaveAnalysis(pageIdToSave, payload, jobId, { timeout: 180000 });
                 
                 console.log(`✅ [JOURNEYS-IMMEDIATE] Successfully saved ${journeys.length} journey(s) immediately. Response status: ${response.status}`);
                 if (jobId && this.backendLogger) {
@@ -7373,11 +7377,7 @@ return {
               };
               
               console.log(`🔍 [JOURNEYS-CONVERT] Saving ${cleanedConvertJourneys.length} journey(s) after conversion to page ${pageIdToSave}`);
-              const response = await axios.post(
-                `${this.backendUrl}/api/runner/pages/${pageIdToSave}/save-analysis`,
-                payload,
-                { headers: this.getAuthHeaders() }
-              );
+              const response = await this.postRunnerSaveAnalysis(pageIdToSave, payload, jobId, { timeout: 180000 });
               
               console.log(`✅ [JOURNEYS-CONVERT] Successfully saved ${journeys.length} journey(s) after conversion. Response status: ${response.status}`);
               if (jobId && this.backendLogger) {
@@ -7538,13 +7538,7 @@ return {
                 });
               }
               
-              const response = await axios.post(
-                `${this.backendUrl}/api/runner/pages/${pageIdToUse}/save-analysis`,
-                payload,
-                {
-                  headers: this.getAuthHeaders()
-                }
-              );
+              const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, { timeout: 180000 });
               
               console.log(`💾 [JOURNEYS-SAVE] ✅ Successfully saved ${cleanedJourneys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
               if (jobId && this.backendLogger) {
@@ -7729,11 +7723,7 @@ return {
               job_id: jobId
             };
             
-            const response = await axios.post(
-              `${this.backendUrl}/api/runner/pages/${pageIdToUse}/save-analysis`,
-              payload,
-              { headers: this.getAuthHeaders() }
-            );
+            const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, { timeout: 180000 });
             
             console.log(`✅ [JOURNEYS-FALLBACK] Successfully saved ${workflowState.journeys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
             if (jobId && this.backendLogger) {
