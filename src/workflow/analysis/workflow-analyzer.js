@@ -7720,15 +7720,15 @@ return {
           }
 
           if (pageIdToUse) {
-            await axios.post(
-              `${this.backendUrl}/api/runner/pages/${pageIdToUse}/save-analysis`,
+            await this.postRunnerSaveAnalysis(
+              pageIdToUse,
               {
                 saveLegs: false,
                 saveContentData: true,
                 contentData: normalizedContentAnalysis,
                 job_id: jobId
               },
-              { headers: this.getAuthHeaders() }
+              jobId
             );
             console.log(`✅ [CONTENT-OPTIMIZER] Saved content_analysis to page ${pageIdToUse}`);
             if (jobId && this.backendLogger) {
@@ -7801,15 +7801,15 @@ return {
           }
 
           if (pageIdToUse) {
-            await axios.post(
-              `${this.backendUrl}/api/runner/pages/${pageIdToUse}/save-analysis`,
+            await this.postRunnerSaveAnalysis(
+              pageIdToUse,
               {
                 saveLegs: false,
                 saveSeoData: true,
                 seoData: normalizedSeoAnalysis,
                 job_id: jobId
               },
-              { headers: this.getAuthHeaders() }
+              jobId
             );
             console.log(`✅ [SEO-ASSISTANT] Saved seo_analysis to page ${pageIdToUse}`);
             if (jobId && this.backendLogger) {
@@ -7875,15 +7875,15 @@ return {
           }
 
           if (pageIdToUse) {
-            await axios.post(
-              `${this.backendUrl}/api/runner/pages/${pageIdToUse}/save-analysis`,
+            await this.postRunnerSaveAnalysis(
+              pageIdToUse,
               {
                 saveLegs: false,
                 saveAccessibilityData: true,
                 accessibilityData: normalizedAccessibility,
                 job_id: jobId
               },
-              { headers: this.getAuthHeaders() }
+              jobId
             );
             console.log(`✅ [ACCESSIBILITY] Saved accessibility_analysis to page ${pageIdToUse}`);
             if (jobId && this.backendLogger) {
@@ -7955,15 +7955,15 @@ return {
           }
 
           if (pageIdToUse) {
-            await axios.post(
-              `${this.backendUrl}/api/runner/pages/${pageIdToUse}/save-analysis`,
+            await this.postRunnerSaveAnalysis(
+              pageIdToUse,
               {
                 saveLegs: false,
                 saveComplianceData: true,
                 complianceData: normalizedCompliance,
                 job_id: jobId
               },
-              { headers: this.getAuthHeaders() }
+              jobId
             );
             console.log(`✅ [COMPLIANCE] Saved compliance_analysis to page ${pageIdToUse}`);
             if (jobId && this.backendLogger) {
@@ -14508,26 +14508,37 @@ ${executableBody}`;
 
   /**
    * POST save-analysis with the same Bearer retry sequence used by save-data / workflow completion.
-   * Handles transient 401 (stale job token vs env/service tokens) and network blips.
+   * Handles transient 401/403 (stale token vs env/service tokens, runner vs /api/pages fallback) and network blips.
    */
   async postRunnerSaveAnalysis(pageId, payload, jobId, options = {}) {
     const axios = (await import('axios')).default;
     let pid = pageId != null ? String(pageId) : '';
     const timeout = options.timeout ?? 120000;
-    const postOpts = { headers: this.getAuthHeaders(), timeout };
+    const buildOpts = (authExtra = {}) => ({
+      headers: {
+        ...this.getAuthHeaders(authExtra),
+        'Content-Type': 'application/json',
+      },
+      timeout,
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+    });
+    let postOpts = buildOpts();
     let lastErr = null;
-    const enc = encodeURIComponent(pid);
     const postSaveAnalysis = async () => {
+      const encCur = encodeURIComponent(pid);
       try {
         return await axios.post(
-          `${this.backendUrl}/api/runner/pages/${enc}/save-analysis`,
+          `${this.backendUrl}/api/runner/pages/${encCur}/save-analysis`,
           payload,
           postOpts
         );
       } catch (runnerErr) {
-        if (runnerErr.response?.status === 401) {
+        const rs = runnerErr.response?.status;
+        // Fallback to user-authenticated route (same handler) when runner-only middleware rejects or edge ACL returns 403.
+        if (rs === 401 || rs === 403) {
           return await axios.post(
-            `${this.backendUrl}/api/pages/${enc}/save-analysis`,
+            `${this.backendUrl}/api/pages/${encCur}/save-analysis`,
             payload,
             postOpts
           );
@@ -14535,38 +14546,45 @@ ${executableBody}`;
         throw runnerErr;
       }
     };
-    for (let attempt = 0; attempt < 6; attempt++) {
+    const maxAttempts = 8;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         return await postSaveAnalysis();
       } catch (postErr) {
         lastErr = postErr;
         const st = postErr.response?.status;
-        if (st === 401 && attempt < 5) {
+        if ((st === 401 || st === 403) && attempt < maxAttempts - 1) {
           const modes = [
             'runner_refresh',
             'service_only',
             'service_first',
             'env_only',
             'ignore_ctx',
-            'runner_first'
+            'runner_first',
+            'service_only_delay',
+            'runner_refresh_delay',
           ];
           const mode = modes[attempt] || 'runner_first';
-          if (mode === 'runner_refresh') {
+          if (mode === 'runner_refresh' || mode === 'runner_refresh_delay') {
             const envTok = String(process.env.RUNNER_TOKEN || '').trim();
             const snapTok = String(this._runnerTokenSnapshot || '').trim();
             this.context.runner_token = envTok || snapTok || this.context.runner_token;
           }
           let authMode = 'runner_first';
           let ignoreContextRunner = false;
-          if (mode === 'service_only') authMode = 'service_only';
+          if (mode === 'service_only' || mode === 'service_only_delay') authMode = 'service_only';
           else if (mode === 'service_first') authMode = 'service_first';
           else if (mode === 'env_only') authMode = 'env_only';
           else if (mode === 'ignore_ctx') {
             authMode = 'runner_first';
             ignoreContextRunner = true;
           }
-          postOpts.headers = this.getAuthHeaders({ authMode, ignoreContextRunner });
-          await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+          postOpts = buildOpts({ authMode, ignoreContextRunner });
+          const delayMs =
+            mode === 'service_only_delay' || mode === 'runner_refresh_delay'
+              ? 2000 + 400 * attempt
+              : 350 * (attempt + 1);
+          await new Promise((r) => setTimeout(r, delayMs));
           continue;
         }
         if (st === 404 && attempt < 5 && typeof options.on404 === 'function') {
@@ -14582,7 +14600,7 @@ ${executableBody}`;
         }
         const msg = String(postErr?.message || '');
         const retryable =
-          attempt < 5 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
+          attempt < maxAttempts - 1 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
         if (retryable) {
           await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
           continue;
