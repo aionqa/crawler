@@ -18857,6 +18857,12 @@ ${executableBody}`;
           finalAiJustification = journey.ai_justification;
         }
         journey.justification_status = finalJustificationStatus || journey.justification_status || 'discovered';
+        const terminalForStatus = String(finalJustificationStatus || finalLegStatus || '').toLowerCase();
+        if (terminalForStatus === 'success' || terminalForStatus === 'completed') {
+          journey.status = 'success';
+        } else if (terminalForStatus === 'failure' || terminalForStatus === 'failed') {
+          journey.status = 'failure';
+        }
         if (finalLegResult === 'skipped_insufficient_signal') {
           journey.final_result = finalLegResult;
         }
@@ -18878,6 +18884,11 @@ ${executableBody}`;
               finalAiJustification = workflowState.journeys[journeysIndex].ai_justification;
             }
             workflowState.journeys[journeysIndex].justification_status = finalJustificationStatus || workflowState.journeys[journeysIndex].justification_status || 'discovered';
+            if (terminalForStatus === 'success' || terminalForStatus === 'completed') {
+              workflowState.journeys[journeysIndex].status = 'success';
+            } else if (terminalForStatus === 'failure' || terminalForStatus === 'failed') {
+              workflowState.journeys[journeysIndex].status = 'failure';
+            }
             if (finalLegResult === 'skipped_insufficient_signal') {
               workflowState.journeys[journeysIndex].final_result = finalLegResult;
             }

@@ -3202,7 +3202,20 @@ const modeHandlers = {
       const lastWorkflow = allWorkflows.length > 0 ? allWorkflows[allWorkflows.length - 1] : null;
       const journeys = lastWorkflow?.journeys || [];
       const legs = lastWorkflow?.legs || [];
-      const allJourneysFailed = journeys.length > 0 && journeys.every(j => j.status === 'failure');
+      const journeyRowSucceeded = (j) => {
+        if (!j || typeof j !== 'object') return false;
+        if (j.expected_outcome_verified === true) return true;
+        const p = String(j.justification_status || j.status || j.final_result || '').toLowerCase();
+        return p === 'success' || p === 'completed';
+      };
+      const journeyRowFailedOnly = (j) => {
+        if (journeyRowSucceeded(j)) return false;
+        const st = String(j.status || '').toLowerCase();
+        const jst = String(j.justification_status || '').toLowerCase();
+        return st === 'failure' || st === 'failed' || jst === 'failure' || jst === 'failed';
+      };
+      const allJourneysFailed =
+        journeys.length > 0 && journeys.every((j) => journeyRowFailedOnly(j));
       // Keep the page crawl job successful when workflow execution finished but all journeys failed.
       // This preserves collected artifacts/logs and avoids poisoning distributed runs with hard failures.
       const workflowSuccess = true;
