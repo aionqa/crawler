@@ -10957,6 +10957,19 @@ return {
     );
     // Ensure direct page actions are awaited when generated without await.
     cleaned = cleaned.replace(/(^|\n)\s*(page\.(?:click|fill|check|uncheck|selectOption|type|press)\s*\()/g, '$1await $2');
+    // Quote bare #id tokens before fill/selectOption repairs (LLM: page.fill(#email) is a syntax error).
+    cleaned = cleaned.replace(
+      /page\.fill\(\s*(#[A-Za-z0-9_-]+)\s*\)/g,
+      (_m, id) => `page.fill(${JSON.stringify(String(id || ''))})`
+    );
+    cleaned = cleaned.replace(
+      /page\.fill\(\s*(#[A-Za-z0-9_-]+)\s*,/g,
+      (_m, id) => `page.fill(${JSON.stringify(String(id || ''))},`
+    );
+    cleaned = cleaned.replace(
+      /page\.selectOption\(\s*(#[A-Za-z0-9_-]+)\s*,/g,
+      (_m, id) => `page.selectOption(${JSON.stringify(String(id || ''))},`
+    );
     // Normalize unquoted selector args in common page.* calls (e.g., page.fill(input[name="x"]))
     cleaned = cleaned.replace(
       /page\.(click|fill|check|uncheck|isVisible|waitForSelector)\(\s*([a-zA-Z][^'"`)\n]*(?:\[[^\)\n]+\]|:[^)\n]+)[^)\n]*)\s*\)/g,
@@ -11379,6 +11392,52 @@ return {
     s = s.replace(
       /page\.(click|fill|check|uncheck|waitForSelector)\(\s*(#[A-Za-z0-9_-]+)\s*,/g,
       (_m, method, selectorExpr) => `page.${method}(${JSON.stringify(String(selectorExpr || ''))},`
+    );
+    // page.selectOption(selector, value) — same unquoted #id bug as fill/click.
+    s = s.replace(
+      /page\.selectOption\(\s*(#[A-Za-z0-9_-]+)\s*,/g,
+      (_m, selectorExpr) => `page.selectOption(${JSON.stringify(String(selectorExpr || ''))},`
+    );
+
+    // <select> placeholder options (value="" / visible text "Select") — choosing them fails required() validation.
+    // General pattern: common English placeholder labels, not site-specific domains.
+    const placeholderSelectOptionLabelRe =
+      /^(Select|Choose(\s+one)?|Pick\s+one|Please\s+select|Please\s+choose|--|—|…|\.\.\.)$/i;
+    const rewritePlaceholderSelectOption = (optBody) => {
+      const m = String(optBody || '').match(/^\s*\{\s*label\s*:\s*(['"])((?:\\.|(?!\1).)*)\1\s*\}\s*$/i);
+      if (!m) return null;
+      const inner = String(m[2] || '')
+        .replace(/\\(.)/g, '$1')
+        .trim();
+      if (placeholderSelectOptionLabelRe.test(inner)) return '{ index: 1 }';
+      return null;
+    };
+    s = s.replace(/\.selectOption\(\s*(\{[^}]*\})\s*\)/g, (full, arg1) => {
+      const repl = rewritePlaceholderSelectOption(arg1);
+      return repl ? `.selectOption(${repl})` : full;
+    });
+    s = s.replace(
+      /\.selectOption\(\s*([^,]+)\s*,\s*(\{[^}]*\})\s*\)/g,
+      (full, sel, opt) => {
+        const repl = rewritePlaceholderSelectOption(opt);
+        return repl ? `.selectOption(${sel}, ${repl})` : full;
+      }
+    );
+    // Empty explicit value selects the disabled/placeholder row on many forms.
+    s = s.replace(/\.selectOption\(\s*\{\s*value\s*:\s*['"]\s*['"]\s*\}\s*\)/g, '.selectOption({ index: 1 })');
+    s = s.replace(
+      /\.selectOption\(\s*([^,]+)\s*,\s*\{\s*value\s*:\s*['"]\s*['"]\s*\}\s*\)/g,
+      '.selectOption($1, { index: 1 })'
+    );
+
+    // HTML5 <input type="date"> expects yyyy-mm-dd; models often emit US-style mm/dd/yyyy in .fill second arg.
+    s = s.replace(
+      /(\.fill\s*\(\s*[^,]+,\s*)(['"])(\d{1,2})\/(\d{1,2})\/(\d{4})\2/g,
+      (_m, prefix, q, mm, dd, yyyy) => {
+        const mP = String(mm).padStart(2, '0');
+        const dP = String(dd).padStart(2, '0');
+        return `${prefix}${q}${yyyy}-${mP}-${dP}${q}`;
+      }
     );
 
     // Fix a common unquoted class/tag selector form observed in waits, e.g. page.waitForSelector(div.modal)
