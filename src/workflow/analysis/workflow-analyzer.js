@@ -11217,6 +11217,15 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       s = `${prelude}\n\n${s}`;
     }
 
+    // LLM typo: uses `sel` when a `selector` or `locator` binding was declared (ReferenceError: sel is not defined).
+    if (/\bsel\b/.test(s) && !/\b(const|let|var)\s+sel\b/.test(s) && /\bsel\./.test(s)) {
+      if (/\b(const|let|var)\s+selector\s*=/.test(s)) {
+        s = s.replace(/\bsel\./g, 'selector.');
+      } else if (/\b(const|let|var)\s+locator\s*=/.test(s)) {
+        s = s.replace(/\bsel\./g, 'locator.');
+      }
+    }
+
     return s;
   }
 
@@ -16433,7 +16442,9 @@ ${executableBody}`;
             execErrLower.includes('selector is not defined') ||
             execErrLower.includes('shouldbechecked is not defined') ||
             execErrLower.includes('journey script syntax error') ||
-            execErrLower.includes('no actionable interaction generated in journey script');
+            execErrLower.includes('no actionable interaction generated in journey script') ||
+            execErrLower.includes('missing ) after argument list') ||
+            execErrLower.includes('unexpected end of input');
 
           if (hasExecFailureSignal && (looksLikeSelectorOrTiming || looksLikeAiScriptBug)) {
             const patched = {
@@ -16496,6 +16507,10 @@ ${executableBody}`;
               scanJustifyKeys(workflowState.variablePool?.steps);
             }
 
+            // Path-based condition reads sometimes still resolve a stale justify status (nested step ids,
+            // structured AI payloads). Force one continuation pass so iteration 2 can regenerate script.
+            workflowState._inconclusiveJourneyRetryContinue = true;
+
             console.log(`🟡 Overrode determine_completion -> continue due to inconclusive execution error`);
             if (jobId) {
               await this.sendLogToBackend(
@@ -16511,6 +16526,103 @@ ${executableBody}`;
           }
         } catch (inconclusivePatchErr) {
           console.warn(`⚠️ Failed to patch determine_completion for inconclusive execution: ${inconclusivePatchErr.message}`);
+        }
+
+        // Verifier-only uncertainty after a clean execution: allow bounded retry (same patch semantics).
+        try {
+          if (
+            iteration < maxIterations &&
+            conditionPath &&
+            /^justify[-_]journey\b/.test(String(conditionPath))
+          ) {
+            const justifyEntry =
+              workflowState.justify_journey ||
+              workflowState.results?.justify_journey ||
+              workflowState.variablePool?.steps?.justify_journey ||
+              workflowState.variablePool?.steps?.['justify-journey'];
+            let jr = justifyEntry?.result;
+            if (jr && typeof jr === 'object' && 'value' in jr && jr.value && typeof jr.value === 'object' && 'namespace' in jr) {
+              jr = jr.value;
+            }
+            const jStatus = String(jr?.status || '').toLowerCase();
+            const jReason = String(jr?.reason || jr?.what_happened || '').toLowerCase();
+            const lastRes = workflowState?.lastExecutionResult;
+            const execOk =
+              lastRes &&
+              lastRes.success === true &&
+              lastRes.skipped !== true &&
+              lastRes.execution_failed !== true &&
+              lastRes.error_type !== 'execution';
+            const uncertainVerifier =
+              jReason.includes('inconclusive') ||
+              jReason.includes('cannot determine') ||
+              jReason.includes('cannot reliably') ||
+              jReason.includes('unclear whether') ||
+              jReason.includes('insufficient evidence') ||
+              jReason.includes('not possible to tell');
+            if (jStatus === 'failure' && execOk && uncertainVerifier) {
+              const patched = {
+                status: 'continue',
+                completion_status: 'continue',
+                is_complete: false,
+                reason: `Verifier inconclusive after successful execution (retrying): ${String(jr?.reason || '').substring(0, 180)}`,
+                execution_error_type: 'inconclusive',
+              };
+              if (!workflowState.determine_completion) workflowState.determine_completion = {};
+              workflowState.determine_completion.result = patched;
+              if (!workflowState.results) workflowState.results = {};
+              if (!workflowState.results.determine_completion) workflowState.results.determine_completion = {};
+              workflowState.results.determine_completion.result = patched;
+              if (workflowState.variablePool?.steps) {
+                workflowState.variablePool.steps.determine_completion = { result: patched };
+              }
+              const applyPatchedToJustifyEntry = (entry) => {
+                if (!entry || typeof entry !== 'object') return;
+                const raw = Object.prototype.hasOwnProperty.call(entry, 'result') ? entry.result : entry;
+                let target = raw;
+                if (
+                  raw &&
+                  typeof raw === 'object' &&
+                  Object.prototype.hasOwnProperty.call(raw, 'value') &&
+                  Object.prototype.hasOwnProperty.call(raw, 'namespace') &&
+                  raw.value &&
+                  typeof raw.value === 'object'
+                ) {
+                  target = raw.value;
+                }
+                if (!target || typeof target !== 'object') return;
+                Object.assign(target, patched);
+              };
+              const scanJustifyKeys = (container) => {
+                if (!container || typeof container !== 'object') return;
+                for (const key of Object.keys(container)) {
+                  if (
+                    key === 'justify_journey' ||
+                    key === 'justify-journey' ||
+                    key.endsWith('::justify_journey') ||
+                    key.endsWith('::justify-journey')
+                  ) {
+                    applyPatchedToJustifyEntry(container[key]);
+                  }
+                }
+              };
+              scanJustifyKeys(workflowState);
+              scanJustifyKeys(workflowState.results);
+              scanJustifyKeys(workflowState.variablePool?.steps);
+              workflowState._inconclusiveJourneyRetryContinue = true;
+              if (jobId) {
+                await this.sendLogToBackend(
+                  jobId,
+                  'info',
+                  `🟡 Inconclusive verifier after successful execution. Retrying journey (bounded).`,
+                  'WORKFLOW-ANALYZER',
+                  { justification_excerpt: String(jr?.reason || '').substring(0, 400) }
+                );
+              }
+            }
+          }
+        } catch (verifierInconclusiveErr) {
+          console.warn(`⚠️ Verifier inconclusive patch skipped: ${verifierInconclusiveErr.message}`);
         }
 
         // Evaluate condition after nested steps
@@ -16881,6 +16993,15 @@ ${executableBody}`;
                 determine_completion_keys: workflowState.determine_completion?.result ? Object.keys(workflowState.determine_completion.result) : [],
                 iteration: iteration
               }
+            );
+          }
+
+          if (workflowState._inconclusiveJourneyRetryContinue) {
+            const prevCv = conditionValue;
+            conditionValue = 'continue';
+            delete workflowState._inconclusiveJourneyRetryContinue;
+            console.log(
+              `🟡 [WHILE-LOOP-ITERATION-${iteration}] Forcing conditionValue=continue after inconclusive patch (resolved=${String(prevCv)})`
             );
           }
           
