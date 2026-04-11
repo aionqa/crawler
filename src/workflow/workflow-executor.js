@@ -3369,7 +3369,7 @@ class WorkflowExecutor {
    */
   async updateJobSubstatus(jobId, substatus, progress = {}) {
     try {
-      await axios.post(`${this.backendUrl}/jobs/${jobId}/substatus`, {
+      await axios.post(`${this.backendUrl}/api/jobs/${jobId}/substatus`, {
         substatus, 
         ...progress,
         timestamp: new Date().toISOString()

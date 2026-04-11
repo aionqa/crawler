@@ -491,7 +491,7 @@ async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allo
 async function updateJobSubstatus(jobId, substatus, progress = {}) {
   try {
     const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
-    await fetch(`${backendUrl}/jobs/${jobId}/substatus`, {
+    await fetch(`${backendUrl}/api/jobs/${jobId}/substatus`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ 
