@@ -5071,7 +5071,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       step.id === 'generate_journey_script' ||
       (typeof step.id === 'string' && step.id.includes('generate_journey_script')) ||
       (step.name && String(step.name).includes('Generate Journey Action Script'));
-    if (isGenerateJourneyScriptStep && !stepPayload.input_credentials) {
+    if (isGenerateJourneyScriptStep) {
       const vt = workflowState.visibleText || stepPayload.visible_text || '';
       const pageUrlForCreds =
         workflowState.pageUrl ||
@@ -5081,6 +5081,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         '';
       const extracted = extractDeclaredLoginCredentialsFromVisibleText(vt, pageUrlForCreds);
       if (extracted && extracted.username && extracted.password) {
+        // Authoritative for fixture/demo pages: visible copy + URL hints beat generic project crawl creds.
         stepPayload.input_credentials = extracted;
         stepPayload.page_declared_credentials = true;
         if (!workflowState.inputCredentials) {
@@ -5088,7 +5089,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         }
         workflowState.pageDeclaredCredentials = true;
         console.log(
-          `🔑 Page-declared credentials injected for journey script step: username=${extracted.username}`
+          `🔑 Page-declared credentials override for journey script step: username=${extracted.username}`
         );
       }
     }
@@ -5219,6 +5220,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       if (isScriptGenerationStep) {
         // Runtime hardening: enforce deterministic dynamic-field handling even if older workflow templates are loaded.
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
+          + '- JOURNEY SCOPE: Implement ONLY currentJourney (journey_id, description, test_instructions, and currentJourney.actions in order). Do not substitute an unrelated flow—for example, do not run a full login+submit sequence when the journey only exercises a checkbox, toggle, or other auxiliary control unless those login actions explicitly appear in currentJourney.actions.\n'
+          + '- Credential fields (username/password): fill them ONLY when currentJourney.actions includes those input steps. If the journey targets only a non-credential control, interact only with that control and do not submit the primary login action unless it is part of the journey.\n'
           + '- Execute each listed action exactly once (no duplicate add/click actions unless explicitly repeated in currentJourney.actions).\n'
           + '- Generate script body for the EXISTING Playwright page only (assume page is already available). Never import playwright/chromium, never create browser/context/newPage, never call browser.close.\n'
           + '- Do not navigate to localhost/base URLs. Use current page state; only navigate if currentJourney explicitly requires a URL navigation action.\n'
@@ -6253,6 +6256,17 @@ return {
               script.includes('input_credentials.password');
             if (!usesCreds) {
               script = `const emailValue = ${safeUsernameExpr};\nconst passwordValue = ${safePasswordExpr};\n` + script;
+            }
+            // If the model declared *Selector variables but hard-coded credential strings, route fills through injected vars.
+            if (script.includes('emailValue') && script.includes('passwordValue')) {
+              script = script.replace(
+                /\.fill\(\s*(usernameSelector|userSelector|emailSelector)\s*,\s*["'][^"']*["']\s*\)/gi,
+                (_m, sel) => `.fill(${sel}, emailValue)`
+              );
+              script = script.replace(
+                /\.fill\(\s*(passwordSelector|passSelector)\s*,\s*["'][^"']*["']\s*\)/gi,
+                (_m, sel) => `.fill(${sel}, passwordValue)`
+              );
             }
             if (script !== before) {
               playwrightScript = script;
