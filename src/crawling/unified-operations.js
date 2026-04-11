@@ -2103,6 +2103,12 @@ const modeHandlers = {
       backendLogger,
       {
         ...context,
+        why_failure: context.why_failure ?? context.options?.why_failure,
+        failure_diagnosis_context:
+          context.failure_diagnosis_context ?? context.options?.failure_diagnosis_context,
+        failure_focus_journey_id:
+          context.failure_focus_journey_id ?? context.options?.failure_focus_journey_id,
+        failure_focus_leg_id: context.failure_focus_leg_id ?? context.options?.failure_focus_leg_id,
         maxIterations: 1 // No retry for page analysis workflows
       },
       context.videoRecorder || null

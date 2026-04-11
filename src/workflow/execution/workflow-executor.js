@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { runFailureDiagnosisCrawlerAi } from '../failure-diagnosis-crawler-ai.js';
 import { detectModal, analyzeModalPaths, waitForModal } from '../utils/modalDetector.js';
 import { generateModalPath, appendToModalPath, getActionNameFromElement, getPageNameFromModal } from '../utils/modalPathNotation.js';
 
@@ -2165,6 +2166,29 @@ class WorkflowExecutor {
       // Track executed leg in memory (executeLeg already does this, but ensure it's tracked)
       if (leg.leg_id) {
         executedLegIds.add(leg.leg_id);
+      }
+    }
+
+    const whyDiag =
+      this.context?.why_failure === true ||
+      this.context?.why_failure === 'true' ||
+      this.context?.options?.why_failure === true ||
+      this.context?.options?.why_failure === 'true';
+    if (whyDiag && effectiveJobId) {
+      try {
+        await runFailureDiagnosisCrawlerAi(
+          {
+            context: this.context,
+            backendUrl: this.backendUrl,
+            getAuthHeaders: () => this.getAuthHeaders(),
+            backendLogger: this.backendLogger,
+          },
+          effectiveJobId,
+          workflowId,
+          results
+        );
+      } catch (fdErr) {
+        console.error('[WorkflowExecutor] Failure diagnosis crawler AI failed:', fdErr?.message || fdErr);
       }
     }
 
