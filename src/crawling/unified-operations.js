@@ -12,6 +12,7 @@ import { createOpenAIClient } from '../openai-client-factory.js';
 import ffmpeg from 'fluent-ffmpeg';
 import WorkflowAnalyzer from '../workflow/analysis/workflow-analyzer.js';
 import WorkflowExecutor from '../workflow/execution/workflow-executor.js';
+import { runFailureDiagnosisCrawlerAi } from '../workflow/failure-diagnosis-crawler-ai.js';
 import OptimizedWorkflowAnalyzer from '../workflow/analysis/optimized-workflow-analyzer.js';
 import axios from 'axios';
 import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
@@ -2780,6 +2781,51 @@ const modeHandlers = {
                 // Journey-first workflows already execute actions inside WorkflowAnalyzer.
                 // Running legacy direct legs again causes duplicate/unstable execution and false failures.
                 await sendLog(jobId, 'info', `⏭️ Skipping legacy direct-leg execution (${legsToExecute.length} legs) because journey execution already ran in workflow analyzer`);
+                // Failure-diagnosis POST normally runs at the end of WorkflowExecutor.executeWorkflow — that path is skipped here, so run it explicitly.
+                const whyDiag =
+                  workflowExecutor.context?.why_failure === true ||
+                  workflowExecutor.context?.why_failure === 'true' ||
+                  workflowExecutor.context?.options?.why_failure === true ||
+                  workflowExecutor.context?.options?.why_failure === 'true' ||
+                  context.why_failure === true ||
+                  context.options?.why_failure === true;
+                if (whyDiag && jobId) {
+                  const legResultsPayload = [
+                    {
+                      mode: 'journey_driven_workflow_analyzer',
+                      workflow_id: analysisResult?.workflow_id || null,
+                      journeys: analysisResult?.journeys || [],
+                      legs: analysisResult?.legs || [],
+                      legs_count: analysisResult?.legs_count,
+                      page_description: analysisResult?.page_description,
+                    },
+                  ];
+                  try {
+                    await runFailureDiagnosisCrawlerAi(
+                      {
+                        context: workflowExecutor.context,
+                        backendUrl,
+                        getAuthHeaders: () => workflowExecutor.getAuthHeaders(),
+                        backendLogger,
+                      },
+                      jobId,
+                      analysisResult?.workflow_id || 'journey-driven',
+                      legResultsPayload
+                    );
+                    await sendLog(
+                      jobId,
+                      'info',
+                      '[Failure diagnosis] Journey-driven run: AI summary POST completed (failure-why flow).'
+                    );
+                  } catch (fdErr) {
+                    console.error('[UNIFIED-OPERATIONS] Failure diagnosis (journey-driven):', fdErr);
+                    await sendLog(
+                      jobId,
+                      'error',
+                      `[Failure diagnosis] Journey-driven summary failed: ${fdErr?.message || fdErr}`
+                    );
+                  }
+                }
               } else {
                 // Execute legs directly without workflow_id (no database updates)
                 await sendLog(jobId, 'warn', `⚠️ Executing ${legsToExecute.length} legs without workflow_id (no database status updates will be made)`);
