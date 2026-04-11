@@ -11820,7 +11820,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     console.log(`📦 Resolved code from "${sourceField}": ${code ? 'found' : 'not found'}`);
     
     // Parse script to extract action lines BEFORE cleaning (to preserve original structure)
-    const actionLines = this.parseScriptActions(code);
+    let actionLines = this.parseScriptActions(code);
     console.log(`📋 Parsed ${actionLines.length} action lines from script`);
     
     // Log parsing result to job logs for debugging
@@ -11894,6 +11894,65 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         });
       }
       throw new Error(`Script is empty after cleaning for step: ${step.name}`);
+    }
+
+    // Re-parse after cleaning/sanitization so execution logging and guards reflect the actual script we run.
+    const cleanedActionLines = this.parseScriptActions(code);
+    if (cleanedActionLines.length > 0 || actionLines.length === 0) {
+      actionLines = cleanedActionLines;
+    }
+
+    if (isJourneyScriptExecutionStep && actionLines.length === 0) {
+      const formsSignals = Array.isArray(workflowState?.playwrightAnalysis?.forms)
+        ? workflowState.playwrightAnalysis.forms.length
+        : 0;
+      const interactiveSignals = Array.isArray(workflowState?.playwrightAnalysis?.interactive_elements)
+        ? workflowState.playwrightAnalysis.interactive_elements.length
+        : 0;
+      const hasActionableSignals = formsSignals > 0 || interactiveSignals > 0;
+
+      if (!hasActionableSignals) {
+        return await skipEmptyJourneyScriptExecution('post-clean-no-actionable-signal', {
+          script_length: code.length,
+          forms_signals: formsSignals,
+          interactive_signals: interactiveSignals
+        });
+      }
+
+      const noActionError = 'No actionable interaction generated in journey script';
+      const noActionResult = {
+        success: false,
+        execution_failed: true,
+        error_type: 'execution',
+        error: noActionError,
+        source_field: sourceField,
+        script_length: code.length,
+        forms_signals: formsSignals,
+        interactive_signals: interactiveSignals
+      };
+      workflowState.lastExecutedActionLines = [];
+      workflowState.lastExecutionResult = noActionResult;
+      workflowState.executionErrorType = 'execution';
+      await this.storeStepResult(step, noActionResult, workflowState);
+
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'warn',
+          `${noActionError}; forcing retry instead of accepting no-op execution.`,
+          'WORKFLOW-ANALYZER',
+          {
+            step_id: step.id,
+            step_name: step.name,
+            source_field: sourceField,
+            script_length: code.length,
+            forms_signals: formsSignals,
+            interactive_signals: interactiveSignals
+          }
+        );
+      }
+
+      return noActionResult;
     }
     
     try {
@@ -12907,6 +12966,12 @@ ${executableBody}`;
           const isSyntaxLike = /unexpected end of input|invalid or unexpected token|unexpected token|unexpected identifier|missing\s+[\)\}]|unterminated/i.test(message);
           if (!isSyntaxLike) throw syntaxError;
 
+          if (isJourneyScriptExecutionStep) {
+            const journeySyntaxError = new Error(`Journey script syntax error: ${message}`);
+            journeySyntaxError.name = 'JourneyScriptSyntaxError';
+            throw journeySyntaxError;
+          }
+
           const fallbackScript = buildFallbackJourneyScript();
           if (!fallbackScript) throw syntaxError;
 
@@ -13337,6 +13402,11 @@ ${executableBody}`;
         urlAfterAction,
         pageChanged: (workflowState.urlBeforeAction || '') !== urlAfterAction
       };
+      if (isJourneyScriptExecutionStep) {
+        errorResult.execution_failed = true;
+        errorResult.error_type = 'execution';
+        workflowState.executionErrorType = 'execution';
+      }
       workflowState.lastExecutionResult = errorResult;
       await this.storeStepResult(step, errorResult, workflowState);
       
@@ -16240,7 +16310,9 @@ ${executableBody}`;
             execErrLower.includes('is not a function') ||
             execErrLower.includes(' is not defined') ||
             execErrLower.includes('selector is not defined') ||
-            execErrLower.includes('shouldbechecked is not defined');
+            execErrLower.includes('shouldbechecked is not defined') ||
+            execErrLower.includes('journey script syntax error') ||
+            execErrLower.includes('no actionable interaction generated in journey script');
 
           if (hasExecFailureSignal && (looksLikeSelectorOrTiming || looksLikeAiScriptBug)) {
             const patched = {
