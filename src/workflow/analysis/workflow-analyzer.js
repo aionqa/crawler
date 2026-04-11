@@ -11499,6 +11499,42 @@ return {
       (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))})`
     );
 
+    // Unquoted tag[attr] selectors inside .locator(...): LLMs emit page.locator(input[name="x"])
+    // without string quotes — `input` parses as an identifier and the script throws before Playwright runs.
+    s = s.replace(
+      /\.locator\(\s*((?:input|textarea|select|button)(?:\[[^\]]*(?:\\.[^\]]*)*\])+)\s*\)/gi,
+      (_m, rawSel) => {
+        const normalized = String(rawSel || '')
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\');
+        return `.locator(${JSON.stringify(normalized)})`;
+      }
+    );
+
+    // :has-text(Label) with a bare word label (no quotes) is invalid in a CSS string; quote the label.
+    s = s.replace(/:has-text\(\s*([A-Za-z][A-Za-z0-9_\-]*)\s*\)/g, (_m, label) => {
+      const lbl = String(label || '').trim();
+      return `:has-text("${lbl.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}")`;
+    });
+
+    // Locator.fill(value) / frame.fill etc.: literal values must be quoted JS strings. Models often emit
+    // .fill(Sample User) or .fill(sample@example.com) which are syntax errors or ReferenceErrors.
+    s = s.replace(/\.fill\(\s*([^'")\n`][^)\n]*?)\s*\)/g, (full, inner) => {
+      const t = String(inner || '').trim();
+      if (!t) return full;
+      if (/^await\s+/i.test(t)) return full;
+      if (/^String\s*\(/.test(t) || /^Number\s*\(/.test(t) || /^Boolean\s*\(/.test(t) || /^JSON\.stringify\s*\(/.test(t)) {
+        return full;
+      }
+      if (/^(true|false|null)\b/.test(t)) return full;
+      if (/^-?\d/.test(t)) return full;
+      if (/^[a-zA-Z_$][\w$]*$/.test(t)) return full;
+      if (/^[a-zA-Z_$][\w$]*(?:\.[a-zA-Z_$][\w$]*)+$/.test(t)) return full;
+      if (t.includes('(') || t.includes(')')) return full;
+      if (t.includes(',')) return full;
+      return `.fill(${JSON.stringify(t)})`;
+    });
+
     // LLMs often emit a quoted token that is meant as an HTML id (e.g. page.click("modalOpener")).
     // Playwright treats that string as a tag-name selector, not #id. Promote camelCase / snake_case
     // tokens to CSS id selectors. Skip known lowercase HTML tag names only when the token is purely
