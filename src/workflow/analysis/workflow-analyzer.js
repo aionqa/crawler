@@ -10935,6 +10935,41 @@ return {
       (_m, selectorExpr) => `page.waitForSelector(${JSON.stringify(String(selectorExpr || ''))},`
     );
 
+    // LLMs often emit a quoted token that is meant as an HTML id (e.g. page.click("modalOpener")).
+    // Playwright treats that string as a tag-name selector, not #id. Promote camelCase / snake_case
+    // tokens to CSS id selectors. Skip known lowercase HTML tag names only when the token is purely
+    // lowercase (so real tag selectors like "button" stay intact).
+    const htmlTagNamesForBareQuotedSelector = new Set([
+      'a', 'abbr', 'address', 'area', 'article', 'aside', 'audio', 'b', 'base', 'bdi', 'bdo', 'blockquote',
+      'body', 'br', 'button', 'canvas', 'caption', 'cite', 'code', 'col', 'colgroup', 'data', 'datalist',
+      'dd', 'del', 'details', 'dfn', 'dialog', 'div', 'dl', 'dt', 'em', 'embed', 'fieldset', 'figcaption',
+      'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'head', 'header', 'hr', 'html', 'i',
+      'iframe', 'img', 'input', 'ins', 'kbd', 'label', 'legend', 'li', 'link', 'main', 'map', 'mark', 'meta',
+      'meter', 'nav', 'noscript', 'object', 'ol', 'optgroup', 'option', 'output', 'p', 'param', 'picture',
+      'pre', 'progress', 'q', 'rp', 'rt', 'ruby', 's', 'samp', 'script', 'section', 'select', 'slot',
+      'small', 'source', 'span', 'strong', 'style', 'sub', 'summary', 'sup', 'svg', 'table', 'tbody', 'td',
+      'template', 'textarea', 'tfoot', 'th', 'thead', 'time', 'title', 'tr', 'track', 'u', 'ul', 'var',
+      'video', 'wbr', 'path', 'g'
+    ]);
+    const promoteBareQuotedTokenToIdSelector = (token) => {
+      const inner = String(token || '').trim();
+      if (!/^[a-zA-Z][a-zA-Z0-9_-]*$/.test(inner)) return null;
+      if (/[.#\[/:]/.test(inner)) return null;
+      const lower = inner.toLowerCase();
+      if (inner === lower && htmlTagNamesForBareQuotedSelector.has(lower)) return null;
+      const looksLikeJsId = /[a-z][a-z0-9]*[A-Z]/.test(inner) || inner.includes('_');
+      if (!looksLikeJsId) return null;
+      return `#${inner}`;
+    };
+    s = s.replace(
+      /\bpage\.(click|dblclick|fill|check|uncheck|tap|hover)\(\s*(['"])([a-zA-Z][a-zA-Z0-9_-]*)\2/g,
+      (full, method, quote, inner) => {
+        const idSel = promoteBareQuotedTokenToIdSelector(inner);
+        if (!idSel) return full;
+        return `page.${method}(${quote}${idSel}${quote}`;
+      }
+    );
+
     // Drop leaked `await el.fill(...)` lines when `el` is never declared in script scope.
     const hasBareElFillWithoutDeclaration =
       /await\s+el\.fill\(/.test(s) &&
@@ -16416,6 +16451,49 @@ ${executableBody}`;
             workflowState.results.determine_completion.result = patched;
             if (workflowState.variablePool?.steps) {
               workflowState.variablePool.steps.determine_completion = { result: patched };
+            }
+
+            // Default Page Workflow (advanced/simplified) uses conditionPath "justify_journey.result.status".
+            // Without mirroring the patched status onto justify_journey, the while-loop exits after one
+            // iteration even though execution was marked inconclusive and should retry (bounded).
+            if (conditionPath && /^justify[-_]journey\b/.test(String(conditionPath))) {
+              const applyPatchedToJustifyEntry = (entry) => {
+                if (!entry || typeof entry !== 'object') return;
+                const raw = Object.prototype.hasOwnProperty.call(entry, 'result') ? entry.result : entry;
+                let target = raw;
+                if (
+                  raw &&
+                  typeof raw === 'object' &&
+                  Object.prototype.hasOwnProperty.call(raw, 'value') &&
+                  Object.prototype.hasOwnProperty.call(raw, 'namespace') &&
+                  raw.value &&
+                  typeof raw.value === 'object'
+                ) {
+                  target = raw.value;
+                }
+                if (!target || typeof target !== 'object') return;
+                target.status = patched.status;
+                target.completion_status = patched.completion_status;
+                target.is_complete = patched.is_complete;
+                target.reason = patched.reason;
+                target.execution_error_type = patched.execution_error_type;
+              };
+              const scanJustifyKeys = (container) => {
+                if (!container || typeof container !== 'object') return;
+                for (const key of Object.keys(container)) {
+                  if (
+                    key === 'justify_journey' ||
+                    key === 'justify-journey' ||
+                    key.endsWith('::justify_journey') ||
+                    key.endsWith('::justify-journey')
+                  ) {
+                    applyPatchedToJustifyEntry(container[key]);
+                  }
+                }
+              };
+              scanJustifyKeys(workflowState);
+              scanJustifyKeys(workflowState.results);
+              scanJustifyKeys(workflowState.variablePool?.steps);
             }
 
             console.log(`🟡 Overrode determine_completion -> continue due to inconclusive execution error`);
