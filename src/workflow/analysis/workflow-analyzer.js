@@ -10340,6 +10340,92 @@ return {
     const loggedInputSelectors = new Set();
     const inputMethods = new Set(['fill', 'type', 'press', 'selectOption', 'check', 'uncheck']);
 
+    /**
+     * Detect user interactions when naive regexes miss valid Playwright chains, e.g.
+     *   await page.locator('button:has-text("Save")').first().click()
+     * because [^)]* stops at the first ")" inside the selector string.
+     */
+    const heuristicMatchesPlaywrightUserAction = (text) => {
+      if (!text || typeof text !== 'string') return false;
+      const stripStringsToPlaceholders = (raw) => {
+        let out = '';
+        let i = 0;
+        let inSQ = false;
+        let inDQ = false;
+        let inBT = false;
+        let esc = false;
+        while (i < raw.length) {
+          const c = raw[i];
+          if (esc) {
+            out += 'x';
+            esc = false;
+            i++;
+            continue;
+          }
+          if (c === '\\' && (inSQ || inDQ || inBT)) {
+            esc = true;
+            out += c;
+            i++;
+            continue;
+          }
+          if (!inDQ && !inBT && c === "'" && !inSQ) {
+            inSQ = true;
+            out += c;
+            i++;
+            continue;
+          }
+          if (inSQ && c === "'") {
+            inSQ = false;
+            out += c;
+            i++;
+            continue;
+          }
+          if (!inSQ && !inBT && c === '"' && !inDQ) {
+            inDQ = true;
+            out += c;
+            i++;
+            continue;
+          }
+          if (inDQ && c === '"') {
+            inDQ = false;
+            out += c;
+            i++;
+            continue;
+          }
+          if (!inSQ && !inDQ && c === '`' && !inBT) {
+            inBT = true;
+            out += c;
+            i++;
+            continue;
+          }
+          if (inBT && c === '`') {
+            inBT = false;
+            out += c;
+            i++;
+            continue;
+          }
+          if (inSQ || inDQ || inBT) {
+            out += 'x';
+            i++;
+            continue;
+          }
+          out += c;
+          i++;
+        }
+        return out;
+      };
+      const segments = text.split(';').map((s) => s.trim()).filter(Boolean);
+      const parts = segments.length ? segments : [text];
+      const userAct = /\.(click|dblclick|fill|type|press|selectOption|check|uncheck|tap)\s*\(/i;
+      const waitRe = /\bwaitFor(Function|Selector|Timeout|LoadState|Navigation|Response|Request)\s*\(/i;
+      for (const part of parts) {
+        const bare = stripStringsToPlaceholders(part);
+        if (waitRe.test(bare)) continue;
+        if (userAct.test(bare)) return true;
+      }
+      return false;
+    };
+
     const normalizeSelectorKey = (selectorKey) => {
       if (!selectorKey) return null;
       const cleaned = selectorKey.replace(/^[#.]+/, '').trim();
@@ -10499,7 +10585,7 @@ return {
       if (!matchedPattern && (line.endsWith('(') || line.endsWith('.') || line.endsWith('['))) {
         // Look ahead a few lines to see if there's an action
         let combinedLine = line;
-        for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        for (let j = i + 1; j < Math.min(i + 10, lines.length); j++) {
           const nextLine = lines[j].trim();
           if (!nextLine) continue;
           combinedLine += ' ' + nextLine;
@@ -10511,11 +10597,18 @@ return {
               break;
             }
           }
+          if (!matchedPattern && heuristicMatchesPlaywrightUserAction(combinedLine)) {
+            matchedPattern = /__heuristic_playwright_user_action__/;
+          }
           if (matchedPattern) break;
           
           // Stop if we hit a semicolon or closing brace
           if (nextLine.includes(';') || nextLine.includes('}')) break;
         }
+      }
+
+      if (!matchedPattern && heuristicMatchesPlaywrightUserAction(line)) {
+        matchedPattern = /__heuristic_playwright_user_action__/;
       }
       
       if (matchedPattern) {
@@ -11131,9 +11224,18 @@ return {
       /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*"((?:[^"\\]|\\.)*)"\s*\))\s*->\s*first\(\s*\)\s*\)/gi,
       (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))}).first()`
     );
+    // Same corruption with single-quoted :has-text(...) inside the selector.
+    s = s.replace(
+      /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*'((?:[^'\\]|\\.)*)'\s*\))\s*->\s*first\(\s*\)\s*\)/gi,
+      (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))}).first()`
+    );
     // Unquoted tag:has-text("...") selector as locator argument (valid CSS string, invalid as JS expression).
     s = s.replace(
       /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*"((?:[^"\\]|\\.)*)"\s*\))\s*\)/gi,
+      (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))})`
+    );
+    s = s.replace(
+      /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*'((?:[^'\\]|\\.)*)'\s*\))\s*\)/gi,
       (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))})`
     );
 
@@ -16814,6 +16916,9 @@ ${executableBody}`;
               jReason.includes('cannot reliably') ||
               jReason.includes('unclear whether') ||
               jReason.includes('insufficient evidence') ||
+              jReason.includes('insufficient signal') ||
+              jReason.includes('skipped_insufficient') ||
+              jReason.includes('low confidence') ||
               jReason.includes('not possible to tell');
             if (jStatus === 'failure' && execOk && uncertainVerifier) {
               const patched = {
