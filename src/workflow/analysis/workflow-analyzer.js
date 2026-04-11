@@ -5241,6 +5241,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- Immediately before submit, handle browser validation safely: if any :invalid input exists, fill it with a valid realistic value and then submit.\n'
           + '- After submit/click of primary action, wait for either URL/navigation change OR visible DOM state change before returning script completion.\n'
           + '- Never return success while required fields remain empty or browser validation messages are visible.\n'
+          + '- NEVER emit .fill(..., "") or .fill(..., \'\') for inputs the journey must complete; use realistic synthetic values appropriate to the field type (valid email shape for email fields, multi-word text for messages/textarea, non-empty strings for names).\n'
           + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
           + '- Use page.$/page.$$ with CSS-only selectors; for text use getByRole/getByText/locator("text=...") as standalone selectors only.\n'
           + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n'
@@ -10878,6 +10879,94 @@ return {
     return /\.(?:fill|selectOption)\s*\(/i.test(script);
   }
 
+  /**
+   * Infer a safe non-empty fill value for journey automation when the model emitted an empty string.
+   * Uses only generic patterns (variable names, selector substrings) — no per-site URLs or page ids.
+   */
+  inferJourneyAutofillValueExpr(hintSource) {
+    const h = String(hintSource || '').toLowerCase();
+    if (!h) return JSON.stringify('journey-test-value');
+    if (/(^|[^a-z])pass(word)?($|[^a-z])|\bpwd\b|password/.test(h)) {
+      return "String(((input_credentials && input_credentials.password) || 'JourneyTestPass#1'))";
+    }
+    if (/\bemail\b|e-mail|\bmail\b|type.?=.?["']email/.test(h)) {
+      return JSON.stringify('journey-autofill@automation.aionqa.invalid');
+    }
+    if (/\bmessage\b|\bcomment\b|\bbody\b|textarea|multiline/.test(h)) {
+      return JSON.stringify('Automated journey validation message.');
+    }
+    if (/\bname\b|username|firstname|lastname|fname|lname|\buser\b/.test(h)) {
+      return JSON.stringify('AionQA Journey Test User');
+    }
+    if (/\bphone\b|\btel\b|mobile/.test(h)) {
+      return JSON.stringify('+15550123456');
+    }
+    if (/\burl\b|website|http|href/.test(h)) {
+      return JSON.stringify('https://example.com');
+    }
+    return JSON.stringify('journey-test-value');
+  }
+
+  /**
+   * Replace `.fill('')` / `.fill("")` in AI-generated journey scripts so HTML5 validation and
+   * post-run verification do not treat intentional empty submissions as inconclusive failures.
+   */
+  replaceEmptyJourneyFillValues(script) {
+    if (!script || typeof script !== 'string' || !/\.fill\s*\(\s*['"]\s*['"]\s*\)/.test(script)) {
+      return script;
+    }
+    let s = script;
+
+    const pageFillDouble = /\bpage\.fill\(\s*"([^"\\]*(?:\\.[^"\\]*)*)"\s*,\s*""\s*\)/g;
+    s = s.replace(pageFillDouble, (_full, sel) => {
+      const unescaped = String(sel || '').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+      return `page.fill(${JSON.stringify(unescaped)}, ${this.inferJourneyAutofillValueExpr(unescaped)})`;
+    });
+    const pageFillSingle = /\bpage\.fill\(\s*'([^'\\]*(?:\\.[^'\\]*)*)'\s*,\s*''\s*\)/g;
+    s = s.replace(pageFillSingle, (_full, sel) => {
+      const unescaped = String(sel || '').replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+      return `page.fill(${JSON.stringify(unescaped)}, ${this.inferJourneyAutofillValueExpr(unescaped)})`;
+    });
+
+    s = s.replace(/\.fill\(\s*(['"])\s*\1\s*\)/g, (full, _q, offset, whole) => {
+      const before = whole.slice(Math.max(0, offset - 220), offset);
+      const idMatch = before.match(/([A-Za-z_$][\w$]*)\s*$/);
+      const varName = idMatch ? idMatch[1] : '';
+      const vn = String(varName || '').toLowerCase();
+      if (vn) {
+        if (vn.includes('password') || vn.includes('passwd') || vn === 'pwd' || vn === 'pass') {
+          return `.fill(String(((input_credentials && input_credentials.password) || 'JourneyTestPass#1')))`;
+        }
+        if (vn.includes('email') || vn.endsWith('mail')) {
+          return `.fill(${JSON.stringify('journey-autofill@automation.aionqa.invalid')})`;
+        }
+        if (vn.includes('message') || vn.includes('comment') || vn.includes('textarea') || vn.includes('body')) {
+          return `.fill(${JSON.stringify('Automated journey validation message.')})`;
+        }
+        if (vn.includes('name') || vn.includes('user') || vn.includes('first') || vn.includes('last')) {
+          return `.fill(${JSON.stringify('AionQA Journey Test User')})`;
+        }
+        if (vn.includes('phone') || vn.includes('tel') || vn.includes('mobile')) {
+          return `.fill(${JSON.stringify('+15550123456')})`;
+        }
+        if (vn.includes('url') || vn.includes('website')) {
+          return `.fill(${JSON.stringify('https://example.com')})`;
+        }
+      }
+      const roleName = before.match(/name:\s*['"]([^'"]+)['"]\s*\}/);
+      const labelArg = before.match(/getByLabel\(\s*['"]([^'"]+)['"]/i);
+      const placeholderArg = before.match(/getByPlaceholder\(\s*['"]([^'"]+)['"]/i);
+      const hint =
+        [varName, roleName && roleName[1], labelArg && labelArg[1], placeholderArg && placeholderArg[1]]
+          .filter(Boolean)
+          .join(' ');
+      const valueExpr = this.inferJourneyAutofillValueExpr(hint);
+      return `.fill(${valueExpr})`;
+    });
+
+    return s;
+  }
+
   stripTypeScriptArtifacts(script) {
     if (!script || typeof script !== 'string') return script;
 
@@ -10910,7 +10999,7 @@ return {
   sanitizeAiPlaywrightScript(script) {
     if (!script || typeof script !== 'string') return script;
 
-    let s = script;
+    let s = this.replaceEmptyJourneyFillValues(script);
 
     // Models often append Playwright timeout tuning after substantive actions; it adds noise to parsers
     // and rarely affects outcomes. Drop trailing timeout lines (repeat to handle alternating order).
