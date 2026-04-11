@@ -293,6 +293,55 @@ function filterJourneysAgainstPlaywrightInventory(journeys, workflowState) {
   return out;
 }
 
+/**
+ * True when Playwright structural analysis found zero HTML forms but the journey still targets
+ * form submission or "form present / verifiable form" checks. Keeping these produces false
+ * terminal failures on legal/docs/marketing pages that only have links and nav (no HTML form tags).
+ * General rule: any site with formsCount===0 should not persist form-flow journeys.
+ */
+function shouldDropFormIntentJourneyOnFormlessPage(journey) {
+  const jid = String(journey?.journey_id || journey?.id || '');
+  const actionTextBlob = (Array.isArray(journey?.actions) ? journey.actions : [])
+    .map((a) => `${a?.description || ''} ${a?.expected_outcome || ''}`)
+    .join(' ');
+  const blob = [
+    jid,
+    journey?.description,
+    journey?.expected_outcome,
+    journey?.test_instructions,
+    actionTextBlob
+  ]
+    .join(' ')
+    .toLowerCase();
+  const actions = Array.isArray(journey?.actions) ? journey.actions : [];
+  const types = actions.map((a) => String(a?.type || a?.action_type || '').toLowerCase());
+
+  if (types.some((t) => t === 'form_submit' || t === 'submit')) return true;
+  if (/form_submit|submit_form|_form_submit\b/i.test(jid)) return true;
+  if (
+    /\b(submit the form|form submission|complete the form|fill out the form|fill required fields|registration form|contact form|login form|survey form)\b/i.test(
+      blob
+    )
+  ) {
+    return true;
+  }
+
+  const onlyPassive =
+    actions.length > 0 &&
+    actions.every((a) => {
+      const t = String(a?.type || a?.action_type || '').toLowerCase();
+      return t === 'check' || t === 'verify';
+    });
+  if (
+    onlyPassive &&
+    /\b(verifiable form|no verifiable form|multi-?field form|form element|form_submit)\b/i.test(blob)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 function computeStableJourneyId(pageUrl, journey) {
   try {
     const crypto = require('crypto');
@@ -3682,7 +3731,14 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     // CRITICAL: Final save of journeys before workflow completes
     // This ensures journeys are saved even if earlier save attempts failed
     // Check multiple sources for journeys - "Execute Workflow Journeys" runs, so journeys must exist somewhere
-    let journeysToSave = workflowState.journeys || workflowState.journeysToExecute || null;
+    const journeysFromPool = this.readVariable(workflowState, 'journeysToExecute', 'page');
+    let journeysToSave = null;
+    if (Array.isArray(journeysFromPool)) {
+      // Prefer variable pool when set (including explicit []) so we never resurrect stale workflowState.journeys
+      journeysToSave = journeysFromPool;
+    } else {
+      journeysToSave = workflowState.journeysToExecute || workflowState.context?.journeysToExecute || workflowState.journeys || null;
+    }
     if (!journeysToSave || journeysToSave.length === 0) {
       // Check variablePool for journeys extracted by variableOutputs
       const journeysVar = this.readVariable(workflowState, 'journeysToExecute', 'page');
@@ -6993,6 +7049,16 @@ return {
             if (dedupedJourneys.length !== journeys.length) {
               console.warn(`⚠️ [JOURNEYS-DEDUP] Deduped journeys from ${journeys.length} to ${dedupedJourneys.length}`);
               journeys = dedupedJourneys;
+            }
+          }
+
+          if (formsCount === 0 && journeys.length > 0) {
+            const beforeFormless = journeys.length;
+            journeys = journeys.filter((journey) => !shouldDropFormIntentJourneyOnFormlessPage(journey));
+            if (journeys.length !== beforeFormless) {
+              console.log(
+                `✅ [JOURNEYS-FORMLESS] Dropped ${beforeFormless - journeys.length} form-oriented journey(s) — Playwright reported zero HTML forms`
+              );
             }
           }
 
