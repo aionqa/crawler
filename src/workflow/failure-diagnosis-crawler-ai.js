@@ -152,21 +152,51 @@ export async function runFailureDiagnosisCrawlerAi(deps, jobId, workflowId, legR
     /* ignore */
   }
 
-  await axios.post(
-    `${backendUrl}/api/jobs/${encodeURIComponent(jobId)}/failure-diagnosis-answer`,
-    {
-      for_terminal_status: jobStatus,
-      answer: {
-        why_failed: parsed?.why_failed != null ? String(parsed.why_failed) : rawText.slice(0, 8000),
-        root_cause_category: parsed?.root_cause_category,
-        evidence_bullets: Array.isArray(parsed?.evidence_bullets) ? parsed.evidence_bullets : [],
-        recommended_actions: Array.isArray(parsed?.recommended_actions) ? parsed.recommended_actions : [],
-        confidence: parsed?.confidence,
-        raw_text: rawText.slice(0, 12000),
-      },
+  const successPayload = {
+    for_terminal_status: jobStatus,
+    answer: {
+      why_failed: parsed?.why_failed != null ? String(parsed.why_failed) : rawText.slice(0, 8000),
+      root_cause_category: parsed?.root_cause_category,
+      evidence_bullets: Array.isArray(parsed?.evidence_bullets) ? parsed.evidence_bullets : [],
+      recommended_actions: Array.isArray(parsed?.recommended_actions) ? parsed.recommended_actions : [],
+      confidence: parsed?.confidence,
+      raw_text: rawText.slice(0, 12000),
     },
-    { headers: getAuthHeaders(), timeout: 60000 }
-  );
+  };
+
+  try {
+    await axios.post(
+      `${backendUrl}/api/jobs/${encodeURIComponent(jobId)}/failure-diagnosis-answer`,
+      successPayload,
+      { headers: getAuthHeaders(), timeout: 60000 }
+    );
+  } catch (postErr) {
+    const detail =
+      postErr?.response?.data?.error ||
+      postErr?.response?.data?.message ||
+      postErr?.message ||
+      String(postErr);
+    console.error('[failure-diagnosis-crawler-ai] POST success answer failed:', detail);
+    try {
+      await axios.post(
+        `${backendUrl}/api/jobs/${encodeURIComponent(jobId)}/failure-diagnosis-answer`,
+        {
+          for_terminal_status: jobStatus,
+          answer: {
+            why_failed: null,
+            error: `Failed to save diagnosis summary: ${String(detail).slice(0, 1800)}`,
+            raw_text: rawText.slice(0, 12000),
+          },
+        },
+        { headers: getAuthHeaders(), timeout: 60000 }
+      );
+    } catch (fallbackErr) {
+      console.error(
+        '[failure-diagnosis-crawler-ai] POST fallback error answer failed:',
+        fallbackErr?.message || fallbackErr
+      );
+    }
+  }
 
   if (backendLogger?.appendJobLog) {
     const preview = String(parsed?.why_failed || rawText).slice(0, 320);
