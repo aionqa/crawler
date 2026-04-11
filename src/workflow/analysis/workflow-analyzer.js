@@ -5521,13 +5521,15 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         }
         effectiveTemplate +=
           '\n- DOM INVENTORY ALIGNMENT: journey_script_action_brief entries may include inventory_semantic ("link" or "button") and inventory_selector from live Playwright analysis. When inventory_semantic is "link", target the anchor (use inventory_selector as a quoted page.locator argument, or page.getByRole("link", { name: ... })) — do not use button:has-text for that action. When inventory_semantic is "button", prefer real button / [role=button] patterns consistent with the inventory.\n'
-          + '- page.locator(...) first argument must be a JavaScript string (quotes or backticks) or a const bound to a string — never bare CSS tokens like a:has-text(...) without quotes (ReferenceError).\n';
+          + '- page.locator(...) first argument must be a JavaScript string (quotes or backticks) or a const bound to a string — never bare CSS tokens like a:has-text(...) without quotes (ReferenceError).\n'
+          + '- EMBEDDED THIRD-PARTY CHAT / SUPPORT WIDGETS (vendor-agnostic): Launchers and bubbles usually live on the host page; message composer, textarea, and send controls are often inside a cross-origin iframe. Flow: (1) click the visible launcher/open control on `page` with a short wait (e.g. waitForSelector on iframe or launcher, timeout 8000ms); (2) resolve a chat frame with `page.frameLocator(...)` using a broad iframe selector (e.g. `iframe[src*="chat"]`, `iframe[src*="widget"]`, `iframe[src*="messenger"]`, `iframe[src*="support"]`, or the nth visible iframe) OR `const f = page.frames().find(fr => /chat|widget|messenger|support|crisp|intercom|zendesk/i.test(fr.url()||""));` then `f.locator(...)`; (3) perform fill/click/send **on the frame handle or frameLocator chain**, not on top-level `page`, for composer and send actions; (4) after send, wait briefly for a user bubble, delivery checkmark, or non-empty transcript inside the same frame. Prefer one consistent frame variable (e.g. `const chat = page.frameLocator(\'iframe\').first()`) and chain `.locator(...)` / `.getByRole(...)` on it.\n';
       }
       if (isJustifyJourneyStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
           + '- If visible validation/error text exists, return status="failure".\n'
           + '- If expected_outcome is visible in DOM, return status="success" and expected_outcome_verified=true.\n'
           + '- For non-reactive form submit journeys: when submit was attempted and page is in clean initial state after submit with NO visible validation/error text, treat as status="success" (submit likely reloaded/reset page).\n'
+          + '- For embedded chat/support widgets: after a send action, treat status="success" when screenshots/DOM show a user-authored line, typing indicator cleared, delivery state, or an agent reply stub inside the chat surface (including inside iframes), even if the host page URL unchanged.\n'
           + '- Use status="pending" only when there is genuinely insufficient evidence and no success/failure signal.\n';
       }
       if (isPageSummaryStep) {
@@ -10701,10 +10703,16 @@ return {
       /await\s+page\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
       /await\s+element\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
       /await\s+[A-Za-z_$][\w$]*\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      // frameLocator / Frame chains (embedded chat, third-party widgets)
+      /await\s+page\.frameLocator\([^)]*\)\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /await\s+page\.frameLocator\([^)]*\)\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /await\s+[A-Za-z_$][\w$]*\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /await\s+[A-Za-z_$][\w$]*\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
       // Without await (some scripts don't use await)
       /page\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
       /page\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
       /[A-Za-z_$][\w$]*\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
+      /page\.frameLocator\([^)]*\)\.locator\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
       // Locator patterns with action chaining
       /await\s+page\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
       /page\.getBy(Text|Role|Label|Placeholder|AltText|Title|TestId)\([^)]*\)\.(click|fill|type|press|selectOption|check|uncheck)\b/i,
@@ -12816,7 +12824,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       try {
         // Check if script might be valid but just not matching our patterns
         const hasAsyncFunction = /async\s*\(\)\s*=>|async\s+function|\(async\s*\(\)/.test(code);
-        const hasPageReference = /page\.|await\s+page|page\.locator|page\.getBy/.test(code);
+        const hasPageReference = /page\.|await\s+page|page\.locator|page\.getBy|page\.frameLocator|\.frameLocator\(/.test(code);
         const hasReturn = /return\s+/.test(code);
         
         // If script has async/page references, it's likely valid - reduce warning severity
