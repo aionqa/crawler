@@ -10904,6 +10904,18 @@ return {
     return filteredActions;
   }
 
+  /**
+   * Detect Playwright calls that are real journey work but often omitted by parseScriptActions
+   * (e.g. page.$ / page.$$ probes, waitForNavigation). Prevents false "no actionable interaction"
+   * aborts when the model emits valid scripts using those APIs.
+   */
+  journeyScriptHasUnloggedPlaywrightInteractions(script) {
+    if (!script || typeof script !== 'string') return false;
+    return /\bpage\.(\$\$?|waitForNavigation|waitForURL|expectNavigation|evaluate|evaluateHandle)\s*\(/i.test(
+      script
+    );
+  }
+
   cleanScript(script) {
     if (!script || typeof script !== 'string') {
       return script;
@@ -12551,7 +12563,9 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       actionLines = cleanedActionLines;
     }
 
-    if (isJourneyScriptExecutionStep && actionLines.length === 0) {
+    const hasUnloggedPlaywright = this.journeyScriptHasUnloggedPlaywrightInteractions(code);
+
+    if (isJourneyScriptExecutionStep && actionLines.length === 0 && !hasUnloggedPlaywright) {
       const formsSignals = Array.isArray(workflowState?.playwrightAnalysis?.forms)
         ? workflowState.playwrightAnalysis.forms.length
         : 0;
@@ -13925,9 +13939,17 @@ ${executableBody}`;
         // Best-effort only.
       }
 
-      const hasInlineErrorCopy = (validationCheck?.error_text_samples || []).some((t) =>
-        /(error|failed|invalid|required|please)/i.test(String(t || ''))
-      );
+      const hasInlineErrorCopy = (validationCheck?.error_text_samples || []).some((t) => {
+        const raw = String(t || '').trim();
+        if (!raw) return false;
+        const lower = raw.toLowerCase();
+        // Advisory "warning but success" panels (common on test/demo thank-you pages).
+        if (/\b(submitted|submission)\b/.test(lower) && /\b(success|successfully)\b/.test(lower)) {
+          return false;
+        }
+        if (/\bform submitted successfully\b/i.test(raw)) return false;
+        return /(error|failed|invalid|required|please)/i.test(raw);
+      });
       // Browsers populate validationMessage for plain empty required fields (valueMissing) even when no submit
       // was attempted — same false-positive class as :invalid on a fresh wizard step; ignore those alone.
       const isTrivialValueMissingOnly = (validity) => {
@@ -13981,6 +14003,7 @@ ${executableBody}`;
               return rect.width > 0 && rect.height > 0;
             };
             const bodyText = (document.body && document.body.innerText) ? document.body.innerText.toLowerCase() : '';
+            const titleText = (document.title || '').toLowerCase();
             const phrases = [
               'submitted successfully',
               'survey has been submitted',
@@ -13993,8 +14016,13 @@ ${executableBody}`;
               'registration complete',
               'order confirmed',
               'logged in successfully',
+              'submission was successful',
             ];
             if (phrases.some((p) => bodyText.includes(p))) return true;
+            if (bodyText.includes('submitted with warnings') && bodyText.includes('successful')) return true;
+            if (titleText.includes('success') && (titleText.includes('submit') || bodyText.includes('submitted'))) {
+              return true;
+            }
             const candidates = document.querySelectorAll(
               '.result, [class*="success"], [data-testid="success"], [data-testid="form-success"]'
             );
