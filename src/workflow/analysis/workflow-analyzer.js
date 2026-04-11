@@ -3702,6 +3702,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                     const envTok = String(process.env.RUNNER_TOKEN || '').trim();
                     if (envTok) {
                       this.context.runner_token = envTok;
+                      postOpts.headers = this.getAuthHeaders();
                       await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
                       continue;
                     }
@@ -9205,13 +9206,33 @@ return {
       }
       
       console.log(`💾 [SAVE-DATA] POSTing to ${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis with ${journeys.length} journeys`);
-      const response = await axios.post(
-        `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
-        payload,
-        {
-          headers: this.getAuthHeaders()
+      const postOpts = { headers: this.getAuthHeaders() };
+      let response;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          response = await axios.post(
+            `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
+            payload,
+            postOpts
+          );
+          break;
+        } catch (postErr) {
+          const st = postErr.response?.status;
+          if (st === 401 && attempt < 4) {
+            const envTok = String(process.env.RUNNER_TOKEN || '').trim();
+            if (envTok) {
+              this.context.runner_token = envTok;
+              postOpts.headers = this.getAuthHeaders();
+              await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+              continue;
+            }
+          }
+          const msg = String(postErr?.message || '');
+          const retryable = attempt < 4 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
+          if (!retryable) throw postErr;
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
         }
-      );
+      }
       
       console.log(`✅ [SAVE-DATA] Backend responded with status ${response.status}`);
       const results = response.data?.results || {};
@@ -14347,7 +14368,7 @@ ${executableBody}`;
    */
   getAuthHeaders() {
     const headers = {};
-    const token = String(this.context?.runner_token || process.env.RUNNER_TOKEN || '').trim();
+    const token = String(process.env.RUNNER_TOKEN || this.context?.runner_token || '').trim();
     if (token) {
       headers['Authorization'] = `Bearer ${token}`;
       headers['x-runner-token'] = token;
