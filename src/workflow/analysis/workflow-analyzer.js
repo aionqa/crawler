@@ -11465,6 +11465,30 @@ return {
       s = s.replace(/^\s*await\s+el\.fill\([^)]*\)\s*;?\s*$/gm, '');
     }
 
+    // Models often emit `await loc.click(...)` / `await x.click()` without declaring the locator
+    // (ReferenceError → inconclusive retries). Drop these lines when there is no shallow (top-level)
+    // binding — ignore nested `const loc` inside injected helper preludes (deeper indent).
+    const hasShallowVarBinding = (varName) =>
+      new RegExp(`(?:^|\\n)\\s{0,3}(const|let|var)\\s+${varName}\\s*=`, 'm').test(s);
+    const stripAwaitOnUndeclaredVarMethod = (varName, methods) => {
+      const reParam = new RegExp(`\\(\\s*${varName}\\s*[,)]`);
+      if (hasShallowVarBinding(varName) || reParam.test(s)) return;
+      for (const m of methods) {
+        const lineRe = new RegExp(
+          `^\\s*await\\s+${varName}\\.${m}\\([^)]*\\)\\s*;?\\s*$`,
+          'gm'
+        );
+        s = s.replace(lineRe, '');
+      }
+    };
+    stripAwaitOnUndeclaredVarMethod('loc', ['click', 'dblclick', 'fill', 'check', 'uncheck', 'hover', 'tap']);
+    stripAwaitOnUndeclaredVarMethod('x', ['click', 'dblclick', 'fill', 'check', 'uncheck', 'hover', 'tap']);
+    const hasElShallow =
+      /(?:^|\n)\s{0,3}(const|let|var)\s+el\b/m.test(s) || /\(\s*el\s*[,)]/.test(s);
+    if (!hasElShallow) {
+      s = s.replace(/^\s*await\s+el\.(click|dblclick|check|uncheck|hover|tap)\([^)]*\)\s*;?\s*$/gm, '');
+    }
+
     // Cypress-style `page.$(text=Label)` is not valid Playwright (`$` expects a CSS selector string).
     s = s.replace(/page\.\$\(\s*text\s*=\s*([^)]+?)\s*\)/gi, (_m, rawLabel) => {
       let label = String(rawLabel || '').trim();
