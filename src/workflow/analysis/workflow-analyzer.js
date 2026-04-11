@@ -5501,6 +5501,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- After submit/click of primary action, wait for either URL/navigation change OR visible DOM state change before returning script completion.\n'
           + '- Never return success while required fields remain empty or browser validation messages are visible.\n'
           + '- NEVER emit .fill(..., "") or .fill(..., \'\') for inputs the journey must complete; use realistic synthetic values appropriate to the field type (valid email shape for email fields, multi-word text for messages/textarea, non-empty strings for names).\n'
+          + '- NEVER put pseudocode or expressions inside string literals for .fill()/.type() second arguments (e.g. .fill("act.value || \'\'") types the literal characters a-c-t-.-v-a-l-u-e). Use a real JavaScript expression (variable you declared) or a concrete quoted string literal for the value.\n'
           + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
           + '- Use page.$/page.$$ with CSS-only selectors; for text use getByRole/getByText/locator("text=...") as standalone selectors only.\n'
           + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n'
@@ -11340,6 +11341,33 @@ return {
   }
 
   /**
+   * Models sometimes paste action-loop pseudocode into string literals, e.g. .fill("act.value || ''"),
+   * which executes as literal text and breaks chat/message journeys. Rewrite to a synthetic value
+   * inferred from the full script (same helper as empty-fill repair) — no site-specific literals.
+   */
+  repairQuotedActPseudocodeInFillAndType(script) {
+    if (!script || typeof script !== 'string') return script;
+    const v = this.inferJourneyAutofillValueExpr(script);
+    let s = script;
+    const apply = (method) => {
+      const m = method;
+      s = s.replace(
+        new RegExp(`\\.${m}\\s*\\(\\s*"act\\.value\\s*\\|\\|\\s*''"\\s*\\)`, 'gi'),
+        `.${m}(${v})`
+      );
+      s = s.replace(
+        new RegExp(`\\.${m}\\s*\\(\\s*"act\\.value\\s*\\|\\|\\s*""\\s*\\)`, 'gi'),
+        `.${m}(${v})`
+      );
+      s = s.replace(new RegExp(`\\.${m}\\s*\\(\\s*"act\\.value"\\s*\\)`, 'gi'), `.${m}(${v})`);
+      s = s.replace(new RegExp(`\\.${m}\\s*\\(\\s*'act\\.value'\\s*\\)`, 'gi'), `.${m}(${v})`);
+    };
+    apply('fill');
+    apply('type');
+    return s;
+  }
+
+  /**
    * Replace `.fill('')` / `.fill("")` in AI-generated journey scripts so HTML5 validation and
    * post-run verification do not treat intentional empty submissions as inconclusive failures.
    */
@@ -11529,7 +11557,8 @@ return {
   sanitizeAiPlaywrightScript(script) {
     if (!script || typeof script !== 'string') return script;
 
-    let s = this.replaceEmptyJourneyFillValues(script);
+    let s = this.repairQuotedActPseudocodeInFillAndType(script);
+    s = this.replaceEmptyJourneyFillValues(s);
 
     // Models often append Playwright timeout tuning after substantive actions; it adds noise to parsers
     // and rarely affects outcomes. Drop trailing timeout lines (repeat to handle alternating order).
