@@ -4695,6 +4695,14 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       
       stepPayload.currentJourney = filteredJourney;
       stepPayload.current_journey = filteredJourney;
+
+      const interactiveForScript = this.getInteractiveJourneyActionsForScript(filteredJourney.actions);
+      stepPayload.journey_script_allows_form_mutations =
+        this.journeyInteractiveActionsAllowFormMutations(interactiveForScript);
+      stepPayload.journey_script_action_brief = interactiveForScript.slice(0, 14).map((a) => ({
+        type: a.type || null,
+        selector: a.selector || a.locator || null,
+      }));
     }
     
     // For while-loop iterations: include iteration/step id only. Do NOT set conversation_key: backend returns 404 if id is not an existing conversation, so omit to let backend create new conversation and avoid log errors.
@@ -5244,6 +5252,13 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- page.waitForSelector must always be called as page.waitForSelector(\"<valid selector>\", { ...options }).\n'
           + '- CREDENTIALS: If input_credentials is present in the payload, you MUST use input_credentials.username and input_credentials.password for every username/password fill. Never shorten or substitute generic placeholders (e.g. \'test\', \'user\', \'demo\', \'password\') when real values are provided.\n'
           + '- If input_credentials is absent, read exact required username/password from visible_text (info banners, labels, error text) or currentJourney test instructions and use those exact string literals in fill(); never invent credentials.\n';
+        if (stepPayload.journey_script_allows_form_mutations === false) {
+          effectiveTemplate +=
+            '\n- NON-FORM JOURNEY (hard rule): Executable currentJourney.actions are only non-input interactions (e.g. click/toggle/hover/navigate). Do NOT call .fill(), .selectOption(), or populate inputs/textareas/selects. Do NOT submit a main contact/login form unless a fill/select/submit action explicitly appears in currentJourney.actions. Ignore dominant forms in Playwright analysis when they are not part of this journey.\n';
+        }
+        if (Array.isArray(stepPayload.journey_script_action_brief) && stepPayload.journey_script_action_brief.length > 0) {
+          effectiveTemplate += `\n- AUTHORITATIVE ACTION SEQUENCE (follow in order; do not substitute unrelated flows): ${JSON.stringify(stepPayload.journey_script_action_brief)}\n`;
+        }
       }
       if (isJustifyJourneyStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
@@ -10829,6 +10844,40 @@ return {
    * Strip common TypeScript-only syntax from AI-generated scripts.
    * These scripts are executed via `new Function(...)` as plain JS.
    */
+  /**
+   * Actions that should be executed as Playwright steps (verify/check are justified separately).
+   */
+  getInteractiveJourneyActionsForScript(actions) {
+    if (!Array.isArray(actions)) return [];
+    return actions.filter((action) => {
+      const actionType = String(action?.type || '').toLowerCase();
+      return actionType !== 'verify' && actionType !== 'check';
+    });
+  }
+
+  /**
+   * True when executable journey actions include filling or selecting form fields.
+   */
+  journeyInteractiveActionsAllowFormMutations(interactiveActions) {
+    if (!Array.isArray(interactiveActions) || interactiveActions.length === 0) return true;
+    const formish = (a) => {
+      const x = String(a?.type || '').toLowerCase();
+      if (['fill', 'input', 'type', 'select', 'textarea', 'password'].includes(x)) return true;
+      if (x.includes('fill') || x.includes('select') || x.includes('input')) return true;
+      const sel = String(a?.selector || a?.locator || '');
+      if (/^(input|textarea|select)\b/i.test(sel)) return true;
+      if (/\b(input|textarea|select)\s*[\[.#:]/i.test(sel)) return true;
+      return false;
+    };
+    return interactiveActions.some(formish);
+  }
+
+  /** Detect form-mutating Playwright calls in generated script text. */
+  aiJourneyScriptUsesFormMutations(script) {
+    if (!script || typeof script !== 'string') return false;
+    return /\.(?:fill|selectOption)\s*\(/i.test(script);
+  }
+
   stripTypeScriptArtifacts(script) {
     if (!script || typeof script !== 'string') return script;
 
@@ -12029,6 +12078,52 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     code = this.stripTypeScriptArtifacts(code);
     code = this.sanitizeAiPlaywrightScript(code);
     console.log(`🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
+
+    if (
+      isJourneyScriptExecutionStep &&
+      code &&
+      typeof code === 'string'
+    ) {
+      const cj = workflowState.currentJourney || workflowState.currentItem || workflowState.currentLeg;
+      const interactive = this.getInteractiveJourneyActionsForScript(cj?.actions);
+      if (
+        cj &&
+        Array.isArray(cj.actions) &&
+        interactive.length > 0 &&
+        !this.journeyInteractiveActionsAllowFormMutations(interactive) &&
+        this.aiJourneyScriptUsesFormMutations(code)
+      ) {
+        const scopeError =
+          'Journey script scope error: form field interaction not permitted for currentJourney interactive actions';
+        const scopeResult = {
+          success: false,
+          execution_failed: true,
+          error_type: 'execution',
+          error: scopeError,
+          source_field: sourceField,
+          script_length: code.length,
+        };
+        workflowState.lastExecutedActionLines = [];
+        workflowState.lastExecutionResult = scopeResult;
+        workflowState.executionErrorType = 'execution';
+        await this.storeStepResult(step, scopeResult, workflowState);
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'warn',
+            `${scopeError}; forcing bounded regeneration.`,
+            'WORKFLOW-ANALYZER',
+            {
+              step_id: step.id,
+              step_name: step.name,
+              journey_id: cj.journey_id || cj.id,
+              interactive_action_types: interactive.map((a) => a.type),
+            }
+          );
+        }
+        return scopeResult;
+      }
+    }
     
     if (!code || code.trim().length === 0) {
       if (isJourneyScriptExecutionStep) {
@@ -16456,6 +16551,7 @@ ${executableBody}`;
             execErrLower.includes('selector is not defined') ||
             execErrLower.includes('shouldbechecked is not defined') ||
             execErrLower.includes('journey script syntax error') ||
+            execErrLower.includes('journey script scope error') ||
             execErrLower.includes('no actionable interaction generated in journey script') ||
             execErrLower.includes('missing ) after argument list') ||
             execErrLower.includes('unexpected end of input');
