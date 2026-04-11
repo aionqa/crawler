@@ -3300,6 +3300,10 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           case 'save-page-data':
             await this.executeSavePageDataStep(page, step, workflowState, effectiveJobId);
             break;
+
+          case 'save-data':
+            await this.executeSaveDataStep(page, step, workflowState, effectiveJobId);
+            break;
             
           case 'execute-code':
             const nextStepForCode = i + 1 < this.workflowTemplate.steps.length ? this.workflowTemplate.steps[i + 1] : null;
@@ -3706,58 +3710,25 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
               // CRITICAL: Clean journeys to remove circular references before sending
               const cleanedJourneys = newJourneys.map(j => this.cleanJourneyForSave(j));
               
-              const postOpts = { headers: this.getAuthHeaders(), timeout: 120000 };
               let response;
-              for (let attempt = 0; attempt < 5; attempt++) {
-                try {
-                  const payload = {
-                    saveLegs: true,
-                    journeys: cleanedJourneys,
-                    job_id: effectiveJobId
-                  };
-                  response = await axios.post(
-                    `${this.backendUrl}/api/runner/pages/${pageIdToUse}/save-analysis`,
-                    payload,
-                    postOpts
-                  );
-                  break;
-                } catch (postErr) {
-                  const st = postErr.response?.status;
-                  if (st === 401 && attempt < 4) {
-                    const modes = ['runner_refresh', 'service_only', 'service_first', 'runner_first'];
-                    const mode = modes[attempt] || 'runner_first';
-                    if (mode === 'runner_refresh') {
-                      const envTok = String(process.env.RUNNER_TOKEN || '').trim();
-                      const snapTok = String(this._runnerTokenSnapshot || '').trim();
-                      this.context.runner_token = envTok || snapTok || this.context.runner_token;
-                    }
-                    const authMode =
-                      mode === 'service_only'
-                        ? 'service_only'
-                        : mode === 'service_first'
-                          ? 'service_first'
-                          : 'runner_first';
-                    postOpts.headers = this.getAuthHeaders({ authMode });
-                    await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
-                    continue;
-                  }
-                  if (st === 404 && attempt < 4 && workflowState.pageUrl) {
-                    console.warn(`⚠️ [JOURNEYS-FINAL] save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
-                    const recovered = await this.ensurePageId(workflowState, effectiveJobId, { forceDiscover: true });
-                    if (recovered) {
-                      pageIdToUse = String(recovered);
-                      workflowState.pageId = pageIdToUse;
-                      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-                      continue;
-                    }
-                  }
-                  const msg = String(postErr?.message || '');
-                  const retryable =
-                    attempt < 4 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
-                  if (!retryable) throw postErr;
-                  await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+              const payload = {
+                saveLegs: true,
+                journeys: cleanedJourneys,
+                job_id: effectiveJobId
+              };
+              response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, effectiveJobId, {
+                timeout: 120000,
+                on404: async () => {
+                  if (!workflowState.pageUrl) return null;
+                  console.warn(`⚠️ [JOURNEYS-FINAL] save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
+                  const recovered = await this.ensurePageId(workflowState, effectiveJobId, { forceDiscover: true });
+                  return recovered ? String(recovered) : null;
+                },
+                onPageIdResolved: (newId) => {
+                  pageIdToUse = String(newId);
+                  workflowState.pageId = pageIdToUse;
                 }
-              }
+              });
               
               console.log(`✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) at workflow completion. Response status: ${response.status}`);
               await this.sendLogToBackend(effectiveJobId, 'info', `✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) at workflow completion`, 'WORKFLOW-ANALYZER', {
@@ -8015,15 +7986,11 @@ return {
               try {
                 const payload = {
                   saveLegs: true,
-                  journeys: newJourneys,
+                  journeys: newJourneys.map((j) => this.cleanJourneyForSave(j)),
                   job_id: jobId
                 };
                 
-                const response = await axios.post(
-                  `${this.backendUrl}/api/runner/pages/${pageIdToUse}/save-analysis`,
-                  payload,
-                  { headers: this.getAuthHeaders() }
-                );
+                const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId);
                 
                 console.log(`✅ [JOURNEYS-FINAL] Successfully saved ${newJourneys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
                 if (jobId && this.backendLogger) {
@@ -8050,15 +8017,11 @@ return {
             try {
               const payload = {
                 saveLegs: true,
-                journeys: journeysToSave,
+                journeys: journeysToSave.map((j) => this.cleanJourneyForSave(j)),
                 job_id: jobId
               };
               
-              const response = await axios.post(
-                `${this.backendUrl}/api/runner/pages/${pageIdToUse}/save-analysis`,
-                payload,
-                { headers: this.getAuthHeaders() }
-              );
+              const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId);
               
               console.log(`✅ [JOURNEYS-FINAL] Successfully saved ${journeysToSave.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
             } catch (finalError) {
@@ -8115,15 +8078,11 @@ return {
                 console.log(`🔍 [AI-PROMPT-END] Saving ${newOnes.length} new journey(s) at end of AI prompt step`);
                 const payload = {
                   saveLegs: true,
-                  journeys: newOnes,
+                  journeys: newOnes.map((j) => this.cleanJourneyForSave(j)),
                   job_id: jobId
                 };
                 
-                const response = await axios.post(
-                  `${this.backendUrl}/api/runner/pages/${pageIdFinal}/save-analysis`,
-                  payload,
-                  { headers: this.getAuthHeaders() }
-                );
+                const response = await this.postRunnerSaveAnalysis(pageIdFinal, payload, jobId);
                 
                 console.log(`✅ [AI-PROMPT-END] Successfully saved ${newOnes.length} journey(s). Response status: ${response.status}`);
                 if (jobId && this.backendLogger) {
@@ -8141,15 +8100,11 @@ return {
               console.log(`🔍 [AI-PROMPT-END] Could not check page, saving ${finalJourneysToSave.length} journey(s) anyway`);
               const payload = {
                 saveLegs: true,
-                journeys: finalJourneysToSave,
+                journeys: finalJourneysToSave.map((j) => this.cleanJourneyForSave(j)),
                 job_id: jobId
               };
               
-              const response = await axios.post(
-                `${this.backendUrl}/api/runner/pages/${pageIdFinal}/save-analysis`,
-                payload,
-                { headers: this.getAuthHeaders() }
-              );
+              const response = await this.postRunnerSaveAnalysis(pageIdFinal, payload, jobId);
               
               console.log(`✅ [AI-PROMPT-END] Successfully saved ${finalJourneysToSave.length} journey(s). Response status: ${response.status}`);
               if (jobId && this.backendLogger) {
@@ -8876,17 +8831,10 @@ return {
   }
 
   /**
-   * Execute save-data step - DEPRECATED: This step type has been removed.
-   * Each workflow step must now save its own data directly.
-   * @deprecated Use individual step data saving instead
+   * Execute save-data step — persists legs/journeys and optional SEO/content/accessibility payloads
+   * via POST /api/runner/pages/:pageId/save-analysis (same contract as save-page-data for full templates).
    */
   async executeSaveDataStep(page, step, workflowState, jobId) {
-      console.error(`❌ DEPRECATED: save-data step type has been removed. Each step must save its own data.`);
-    throw new Error('save-data step type has been removed. Each workflow step must save its own data when executed.');
-    
-    // Original implementation removed - steps must save data individually
-    // This function is deprecated and will always throw an error
-    
     const config = step.config || {};
     
     // Determine what to save based on config
@@ -9240,42 +9188,7 @@ return {
       }
       
       console.log(`💾 [SAVE-DATA] POSTing to ${this.backendUrl}/api/runner/pages/${workflowState.pageId}/save-analysis with ${journeys.length} journeys`);
-      const postOpts = { headers: this.getAuthHeaders() };
-      let response;
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          response = await axios.post(
-            `${this.backendUrl}/api/runner/pages/${workflowState.pageId}/save-analysis`,
-            payload,
-            postOpts
-          );
-          break;
-        } catch (postErr) {
-          const st = postErr.response?.status;
-          if (st === 401 && attempt < 4) {
-            const modes = ['runner_refresh', 'service_only', 'service_first', 'runner_first'];
-            const mode = modes[attempt] || 'runner_first';
-            if (mode === 'runner_refresh') {
-              const envTok = String(process.env.RUNNER_TOKEN || '').trim();
-              const snapTok = String(this._runnerTokenSnapshot || '').trim();
-              this.context.runner_token = envTok || snapTok || this.context.runner_token;
-            }
-            const authMode =
-              mode === 'service_only'
-                ? 'service_only'
-                : mode === 'service_first'
-                  ? 'service_first'
-                  : 'runner_first';
-            postOpts.headers = this.getAuthHeaders({ authMode });
-            await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
-            continue;
-          }
-          const msg = String(postErr?.message || '');
-          const retryable = attempt < 4 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
-          if (!retryable) throw postErr;
-          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-        }
-      }
+      const response = await this.postRunnerSaveAnalysis(workflowState.pageId, payload, jobId);
       
       console.log(`✅ [SAVE-DATA] Backend responded with status ${response.status}`);
       const results = response.data?.results || {};
@@ -11655,6 +11568,15 @@ return {
     s = s.replace(
       /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*'((?:[^'\\]|\\.)*)'\s*\))\s*\)/gi,
       (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))})`
+    );
+    // Same as above but with a comma-separated selector tail (unquoted), e.g. locator(a:has-text("Edit"), button).
+    s = s.replace(
+      /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*"(?:[^"\\]|\\.)*"\s*\)\s*,\s*[^)]+)\)/gi,
+      (_m, inner) => `.locator(${JSON.stringify(String(inner || ''))})`
+    );
+    s = s.replace(
+      /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*'(?:[^'\\]|\\.)*'\s*\)\s*,\s*[^)]+)\)/gi,
+      (_m, inner) => `.locator(${JSON.stringify(String(inner || ''))})`
     );
 
     // Corrupted chain: locator(input[name="x"] -> first()) — LLM uses "->" instead of .first().
@@ -14457,7 +14379,9 @@ ${executableBody}`;
   getAuthHeaders(opts = {}) {
     const authMode = opts.authMode || 'runner_first';
     const headers = {};
-    const ctxRunner = String(this.context?.runner_token || '').trim();
+    const ctxRunner = opts.ignoreContextRunner
+      ? ''
+      : String(this.context?.runner_token || '').trim();
     const envRunner = String(process.env.RUNNER_TOKEN || '').trim();
     const runnerTok = ctxRunner || envRunner;
     const serviceTok = String(process.env.BACKEND_SERVICE_TOKEN || process.env.SERVICE_TOKEN || '').trim();
@@ -14466,6 +14390,8 @@ ${executableBody}`;
       token = serviceTok;
     } else if (authMode === 'service_first') {
       token = serviceTok || runnerTok;
+    } else if (authMode === 'env_only') {
+      token = envRunner || serviceTok;
     } else {
       token = runnerTok || serviceTok;
     }
@@ -14476,6 +14402,78 @@ ${executableBody}`;
       }
     }
     return headers;
+  }
+
+  /**
+   * POST save-analysis with the same Bearer retry sequence used by save-data / workflow completion.
+   * Handles transient 401 (stale job token vs env/service tokens) and network blips.
+   */
+  async postRunnerSaveAnalysis(pageId, payload, jobId, options = {}) {
+    const axios = (await import('axios')).default;
+    let pid = pageId != null ? String(pageId) : '';
+    const timeout = options.timeout ?? 120000;
+    const postOpts = { headers: this.getAuthHeaders(), timeout };
+    let lastErr = null;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        return await axios.post(
+          `${this.backendUrl}/api/runner/pages/${pid}/save-analysis`,
+          payload,
+          postOpts
+        );
+      } catch (postErr) {
+        lastErr = postErr;
+        const st = postErr.response?.status;
+        if (st === 401 && attempt < 5) {
+          const modes = [
+            'runner_refresh',
+            'service_only',
+            'service_first',
+            'env_only',
+            'ignore_ctx',
+            'runner_first'
+          ];
+          const mode = modes[attempt] || 'runner_first';
+          if (mode === 'runner_refresh') {
+            const envTok = String(process.env.RUNNER_TOKEN || '').trim();
+            const snapTok = String(this._runnerTokenSnapshot || '').trim();
+            this.context.runner_token = envTok || snapTok || this.context.runner_token;
+          }
+          let authMode = 'runner_first';
+          let ignoreContextRunner = false;
+          if (mode === 'service_only') authMode = 'service_only';
+          else if (mode === 'service_first') authMode = 'service_first';
+          else if (mode === 'env_only') authMode = 'env_only';
+          else if (mode === 'ignore_ctx') {
+            authMode = 'runner_first';
+            ignoreContextRunner = true;
+          }
+          postOpts.headers = this.getAuthHeaders({ authMode, ignoreContextRunner });
+          await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+          continue;
+        }
+        if (st === 404 && attempt < 5 && typeof options.on404 === 'function') {
+          const recovered = await options.on404(pid, postErr);
+          if (recovered) {
+            pid = String(recovered);
+            if (typeof options.onPageIdResolved === 'function') {
+              options.onPageIdResolved(pid);
+            }
+            await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+            continue;
+          }
+        }
+        const msg = String(postErr?.message || '');
+        const retryable =
+          attempt < 5 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
+        if (retryable) {
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        throw postErr;
+      }
+    }
+    throw lastErr || new Error('save-analysis failed after retries');
   }
 
   /**
@@ -20165,6 +20163,9 @@ ${executableBody}`;
         
       case 'save-page-data':
         await this.executeSavePageDataStep(page, step, workflowState, jobId);
+        break;
+      case 'save-data':
+        await this.executeSaveDataStep(page, step, workflowState, jobId);
         break;
       case 'execute-code':
         await this.executeCodeStep(page, step, workflowState);
