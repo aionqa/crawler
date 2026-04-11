@@ -332,6 +332,8 @@ class WorkflowAnalyzer {
     this.context = context;
     this.workflowTemplate = null;
     this.workflowCapabilities = this.detectCapabilities([]);
+    /** Snapshot runner token at construction for late-job API calls (avoids stale context-only tokens). */
+    this._runnerTokenSnapshot = String(process.env.RUNNER_TOKEN || context?.runner_token || '').trim();
   }
 
   /**
@@ -2661,12 +2663,24 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       err.response = { status: 404 };
       throw err;
     }
-    const res = await axios.get(`${this.backendUrl}/pages/${encodeURIComponent(id)}`, {
+    const urlRunner = `${this.backendUrl}/api/runner/pages/${encodeURIComponent(id)}`;
+    const urlLegacy = `${this.backendUrl}/pages/${encodeURIComponent(id)}`;
+    const opts = {
       headers: this.getAuthHeaders(),
       timeout: requestOptions.timeout ?? 60000,
       ...requestOptions,
-    });
-    return res.data;
+    };
+    try {
+      const res = await axios.get(urlRunner, opts);
+      return res.data;
+    } catch (firstErr) {
+      const st = firstErr.response?.status;
+      if (st === 404 || st === 401) {
+        const res2 = await axios.get(urlLegacy, opts);
+        return res2.data;
+      }
+      throw firstErr;
+    }
   }
 
   /**
@@ -2967,7 +2981,18 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       return pagePrompt ? (base ? `${base}\n\n=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}` : `=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}`).trim() : base;
     }
     try {
-      const res = await axios.get(`${this.backendUrl}/pages/${pageId}`, { headers: this.getAuthHeaders(), timeout: 5000 });
+      const opts = { headers: this.getAuthHeaders(), timeout: 5000 };
+      let res;
+      try {
+        res = await axios.get(`${this.backendUrl}/api/runner/pages/${encodeURIComponent(pageId)}`, opts);
+      } catch (e1) {
+        const st = e1.response?.status;
+        if (st === 404 || st === 401) {
+          res = await axios.get(`${this.backendUrl}/pages/${encodeURIComponent(pageId)}`, opts);
+        } else {
+          throw e1;
+        }
+      }
       const pagePrompt = (
         res.data?.special_prompts?.project_tree_page_prompt ||
         res.data?.special_prompts?.page_prompt ||
@@ -3699,9 +3724,11 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 } catch (postErr) {
                   const st = postErr.response?.status;
                   if (st === 401 && attempt < 4) {
+                    const snapTok = String(this._runnerTokenSnapshot || '').trim();
                     const envTok = String(process.env.RUNNER_TOKEN || '').trim();
-                    if (envTok) {
-                      this.context.runner_token = envTok;
+                    const refreshTok = envTok || snapTok;
+                    if (refreshTok) {
+                      this.context.runner_token = refreshTok;
                       postOpts.headers = this.getAuthHeaders();
                       await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
                       continue;
@@ -9219,9 +9246,11 @@ return {
         } catch (postErr) {
           const st = postErr.response?.status;
           if (st === 401 && attempt < 4) {
+            const snapTok = String(this._runnerTokenSnapshot || '').trim();
             const envTok = String(process.env.RUNNER_TOKEN || '').trim();
-            if (envTok) {
-              this.context.runner_token = envTok;
+            const refreshTok = envTok || snapTok;
+            if (refreshTok) {
+              this.context.runner_token = refreshTok;
               postOpts.headers = this.getAuthHeaders();
               await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
               continue;
@@ -11347,6 +11376,48 @@ return {
     return s;
   }
 
+  /**
+   * When the model references aliases like elUsername / usernameInput without declarations but the
+   * same script contains quoted '#username' selectors (or journey guard checks), inject const locators.
+   * Generalized: driven only by id tokens present in the script text.
+   */
+  injectUndeclaredLocatorAliasesFromQuotedIds(script) {
+    if (!script || typeof script !== 'string') return script;
+    const ids = new Set();
+    const reQuoted = /['"]#([\w-]+)['"]/g;
+    let qm;
+    while ((qm = reQuoted.exec(script)) !== null) {
+      if (qm[1]) ids.add(qm[1]);
+    }
+    if (ids.size === 0) return script;
+    const injections = [];
+    for (const rawId of ids) {
+      if (!rawId) continue;
+      const pascal = rawId.charAt(0).toUpperCase() + rawId.slice(1);
+      const candidates = [
+        `el${pascal}`,
+        `${rawId}Input`,
+        `${rawId}Btn`,
+        `${rawId}Button`,
+        `el${rawId}`,
+        `${pascal}Input`,
+      ];
+      const selJson = JSON.stringify(`#${rawId}`);
+      for (const cand of candidates) {
+        if (!/^[A-Za-z_$][\w$]*$/.test(cand)) continue;
+        const escaped = cand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const useRe = new RegExp(`\\bawait\\s+${escaped}\\.`);
+        const declRe = new RegExp(`\\b(const|let|var)\\s+${escaped}\\s*=`);
+        if (useRe.test(script) && !declRe.test(script)) {
+          injections.push(`const ${cand} = page.locator(${selJson});`);
+        }
+      }
+    }
+    if (!injections.length) return script;
+    const unique = [...new Set(injections)];
+    return `${unique.join('\n')}\n${script}`;
+  }
+
   stripTypeScriptArtifacts(script) {
     if (!script || typeof script !== 'string') return script;
 
@@ -11959,6 +12030,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       }
     }
 
+    s = this.injectUndeclaredLocatorAliasesFromQuotedIds(s);
     s = this.replaceEmptyJourneyFillValues(s);
 
     return s;
