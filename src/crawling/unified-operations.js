@@ -3202,11 +3202,19 @@ const modeHandlers = {
       const lastWorkflow = allWorkflows.length > 0 ? allWorkflows[allWorkflows.length - 1] : null;
       const journeys = lastWorkflow?.journeys || [];
       const legs = lastWorkflow?.legs || [];
+      const terminalJourneySuccessValues = new Set(['success', 'completed', 'passed', 'done', 'ok']);
       const journeyRowSucceeded = (j) => {
         if (!j || typeof j !== 'object') return false;
         if (j.expected_outcome_verified === true) return true;
-        const p = String(j.justification_status || j.status || j.final_result || '').toLowerCase();
-        return p === 'success' || p === 'completed';
+        // Prefer `status` over `justification_status`: after bounded retries the verifier can leave a
+        // stale justification from an earlier iteration while the journey row's terminal `status` is success
+        // (matches workflow-analyzer final leg logs vs CRAWLER-TEXT "all journeys failed" false positives).
+        const st = String(j.status || '').toLowerCase();
+        if (terminalJourneySuccessValues.has(st)) return true;
+        const jst = String(j.justification_status || '').toLowerCase();
+        if (terminalJourneySuccessValues.has(jst)) return true;
+        const fr = String(j.final_result || '').toLowerCase();
+        return terminalJourneySuccessValues.has(fr);
       };
       const journeyRowFailedOnly = (j) => {
         if (journeyRowSucceeded(j)) return false;
