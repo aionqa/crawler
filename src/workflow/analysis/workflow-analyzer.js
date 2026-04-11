@@ -10686,6 +10686,18 @@ return {
       if (/^\s*if\s*\(\s*!act\s*\|\|\s*!act\.type\s*\)/.test(line)) {
         continue;
       }
+      if (/^\s*if\s*\(\s*!act\s*\|\|.*act\.(type|selector)/i.test(line)) {
+        continue;
+      }
+      if (/^\s*if\s*\(\s*act\.type\s*===/i.test(line)) {
+        continue;
+      }
+      if (/^\s*}\s*else\s+if\s*\(\s*act\.type\s*===/i.test(line)) {
+        continue;
+      }
+      if (/await\s+locator\.(fill|selectOption|click|check|uncheck|press)\(\s*act\./i.test(line)) {
+        continue;
+      }
       
       // Detect start of async IIFE: "return await (async () => {" or "async () => {"
       if (line.match(/^(return\s+await\s*\(async|async\s*\(\)\s*=>\s*\{)/)) {
@@ -13620,6 +13632,12 @@ const runJourney = async (task) => {
   return task;
 };
 const run_step = runJourney;
+const safeWait = async (duration) => {
+  const resolved = typeof duration === 'number' && Number.isFinite(duration) ? duration : ms(duration);
+  const capped = Math.min(Math.max(0, Math.floor(resolved)), 120000);
+  await page.waitForTimeout(capped);
+};
+const sleep = safeWait;
 ${executableBody}`;
         let fn;
         try {
