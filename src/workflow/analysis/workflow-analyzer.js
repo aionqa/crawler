@@ -176,6 +176,73 @@ function inventorySelectorMatches(candidate, inventory) {
   return false;
 }
 
+/** Labels inside :has-text('...') / :has-text("...") for inventory alignment. */
+function extractHasTextLabelsFromSelector(sel) {
+  const out = [];
+  const s = String(sel || '');
+  const re = /:has-text\(\s*(['"])((?:\\.|(?!\1).)*)\1\s*\)/gi;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const inner = String(m[2] || '')
+      .replace(/\\(.)/g, '$1')
+      .trim();
+    if (inner) out.push(inner);
+  }
+  return out;
+}
+
+/**
+ * Map a journey action to Playwright structural inventory (link vs button) so script prompts
+ * avoid button:has-text when the DOM exposes the control as an <a href>.
+ */
+function inferInventorySemanticForJourneyAction(action, workflowState) {
+  const interactive = Array.isArray(workflowState?.playwrightAnalysis?.interactive_elements)
+    ? workflowState.playwrightAnalysis.interactive_elements
+    : [];
+  const sel = String(action?.selector || action?.locator || '');
+  const labels = extractHasTextLabelsFromSelector(sel);
+  const desc = String(action?.description || '').trim();
+  if (labels.length === 0 && desc.length >= 3) {
+    labels.push(desc.slice(0, 120));
+  }
+  let best = null;
+  for (const el of interactive) {
+    const et = String(el.type || '').toLowerCase();
+    if (et !== 'link' && et !== 'button') continue;
+    const txt = String(el.text || '').trim().toLowerCase();
+    if (!txt) continue;
+    for (const rawLab of labels) {
+      const lab = String(rawLab || '')
+        .trim()
+        .toLowerCase();
+      if (lab.length < 2) continue;
+      if (txt.includes(lab) || lab.includes(txt)) {
+        const score = Math.min(txt.length, lab.length);
+        if (!best || score > best.score) {
+          best = { semantic: et, selector: el.selector, score };
+        }
+      }
+    }
+  }
+  return best ? { inventory_semantic: best.semantic, inventory_selector: best.selector } : null;
+}
+
+function buildJourneyScriptActionBrief(actions, workflowState) {
+  if (!Array.isArray(actions)) return [];
+  return actions.map((a) => {
+    const row = {
+      type: a.type || null,
+      selector: a.selector || a.locator || null,
+    };
+    const inv = inferInventorySemanticForJourneyAction(a, workflowState);
+    if (inv) {
+      row.inventory_semantic = inv.inventory_semantic;
+      if (inv.inventory_selector) row.inventory_selector = inv.inventory_selector;
+    }
+    return row;
+  });
+}
+
 /**
  * Remove journeys whose click/fill/... selectors are absent from the latest Playwright inventory.
  * Skips document-only surfaces (handled elsewhere) and skips when inventory is empty.
@@ -4891,10 +4958,10 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       const interactiveForScript = this.getInteractiveJourneyActionsForScript(filteredJourney.actions);
       stepPayload.journey_script_allows_form_mutations =
         this.journeyInteractiveActionsAllowFormMutations(interactiveForScript);
-      stepPayload.journey_script_action_brief = interactiveForScript.slice(0, 14).map((a) => ({
-        type: a.type || null,
-        selector: a.selector || a.locator || null,
-      }));
+      stepPayload.journey_script_action_brief = buildJourneyScriptActionBrief(
+        interactiveForScript.slice(0, 14),
+        workflowState
+      );
     }
     
     // For while-loop iterations: include iteration/step id only. Do NOT set conversation_key: backend returns 404 if id is not an existing conversation, so omit to let backend create new conversation and avoid log errors.
@@ -5452,6 +5519,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         if (Array.isArray(stepPayload.journey_script_action_brief) && stepPayload.journey_script_action_brief.length > 0) {
           effectiveTemplate += `\n- AUTHORITATIVE ACTION SEQUENCE (follow in order; do not substitute unrelated flows): ${JSON.stringify(stepPayload.journey_script_action_brief)}\n`;
         }
+        effectiveTemplate +=
+          '\n- DOM INVENTORY ALIGNMENT: journey_script_action_brief entries may include inventory_semantic ("link" or "button") and inventory_selector from live Playwright analysis. When inventory_semantic is "link", target the anchor (use inventory_selector as a quoted page.locator argument, or page.getByRole("link", { name: ... })) — do not use button:has-text for that action. When inventory_semantic is "button", prefer real button / [role=button] patterns consistent with the inventory.\n'
+          + '- page.locator(...) first argument must be a JavaScript string (quotes or backticks) or a const bound to a string — never bare CSS tokens like a:has-text(...) without quotes (ReferenceError).\n';
       }
       if (isJustifyJourneyStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
@@ -5467,6 +5537,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- Omit decorative regions, vague "click here" areas, and plain same-document navigation with no state change.\n'
           + '- Never create hypothetical or conditional journeys (for example: "if available", "if present", "maybe", "try"). If a concrete element is not observed, do not emit that journey.\n'
           + '- Every journey MUST have a non-empty "actions" array. Each action that interacts with the DOM MUST include a concrete Playwright-capable "selector" string (no placeholders like "selector" or "{{...}}").\n'
+          + '- When interactive_elements / link inventory lists a control as type "link" (e.g. marketing "Read more" on cards), use link selectors (a[href], a:has-text(...)) or getByRole("link") — do not label it button:has-text unless the DOM is actually a <button>.\n'
           + '- Every emitted journey must have at least one deterministic post-action verification signal (visible message/state change/url change) described in expected_outcome.\n'
           + '- If nothing qualifies, return an empty journeys array ([]).\n';
       }
@@ -11569,14 +11640,37 @@ return {
       /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*'((?:[^'\\]|\\.)*)'\s*\))\s*\)/gi,
       (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))})`
     );
-    // Same as above but with a comma-separated selector tail (unquoted), e.g. locator(a:has-text("Edit"), button).
+    // Comma-separated junk after unquoted tag:has-text("...") — models emit locator(a:has-text("x"), button) or longer invalid unions; keep first :has-text only.
     s = s.replace(
-      /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*"(?:[^"\\]|\\.)*"\s*\)\s*,\s*[^)]+)\)/gi,
-      (_m, inner) => `.locator(${JSON.stringify(String(inner || ''))})`
+      /\.locator\(\s*([a-z][a-z0-9_-]*):has-text\(\s*"((?:[^"\\]|\\.)*)"\s*\)\s*,\s*[^)]*\)/gi,
+      (_m, tag, inner) => {
+        const unescaped = String(inner || '')
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\');
+        const esc = unescaped.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        const fullSel = `${tag}:has-text("${esc}")`;
+        return `.locator(${JSON.stringify(fullSel)})`;
+      }
     );
     s = s.replace(
-      /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*'(?:[^'\\]|\\.)*'\s*\)\s*,\s*[^)]+)\)/gi,
-      (_m, inner) => `.locator(${JSON.stringify(String(inner || ''))})`
+      /\.locator\(\s*([a-z][a-z0-9_-]*):has-text\(\s*'((?:[^'\\]|\\.)*)'\s*\)\s*,\s*[^)]*\)/gi,
+      (_m, tag, inner) => {
+        const unescaped = String(inner || '')
+          .replace(/\\'/g, "'")
+          .replace(/\\\\/g, '\\');
+        const esc = unescaped.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const fullSel = `${tag}:has-text('${esc}')`;
+        return `.locator(${JSON.stringify(fullSel)})`;
+      }
+    );
+    // Stray attribute / union tail after a quoted .locator("...") before .click (e.g. `locator("a:has-text(...)"), [role="button"]:has-text(...)).click`).
+    s = s.replace(
+      /(\.locator\(\s*"(?:\\.|[^"])*"\s*\))\s*,\s*\[[^\]]+\][^\n;]*?(?=\s*\.click\b)/gi,
+      '$1'
+    );
+    s = s.replace(
+      /(\.locator\(\s*'(?:\\.|[^'])*'\s*\))\s*,\s*\[[^\]]+\][^\n;]*?(?=\s*\.click\b)/gi,
+      '$1'
     );
 
     // Corrupted chain: locator(input[name="x"] -> first()) — LLM uses "->" instead of .first().
