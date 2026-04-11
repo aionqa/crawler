@@ -150,7 +150,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
     return status === 401 || /invalid token/i.test(msg) || /invalid token/i.test(responseMsg);
   };
 
-  const MAX_TRANSIENT_RETRIES = 3;
+  const MAX_TRANSIENT_RETRIES = 6;
 
   const postToAiServiceWithFailover = async (requestBody, requestConfig, initialToken) => {
     let currentToken = initialToken;
@@ -178,7 +178,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
           }
           if (isTransientGatewayError(e) && transientAttempts < MAX_TRANSIENT_RETRIES) {
             transientAttempts++;
-            const delayMs = Math.min(8000, 500 * 2 ** (transientAttempts - 1));
+            const delayMs = Math.min(16000, 500 * 2 ** (transientAttempts - 1));
             const st = e.response?.status ?? e.status ?? '?';
             console.warn(
               `[OpenAI-Client] Transient HTTP ${st} from ${baseUrl}; retry ${transientAttempts}/${MAX_TRANSIENT_RETRIES} in ${delayMs}ms...`

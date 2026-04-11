@@ -1,4 +1,4 @@
-import { createBackendAxiosWithRetries } from '../../utils/backend-http-retry.js';
+import { createBackendAxiosWithRetries, retryTransientAsync } from '../../utils/backend-http-retry.js';
 
 const axios = createBackendAxiosWithRetries();
 import { isSearchEngineInfraUrl } from '../../utils/search-engine-infra-url.js';
@@ -4072,12 +4072,16 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         fileId = key;
         publicUrl = returnedUrl;
 
-        await axios.put(presignedUrl, screenshot, {
-          headers: { 'Content-Type': mimeType },
-          maxBodyLength: Infinity,
-          maxContentLength: Infinity,
-          timeout: 30000
-        });
+        await retryTransientAsync(
+          () =>
+            axios.put(presignedUrl, screenshot, {
+              headers: { 'Content-Type': mimeType },
+              maxBodyLength: Infinity,
+              maxContentLength: Infinity,
+              timeout: 30000
+            }),
+          { maxRetries: 8 }
+        );
 
         uploaded = true;
         console.log(`✅ Screenshot uploaded to MinIO: ${returnedUrl}`);
@@ -13217,11 +13221,15 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         });
         
         if (presignedBefore.data.key && presignedBefore.data.url) {
-          await axios.put(presignedBefore.data.url, screenshotBefore, {
-            headers: { 'Content-Type': 'image/png' },
-            maxBodyLength: Infinity,
-            maxContentLength: Infinity
-          });
+          await retryTransientAsync(
+            () =>
+              axios.put(presignedBefore.data.url, screenshotBefore, {
+                headers: { 'Content-Type': 'image/png' },
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity
+              }),
+            { maxRetries: 8 }
+          );
           screenshotBeforeKey = presignedBefore.data.key;
           
           // Store screenshot link with action metadata
@@ -13748,11 +13756,15 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
                 
                 if (presignedResponse.data.key && presignedResponse.data.url) {
                   // Upload screenshot
-                  await axios.put(presignedResponse.data.url, screenshotBuffer, {
-                    headers: { 'Content-Type': 'image/png' },
-                    maxBodyLength: Infinity,
-                    maxContentLength: Infinity
-                  });
+                  await retryTransientAsync(
+                    () =>
+                      axios.put(presignedResponse.data.url, screenshotBuffer, {
+                        headers: { 'Content-Type': 'image/png' },
+                        maxBodyLength: Infinity,
+                        maxContentLength: Infinity
+                      }),
+                    { maxRetries: 8 }
+                  );
                   
                   const screenshotKey = presignedResponse.data.key;
                   
@@ -14416,11 +14428,15 @@ const sleep = safeWait;
         });
         
         if (presignedAfter.data.key && presignedAfter.data.url) {
-          await axios.put(presignedAfter.data.url, screenshotAfter, {
-            headers: { 'Content-Type': 'image/png' },
-            maxBodyLength: Infinity,
-            maxContentLength: Infinity
-          });
+          await retryTransientAsync(
+            () =>
+              axios.put(presignedAfter.data.url, screenshotAfter, {
+                headers: { 'Content-Type': 'image/png' },
+                maxBodyLength: Infinity,
+                maxContentLength: Infinity
+              }),
+            { maxRetries: 8 }
+          );
           screenshotAfterKey = presignedAfter.data.key;
           
           // Store screenshot link with action metadata
@@ -14874,12 +14890,16 @@ const sleep = safeWait;
       const { url: presignedUrl, key, publicUrl: returnedUrl } = presignedResponse.data;
 
       // Upload file to presigned URL
-      await axios.put(presignedUrl, buffer, {
-        headers: { 'Content-Type': contentType },
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-        timeout: 30000
-      });
+      await retryTransientAsync(
+        () =>
+          axios.put(presignedUrl, buffer, {
+            headers: { 'Content-Type': contentType },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+            timeout: 30000
+          }),
+        { maxRetries: 8 }
+      );
 
       console.log(`✅ File uploaded for download: ${returnedUrl}`);
       return returnedUrl || null;

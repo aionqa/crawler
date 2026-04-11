@@ -3,7 +3,9 @@
  * Manages 24-hour AI service tokens issued by backend
  */
 
-import axios from 'axios';
+import { createBackendAxiosWithRetries } from './utils/backend-http-retry.js';
+
+const axios = createBackendAxiosWithRetries({ maxRetries: 10, capDelayMs: 25000 });
 
 const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 const RUNNER_TOKEN = process.env.RUNNER_TOKEN;
