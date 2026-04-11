@@ -75,6 +75,157 @@ function collectAllowedDocumentOnlySelectors(workflowState) {
   return allowed;
 }
 
+/** Normalize selector strings for inventory matching (whitespace + case). */
+function normalizeSelectorTokenForInventory(s) {
+  return String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * Collect CSS / Playwright selector strings observed during Playwright structural analysis.
+ * Used to drop AI journeys that reference controls not present on the current DOM snapshot
+ * (e.g. stale `.card .toggle` after a layout change, SPA sidebar vs card UI).
+ */
+function collectPlaywrightSelectorInventory(workflowState) {
+  const raw = new Set();
+  const pa = workflowState?.playwrightAnalysis || {};
+  const add = (v) => {
+    const t = String(v || '').trim();
+    if (t) raw.add(t);
+  };
+  const addFromSelectorsArray = (arr) => {
+    if (!Array.isArray(arr)) return;
+    for (const entry of arr) {
+      if (!entry || typeof entry !== 'object') continue;
+      add(entry.selector);
+    }
+  };
+
+  for (const form of Array.isArray(pa.forms) ? pa.forms : []) {
+    if (!form || typeof form !== 'object') continue;
+    add(form.selector);
+    for (const field of Array.isArray(form.fields) ? form.fields : []) {
+      if (!field || typeof field !== 'object') continue;
+      add(field.selector);
+      addFromSelectorsArray(field.selectors);
+    }
+    for (const btn of Array.isArray(form.buttons) ? form.buttons : []) {
+      if (!btn || typeof btn !== 'object') continue;
+      add(btn.selector);
+      addFromSelectorsArray(btn.selectors);
+    }
+  }
+
+  for (const el of Array.isArray(pa.interactive_elements) ? pa.interactive_elements : []) {
+    if (!el || typeof el !== 'object') continue;
+    add(el.selector);
+    addFromSelectorsArray(el.selectors);
+    if (el.element_info && typeof el.element_info === 'object') {
+      add(el.element_info.selector);
+      add(el.element_info.primary_selector);
+      addFromSelectorsArray(el.element_info.selectors);
+    }
+    add(el.primary_selector);
+  }
+
+  for (const L of Array.isArray(pa.links) ? pa.links : []) {
+    if (!L || typeof L !== 'object') continue;
+    add(L.selector);
+    addFromSelectorsArray(L.selectors);
+  }
+
+  for (const el of Array.isArray(pa.non_interactive_elements) ? pa.non_interactive_elements : []) {
+    if (!el || typeof el !== 'object') continue;
+    add(el.selector);
+  }
+
+  const walkMenu = (nodes) => {
+    if (!Array.isArray(nodes)) return;
+    for (const node of nodes) {
+      if (!node || typeof node !== 'object') continue;
+      add(node.selector);
+      if (Array.isArray(node.items)) walkMenu(node.items);
+      if (Array.isArray(node.children)) walkMenu(node.children);
+    }
+  };
+  walkMenu(Array.isArray(pa.menu_items) ? pa.menu_items : []);
+
+  const normalized = new Map();
+  for (const s of raw) {
+    const n = normalizeSelectorTokenForInventory(s);
+    if (n) normalized.set(n, s);
+  }
+  return { raw, normalized };
+}
+
+function inventorySelectorMeaningful(norm) {
+  return norm.length >= 4 || /[.#\[:=]/.test(norm);
+}
+
+function inventorySelectorMatches(candidate, inventory) {
+  const t = String(candidate || '').trim();
+  if (!t) return false;
+  if (inventory.raw.has(t)) return true;
+  const n = normalizeSelectorTokenForInventory(t);
+  if (inventory.normalized.has(n)) return true;
+  if (!inventorySelectorMeaningful(n)) return false;
+  for (const r of inventory.raw) {
+    const rn = normalizeSelectorTokenForInventory(r);
+    if (!rn || !inventorySelectorMeaningful(rn)) continue;
+    if (n === rn || n.includes(rn) || rn.includes(n)) return true;
+  }
+  return false;
+}
+
+/**
+ * Remove journeys whose click/fill/... selectors are absent from the latest Playwright inventory.
+ * Skips document-only surfaces (handled elsewhere) and skips when inventory is empty.
+ */
+function filterJourneysAgainstPlaywrightInventory(journeys, workflowState) {
+  if (!Array.isArray(journeys) || journeys.length === 0) return journeys;
+  if (isPlaywrightNonInteractiveDocumentSurface(workflowState)) return journeys;
+  const inventory = collectPlaywrightSelectorInventory(workflowState);
+  if (inventory.raw.size === 0) return journeys;
+
+  const requiresInventoryMatch = (actionType) => {
+    const type = String(actionType || '').toLowerCase();
+    return ['click', 'fill', 'type', 'check', 'uncheck', 'selectoption', 'hover', 'press'].includes(type);
+  };
+
+  const resolveActionSelector = (action) => {
+    if (!action || typeof action !== 'object') return '';
+    return (
+      action.selector ||
+      (action.element_info && action.element_info.selector) ||
+      action.element_info?.primary_selector ||
+      ''
+    );
+  };
+
+  const before = journeys.length;
+  const out = [];
+  for (const journey of journeys) {
+    if (!journey || typeof journey !== 'object') continue;
+    const actions = Array.isArray(journey.actions) ? journey.actions : [];
+    let drop = false;
+    for (const action of actions) {
+      if (!requiresInventoryMatch(action?.action_type || action?.type)) continue;
+      const sel = resolveActionSelector(action);
+      if (!inventorySelectorMatches(sel, inventory)) {
+        console.warn(
+          `⚠️ [JOURNEYS-QUALITY] Dropping journey "${journey.journey_id || journey.description || 'unknown'}" — interactive selector not in Playwright inventory: ${String(sel).substring(0, 140)}`
+        );
+        drop = true;
+        break;
+      }
+    }
+    if (!drop) out.push(journey);
+  }
+  if (out.length !== before) {
+    console.warn(`⚠️ [JOURNEYS-QUALITY] Playwright inventory filter: ${before} → ${out.length} journey(s)`);
+  }
+  return out;
+}
+
 function computeStableJourneyId(pageUrl, journey) {
   try {
     const crypto = require('crypto');
@@ -6592,6 +6743,13 @@ return {
           if (droppedEmptyJourneys > 0) {
             console.warn(`⚠️ [JOURNEYS-QUALITY] Removed ${droppedEmptyJourneys} journey(s) with no executable actions after selector validation`);
           }
+          if (journeys.length > 0) {
+            const beforeInv = journeys.length;
+            journeys = filterJourneysAgainstPlaywrightInventory(journeys, workflowState);
+            if (journeys.length !== beforeInv) {
+              console.log(`✅ [JOURNEYS-INVENTORY] Selector grounding filter: ${beforeInv} → ${journeys.length} journey(s)`);
+            }
+          }
           if (journeys.length > 0 && this.isSparseInteractiveCrawlSurface(workflowState)) {
             const beforeSparse = journeys.length;
             journeys = this.filterImpossibleJourneysOnSparseSurface(journeys, workflowState);
@@ -11408,6 +11566,20 @@ return {
     if (hasBrokenFillBySelectorFragment) {
       s = s.replace(
         /const\s+el\s*=\s*await\s+page\.\$\(\s*selector\s*\)\s*;\s*if\s*\(!el\)\s*return\s+false\s*;\s*await\s+el\.fill\(\s*value\s*\)\s*;\s*return\s+true\s*;\s*/m,
+        ''
+      );
+    }
+
+    // LLM leaked helper parameter `selector` into top-level page.* calls → ReferenceError: selector is not defined.
+    const selectorVarDeclared =
+      /\b(const|let|var)\s+selector\s*=/.test(s) ||
+      /\bfor\s*\([^)]*\bselector\b[^)]*\)/.test(s) ||
+      /\(\s*selector\s*\)\s*=>/.test(s) ||
+      /\bfunction\s*\([^)]*\bselector\b[^)]*\)/.test(s) ||
+      /\basync\s+function\s*\([^)]*\bselector\b[^)]*\)/.test(s);
+    if (!selectorVarDeclared) {
+      s = s.replace(
+        /^\s*await\s+page\.(click|dblclick|fill|check|uncheck|waitForSelector|tap|hover)\(\s*selector\s*[^;]*;\s*$/gm,
         ''
       );
     }
