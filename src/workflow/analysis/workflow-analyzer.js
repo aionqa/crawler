@@ -3698,6 +3698,14 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                   break;
                 } catch (postErr) {
                   const st = postErr.response?.status;
+                  if (st === 401 && attempt < 4) {
+                    const envTok = String(process.env.RUNNER_TOKEN || '').trim();
+                    if (envTok) {
+                      this.context.runner_token = envTok;
+                      await new Promise((r) => setTimeout(r, 350 * (attempt + 1)));
+                      continue;
+                    }
+                  }
                   if (st === 404 && attempt < 4 && workflowState.pageUrl) {
                     console.warn(`⚠️ [JOURNEYS-FINAL] save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
                     const recovered = await this.ensurePageId(workflowState, effectiveJobId, { forceDiscover: true });
@@ -11219,7 +11227,8 @@ return {
    * post-run verification do not treat intentional empty submissions as inconclusive failures.
    */
   replaceEmptyJourneyFillValues(script) {
-    if (!script || typeof script !== 'string' || !/\.fill\s*\(\s*['"]\s*['"]\s*\)/.test(script)) {
+    if (!script || typeof script !== 'string') return script;
+    if (!/\.fill\s*\(\s*['"]\s*['"]\s*\)/.test(script) && !/\.fill\s*\(\s*\)/.test(script)) {
       return script;
     }
     let s = script;
@@ -11269,6 +11278,49 @@ return {
           .join(' ');
       const valueExpr = this.inferJourneyAutofillValueExpr(hint);
       return `.fill(${valueExpr})`;
+    });
+
+    // `.fill()` with no arguments (invalid Playwright / LLM truncation).
+    s = s.replace(/\.fill\(\s*\)/g, (match, offset, whole) => {
+      const before = whole.slice(Math.max(0, offset - 220), offset);
+      const idMatch = before.match(/([A-Za-z_$][\w$]*)\s*$/);
+      const varName = idMatch ? idMatch[1] : '';
+      const vn = String(varName || '').toLowerCase();
+      if (vn) {
+        if (vn.includes('password') || vn.includes('passwd') || vn === 'pwd' || vn === 'pass') {
+          return `.fill(String(((input_credentials && input_credentials.password) || 'JourneyTestPass#1')))`;
+        }
+        if (vn.includes('email') || vn.endsWith('mail')) {
+          return `.fill(${JSON.stringify('journey-autofill@automation.aionqa.invalid')})`;
+        }
+        if (vn.includes('message') || vn.includes('comment') || vn.includes('textarea') || vn.includes('body')) {
+          return `.fill(${JSON.stringify('Automated journey validation message.')})`;
+        }
+        if (vn.includes('name') || vn.includes('user') || vn.includes('first') || vn.includes('last')) {
+          return `.fill(${JSON.stringify('AionQA Journey Test User')})`;
+        }
+        if (vn.includes('phone') || vn.includes('tel') || vn.includes('mobile')) {
+          return `.fill(${JSON.stringify('+15550123456')})`;
+        }
+        if (vn.includes('url') || vn.includes('website')) {
+          return `.fill(${JSON.stringify('https://example.com')})`;
+        }
+      }
+      const locDouble = before.match(/\.locator\(\s*"((?:[^"\\]|\\.)*)"\s*\)(?:\s*\.first\(\s*\))?\s*$/);
+      const locSingle = before.match(/\.locator\(\s*'((?:[^'\\]|\\.)*)'\s*\)(?:\s*\.first\(\s*\))?\s*$/);
+      const locM = locDouble || locSingle;
+      if (locM) {
+        const inner = String(locM[1] || '').replace(/\\(.)/g, '$1');
+        return `.fill(${this.inferJourneyAutofillValueExpr(inner)})`;
+      }
+      const roleName = before.match(/name:\s*['"]([^'"]+)['"]\s*\}/);
+      const labelArg = before.match(/getByLabel\(\s*['"]([^'"]+)['"]/i);
+      const placeholderArg = before.match(/getByPlaceholder\(\s*['"]([^'"]+)['"]/i);
+      const hint =
+        [varName, roleName && roleName[1], labelArg && labelArg[1], placeholderArg && placeholderArg[1]]
+          .filter(Boolean)
+          .join(' ');
+      return `.fill(${this.inferJourneyAutofillValueExpr(hint)})`;
     });
 
     return s;
@@ -11499,6 +11551,17 @@ return {
       (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))})`
     );
 
+    // Corrupted chain: locator(input[name="x"] -> first()) — LLM uses "->" instead of .first().
+    s = s.replace(
+      /\.locator\(\s*((?:input|textarea|select|button)(?:\[[^\]]*(?:\\.[^\]]*)*\])+)\s*->\s*first\(\s*\)\s*\)/gi,
+      (_m, rawSel) => {
+        const normalized = String(rawSel || '')
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\');
+        return `.locator(${JSON.stringify(normalized)}).first()`;
+      }
+    );
+
     // Unquoted tag[attr] selectors inside .locator(...): LLMs emit page.locator(input[name="x"])
     // without string quotes — `input` parses as an identifier and the script throws before Playwright runs.
     s = s.replace(
@@ -11534,6 +11597,17 @@ return {
       if (t.includes(',')) return full;
       return `.fill(${JSON.stringify(t)})`;
     });
+
+    // Empty .fill() after a quoted .locator(...) / .first() chain (common when the model truncates).
+    s = s.replace(
+      /\.locator\(\s*(['"])((?:\\.|(?!\1).)*)\1\s*\)(\s*\.first\(\s*\))?\s*\.fill\(\s*\)/gi,
+      (_full, q, inner, firstCall) => {
+        const unescaped = String(inner || '').replace(/\\(.)/g, '$1');
+        const inferred = this.inferJourneyAutofillValueExpr(unescaped);
+        const chainFirst = firstCall && String(firstCall).includes('.first') ? '.first()' : '';
+        return `.locator(${q}${inner}${q})${chainFirst}.fill(${inferred})`;
+      }
+    );
 
     // LLMs often emit a quoted token that is meant as an HTML id (e.g. page.click("modalOpener")).
     // Playwright treats that string as a tag-name selector, not #id. Promote camelCase / snake_case
@@ -11863,6 +11937,8 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         s = s.replace(/\bsel\./g, 'locator.');
       }
     }
+
+    s = this.replaceEmptyJourneyFillValues(s);
 
     return s;
   }
@@ -14271,8 +14347,10 @@ ${executableBody}`;
    */
   getAuthHeaders() {
     const headers = {};
-    if (this.context.runner_token) {
-      headers['Authorization'] = `Bearer ${this.context.runner_token}`;
+    const token = String(this.context?.runner_token || process.env.RUNNER_TOKEN || '').trim();
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+      headers['x-runner-token'] = token;
     }
     return headers;
   }
