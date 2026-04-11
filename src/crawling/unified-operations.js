@@ -345,7 +345,7 @@ async function recordApiDomainClassification(jobId, projectId, apiUrl, pageUrl, 
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
-async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null, allowSubdomains = false, domainScope = null) {
+async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null, allowSubdomains = false, domainScope = null, lastHttpStatus = null) {
   try {
     if (isSearchEngineInfraUrl(pageUrl)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping crawler infrastructure URL: ${pageUrl}`);
@@ -368,7 +368,11 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
       title: pageTitle,
       analyzed: false // Will be updated after analysis
     };
-    
+    const httpCode = Number(lastHttpStatus);
+    if (Number.isFinite(httpCode)) {
+      requestBody.last_http_status = httpCode;
+    }
+
     // Add performance metrics if available
     if (lighthouseResults && lighthouseResults.success) {
       requestBody.lighthouse_metrics = {
@@ -457,6 +461,10 @@ async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allo
       requested_url: pageData.requested_url || null,
       final_url: pageData.final_url || pageData.url || null
     };
+    const discoverHttp = Number(pageData.last_http_status);
+    if (Number.isFinite(discoverHttp)) {
+      requestBody.last_http_status = discoverHttp;
+    }
 
     const response = await fetch(`${backendUrl}/api/pages/discover`, {
       method: 'POST',
@@ -2296,6 +2304,7 @@ const modeHandlers = {
         }
         let finalUrl = currentUrl;
         let redirectedOutsideSeedDomain = false;
+        let lastNavHttpStatus = null;
         if (currentPageUrl !== currentUrl) {
           try {
             // Capture response status and retry transient 5xx (common with CDNs returning 503).
@@ -2320,6 +2329,7 @@ const modeHandlers = {
                 });
               }
             }
+            lastNavHttpStatus = status ?? null;
             await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
               console.warn('Page DOM not fully loaded after 30s, continuing with analysis');
             });
@@ -2553,6 +2563,7 @@ const modeHandlers = {
                   project_id: projectId,
                   title: `${pageTitle || 'Page'} (redirected)`,
                   analyzed: true,
+                  last_http_status: lastNavHttpStatus ?? undefined,
                   page_description: {
                     short_description: `Redirect route to ${actualPageUrlCanonical}`,
                     description: redirectSummary
@@ -2605,7 +2616,8 @@ const modeHandlers = {
           projectStartUrl,
           lighthouseResults,
           allowSubdomains,
-          domainScope
+          domainScope,
+          lastNavHttpStatus
         );
         const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
         
@@ -4836,10 +4848,11 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       const { result: pageData, videoKey } = await recordPageVideo(page, jobId, currentUrl, async () => {
         // Navigate to URL
         await updateJobSubstatus(jobId, 'loading_page', { current_page: currentUrl });
-        await page.goto(currentUrl, { 
+        const workflowNavResp = await page.goto(currentUrl, { 
           waitUntil: 'domcontentloaded', 
           timeout: 30000 
         });
+        const workflowNavHttpStatus = workflowNavResp ? workflowNavResp.status() : null;
         
         await sendLog(jobId, 'info', `⏳ Waiting for page to fully load...`, currentPageContext);
         await updateJobSubstatus(jobId, 'waiting_for_page_ready', { current_page: currentUrl });
@@ -4882,7 +4895,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         // Create basic page document in backend FIRST.
         // IMPORTANT: Always pass project_id when available so pages are attributed to the job's project,
         // not auto-created "domain projects" (SSO redirects frequently cross subdomains).
-        let pageId = await sendBasicPageToBackend(
+        const basicPageResult = await sendBasicPageToBackend(
           jobId,
           pageUrl,
           pageTitle,
@@ -4890,8 +4903,10 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           startUrl,
           null,
           allowSubdomains,
-          domainScope
+          domainScope,
+          workflowNavHttpStatus
         );
+        let pageId = basicPageResult?.pageId || basicPageResult;
         
         // Update page context with pageId for all subsequent logs
         if (pageId) {
