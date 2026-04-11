@@ -15,7 +15,10 @@ import WorkflowExecutor from '../workflow/execution/workflow-executor.js';
 import { runFailureDiagnosisCrawlerAi } from '../workflow/failure-diagnosis-crawler-ai.js';
 import OptimizedWorkflowAnalyzer from '../workflow/analysis/optimized-workflow-analyzer.js';
 import axios from 'axios';
+import { createBackendAxiosWithRetries, retryTransientAsync } from '../utils/backend-http-retry.js';
 import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
+
+const backendDiscoverAxios = createBackendAxiosWithRetries();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -558,22 +561,24 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
         timestamp: lighthouseResults.timestamp
       };
     }
-    
-    const response = await fetch(`${backendUrl}/api/pages/discover`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+
+    const runnerTok = String(process.env.RUNNER_TOKEN || '').trim();
+    const discoverHeaders = {
+      'Content-Type': 'application/json',
+      ...(runnerTok ? { Authorization: `Bearer ${runnerTok}` } : {})
+    };
+
+    const result = await retryTransientAsync(
+      async () => {
+        const response = await backendDiscoverAxios.post(
+          `${backendUrl}/api/pages/discover`,
+          requestBody,
+          { headers: discoverHeaders, timeout: 120000, maxBodyLength: Infinity, maxContentLength: Infinity }
+        );
+        return response.data;
       },
-      body: JSON.stringify(requestBody)
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`[INCREMENTAL-STORAGE] Backend returned ${response.status}: ${errorText}`);
-      return null;
-    }
-    
-    const result = await response.json();
+      { maxRetries: 5, baseDelayMs: 500, capDelayMs: 15000 }
+    );
     const rawPageId = result._id ?? result.page_id ?? result.page?._id;
     const pageId = rawPageId != null ? String(rawPageId) : null;
     const isNewPage = result.isNew;

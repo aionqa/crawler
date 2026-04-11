@@ -1,4 +1,5 @@
 import { createBackendAxiosWithRetries, retryTransientAsync } from '../../utils/backend-http-retry.js';
+import { isTransientGatewayError } from '../../openai-client-factory.js';
 
 const axios = createBackendAxiosWithRetries();
 import { isSearchEngineInfraUrl } from '../../utils/search-engine-infra-url.js';
@@ -2746,11 +2747,19 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         analyzed: true
       };
 
-      const response = await axios.post(`${this.backendUrl}/api/pages/discover`, payload, {
-        headers: this.getAuthHeaders()
-      });
+      const discovered = await retryTransientAsync(
+        async () => {
+          const response = await axios.post(`${this.backendUrl}/api/pages/discover`, payload, {
+            headers: this.getAuthHeaders(),
+            timeout: 120000,
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity
+          });
+          return response.data;
+        },
+        { maxRetries: 4, baseDelayMs: 400, capDelayMs: 12000 }
+      );
 
-      const discovered = response.data;
       const rawPageId = discovered?._id || discovered?.page_id || discovered?.page?._id;
       const pageId = rawPageId != null ? String(rawPageId) : null;
       if (pageId) {
@@ -9347,19 +9356,47 @@ return {
       } catch (_) {
         /* keep existing pageUrl */
       }
+      if (!workflowState.projectId) {
+        const ctxPid = this.context?.project_id || this.context?.projectId;
+        if (ctxPid) {
+          workflowState.projectId = ctxPid;
+        }
+      }
       const projectIdForResolve =
         workflowState.projectId ||
         this.context?.project_id ||
         this.context?.projectId ||
         null;
       if (!resolvedPageId && projectIdForResolve && workflowState.pageUrl) {
-        try {
-          const ensured = await this.ensurePageId(workflowState, jobId);
-          if (ensured) {
-            resolvedPageId = String(ensured).trim();
+        for (let attempt = 0; attempt < 4 && !resolvedPageId; attempt++) {
+          if (attempt > 0) {
+            const delayMs = Math.min(12000, 400 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 200);
+            await new Promise((r) => setTimeout(r, delayMs));
           }
-        } catch (ensureErr) {
-          console.warn(`⚠️ [SAVE-DATA] ensurePageId retry failed: ${ensureErr.message}`);
+          try {
+            const ensured = await this.ensurePageId(workflowState, jobId);
+            if (ensured) {
+              resolvedPageId = String(ensured).trim();
+            }
+          } catch (ensureErr) {
+            console.warn(`⚠️ [SAVE-DATA] ensurePageId attempt ${attempt + 1} failed: ${ensureErr.message}`);
+          }
+        }
+      }
+      if (!resolvedPageId && projectIdForResolve && workflowState.pageUrl) {
+        for (let attempt = 0; attempt < 3 && !resolvedPageId; attempt++) {
+          if (attempt > 0) {
+            const delayMs = Math.min(15000, 600 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
+          try {
+            const forced = await this.ensurePageId(workflowState, jobId, { forceDiscover: true });
+            if (forced) {
+              resolvedPageId = String(forced).trim();
+            }
+          } catch (forceErr) {
+            console.warn(`⚠️ [SAVE-DATA] forceDiscover ensurePageId attempt ${attempt + 1} failed: ${forceErr.message}`);
+          }
         }
       }
       if (resolvedPageId) {
@@ -14846,10 +14883,16 @@ const sleep = safeWait;
           }
         }
         const msg = String(postErr?.message || '');
-        const retryable =
+        const retryableNet =
           attempt < maxAttempts - 1 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
-        if (retryable) {
-          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        const retryableGateway = attempt < maxAttempts - 1 && isTransientGatewayError(postErr);
+        if (retryableNet || retryableGateway) {
+          const st = postErr.response?.status;
+          const delayMs = retryableGateway ? 800 + 500 * (attempt + 1) : 1000 * (attempt + 1);
+          console.warn(
+            `[postRunnerSaveAnalysis] retry after transient failure (attempt ${attempt + 1}/${maxAttempts}) status=${st || 'n/a'}: ${postErr.message}`
+          );
+          await new Promise((r) => setTimeout(r, delayMs));
           continue;
         }
         throw postErr;
