@@ -380,7 +380,8 @@ function cookieDomainInCrawlScope(cookie, domainScope, allowSubdomains) {
 /**
  * When an in-scope navigation lands outside the crawl domain (often stale partner cookies on the
  * project), retry after (1) dropping cookies scoped to the destination host, then (2) keeping only
- * project/API-scoped cookies. General — no per-site URL lists.
+ * project/API-scoped cookies, then (3) if still off-domain, one anonymous navigation (empty jar)
+ * so first-party project cookies cannot force an affiliate/partner redirect. General — no per-site URL lists.
  */
 async function recoverInScopeUrlAfterCrossDomainRedirect(
   page,
@@ -395,13 +396,20 @@ async function recoverInScopeUrlAfterCrossDomainRedirect(
   const ctx = page.context();
   let workingFinal = finalUrlBefore;
 
-  const runPass = async (label, filterFn) => {
+  const runPass = async (label, filterFn, options = {}) => {
+    const { anonymousSession = false } = options;
     if (!isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope)) return false;
     if (isWithinDomain(workingFinal, seedUrl, allowSubdomains, domainScope)) return true;
 
     const all = await ctx.cookies();
-    const next = all.filter(filterFn);
-    if (next.length >= all.length) return false;
+    let next;
+    if (anonymousSession) {
+      if (all.length === 0) return false;
+      next = [];
+    } else {
+      next = all.filter(filterFn);
+      if (next.length >= all.length) return false;
+    }
 
     await sendLog(jobId, 'info', label, {
       component: 'CRAWLER-TEXT',
@@ -409,7 +417,8 @@ async function recoverInScopeUrlAfterCrossDomainRedirect(
       dropped: all.length - next.length,
       kept: next.length,
       target_url: currentUrl,
-      prior_final_url: workingFinal
+      prior_final_url: workingFinal,
+      ...(anonymousSession ? { anonymous_session: true } : {})
     });
 
     await ctx.clearCookies();
@@ -458,6 +467,14 @@ async function recoverInScopeUrlAfterCrossDomainRedirect(
     await runPass(
       `Still off-domain; retrying with project/API-scoped cookies only`,
       (c) => cookieDomainInCrawlScope(c, domainScope, allowSubdomains)
+    );
+  }
+
+  if (!isWithinDomain(workingFinal, seedUrl, allowSubdomains, domainScope)) {
+    await runPass(
+      `Still off-domain; retrying with no cookies (anonymous session for in-scope URL)`,
+      () => false,
+      { anonymousSession: true }
     );
   }
 }
