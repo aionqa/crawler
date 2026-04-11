@@ -88,46 +88,49 @@ class WorkflowAnalyzer {
    * Range: 1 minute (60000ms) to 15 minutes (900000ms)
    */
   getStepTimeout(step) {
-    // If step has explicit timeout config, use it (clamped to 1m-15m range)
+    let timeout;
     if (step.config?.timeout_ms !== undefined) {
-      const timeout = Math.max(60000, Math.min(900000, step.config.timeout_ms));
-      return timeout;
+      timeout = Math.max(60000, Math.min(900000, step.config.timeout_ms));
+    } else if (step.config?.timeout !== undefined) {
+      timeout = Math.max(60000, Math.min(900000, step.config.timeout));
+    } else {
+      // Step types that use project "Max time per subjob" from context (no hardcoded value)
+      const maxFromSettings = this.context?.max_job_duration_ms != null && Number.isFinite(Number(this.context.max_job_duration_ms))
+        ? Math.max(60000, Math.min(900000, Number(this.context.max_job_duration_ms)))
+        : DEFAULT_MAX_STEP_TIMEOUT_MS;
+
+      const defaultTimeouts = {
+        'ai-prompt': 900000,           // 15 minutes - AI calls can take time
+        'workflow-analysis': maxFromSettings,   // From project "Max time per subjob" (context.max_job_duration_ms)
+        'page-description': 120000,    // 2 minutes - Page analysis
+        'playwright-analysis': 120000, // 2 minutes - Playwright analysis
+        'execute-code': 120000,        // 2 minutes - Code execution
+        'execute-code-from-variable': 120000, // 2 minutes
+        'while-loop': 60000,           // 1 minute - Loops timeout quickly
+        'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
+        'screenshot': 90000,           // 90s — align with screenshot step Playwright default; full-page captures often exceed 60s
+        'cookie-collect': 120000,      // 2 minutes - browser cookies + optional backend save (GET job, POST project cookies)
+        'content-change': 60000,       // 1 minute - Variable operations
+        'var-dump': 60000,            // 1 minute - Quick operation
+        'print': 30000,               // 30 seconds - Very quick
+        'sleep': 60000,               // 1 minute - Sleep operations
+        'page-discovery': maxFromSettings,     // From project "Max time per subjob" (context.max_job_duration_ms)
+        'sitemap-exploration': 240000, // 4 minutes - Sitemap exploration
+        'unlighthouse': 300000,       // 5 minutes - Performance audit
+        'save-data': 120000,          // 2 minutes - Data saving
+        'update-workflow': 120000,    // 2 minutes
+        'hardcoded-workflow-analysis': 120000, // 2 minutes
+      };
+
+      const stepType = step.type || 'ai-prompt';
+      timeout = defaultTimeouts[stepType] || 120000; // Default: 2 minutes
     }
-    if (step.config?.timeout !== undefined) {
-      const timeout = Math.max(60000, Math.min(900000, step.config.timeout));
-      return timeout;
+
+    if (String(step.type || '').toLowerCase() === 'ai-prompt') {
+      timeout = Math.max(timeout, 900000);
     }
 
-    // Step types that use project "Max time per subjob" from context (no hardcoded value)
-    const maxFromSettings = this.context?.max_job_duration_ms != null && Number.isFinite(Number(this.context.max_job_duration_ms))
-      ? Math.max(60000, Math.min(900000, Number(this.context.max_job_duration_ms)))
-      : DEFAULT_MAX_STEP_TIMEOUT_MS;
-
-    const defaultTimeouts = {
-      'ai-prompt': 900000,           // 15 minutes - AI calls can take time
-      'workflow-analysis': maxFromSettings,   // From project "Max time per subjob" (context.max_job_duration_ms)
-      'page-description': 120000,    // 2 minutes - Page analysis
-      'playwright-analysis': 120000, // 2 minutes - Playwright analysis
-      'execute-code': 120000,        // 2 minutes - Code execution
-      'execute-code-from-variable': 120000, // 2 minutes
-      'while-loop': 60000,           // 1 minute - Loops timeout quickly
-      'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
-      'screenshot': 90000,           // 90s — align with screenshot step Playwright default; full-page captures often exceed 60s
-      'cookie-collect': 120000,      // 2 minutes - browser cookies + optional backend save (GET job, POST project cookies)
-      'content-change': 60000,       // 1 minute - Variable operations
-      'var-dump': 60000,            // 1 minute - Quick operation
-      'print': 30000,               // 30 seconds - Very quick
-      'sleep': 60000,               // 1 minute - Sleep operations
-      'page-discovery': maxFromSettings,     // From project "Max time per subjob" (context.max_job_duration_ms)
-      'sitemap-exploration': 240000, // 4 minutes - Sitemap exploration
-      'unlighthouse': 300000,       // 5 minutes - Performance audit
-      'save-data': 120000,          // 2 minutes - Data saving
-      'update-workflow': 120000,    // 2 minutes
-      'hardcoded-workflow-analysis': 120000, // 2 minutes
-    };
-
-    const stepType = step.type || 'ai-prompt';
-    return defaultTimeouts[stepType] || 120000; // Default: 2 minutes
+    return Math.min(timeout, 900000);
   }
 
   detectCapabilities(steps = []) {

@@ -547,11 +547,10 @@ class WorkflowAnalyzer {
       timeout = defaultTimeouts[stepType] || 120000; // Default: 2 minutes
     }
 
-    // ai-prompt: workflow templates often cap at 300s; this step may run attachment prep, nested page-description,
-    // the model call, then several save-analysis persistence passes. Inner HTTP uses bounded timeouts; the outer
-    // step budget must not abort while persistence is still legitimately in flight.
-    if ((step.type || '') === 'ai-prompt') {
-      const AI_PROMPT_FLOOR_MS = 600000;
+    // ai-prompt: templates often ship timeout: 300000; backend/job restarts burn wall-clock while the outer
+    // Promise.race budget does not pause. Use the max allowed step window so recovery runs can finish.
+    if (String(step.type || '').toLowerCase() === 'ai-prompt') {
+      const AI_PROMPT_FLOOR_MS = 900000;
       timeout = Math.max(timeout, AI_PROMPT_FLOOR_MS);
     }
 
