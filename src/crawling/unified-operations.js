@@ -574,7 +574,8 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
     }
     
     const result = await response.json();
-    const pageId = result.page?._id;
+    const rawPageId = result._id ?? result.page_id ?? result.page?._id;
+    const pageId = rawPageId != null ? String(rawPageId) : null;
     const isNewPage = result.isNew;
     console.log(`[INCREMENTAL-STORAGE] ✅ Basic page ${isNewPage ? 'created' : 'found'}: ${pageUrl} (ID: ${pageId})`);
     return { pageId, isNewPage }; // Return both page ID and whether it's new
@@ -2205,7 +2206,12 @@ const modeHandlers = {
       const pageUrl = page.url();
       const pageTitle = await page.title();
       const pageResult = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId, pageUrl, null, allowSubdomains);
-      const pageId = pageResult?.pageId || pageResult;
+      const pageId =
+        pageResult && typeof pageResult === 'object' && pageResult.pageId != null
+          ? String(pageResult.pageId)
+          : typeof pageResult === 'string'
+            ? pageResult
+            : null;
       
       // Analyze page with optimized approach
       const analysisResult = await optimizedAnalyzer.analyzePage(page, jobId, pageId, projectId, openaiClient);
@@ -2857,47 +2863,55 @@ const modeHandlers = {
           domainScope,
           lastNavHttpStatus
         );
-        const createdPageId = pageResult?.pageId || pageResult; // Extract pageId from object or use as-is if string
+        const createdPageId =
+          pageResult && typeof pageResult === 'object' && pageResult.pageId != null
+            ? String(pageResult.pageId)
+            : typeof pageResult === 'string'
+              ? pageResult
+              : null;
         
         // CRITICAL: Check if this page has already been analyzed in this job to prevent duplicate workflows
         let existingWorkflow = null;
-        try {
-          const axios = (await import('axios')).default;
-          const headers = {};
-          if (context.runner_token) {
-            headers['Authorization'] = `Bearer ${context.runner_token}`;
-          }
-          const workflowsResponse = await axios.get(`${backendUrl}/api/workflows`, {
-            params: {
-              project_id: projectId,
-              page_id: createdPageId,
-              job_id: jobId
-            },
-            headers,
-            timeout: 5000
-          });
-          
-          // Response can be array or object with workflows property
-          const workflowsArray = Array.isArray(workflowsResponse.data) 
-            ? workflowsResponse.data 
-            : (workflowsResponse.data?.workflows || []);
-          
-          if (workflowsArray.length > 0) {
-            // Find workflow for this page+job combination
-            existingWorkflow = workflowsArray.find(w => 
-              w.page_id?.toString() === createdPageId.toString() && 
-              w.job_id?.toString() === jobId.toString()
-            );
-            
-            if (existingWorkflow) {
-              await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrl} already analyzed in this job (workflow: ${existingWorkflow._id}), skipping duplicate analysis`);
-              // Skip analysis but still process links if needed
-              continue;
+        if (createdPageId) {
+          try {
+            const axios = (await import('axios')).default;
+            const headers = {};
+            if (context.runner_token) {
+              headers['Authorization'] = `Bearer ${context.runner_token}`;
             }
+            const workflowsResponse = await axios.get(`${backendUrl}/api/workflows`, {
+              params: {
+                project_id: projectId,
+                page_id: createdPageId,
+                job_id: jobId
+              },
+              headers,
+              timeout: 5000
+            });
+            
+            // Response can be array or object with workflows property
+            const workflowsArray = Array.isArray(workflowsResponse.data) 
+              ? workflowsResponse.data 
+              : (workflowsResponse.data?.workflows || []);
+            
+            if (workflowsArray.length > 0) {
+              // Find workflow for this page+job combination
+              const createdIdStr = String(createdPageId);
+              existingWorkflow = workflowsArray.find(w => 
+                w.page_id?.toString() === createdIdStr && 
+                w.job_id?.toString() === jobId.toString()
+              );
+              
+              if (existingWorkflow) {
+                await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrl} already analyzed in this job (workflow: ${existingWorkflow._id}), skipping duplicate analysis`);
+                // Skip analysis but still process links if needed
+                continue;
+              }
+            }
+          } catch (workflowCheckError) {
+            // If check fails, log warning but continue (don't block analysis)
+            console.warn(`[WORKFLOW] Could not check for existing workflow: ${workflowCheckError.message}`);
           }
-        } catch (workflowCheckError) {
-          // If check fails, log warning but continue (don't block analysis)
-          console.warn(`[WORKFLOW] Could not check for existing workflow: ${workflowCheckError.message}`);
         }
         
         // Check if we should skip AI analysis
@@ -5165,7 +5179,12 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           domainScope,
           workflowNavHttpStatus
         );
-        let pageId = basicPageResult?.pageId || basicPageResult;
+        let pageId =
+          basicPageResult && typeof basicPageResult === 'object' && basicPageResult.pageId != null
+            ? String(basicPageResult.pageId)
+            : typeof basicPageResult === 'string'
+              ? basicPageResult
+              : null;
         
         // Update page context with pageId for all subsequent logs
         if (pageId) {

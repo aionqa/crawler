@@ -9323,11 +9323,48 @@ return {
     }
     
     try {
+      // Resolve pageId using the same fallbacks as journey-immediate / final saves.
+      // After orchestrator restarts or mid-job recovery, workflowState.pageId can be unset while
+      // runner context still carries page_id, or discover can re-bind from the live URL.
+      let resolvedPageId =
+        workflowState.pageId ||
+        this.context?.page_id ||
+        this.context?.pageId ||
+        null;
+      if (resolvedPageId != null && resolvedPageId !== '') {
+        resolvedPageId = String(resolvedPageId).trim() || null;
+      }
+      try {
+        const liveUrl = page?.url?.();
+        if (liveUrl) {
+          workflowState.pageUrl = liveUrl;
+        }
+      } catch (_) {
+        /* keep existing pageUrl */
+      }
+      const projectIdForResolve =
+        workflowState.projectId ||
+        this.context?.project_id ||
+        this.context?.projectId ||
+        null;
+      if (!resolvedPageId && projectIdForResolve && workflowState.pageUrl) {
+        try {
+          const ensured = await this.ensurePageId(workflowState, jobId);
+          if (ensured) {
+            resolvedPageId = String(ensured).trim();
+          }
+        } catch (ensureErr) {
+          console.warn(`⚠️ [SAVE-DATA] ensurePageId retry failed: ${ensureErr.message}`);
+        }
+      }
+      if (resolvedPageId) {
+        workflowState.pageId = resolvedPageId;
+      }
       if (!workflowState.pageId) {
         console.error(`❌ [SAVE-DATA] Cannot save data: pageId is missing`);
         throw new Error('pageId is required to save data');
       }
-      
+
       console.log(`💾 [SAVE-DATA] POSTing to ${this.backendUrl}/api/runner/pages/${workflowState.pageId}/save-analysis with ${journeys.length} journeys`);
       const response = await this.postRunnerSaveAnalysis(workflowState.pageId, payload, jobId);
       
