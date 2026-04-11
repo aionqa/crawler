@@ -2108,7 +2108,7 @@ async function persistComplexitiesAnalysis(jobId, pageResults) {
 
     try {
       await axios.post(
-        `${BACKEND_URL}/api/pages/${pageId}/save-analysis`,
+        `${BACKEND_URL}/api/runner/pages/${pageId}/save-analysis`,
         {
           saveLegs: false,
           saveInteractiveElements: false,

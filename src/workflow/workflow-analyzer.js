@@ -5836,7 +5836,7 @@ return {
       const legsPayload = safeJsonClone(legs);
 
       const response = await axios.post(
-        `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
+        `${this.backendUrl}/api/runner/pages/${workflowState.pageId}/save-analysis`,
         {
           saveLegs: true,
           saveInteractiveElements: false,
@@ -5971,7 +5971,7 @@ return {
     
     try {
       const response = await axios.post(
-        `${this.backendUrl}/api/pages/${workflowState.pageId}/save-analysis`,
+        `${this.backendUrl}/api/runner/pages/${workflowState.pageId}/save-analysis`,
         payload,
         {
           headers: this.getAuthHeaders()
