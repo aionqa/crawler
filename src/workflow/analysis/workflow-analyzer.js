@@ -6353,7 +6353,7 @@ return {
           }
 
           // CRITICAL: Store as legScriptToExecute for execute-code-from-variable steps
-          let cleanedScript = this.cleanScript(playwrightScript);
+          let cleanedScript = this.finalizeAiGeneratedPlaywrightScript(playwrightScript);
           // Repair AI-generated script: add missing catch for outer try so executor does not fail with syntax error
           if (cleanedScript && cleanedScript.trim().length > 0) {
             try {
@@ -6434,7 +6434,7 @@ return {
             null;
 
           if (typeof fallbackScript === 'string' && fallbackScript.trim().length > 0) {
-            const cleanedFallback = this.cleanScript(fallbackScript);
+            const cleanedFallback = this.finalizeAiGeneratedPlaywrightScript(fallbackScript);
             if (cleanedFallback && cleanedFallback.trim().length > 0) {
               workflowState.legScriptToExecute = cleanedFallback;
               if (!workflowState.context) {
@@ -7311,7 +7311,7 @@ return {
           // Also store directly in workflowState for immediate access
           workflowState.playwright_script = scriptValue;
           // Also ensure legScriptToExecute is set (the code at line 3200-3207 does this, but ensure it's available)
-          const cleanedScript = this.cleanScript(scriptValue);
+          const cleanedScript = this.finalizeAiGeneratedPlaywrightScript(scriptValue);
           if (cleanedScript && cleanedScript.trim().length > 0) {
             workflowState.legScriptToExecute = cleanedScript;
             if (!workflowState.context) {
@@ -10996,6 +10996,18 @@ return {
     return s;
   }
 
+  /**
+   * Full pipeline for AI-generated Playwright snippets: markdown/structure clean, TS strip, locator repairs.
+   * Use when persisting legScriptToExecute and before execute-code-from-variable so stored and run code match.
+   */
+  finalizeAiGeneratedPlaywrightScript(script) {
+    if (!script || typeof script !== 'string') return script;
+    let s = this.cleanScript(script);
+    s = this.stripTypeScriptArtifacts(s);
+    s = this.sanitizeAiPlaywrightScript(s);
+    return s;
+  }
+
   sanitizeAiPlaywrightScript(script) {
     if (!script || typeof script !== 'string') return script;
 
@@ -11102,6 +11114,27 @@ return {
     s = s.replace(
       /page\.waitForSelector\(\s*(div\.[A-Za-z0-9_-]+)\s*,/g,
       (_m, selectorExpr) => `page.waitForSelector(${JSON.stringify(String(selectorExpr || ''))},`
+    );
+
+    // Unquoted selectors inside .locator(...): LLMs often emit page.locator(#FirstName) which is a syntax error.
+    // #id and .class tokens are unambiguous as CSS fragments (not JS variables).
+    s = s.replace(
+      /\.locator\(\s*(#[A-Za-z_][\w-]*)\s*\)/g,
+      (_m, idSel) => `.locator(${JSON.stringify(String(idSel || ''))})`
+    );
+    s = s.replace(
+      /\.locator\(\s*(\.[A-Za-z_][\w-]*)\s*\)/g,
+      (_m, clsSel) => `.locator(${JSON.stringify(String(clsSel || ''))})`
+    );
+    // Corrupted chain: locator(tag:has-text("X") -> first()) — quote selector and place .first() outside.
+    s = s.replace(
+      /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*"((?:[^"\\]|\\.)*)"\s*\))\s*->\s*first\(\s*\)\s*\)/gi,
+      (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))}).first()`
+    );
+    // Unquoted tag:has-text("...") selector as locator argument (valid CSS string, invalid as JS expression).
+    s = s.replace(
+      /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*"((?:[^"\\]|\\.)*)"\s*\))\s*\)/gi,
+      (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))})`
     );
 
     // LLMs often emit a quoted token that is meant as an HTML id (e.g. page.click("modalOpener")).
@@ -12179,10 +12212,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       }
     }
     
-    // Clean the code to remove markdown code blocks and function declarations
-    code = this.cleanScript(code);
-    code = this.stripTypeScriptArtifacts(code);
-    code = this.sanitizeAiPlaywrightScript(code);
+    code = this.finalizeAiGeneratedPlaywrightScript(code);
     console.log(`🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
 
     if (
@@ -19025,8 +19055,7 @@ ${executableBody}`;
             throw new Error(`No Playwright script generated for iteration ${iteration}`);
           }
           
-          // Clean the script to remove markdown code blocks and function declarations
-          script = this.cleanScript(script);
+          script = this.finalizeAiGeneratedPlaywrightScript(script);
           
           if (!script || script.trim().length === 0) {
             throw new Error(`Script is empty after cleaning for iteration ${iteration}`);
