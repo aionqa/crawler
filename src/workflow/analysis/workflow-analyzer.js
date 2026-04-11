@@ -11006,9 +11006,60 @@ return {
    */
   journeyScriptHasUnloggedPlaywrightInteractions(script) {
     if (!script || typeof script !== 'string') return false;
-    return /\bpage\.(\$\$?|waitForNavigation|waitForURL|expectNavigation|evaluate|evaluateHandle)\s*\(/i.test(
-      script
-    );
+    if (
+      /\bpage\.(\$\$?|waitForNavigation|waitForURL|expectNavigation|evaluate|evaluateHandle)\s*\(/i.test(script)
+    ) {
+      return true;
+    }
+    // Chained locator/user-action calls (e.g. const el = page.locator(...).first(); await el.click())
+    // and wrapper.* aliases sometimes produce zero parseScriptActions lines but are valid journeys.
+    if (
+      /\b(?:await\s+)?(?:page|wrapper)\.(?:locator|getBy(?:Role|Text|Label|Placeholder|TestId)|frameLocator)\b/i.test(
+        script
+      ) &&
+      /\b(?:await\s+)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\.(click|dblclick|fill|type|press|selectOption|check|uncheck)\s*\(/i.test(
+        script
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Deterministic Playwright steps from currentJourney.actions (inventory selectors).
+   * Used when AI-generated scripts fail syntax/runtime ReferenceErrors.
+   */
+  buildDeterministicJourneyScriptFromCurrentJourney(workflowState) {
+    const actions = workflowState?.currentJourney?.actions;
+    if (!Array.isArray(actions) || actions.length === 0) return null;
+
+    const lines = ['await page.waitForLoadState(\'domcontentloaded\').catch(() => {});', 'await page.waitForTimeout(500);'];
+    for (const action of actions) {
+      const selector =
+        action?.selector || action?.element_info?.selector || action?.element_info?.primary_selector;
+      if (!selector || typeof selector !== 'string') continue;
+
+      const actionType = String(action?.type || '').toLowerCase();
+      const safeSelector = JSON.stringify(selector);
+      if (actionType === 'input') {
+        const value =
+          action?.value ||
+          action?.input_value ||
+          action?.text ||
+          action?.element_info?.text ||
+          'test';
+        lines.push(`await page.fill(${safeSelector}, ${JSON.stringify(String(value))});`);
+      } else if (actionType === 'verify' || actionType === 'check') {
+        lines.push(`await page.waitForSelector(${safeSelector}, { timeout: 5000 });`);
+      } else {
+        lines.push(`await page.click(${safeSelector});`);
+        lines.push('await page.waitForTimeout(800);');
+      }
+    }
+
+    lines.push("return { success: true, message: 'Deterministic journey script executed' };");
+    return lines.join('\n');
   }
 
   cleanScript(script) {
@@ -12856,6 +12907,12 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     }
     
     code = this.finalizeAiGeneratedPlaywrightScript(code);
+    if (isJourneyScriptExecutionStep && code && typeof code === 'string') {
+      const spaLead = `await page.waitForLoadState('domcontentloaded').catch(() => {});\nawait page.waitForTimeout(350);\n`;
+      if (!/\bwaitForLoadState\s*\(\s*['"]domcontentloaded['"]/i.test(code)) {
+        code = spaLead + code;
+      }
+    }
     console.log(`🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
 
     if (
@@ -13724,7 +13781,20 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         // Use string concatenation (not template literals) to avoid escaping issues
         // This allows the script code to contain backticks, ${}, etc. without problems
         const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
-        
+        const journeyFnPreamble = `const input_input_credentials = input_credentials;
+const runJourney = async (task) => {
+  if (typeof task === 'function') return await task();
+  return task;
+};
+const run_step = runJourney;
+const safeWait = async (duration) => {
+  const resolved = typeof duration === 'number' && Number.isFinite(duration) ? duration : ms(duration);
+  const capped = Math.min(Math.max(0, Math.floor(resolved)), 120000);
+  await page.waitForTimeout(capped);
+};
+const sleep = safeWait;
+`;
+
         // ms: converts "5s", "1m", "2s" etc. to milliseconds (AI often uses ms('5s') from npm/ms)
         const msHelper = (val) => {
           if (typeof val === 'number' && !isNaN(val)) return Math.floor(val);
@@ -13931,59 +14001,12 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           }
         };
         
-        const buildFallbackJourneyScript = () => {
-          const actions = workflowState?.currentJourney?.actions;
-          if (!Array.isArray(actions) || actions.length === 0) return null;
-
-          const lines = ['await page.waitForTimeout(500);'];
-          for (const action of actions) {
-            const selector =
-              action?.selector ||
-              action?.element_info?.selector ||
-              action?.element_info?.primary_selector;
-            if (!selector || typeof selector !== 'string') continue;
-
-            const actionType = String(action?.type || '').toLowerCase();
-            const safeSelector = JSON.stringify(selector);
-            if (actionType === 'input') {
-              const value =
-                action?.value ||
-                action?.input_value ||
-                action?.text ||
-                action?.element_info?.text ||
-                'test';
-              lines.push(`await page.fill(${safeSelector}, ${JSON.stringify(String(value))});`);
-            } else if (actionType === 'verify' || actionType === 'check') {
-              lines.push(`await page.waitForSelector(${safeSelector}, { timeout: 5000 });`);
-            } else {
-              lines.push(`await page.click(${safeSelector});`);
-              lines.push('await page.waitForTimeout(800);');
-            }
-          }
-
-          lines.push("return { success: true, message: 'Fallback journey script executed' };");
-          return lines.join('\n');
-        };
+        const buildFallbackJourneyScript = () => this.buildDeterministicJourneyScriptFromCurrentJourney(workflowState);
 
         // Create a function with page, wrapper, input_credentials, ms, delay, text, context, test
         console.log(`🔧 Creating function with wrappedPage, script length=${scriptCode.length}`);
-        let executableBody = functionBody;
-        // Backward-compat: some generated scripts occasionally reference `input_input_credentials`
-        // (typo) instead of `input_credentials`. Provide an alias so logins don't silently use
-        // fallback placeholder credentials.
-        executableBody = `const input_input_credentials = input_credentials;
-const runJourney = async (task) => {
-  if (typeof task === 'function') return await task();
-  return task;
-};
-const run_step = runJourney;
-const safeWait = async (duration) => {
-  const resolved = typeof duration === 'number' && Number.isFinite(duration) ? duration : ms(duration);
-  const capped = Math.min(Math.max(0, Math.floor(resolved)), 120000);
-  await page.waitForTimeout(capped);
-};
-const sleep = safeWait;
-${executableBody}`;
+        // Backward-compat: input_input_credentials alias; runJourney/safeWait helpers for generated scripts.
+        let executableBody = journeyFnPreamble + functionBody;
         let fn;
         try {
           fn = new Function('page', 'wrapper', 'input_credentials', 'ms', 'delay', 'text', 'context', 'test', executableBody);
@@ -14014,7 +14037,61 @@ ${executableBody}`;
         }
 
         console.log(`🚀 Executing script with wrapped page object...`);
-        const rawResult = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText, execContext, testHelper);
+        let rawResult;
+        try {
+          rawResult = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText, execContext, testHelper);
+        } catch (runErr) {
+          const msg = String(runErr?.message || runErr || '');
+          const isUndefinedRef =
+            runErr?.name === 'ReferenceError' ||
+            /\bis not defined\b/i.test(msg) ||
+            /\bCan't find variable\b/i.test(msg);
+          if (!isJourneyScriptExecutionStep || !isUndefinedRef) {
+            throw runErr;
+          }
+          const fallbackScript = buildFallbackJourneyScript();
+          if (!fallbackScript) {
+            throw runErr;
+          }
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `Journey script runtime error; retrying with deterministic inventory actions: ${msg.substring(0, 220)}`,
+              'WORKFLOW-ANALYZER',
+              {
+                step_id: step?.id,
+                step_name: step?.name,
+                fallback_script_preview: fallbackScript.substring(0, 280),
+              }
+            );
+          } else {
+            console.warn(`⚠️ Journey script runtime error; using deterministic fallback: ${msg.substring(0, 200)}`);
+          }
+          const fallbackInner = 'return (async function() {\n' + fallbackScript + '\n})();';
+          const fallbackExecutableBody = journeyFnPreamble + fallbackInner;
+          const fnFallback = new Function(
+            'page',
+            'wrapper',
+            'input_credentials',
+            'ms',
+            'delay',
+            'text',
+            'context',
+            'test',
+            fallbackExecutableBody
+          );
+          rawResult = await fnFallback(
+            wrappedPage,
+            wrappedPage,
+            credentials,
+            msHelper,
+            delay,
+            pageText,
+            execContext,
+            testHelper
+          );
+        }
         const result = (rawResult === undefined || rawResult === null)
           ? { success: true, message: 'Script executed without explicit return value' }
           : rawResult;
