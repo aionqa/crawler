@@ -1,4 +1,6 @@
-import axios from 'axios';
+import { createBackendAxiosWithRetries } from '../../utils/backend-http-retry.js';
+
+const axios = createBackendAxiosWithRetries();
 import { isSearchEngineInfraUrl } from '../../utils/search-engine-infra-url.js';
 import { resolveScreenshotFullPage } from '../utils/resolve-screenshot-full-page.js';
 import { StaticNodeExecutor } from '../execution/static-node-executor.js';
@@ -9196,7 +9198,6 @@ return {
     // Once an action is collected/analyzed in a job, it should not be analyzed again
     if (saveLegs && legs.length > 0 && jobId) {
       try {
-        const axios = (await import('axios')).default;
         // Get all existing actions for this job
         const existingActionsResponse = await axios.get(`${this.backendUrl}/api/actions`, {
           params: {
@@ -14742,7 +14743,6 @@ const sleep = safeWait;
    * Handles transient 401/403 (stale token vs env/service tokens, runner vs /api/pages fallback) and network blips.
    */
   async postRunnerSaveAnalysis(pageId, payload, jobId, options = {}) {
-    const axios = (await import('axios')).default;
     let pid = pageId != null ? String(pageId) : '';
     const timeout = options.timeout ?? 120000;
     const buildOpts = (authExtra = {}) => ({
@@ -19440,7 +19440,6 @@ const sleep = safeWait;
             
             // Also call complete-leg endpoint to update action status
             try {
-              const axios = (await import('axios')).default;
               const completeResponse = await axios.post(
                 `${this.backendUrl}/api/workflows/${workflowState.workflowId}/legs/${legToSave.leg_id}/complete`,
                 {
