@@ -18375,6 +18375,20 @@ ${executableBody}`;
       }
     }
 
+    // If the while-loop already determined execution success, do not let justify_journey
+    // (status failure or expected_outcome_verified=false) contradict persisted journey state.
+    // This aligns Mongo/page rollups with WORKFLOW-ANALYZER logs ("final leg success").
+    const executionTerminalSuccess = finalLegStatus === 'success' || finalLegStatus === 'completed';
+    if (executionTerminalSuccess) {
+      const jst = String(finalJustificationStatus || '').toLowerCase();
+      if (jst === 'failure' || jst === 'failed' || jst === 'error') {
+        finalJustificationStatus = finalLegStatus;
+      }
+      if (finalExpectedOutcomeVerified === false) {
+        finalExpectedOutcomeVerified = true;
+      }
+    }
+
     // Intermediate AI steps may report failure / verified=false while the leg was finalized as an
     // insufficient-signal skip (e.g. justify_journey path missing). Do not upgrade that to failure.
     if (finalLegStatus === 'skipped' && finalLegResult === 'skipped_insufficient_signal') {
@@ -18474,7 +18488,8 @@ ${executableBody}`;
       finalCondition: condition,
       loopHistory: loopState.iterations,
       determine_completion: lastDetermineCompletion, // Include in final result for extraction
-      finalLegStatus: finalJustificationStatus || finalLegStatus,
+      // Prefer execution-derived leg status so nested for-each / logs match "Determined final leg status"
+      finalLegStatus: finalLegStatus || finalJustificationStatus,
       finalLegResult,
       justification_status: finalJustificationStatus,
       ai_justification: finalAiJustification
