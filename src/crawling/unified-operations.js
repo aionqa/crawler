@@ -334,6 +334,134 @@ function urlWithoutQueryAndFragment(url) {
   }
 }
 
+function ensureSchemeForParse(url) {
+  const t = String(url || '').trim();
+  if (!t) return '';
+  if (t.startsWith('http://') || t.startsWith('https://')) return t;
+  return `https://${t}`;
+}
+
+/**
+ * True if the cookie's Domain would plausibly attach to the off-domain page host
+ * (e.g. .partner.com when we landed on www.partner.com).
+ */
+function cookieAppliesToOffDomainRedirect(cookie, offDomainPageUrl) {
+  try {
+    const u = new URL(ensureSchemeForParse(offDomainPageUrl));
+    const hOff = normalizeDomainHost(u.hostname);
+    if (!hOff) return false;
+    const raw = cookie?.domain != null ? String(cookie.domain) : '';
+    if (!raw.trim()) return false;
+    const cd = normalizeDomainHost(raw.replace(/^\./, ''));
+    if (!cd) return false;
+    return hostMatchesDomain(cd, hOff, true) || hostMatchesDomain(hOff, cd, true);
+  } catch {
+    return false;
+  }
+}
+
+function cookieDomainInCrawlScope(cookie, domainScope, allowSubdomains) {
+  if (!cookie || cookie.domain == null || !String(cookie.domain).trim()) return false;
+  const cd = normalizeDomainHost(String(cookie.domain).replace(/^\./, ''));
+  if (!cd) return false;
+  if (domainScope?.projectDomains?.length) {
+    for (const pd of domainScope.projectDomains) {
+      if (hostMatchesDomain(cd, pd, allowSubdomains)) return true;
+    }
+  }
+  if (domainScope?.apiDomains?.length) {
+    for (const ad of domainScope.apiDomains) {
+      if (hostMatchesDomain(cd, ad, true)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * When an in-scope navigation lands outside the crawl domain (often stale partner cookies on the
+ * project), retry after (1) dropping cookies scoped to the destination host, then (2) keeping only
+ * project/API-scoped cookies. General — no per-site URL lists.
+ */
+async function recoverInScopeUrlAfterCrossDomainRedirect(
+  page,
+  jobId,
+  currentUrl,
+  seedUrl,
+  allowSubdomains,
+  domainScope,
+  finalUrlBefore,
+  updateState
+) {
+  const ctx = page.context();
+  let workingFinal = finalUrlBefore;
+
+  const runPass = async (label, filterFn) => {
+    if (!isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope)) return false;
+    if (isWithinDomain(workingFinal, seedUrl, allowSubdomains, domainScope)) return true;
+
+    const all = await ctx.cookies();
+    const next = all.filter(filterFn);
+    if (next.length >= all.length) return false;
+
+    await sendLog(jobId, 'info', label, {
+      component: 'CRAWLER-TEXT',
+      action: 'nav_retry_cookie_recovery',
+      dropped: all.length - next.length,
+      kept: next.length,
+      target_url: currentUrl,
+      prior_final_url: workingFinal
+    });
+
+    await ctx.clearCookies();
+    if (next.length > 0) {
+      try {
+        await ctx.addCookies(next);
+      } catch (e) {
+        await sendLog(jobId, 'warn', `⚠️ Cookie re-add after filter: ${e.message}`);
+      }
+    }
+
+    let response = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    let status = response ? response.status() : null;
+    if (status && status >= 500) {
+      await page.waitForTimeout(3000);
+      response = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      status = response ? response.status() : null;
+    }
+    await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(1000);
+
+    let newFinal = workingFinal;
+    try {
+      newFinal = page.url();
+    } catch (_) {
+      // keep prior
+    }
+    workingFinal = newFinal;
+
+    const outside = !isWithinDomain(newFinal, seedUrl, allowSubdomains, domainScope);
+    updateState({
+      finalUrl: newFinal,
+      lastNavHttpStatus: status ?? null,
+      redirectedOutsideSeedDomain: outside
+    });
+    return !outside;
+  };
+
+  const destinationForStrip = workingFinal;
+  await runPass(
+    `Off-domain redirect; retrying after dropping cookies scoped to destination host`,
+    (c) => !cookieAppliesToOffDomainRedirect(c, destinationForStrip)
+  );
+
+  if (!isWithinDomain(workingFinal, seedUrl, allowSubdomains, domainScope)) {
+    await runPass(
+      `Still off-domain; retrying with project/API-scoped cookies only`,
+      (c) => cookieDomainInCrawlScope(c, domainScope, allowSubdomains)
+    );
+  }
+}
+
 async function recordApiDomainClassification(jobId, projectId, apiUrl, pageUrl, runnerToken = '') {
   try {
     await sendApiCallsToBackend(
@@ -2453,6 +2581,30 @@ const modeHandlers = {
           } catch (stripNavError) {
             await sendLog(jobId, 'warn', `⚠️ Stripped-URL navigation failed: ${stripNavError.message}`);
           }
+        }
+
+        // Stale third-party cookies on the project (e.g. partner domains) can send an in-scope URL
+        // off-domain even when the URL has no query string. Retry after cookie hygiene (general).
+        if (
+          isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope) &&
+          !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope)
+        ) {
+          await recoverInScopeUrlAfterCrossDomainRedirect(
+            page,
+            jobId,
+            currentUrl,
+            seedUrl,
+            allowSubdomains,
+            domainScope,
+            finalUrl,
+            (patch) => {
+              if (patch.finalUrl != null) finalUrl = patch.finalUrl;
+              if ('lastNavHttpStatus' in patch) lastNavHttpStatus = patch.lastNavHttpStatus;
+              if (patch.redirectedOutsideSeedDomain != null) {
+                redirectedOutsideSeedDomain = patch.redirectedOutsideSeedDomain;
+              }
+            }
+          );
         }
         
         // CRITICAL: Check for login page redirection and handle it
@@ -6724,6 +6876,14 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     const result = await withBrowser(async ({ page, context: browserContext }) => {
       await sendLog(jobId, 'info', 'Browser session started', { mode, allowSubdomains });
 
+      const scopeSeedUrl = ensureSchemeForParse(urlList[0] || url);
+      const domainScope = buildDomainScope(
+        scopeSeedUrl,
+        allowSubdomains,
+        Array.isArray(context.project_domains) ? context.project_domains : [],
+        Array.isArray(context.api_domains) ? context.api_domains : []
+      );
+
       // Diagnostics: capture runtime JS errors and failed requests so we can explain
       // "Application error: a client-side exception has occurred" screenshots.
       try {
@@ -7239,9 +7399,55 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
           throw new Error(`Start URL returned HTTP ${navStatus}${serverHeader ? ` (server=${serverHeader})` : ''}`);
         }
         
-        const finalUrl = page.url();
+        let finalUrl = page.url();
         if (finalUrl !== currentUrl) {
           await sendLog(jobId, 'info', `🔄 Navigation redirected from ${currentUrl} to ${finalUrl} (likely due to cookies)`);
+        }
+
+        const strippedStart = urlWithoutQueryAndFragment(currentUrl);
+        if (
+          strippedStart &&
+          strippedStart !== currentUrl &&
+          isWithinDomain(strippedStart, currentUrl, allowSubdomains, domainScope) &&
+          !isWithinDomain(finalUrl, currentUrl, allowSubdomains, domainScope)
+        ) {
+          await sendLog(
+            jobId,
+            'info',
+            `🔁 Start URL has query/fragment and landed off-domain; retrying without query or fragment: ${strippedStart}`,
+            { component: 'CRAWLER-TEXT', action: 'startcrawl_nav_retry_strip_query', prior_final_url: finalUrl }
+          );
+          try {
+            let stripResp = await page.goto(strippedStart, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            let stripStatus = stripResp ? stripResp.status() : null;
+            if (stripStatus && stripStatus >= 500) {
+              await page.waitForTimeout(3000);
+              stripResp = await page.goto(strippedStart, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              stripStatus = stripResp ? stripResp.status() : null;
+            }
+            navStatus = stripStatus ?? navStatus;
+            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+            await page.waitForTimeout(1000);
+            finalUrl = page.url();
+          } catch (stripErr) {
+            await sendLog(jobId, 'warn', `⚠️ Stripped start URL navigation failed: ${stripErr.message}`);
+          }
+        }
+
+        if (!isWithinDomain(finalUrl, currentUrl, allowSubdomains, domainScope)) {
+          await recoverInScopeUrlAfterCrossDomainRedirect(
+            page,
+            jobId,
+            currentUrl,
+            currentUrl,
+            allowSubdomains,
+            domainScope,
+            finalUrl,
+            (patch) => {
+              if (patch.finalUrl != null) finalUrl = patch.finalUrl;
+              if ('lastNavHttpStatus' in patch) navStatus = patch.lastNavHttpStatus;
+            }
+          );
         }
         
         try {
