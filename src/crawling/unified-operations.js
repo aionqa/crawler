@@ -2471,7 +2471,15 @@ const modeHandlers = {
         let finalUrl = currentUrl;
         let redirectedOutsideSeedDomain = false;
         let lastNavHttpStatus = null;
-        if (currentPageUrl !== currentUrl) {
+        // String mismatch alone is not enough: e.g. queue uses canonical URL while the browser kept a
+        // trailing slash or equivalent form after cookie-recovery navigation. A redundant goto()
+        // reloads the full project cookie jar and can re-trigger cross-domain affiliate redirects
+        // that anonymous recovery had already cleared for this session.
+        const blankOrMissing = !currentPageUrl || currentPageUrl === 'about:blank';
+        const queuedKey = urlKeyForDedupe(currentUrl);
+        const pageKey = blankOrMissing ? '' : urlKeyForDedupe(currentPageUrl);
+        const sameLogicalPage = Boolean(queuedKey && pageKey && queuedKey === pageKey);
+        if (!sameLogicalPage) {
           try {
             // Capture response status and retry transient 5xx (common with CDNs returning 503).
             let response = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -2538,15 +2546,28 @@ const modeHandlers = {
             }
           }
         } else {
-          // Already on the page, but cookies might have caused a navigation
-          // Wait a bit and check if URL changed
+          if (currentPageUrl !== currentUrl) {
+            await sendLog(
+              jobId,
+              'info',
+              `ℹ️ Already at crawl target (canonical URL match); skipping redundant navigation`,
+              {
+                component: 'CRAWLER-TEXT',
+                action: 'workflow_skip_redundant_goto',
+                browser_url: currentPageUrl,
+                queued_url: currentUrl
+              }
+            );
+          }
+          // Already on the page, but cookies or SPA routing might still move the URL
           await page.waitForTimeout(1000);
           try {
             const actualUrl = page.url();
-            if (actualUrl !== currentUrl) {
-              finalUrl = actualUrl;
+            finalUrl = actualUrl;
+            if (urlKeyForDedupe(actualUrl) !== urlKeyForDedupe(currentUrl)) {
               await sendLog(jobId, 'info', `🔄 Page navigated from ${currentUrl} to ${finalUrl} (likely due to cookies)`);
             }
+            redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
           } catch (urlError) {
             console.warn(`Could not get page URL: ${urlError.message}`);
           }
