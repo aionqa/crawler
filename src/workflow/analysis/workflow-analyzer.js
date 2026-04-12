@@ -3890,8 +3890,35 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 page_id: pageIdToUse,
                 response_status: response.status
               });
-            } else {
-              console.log(`✅ [JOURNEYS-FINAL] All ${journeysToSave.length} journey(s) already exist on page`);
+            } else if (journeysToSave.length > 0) {
+              // Re-crawl: journey_ids already on page — still push latest statuses/iterations so Mongo matches this run
+              console.log(`🔍 [JOURNEYS-FINAL] Refreshing ${journeysToSave.length} existing journey(s) at workflow completion`);
+              const cleanedJourneys = journeysToSave.map(j => this.cleanJourneyForSave(j));
+              const refreshPayload = {
+                saveLegs: true,
+                journeys: cleanedJourneys,
+                job_id: effectiveJobId
+              };
+              const refreshResponse = await this.postRunnerSaveAnalysis(pageIdToUse, refreshPayload, effectiveJobId, {
+                timeout: 120000,
+                on404: async () => {
+                  if (!workflowState.pageUrl) return null;
+                  console.warn(`⚠️ [JOURNEYS-FINAL] refresh save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
+                  const recovered = await this.ensurePageId(workflowState, effectiveJobId, { forceDiscover: true });
+                  return recovered ? String(recovered) : null;
+                },
+                onPageIdResolved: (newId) => {
+                  pageIdToUse = String(newId);
+                  workflowState.pageId = pageIdToUse;
+                }
+              });
+              console.log(`✅ [JOURNEYS-FINAL] Refreshed ${journeysToSave.length} journey(s). Response status: ${refreshResponse.status}`);
+              await this.sendLogToBackend(effectiveJobId, 'info', `✅ [JOURNEYS-FINAL] Refreshed ${journeysToSave.length} journey(s) at workflow completion`, 'WORKFLOW-ANALYZER', {
+                journeys_count: journeysToSave.length,
+                page_id: pageIdToUse,
+                response_status: refreshResponse.status,
+                refresh_existing: true
+              });
             }
           }
         } catch (finalError) {
@@ -17508,7 +17535,17 @@ const sleep = safeWait;
                 reasonLower.includes('no multi-step wizard indicators') ||
                 (reasonLower.includes("missing an '@'") && reasonLower.includes('test')) ||
                 reasonLower.includes('visual ambiguity');
-              if (executionSucceeded && softVerifierFalseNegative) {
+              const uncertainVerifierAfterExec =
+                reasonLower.includes('inconclusive') ||
+                reasonLower.includes('cannot determine') ||
+                reasonLower.includes('cannot reliably') ||
+                reasonLower.includes('unclear whether') ||
+                reasonLower.includes('insufficient evidence') ||
+                reasonLower.includes('insufficient signal') ||
+                reasonLower.includes('no actionable') ||
+                reasonLower.includes('low confidence') ||
+                reasonLower.includes('not possible to tell');
+              if (executionSucceeded && (softVerifierFalseNegative || uncertainVerifierAfterExec)) {
                 expectedOutcomeVerified = true;
                 justificationStatus = 'success';
                 justificationReason = `Accepted as success (runtime evidence override): ${justificationReason}`;
@@ -17785,8 +17822,8 @@ const sleep = safeWait;
                 }
               }
               
-              // Save immediately
-              if (workflowState.workflowId) {
+              // Save immediately (page-scoped runner API — do not require workflowId; advanced page templates often finish with no workflow_id)
+              if (workflowState.pageId && jobId) {
                 try {
                   // CRITICAL: Ensure journey has all justification fields before saving
                   const journeyToSave = {
@@ -19054,11 +19091,12 @@ const sleep = safeWait;
             console.log(`🔍 [WHILE-LOOP-ITERATION-${iteration}] Journey ${journeyId} now has ${journey.iterations.length} iteration(s)`);
             
             // CRITICAL: Save journey iterations immediately to make results visible in UI right away
-            if (workflowState.workflowId) {
+            if (workflowState.pageId && jobId) {
               try {
+                const safeJourney = this.makeJsonSafe(journey, 8);
                 const payload = {
                   saveLegs: false,
-                  journeys: [journey],
+                  journeys: [safeJourney],
                   job_id: jobId
                 };
                 console.log(`💾 [WHILE-LOOP-ITERATION-${iteration}] Saving journey ${journeyId} with ${journey.iterations.length} iteration(s) and justification_status=${finalJustificationStatus} to page ${workflowState.pageId}`);
@@ -19081,7 +19119,7 @@ const sleep = safeWait;
                 console.error(`❌ [WHILE-LOOP-ITERATION-${iteration}] Failed to immediately save journey iteration: ${saveError.message}`, saveError);
               }
             } else {
-              console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Cannot save journey iteration: workflowId is missing`);
+              console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Cannot save journey iteration: missing pageId or jobId`);
             }
           } else {
             console.warn(`⚠️ [WHILE-LOOP-ITERATION-${iteration}] Journey not found in journeysToExecute. journeyId=${journeyId}, journeysToExecute.length=${workflowState.journeysToExecute?.length || 0}`);
@@ -19751,8 +19789,8 @@ const sleep = safeWait;
           }
         }
         
-        // Save journey with final justification immediately
-        if (workflowState.workflowId) {
+        // Save journey with final justification immediately (runner page API — must not depend on workflowId)
+        if (workflowState.pageId && jobId) {
           try {
             // CRITICAL: Ensure journey has all justification fields before saving
             const journeyToSave = {
@@ -19806,7 +19844,7 @@ const sleep = safeWait;
     
     // CRITICAL: Final save of iterations at end of while-loop
     // This ensures iterations are saved even if they weren't saved during individual iterations
-    if (workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0 && workflowState.workflowId) {
+    if (workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0 && workflowState.pageId && jobId) {
       const currentItem = workflowState.currentJourney || workflowState.currentItem || {};
       const journeyId = currentItem.journey_id || currentItem.id;
       if (journeyId) {
