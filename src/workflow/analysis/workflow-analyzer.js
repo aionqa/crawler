@@ -13147,6 +13147,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       }
     }
     
+    const journeyRawScriptLen = code && typeof code === 'string' ? code.trim().length : 0;
     code = this.finalizeAiGeneratedPlaywrightScript(code);
     if (isJourneyScriptExecutionStep && code && typeof code === 'string') {
       const spaLead = `await page.waitForLoadState('domcontentloaded').catch(() => {});\nawait page.waitForTimeout(350);\n`;
@@ -13204,9 +13205,49 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     
     if (!code || code.trim().length === 0) {
       if (isJourneyScriptExecutionStep) {
+        const formsSignalsEmpty = Array.isArray(workflowState?.playwrightAnalysis?.forms)
+          ? workflowState.playwrightAnalysis.forms.length
+          : 0;
+        const interactiveSignalsEmpty = Array.isArray(workflowState?.playwrightAnalysis?.interactive_elements)
+          ? workflowState.playwrightAnalysis.interactive_elements.length
+          : 0;
+        const hasActionableUi = formsSignalsEmpty > 0 || interactiveSignalsEmpty > 0;
+        // Raw model output existed but sanitization removed everything — treat as degenerate AI output
+        // so the while-loop can retry (bounded) instead of a silent skip that reads as success to justify.
+        if (journeyRawScriptLen > 0 || hasActionableUi) {
+          const collapseError = 'AI journey script collapsed to empty after sanitization (regenerate)';
+          const collapseResult = {
+            success: false,
+            execution_failed: true,
+            error_type: 'execution',
+            error: collapseError,
+            source_field: sourceField,
+            raw_script_length_before_finalize: journeyRawScriptLen,
+            forms_signals: formsSignalsEmpty,
+            interactive_signals: interactiveSignalsEmpty,
+          };
+          workflowState.lastExecutedActionLines = [];
+          workflowState.lastExecutionResult = collapseResult;
+          workflowState.executionErrorType = 'execution';
+          await this.storeStepResult(step, collapseResult, workflowState);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `${collapseError}; forcing bounded regeneration.`,
+              'WORKFLOW-ANALYZER',
+              {
+                step_id: step.id,
+                step_name: step.name,
+                raw_script_length_before_finalize: journeyRawScriptLen,
+              }
+            );
+          }
+          return collapseResult;
+        }
         return await skipEmptyJourneyScriptExecution('post-clean', {
           original_code_type: typeof code,
-          original_code_length: typeof code === 'string' ? code.length : 0
+          original_code_length: journeyRawScriptLen,
         });
       }
       throw new Error(`Script is empty after cleaning for step: ${step.name}`);
@@ -17826,6 +17867,7 @@ const sleep = safeWait;
             execErrLower.includes('journey script syntax error') ||
             execErrLower.includes('journey script scope error') ||
             execErrLower.includes('no actionable interaction generated in journey script') ||
+            execErrLower.includes('collapsed to empty after sanitization') ||
             execErrLower.includes('missing ) after argument list') ||
             execErrLower.includes('unexpected end of input');
 
