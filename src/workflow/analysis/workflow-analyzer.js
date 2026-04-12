@@ -3857,6 +3857,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
             
             const existingJourneyIds = skipCheck ? new Set() : new Set(existingJourneys.map(j => j.journey_id));
             const newJourneys = skipCheck ? journeysToSave : journeysToSave.filter(j => !existingJourneyIds.has(j.journey_id));
+            const hasPreExistingOverlap = !skipCheck && journeysToSave.some((j) => existingJourneyIds.has(j.journey_id));
             
             if (newJourneys.length > 0) {
               console.log(`🔍 [JOURNEYS-FINAL] Saving ${newJourneys.length} journey(s) at workflow completion${skipCheck ? ' (page just created)' : ` (${existingJourneys.length} already exist)`}`);
@@ -3890,9 +3891,11 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 page_id: pageIdToUse,
                 response_status: response.status
               });
-            } else if (journeysToSave.length > 0) {
-              // Re-crawl: journey_ids already on page — still push latest statuses/iterations so Mongo matches this run
-              console.log(`🔍 [JOURNEYS-FINAL] Refreshing ${journeysToSave.length} existing journey(s) at workflow completion`);
+            }
+            // Re-crawl / mixed new+existing: whenever any journey_id already existed on the page, push the full
+            // in-memory run snapshot so pre-existing rows are not left stale (fixes "Saved 1" while 2 legs stayed failed).
+            if (hasPreExistingOverlap && journeysToSave.length > 0) {
+              console.log(`🔍 [JOURNEYS-FINAL] Refreshing ${journeysToSave.length} journey(s) at workflow completion (sync pre-existing + full run state)`);
               const cleanedJourneys = journeysToSave.map(j => this.cleanJourneyForSave(j));
               const refreshPayload = {
                 saveLegs: true,
@@ -8209,6 +8212,7 @@ return {
             const existingJourneys = pageDoc?.journeys || [];
             const existingJourneyIds = new Set(existingJourneys.map(j => j.journey_id));
             const newJourneys = journeysToSave.filter(j => !existingJourneyIds.has(j.journey_id));
+            const hasPreExistingOverlap = journeysToSave.some((j) => existingJourneyIds.has(j.journey_id));
             
             if (newJourneys.length > 0) {
               console.log(`🔍 [JOURNEYS-FINAL] Saving ${newJourneys.length} new journey(s) to page ${pageIdToUse} (${existingJourneys.length} already exist)`);
@@ -8237,8 +8241,27 @@ return {
                   });
                 }
               }
-            } else {
-              console.log(`✅ [JOURNEYS-FINAL] All ${journeysToSave.length} journey(s) already exist on page`);
+            }
+            if (hasPreExistingOverlap && journeysToSave.length > 0) {
+              try {
+                const refreshPayload = {
+                  saveLegs: true,
+                  journeys: journeysToSave.map((j) => this.cleanJourneyForSave(j)),
+                  job_id: jobId
+                };
+                const refreshResponse = await this.postRunnerSaveAnalysis(pageIdToUse, refreshPayload, jobId);
+                console.log(`✅ [JOURNEYS-FINAL] Refreshed ${journeysToSave.length} journey(s) on page ${pageIdToUse}. Response status: ${refreshResponse.status}`);
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-FINAL] Refreshed ${journeysToSave.length} journey(s) (pre-existing overlap)`, 'WORKFLOW-ANALYZER', {
+                    journeys_count: journeysToSave.length,
+                    page_id: pageIdToUse,
+                    response_status: refreshResponse.status,
+                    refresh_existing: true
+                  });
+                }
+              } catch (refreshErr) {
+                console.error(`❌ [JOURNEYS-FINAL] Failed to refresh journeys: ${refreshErr.message}`);
+              }
             }
           } catch (checkError) {
             // Page might not exist, try to save anyway
@@ -8302,6 +8325,7 @@ return {
               const existing = pageCheckDoc?.journeys || [];
               const existingIds = new Set(existing.map(j => j.journey_id));
               const newOnes = finalJourneysToSave.filter(j => !existingIds.has(j.journey_id));
+              const hasPreExistingOverlapEnd = finalJourneysToSave.some((j) => existingIds.has(j.journey_id));
               
               if (newOnes.length > 0) {
                 console.log(`🔍 [AI-PROMPT-END] Saving ${newOnes.length} new journey(s) at end of AI prompt step`);
@@ -8321,8 +8345,23 @@ return {
                     response_status: response.status
                   });
                 }
-              } else {
-                console.log(`✅ [AI-PROMPT-END] All ${finalJourneysToSave.length} journey(s) already exist on page`);
+              }
+              if (hasPreExistingOverlapEnd && finalJourneysToSave.length > 0) {
+                const refreshPayload = {
+                  saveLegs: true,
+                  journeys: finalJourneysToSave.map((j) => this.cleanJourneyForSave(j)),
+                  job_id: jobId
+                };
+                const refreshResponse = await this.postRunnerSaveAnalysis(pageIdFinal, refreshPayload, jobId);
+                console.log(`✅ [AI-PROMPT-END] Refreshed ${finalJourneysToSave.length} journey(s). Response status: ${refreshResponse.status}`);
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(jobId, 'info', `✅ [AI-PROMPT-END] Refreshed ${finalJourneysToSave.length} journey(s) (pre-existing overlap)`, 'WORKFLOW-ANALYZER', {
+                    journeys_count: finalJourneysToSave.length,
+                    page_id: pageIdFinal,
+                    response_status: refreshResponse.status,
+                    refresh_existing: true
+                  });
+                }
               }
             } catch (checkErr) {
               // Page might not exist, save anyway
