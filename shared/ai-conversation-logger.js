@@ -744,20 +744,37 @@ export class AIConversationLogger {
     if (bypass) {
       return;
     }
-    try {
-      await axios.post(
-        `${this.backendUrl}/jobs/${jobId}/ai-budget/check`,
-        {},
-        { headers: this.getAuthHeaders() }
-      );
-    } catch (error) {
-      const status = error?.response?.status;
-      if (status === 402) {
-        const message = error?.response?.data?.message || 'AI token balance exhausted. Please top up to continue.';
-        throw new Error(message);
+    // Match openai-client-factory postToAiServiceWithFailover: rolling deploys / ALB blips on the
+    // back API can return 502/503/504; a single failure here aborts the whole AI step before any model call.
+    const maxTransientAttempts = 6;
+    let lastError;
+    for (let attempt = 1; attempt <= maxTransientAttempts; attempt++) {
+      try {
+        await axios.post(
+          `${this.backendUrl}/jobs/${jobId}/ai-budget/check`,
+          {},
+          { headers: this.getAuthHeaders() }
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+        const status = error?.response?.status;
+        if (status === 402) {
+          const message = error?.response?.data?.message || 'AI token balance exhausted. Please top up to continue.';
+          throw new Error(message);
+        }
+        if (isTransientGatewayError(error) && attempt < maxTransientAttempts) {
+          const delayMs = Math.min(16000, 500 * 2 ** (attempt - 1));
+          console.warn(
+            `[AI-LOGGER] ai-budget/check HTTP ${status ?? '?'} (transient); retry ${attempt}/${maxTransientAttempts - 1} in ${delayMs}ms...`
+          );
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
+        throw error;
       }
-      throw error;
     }
+    throw lastError;
   }
 
   async reportAiMetrics(jobId, payload) {
