@@ -17,6 +17,11 @@ class VideoStreamManager {
     this.activeStreams = new Map(); // jobId -> stream info
     this.frameBuffer = new Map(); // jobId -> circular buffer of frames
     this.bufferSize = 150; // Keep last 150 frames (30 seconds at 5fps)
+    /** Presigned PUT slots from batch API (reduces /api/upload/presigned-url traffic). */
+    this.presignedPools = new Map(); // jobId -> Array<{ url, key, publicUrl }>
+    /** Pending metadata rows for POST .../stream-frame-batch */
+    this.pendingNotify = new Map(); // jobId -> Array<object>
+    this.notifyFlushTimers = new Map(); // jobId -> Timeout
   }
 
   /**
@@ -153,50 +158,140 @@ class VideoStreamManager {
     console.log(`[VIDEO-STREAM] Stream ended for job ${streamInfo.jobId}, captured ${streamInfo.frameCount} frames`);
   }
 
+  async _takePresignedFrameSlot(jobId) {
+    const jid = String(jobId || '');
+    let pool = this.presignedPools.get(jid) || [];
+    const refillAt = Math.max(0, Number.parseInt(process.env.VIDEO_STREAM_PRESIGNED_REFILL_AT || '4', 10) || 4);
+    const batchSize = Math.max(4, Math.min(48, Number.parseInt(process.env.VIDEO_STREAM_PRESIGNED_BATCH || '16', 10) || 16));
+    if (pool.length <= refillAt) {
+      try {
+        const res = await axios.post(
+          `${this.backendUrl}/api/upload/presigned-url-batch`,
+          { type: 'frame', jobId: jid, count: batchSize },
+          { timeout: 20000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
+        );
+        const items = Array.isArray(res.data?.items) ? res.data.items : [];
+        pool = pool.concat(items);
+      } catch (batchErr) {
+        const presignedRes = await axios.post(
+          `${this.backendUrl}/api/upload/presigned-url`,
+          { type: 'frame', jobId: jid },
+          { timeout: 5000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
+        );
+        pool = pool.concat([presignedRes.data]);
+      }
+    }
+    const slot = pool.shift();
+    this.presignedPools.set(jid, pool);
+    return slot;
+  }
+
+  /** Max metadata rows per stream-frame-batch POST (must stay ≤ backend STREAM_FRAME_BATCH_MAX). */
+  _notifyBatchSize() {
+    return Math.max(1, Math.min(32, Number.parseInt(process.env.VIDEO_STREAM_NOTIFY_BATCH || '8', 10) || 8));
+  }
+
+  _queueStreamNotify(jobId, row) {
+    const jid = String(jobId);
+    const list = this.pendingNotify.get(jid) || [];
+    list.push(row);
+    this.pendingNotify.set(jid, list);
+    const maxBatch = this._notifyBatchSize();
+    if (list.length >= maxBatch) {
+      this._flushNotifyBatch(jid).catch(() => {});
+      return;
+    }
+    if (this.notifyFlushTimers.get(jid)) {
+      clearTimeout(this.notifyFlushTimers.get(jid));
+    }
+    const t = setTimeout(() => {
+      this.notifyFlushTimers.delete(jid);
+      this._flushNotifyBatch(jid).catch(() => {});
+    }, Number.parseInt(process.env.VIDEO_STREAM_NOTIFY_DEBOUNCE_MS || '120', 10) || 120);
+    this.notifyFlushTimers.set(jid, t);
+  }
+
+  async _flushNotifyBatch(jobId) {
+    const jid = String(jobId);
+    if (this.notifyFlushTimers.has(jid)) {
+      clearTimeout(this.notifyFlushTimers.get(jid));
+      this.notifyFlushTimers.delete(jid);
+    }
+    const list = this.pendingNotify.get(jid);
+    if (!list || list.length === 0) return;
+    const chunk = list.splice(0, this._notifyBatchSize());
+    if (list.length === 0) {
+      this.pendingNotify.delete(jid);
+    }
+    const items = chunk.map((row) => ({
+      jobId: row.jobId,
+      key: row.key,
+      publicUrl: row.publicUrl,
+      timestamp: row.timestamp,
+      frameNumber: row.frameNumber,
+      url: row.url,
+    }));
+    try {
+      await axios.post(
+        `${this.backendUrl}/api/runners/${this.runnerId}/stream-frame-batch`,
+        { items },
+        { timeout: 15000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
+      );
+    } catch (e) {
+      for (const row of chunk) {
+        try {
+          await axios.post(
+            `${this.backendUrl}/api/runners/${this.runnerId}/stream-frame`,
+            {
+              jobId: row.jobId,
+              key: row.key,
+              publicUrl: row.publicUrl,
+              timestamp: row.timestamp,
+              frameNumber: row.frameNumber,
+              url: row.url,
+            },
+            { timeout: 5000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
+          );
+        } catch {
+          /* best-effort */
+        }
+      }
+    }
+    if ((this.pendingNotify.get(jid) || []).length > 0) {
+      await this._flushNotifyBatch(jid);
+    }
+  }
+
   /**
-   * Send frame to backend. Uses presigned S3 upload when runner token is available
-   * (avoids sending large base64 through the backend); otherwise falls back to legacy JSON body.
+   * Send frame: PUT JPEG directly to object storage (presigned), notify backend in batches (metadata only).
    */
   async _sendFrame(frameData) {
     try {
       if (this.runnerToken) {
-        // Upload directly to S3 with presigned URL, then notify backend with key only
-        const presignedRes = await axios.post(
-          `${this.backendUrl}/api/upload/presigned-url`,
-          { type: 'frame', jobId: frameData.jobId },
-          { timeout: 5000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
-        );
-        const { url: presignedUrl, key, publicUrl } = presignedRes.data;
+        const slot = await this._takePresignedFrameSlot(frameData.jobId);
+        if (!slot?.url) return;
+        const { url: presignedUrl, key, publicUrl } = slot;
         const imageBuffer = Buffer.from(frameData.data, 'base64');
         await axios.put(presignedUrl, imageBuffer, {
           headers: { 'Content-Type': 'image/jpeg' },
           maxBodyLength: Infinity,
           timeout: 10000
         });
-        await axios.post(
-          `${this.backendUrl}/api/runners/${this.runnerId}/stream-frame`,
-          {
-            jobId: frameData.jobId,
-            key,
-            publicUrl,
-            timestamp: new Date(frameData.timestamp).toISOString(),
-            frameNumber: frameData.frameNumber,
-            url: frameData.url
-          },
-          { timeout: 3000 }
-        );
-      } else {
-        // Legacy: send base64 in JSON (can hit body size limits)
-        await axios.post(`${this.backendUrl}/api/runners/${this.runnerId}/stream-frame`, {
+        this._queueStreamNotify(frameData.jobId, {
           jobId: frameData.jobId,
-          frame: frameData.data,
-          frameNumber: frameData.frameNumber,
+          key,
+          publicUrl,
           timestamp: new Date(frameData.timestamp).toISOString(),
+          frameNumber: frameData.frameNumber,
           url: frameData.url
-        }, {
-          timeout: 3000,
-          maxBodyLength: Infinity
         });
+      } else {
+        if (!this._warnedNoRunnerToken) {
+          this._warnedNoRunnerToken = true;
+          console.warn(
+            '[VIDEO-STREAM] RUNNER_TOKEN is required for streaming: frames must upload via presigned S3 PUT (no base64 through backend).'
+          );
+        }
       }
     } catch (error) {
       // Silently fail - don't interrupt streaming

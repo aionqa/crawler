@@ -10,6 +10,7 @@ import OpenAI from 'openai';
 import { chromium } from 'playwright';
 import axios from 'axios';
 import { createOpenAIClient, isNetworkUnreachableError, isTransientGatewayError } from '../src/openai-client-factory.js';
+import { prepareScreenshotUpload, uploadScreenshotToPresignedUrl } from '../src/backend-logger.js';
 
 /**
  * Extract the first complete JSON object or array from a string that may contain
@@ -707,22 +708,35 @@ export class AIConversationLogger {
    */
   async uploadThumbnail(thumbnailBuffer, filename, jobId) {
     try {
-      const response = await fetch(`${this.backendUrl}/upload/thumbnail`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          job_id: jobId,
-          filename: filename,
-          thumbnail_base64: thumbnailBuffer.toString('base64')
-        })
+      const prep = await prepareScreenshotUpload(jobId, null, {
+        kind: 'ai_thumbnail',
+        filename,
       });
-
-      if (!response.ok) {
-        throw new Error(`Failed to upload thumbnail: ${response.statusText}`);
+      if (!prep || prep.ok === false || !prep.uploadUrl || !prep.key) {
+        return null;
       }
-
-      const result = await response.json();
-      return result.url || result.key;
+      const putOk = await uploadScreenshotToPresignedUrl(prep.uploadUrl, thumbnailBuffer);
+      if (!putOk) {
+        return null;
+      }
+      const headers = {
+        'Content-Type': 'application/json',
+        ...(this.runnerToken ? { Authorization: `Bearer ${this.runnerToken}` } : {}),
+      };
+      const reg = await fetch(`${this.backendUrl}/api/upload/register-screenshot`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          jobId,
+          objectName: prep.key,
+          url: prep.publicUrl,
+          metadata: { kind: 'ai_thumbnail', filename },
+        }),
+      });
+      if (!reg.ok) {
+        return null;
+      }
+      return prep.publicUrl;
     } catch (error) {
       console.error('[AI-LOGGER] Failed to upload thumbnail:', error.message);
       return null;

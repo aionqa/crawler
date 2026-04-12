@@ -866,40 +866,39 @@ async function sendWebSocketMessagesToBackend(jobId, projectId, messages, runner
   }
 }
 
-// Upload files via backend API (legacy - used for fallback only)
+// Upload media via presigned PUT only (never send bytes through the Node API)
 async function uploadFileToBackend({ buffer, contentType, type, jobId, metadata = {} }) {
+  const backendUrl = process.env.BACKEND_URL || 'http://localhost:4000';
+  const authHeaders = process.env.RUNNER_TOKEN
+    ? { Authorization: `Bearer ${process.env.RUNNER_TOKEN}` }
+    : {};
   try {
-    const backendUrl = process.env.BACKEND_URL || 'http://localhost:4000';
-    const endpoint = type === 'screenshot' ? '/upload/screenshot' : '/upload/video';
-    
-    const response = await fetch(`${backendUrl}${endpoint}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        jobId: jobId,
-        data: buffer.toString('base64'),
-        type: contentType,
-        metadata: metadata
-      })
+    if (type === 'screenshot') {
+      const fileId = await backendLogger.uploadScreenshotFullFlow({
+        jobId,
+        screenshotBuffer: buffer,
+        backendUrl,
+        authHeaders,
+        metadata,
+      });
+      return fileId ? { fileId, objectName: null } : null;
+    }
+    const prep = await backendLogger.prepareVideoUpload(jobId, { ...metadata, contentType });
+    if (!prep || prep.ok === false || !prep.uploadUrl || !prep.key) {
+      return null;
+    }
+    const putOk = await backendLogger.uploadVideoToPresignedUrl(prep.uploadUrl, buffer);
+    if (!putOk) {
+      return null;
+    }
+    await backendLogger.trackMediaUpload(jobId, 'video', {
+      videoKey: prep.key,
+      url: prep.publicUrl,
+      size: buffer.length,
     });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Upload failed: ${response.status} ${response.statusText} - ${errorText}`);
-    }
-
-    const result = await response.json();
-    if (!result.file_id) {
-      throw new Error('Backend did not return file_id');
-    }
-    return {
-      fileId: result.file_id,
-      objectName: result.object_name
-    };
+    return { fileId: prep.key, objectName: prep.key };
   } catch (error) {
-    console.error(`[unified-crawler] Backend upload error: ${error.message}`);
+    console.error(`[unified-crawler] Presigned media upload error: ${error.message}`);
     return null;
   }
 }

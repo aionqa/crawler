@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { uploadScreenshotFullFlow } from '../../backend-logger.js';
 import { runFailureDiagnosisCrawlerAi } from '../failure-diagnosis-crawler-ai.js';
 import { detectModal, analyzeModalPaths, waitForModal } from '../utils/modalDetector.js';
 import { generateModalPath, appendToModalPath, getActionNameFromElement, getPageNameFromModal } from '../utils/modalPathNotation.js';
@@ -3859,28 +3860,20 @@ class WorkflowExecutor {
   }
 
   /**
-   * Upload screenshot via backend
+   * Upload screenshot via presigned PUT + register (no binary through Node API)
    */
   async uploadScreenshot(jobId, screenshotBuffer, suffix) {
     try {
-      // Use the correct upload endpoint
-      const response = await axios.post(
-        `${this.backendUrl}/upload/screenshot`,
-        {
-          jobId: jobId,
-          data: screenshotBuffer.toString('base64'),
-          type: 'image/png',
-          metadata: {
-            suffix: suffix,
-            action: 'workflow_executor'
-          }
+      return await uploadScreenshotFullFlow({
+        jobId,
+        screenshotBuffer,
+        backendUrl: this.backendUrl,
+        authHeaders: this.getAuthHeaders(),
+        metadata: {
+          suffix,
+          action: 'workflow_executor',
         },
-        {
-          headers: { 'Content-Type': 'application/json' }
-        }
-      );
-
-      return response.data.file_id;
+      });
     } catch (error) {
       console.error('[WorkflowExecutor] Screenshot upload failed:', error.message);
       return null;

@@ -276,6 +276,57 @@ export async function uploadScreenshotToPresignedUrl(uploadUrl, screenshotBuffer
 }
 
 /**
+ * Prepare presigned URL, PUT screenshot to object storage, register metadata (no binary via backend API).
+ * @param {object} opts
+ * @param {string} opts.jobId
+ * @param {Buffer} opts.screenshotBuffer
+ * @param {string} [opts.backendUrl]
+ * @param {Record<string, string>} [opts.authHeaders] Authorization Bearer for register-screenshot
+ * @param {object} [opts.metadata]
+ * @returns {Promise<string|null>} fileId or null
+ */
+export async function uploadScreenshotFullFlow({
+  jobId,
+  screenshotBuffer,
+  backendUrl = BACKEND_URL,
+  authHeaders = {},
+  metadata = {},
+}) {
+  const prep = await prepareScreenshotUpload(jobId, null, metadata);
+  if (!prep || prep.ok === false || !prep.uploadUrl || !prep.key) {
+    console.error('[SCREENSHOT-FLOW] prepare failed', prep?.error || '');
+    return null;
+  }
+  const putOk = await uploadScreenshotToPresignedUrl(prep.uploadUrl, screenshotBuffer);
+  if (!putOk) {
+    return null;
+  }
+  try {
+    const headers = { 'Content-Type': 'application/json', ...authHeaders };
+    const reg = await fetch(`${backendUrl}/api/upload/register-screenshot`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jobId,
+        objectName: prep.key,
+        url: prep.publicUrl,
+        metadata,
+      }),
+    });
+    if (!reg.ok) {
+      const errText = await reg.text();
+      console.error('[SCREENSHOT-FLOW] register failed', reg.status, errText);
+      return null;
+    }
+    const data = await reg.json();
+    return data.fileId || null;
+  } catch (e) {
+    console.error('[SCREENSHOT-FLOW] register error', e.message);
+    return null;
+  }
+}
+
+/**
  * Prepare video upload (get presigned URL and key)
  * @param {string} jobId - Job ID
  * @param {object} metadata - Additional metadata
