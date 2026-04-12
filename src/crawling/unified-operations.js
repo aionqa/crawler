@@ -505,6 +505,14 @@ async function recordApiDomainClassification(jobId, projectId, apiUrl, pageUrl, 
   }
 }
 
+/** Real HTTP response codes only — excludes 0 (Number(null) bug) and non-responses. */
+function normalizeHttpStatusCode(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 100 || n > 599) return null;
+  return n;
+}
+
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
@@ -531,8 +539,8 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
       title: pageTitle,
       analyzed: false // Will be updated after analysis
     };
-    const httpCode = Number(lastHttpStatus);
-    if (Number.isFinite(httpCode)) {
+    const httpCode = normalizeHttpStatusCode(lastHttpStatus);
+    if (httpCode != null) {
       requestBody.last_http_status = httpCode;
     }
 
@@ -627,8 +635,8 @@ async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allo
       requested_url: pageData.requested_url || null,
       final_url: pageData.final_url || pageData.url || null
     };
-    const discoverHttp = Number(pageData.last_http_status);
-    if (Number.isFinite(discoverHttp)) {
+    const discoverHttp = normalizeHttpStatusCode(pageData.last_http_status);
+    if (discoverHttp != null) {
       requestBody.last_http_status = discoverHttp;
     }
 
