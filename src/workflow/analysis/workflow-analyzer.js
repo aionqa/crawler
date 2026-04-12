@@ -4341,13 +4341,57 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     const existingIECount = workflowState.playwrightAnalysis?.interactive_elements?.length || 0;
     
     await this.waitForSpaInteractiveReady(page);
-    const analysis = await this.performPlaywrightAnalysis(page);
+    let analysis = await this.performPlaywrightAnalysis(page);
     
     // If we had more interactive elements before and new analysis has fewer, preserve the existing ones
     // This handles the case where form fields were added in a previous run
     if (existingIECount > 0 && analysis.interactive_elements.length < existingIECount) {
       console.log(`⚠️ New analysis has fewer interactive elements (${analysis.interactive_elements.length} vs ${existingIECount}). Preserving existing interactive_elements.`);
       analysis.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
+    }
+
+    const playwrightInventoryIsEmpty = (a) =>
+      (a.forms?.length || 0)
+      + (a.links?.length || 0)
+      + (Array.isArray(a.menu_items) ? a.menu_items.length : 0)
+      + (a.interactive_elements?.length || 0) === 0;
+
+    if (playwrightInventoryIsEmpty(analysis)) {
+      let recoverUrl = '';
+      try {
+        recoverUrl = page.url() || '';
+      } catch (_) {
+        recoverUrl = '';
+      }
+      const canHardReload =
+        recoverUrl
+        && recoverUrl !== 'about:blank'
+        && !String(recoverUrl).startsWith('chrome-error://');
+      if (canHardReload) {
+        console.log('♻️ [PLAYWRIGHT] Empty DOM inventory; performing one reload + SPA wait + re-scan (post-recovery / hydration continuity)');
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            '♻️ [PLAYWRIGHT] Empty inventory — single reload + re-scan for SPA continuity after recovery or slow hydration',
+            'WORKFLOW-STEP',
+            { step_id: step?.id, step_name: step?.name, url: recoverUrl },
+          );
+        }
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
+          await this.waitForSpaInteractiveReady(page);
+          const secondPass = await this.performPlaywrightAnalysis(page);
+          if (!playwrightInventoryIsEmpty(secondPass)) {
+            analysis = secondPass;
+            if (existingIECount > 0 && analysis.interactive_elements.length < existingIECount) {
+              analysis.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
+            }
+          }
+        } catch (reErr) {
+          console.warn(`⚠️ [PLAYWRIGHT] Reload re-scan failed: ${reErr.message}`);
+        }
+      }
     }
     
     workflowState.playwrightAnalysis = analysis;
