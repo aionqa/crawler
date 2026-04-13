@@ -11870,6 +11870,31 @@ return {
   }
 
   /**
+   * LLMs often treat Playwright Locator objects like arrays: `rows[0]()` or `rows[0].fill(...)`.
+   * Locator has no `[]`/`[]()` API; use `.nth(i)` or `.first()`. Without this, Node throws
+   * TypeError / strict parse issues and journeys retry until exhaustion.
+   */
+  repairLocatorBracketIndexChains(script) {
+    if (!script || typeof script !== 'string') return script;
+    const skipRoot = new Set(['page', 'context', 'browser', 'frame', 'globalThis', 'window', 'console']);
+    let s = script;
+    for (let i = 0; i < 12; i++) {
+      const next = s
+        .replace(/\b([A-Za-z_$][\w$]*)\[(\d+)\]\(\)/g, (full, name, idx) =>
+          skipRoot.has(String(name)) ? full : `${name}.nth(${idx})`
+        )
+        .replace(
+          /\b([A-Za-z_$][\w$]*)\[(\d+)\]\s*\.\s*(fill|click|dblclick|type|selectOption|check|uncheck|hover|tap|press|focus|blur|dispatchEvent)\s*\(/g,
+          (full, name, idx, method) =>
+            skipRoot.has(String(name)) ? full : `${name}.nth(${idx}).${method}(`
+        );
+      if (next === s) break;
+      s = next;
+    }
+    return s;
+  }
+
+  /**
    * Replace `.fill('')` / `.fill("")` in AI-generated journey scripts so HTML5 validation and
    * post-run verification do not treat intentional empty submissions as inconclusive failures.
    */
@@ -12335,6 +12360,7 @@ return {
     if (!script || typeof script !== 'string') return script;
 
     let s = this.repairQuotedActPseudocodeInFillAndType(script);
+    s = this.repairLocatorBracketIndexChains(s);
     s = this.replaceEmptyJourneyFillValues(s);
 
     // Models often append Playwright timeout tuning after substantive actions; it adds noise to parsers
@@ -12978,6 +13004,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     s = this.dedupeRedundantPreFormButtonClicks(s);
     s = this.injectUndeclaredLocatorAliasesFromQuotedIds(s);
     s = this.injectUndeclaredLocatorAliasesFromInferredLabels(s);
+    s = this.repairLocatorBracketIndexChains(s);
     s = this.replaceEmptyJourneyFillValues(s);
 
     return s;
