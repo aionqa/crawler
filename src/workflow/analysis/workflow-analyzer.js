@@ -12167,6 +12167,119 @@ return {
   }
 
   /**
+   * Unwrap justify_journey / AI step_result blobs so while-loop terminal logic sees the same status
+   * strings as journey iteration persistence (openai_response.result nesting).
+   */
+  extractJustifyFieldsFromStepResult(stepResult) {
+    if (!stepResult || typeof stepResult !== 'object') {
+      return { status: '', reason: null };
+    }
+    const extractValue = (obj) => {
+      if (obj === null || obj === undefined) return null;
+      if (typeof obj === 'string') return obj;
+      if (typeof obj === 'object' && 'value' in obj) return obj.value;
+      return obj.toString ? obj.toString() : null;
+    };
+    let base = stepResult;
+    if (base && typeof base === 'object' && 'value' in base && 'namespace' in base) {
+      base = base.value;
+    }
+    const aiResponse = base?.openai_response || base?.result || base;
+    const statusRaw =
+      extractValue(aiResponse?.status) ||
+      extractValue(aiResponse?.completion_status) ||
+      extractValue(base?.status) ||
+      extractValue(base?.completion_status) ||
+      '';
+    let reason =
+      extractValue(aiResponse?.reason) ||
+      extractValue(aiResponse?.verification_details) ||
+      extractValue(aiResponse?.ai_justification) ||
+      extractValue(base?.reason) ||
+      extractValue(base?.verification_details) ||
+      null;
+    if (typeof reason === 'string' && reason.length > 400 && (reason.includes('Call log:') || /locator\.\w+ Timeout/.test(reason))) {
+      reason = this.summarizeErrorForJustification(reason);
+    }
+    return { status: String(statusRaw || '').toLowerCase().trim(), reason };
+  }
+
+  /**
+   * LLMs often emit placeholder fills that break HTML5-constrained inputs: type=email rejects values
+   * without "@", and soft-validation / min-length flows treat very short message bodies as invalid.
+   * Normalize using the same generic heuristics as empty-fill repair (no per-site URLs).
+   */
+  normalizeConstrainedHtmlJourneyFills(script) {
+    if (!script || typeof script !== 'string') return script;
+    const emailLit = JSON.stringify('journey-autofill@automation.aionqa.invalid');
+    const messageLit = JSON.stringify('Automated journey validation message.');
+    const isPlausibleEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || '').trim());
+    const looksEmailTarget = (vn, locInner) => {
+      const v = String(vn || '').toLowerCase();
+      const l = String(locInner || '');
+      if (/\bemail|e_mail|e-mail|\bmail/.test(v) || v.endsWith('mail')) return true;
+      if (/type\s*=\s*['"]email['"]/i.test(l)) return true;
+      if (/\b#email\b/i.test(l)) return true;
+      if (/\[name\s*=\s*['"]email['"]\]/i.test(l)) return true;
+      if (/\[id\s*=\s*['"]email['"]\]/i.test(l)) return true;
+      return false;
+    };
+    const looksMessageTarget = (vn) => {
+      const v = String(vn || '').toLowerCase();
+      return /\bmessage\b|\bcomment\b|\btextarea\b|\bbody\b/.test(v) || v.includes('message');
+    };
+
+    let s = script;
+    s = s.replace(
+      /\b([A-Za-z_$][\w$]*)\.fill\(\s*(['"])((?:\\.|(?!\2).)*)\2\s*\)/g,
+      (full, varName, q, inner) => {
+        const raw = String(inner || '').replace(/\\(.)/g, '$1');
+        const vn = String(varName || '');
+        if (looksEmailTarget(vn, '') && raw.length > 0 && !isPlausibleEmail(raw)) {
+          return `${varName}.fill(${emailLit})`;
+        }
+        if (looksMessageTarget(vn) && raw.length > 0 && raw.length < 10) {
+          return `${varName}.fill(${messageLit})`;
+        }
+        return full;
+      }
+    );
+
+    s = s.replace(
+      /\.locator\(\s*([^)]*)\)\s*\.fill\(\s*(['"])((?:\\.|(?!\2).)*)\2\s*\)/gi,
+      (full, locInner, q, inner) => {
+        const raw = String(inner || '').replace(/\\(.)/g, '$1');
+        if (looksEmailTarget('', locInner) && raw.length > 0 && !isPlausibleEmail(raw)) {
+          return `.locator(${locInner}).fill(${emailLit})`;
+        }
+        return full;
+      }
+    );
+
+    s = s.replace(
+      /\bpage\.fill\(\s*([^,]+)\s*,\s*(['"])((?:\\.|(?!\2).)*)\2\s*\)/g,
+      (full, selExpr, q, inner) => {
+        const raw = String(inner || '').replace(/\\(.)/g, '$1');
+        const sel = String(selExpr || '');
+        if (looksEmailTarget('', sel) && raw.length > 0 && !isPlausibleEmail(raw)) {
+          return `page.fill(${sel}, ${emailLit})`;
+        }
+        if (
+          /#message\b|\[name\s*=\s*['"]message['"]\]|getByLabel\(\s*['"]message['"]/i.test(sel) ||
+          (/textarea/i.test(sel) && !looksEmailTarget('', sel))
+        ) {
+          if (raw.length > 0 && raw.length < 10) {
+            return `page.fill(${sel}, ${messageLit})`;
+          }
+        }
+        return full;
+      }
+    );
+
+    return s;
+  }
+
+  /**
    * When the model references aliases like elUsername / usernameInput without declarations but the
    * same script contains quoted '#username' selectors (or journey guard checks), inject const locators.
    * Generalized: driven only by id tokens present in the script text.
@@ -12558,6 +12671,7 @@ return {
     s = this.repairLocatorBracketIndexChains(s);
     s = this.repairLocatorQuotedSelectorParenBalance(s);
     s = this.replaceEmptyJourneyFillValues(s);
+    s = this.normalizeConstrainedHtmlJourneyFills(s);
 
     // Models often append Playwright timeout tuning after substantive actions; it adds noise to parsers
     // and rarely affects outcomes. Drop trailing timeout lines (repeat to handle alternating order).
@@ -20261,12 +20375,19 @@ const sleep = safeWait;
     const lastIteration = Array.isArray(loopState?.iterations) && loopState.iterations.length > 0
       ? loopState.iterations[loopState.iterations.length - 1]
       : null;
-    const lastAiStatus = String(
-      lastIteration?.step_result?.status ||
-      lastIteration?.step_result?.completion_status ||
-      ''
-    ).toLowerCase();
-    const lastAiReason = lastIteration?.step_result?.reason || lastIteration?.step_result?.verification_details || null;
+    const justifyExtracted = this.extractJustifyFieldsFromStepResult(lastIteration?.step_result);
+    const lastAiStatus =
+      justifyExtracted.status ||
+      String(
+        lastIteration?.step_result?.status ||
+          lastIteration?.step_result?.completion_status ||
+          ''
+      ).toLowerCase();
+    const lastAiReason =
+      justifyExtracted.reason ||
+      lastIteration?.step_result?.reason ||
+      lastIteration?.step_result?.verification_details ||
+      null;
     const reachedIterationBudget = iteration >= maxIterations;
     const loopIterations = Array.isArray(loopState?.iterations) ? loopState.iterations : [];
     const hasSuccessfulIterationEvidence = loopIterations.some((iter) => {
