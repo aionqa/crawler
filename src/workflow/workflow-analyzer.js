@@ -3,6 +3,7 @@ import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
 import { resolveScreenshotFullPage } from './utils/resolve-screenshot-full-page.js';
 import { StaticNodeExecutor } from './static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../step-requirements.js';
+import { replaceNetworkIdleWithDomContentLoadedForAutomation } from './utils/normalize-playwright-network-idle.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -4101,7 +4102,7 @@ let registrationResponsePromise = waitForRegisterResponse(15000);
 await registerSubmit.click({ timeout: 5000, force: true });
 await page.waitForTimeout(1200);
 let registrationResponse = await registrationResponsePromise;
-await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
 const postSubmitText = ((await page.textContent('body')) || '').toLowerCase();
 let hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(postSubmitText);
 let responseStatus = registrationResponse ? registrationResponse.status() : null;
@@ -4116,7 +4117,7 @@ if (!registrationResponse && !sawRegistrationRequest && !hasRegistrationSuccessS
   }).catch(() => {});
   await page.waitForTimeout(1200);
   registrationResponse = await registrationResponsePromise;
-  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
   const fallbackPostSubmitText = ((await page.textContent('body')) || '').toLowerCase();
   hasRegistrationSuccessSignal = /registration successful|verify your email|check your email|verify your account/.test(fallbackPostSubmitText);
   responseStatus = registrationResponse ? registrationResponse.status() : null;
@@ -7414,7 +7415,7 @@ return {
       "  if (finalSubmit) {",
       "    await finalSubmit.click({ force: true }).catch(() => {});",
       "  }",
-      "  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});",
+      "  await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});",
       "}",
       "return { success: true, used_fallback: true, email_stage: !!emailInput, password_stage: !!passwordInput };"
     ].join('\n');
@@ -9508,6 +9509,23 @@ return {
             });
           });
           console.warn(`⚠️ Applied final emergency replacement`);
+        }
+
+        const beforeNetworkIdleNormalize = finalScriptCode;
+        finalScriptCode = replaceNetworkIdleWithDomContentLoadedForAutomation(finalScriptCode);
+        if (finalScriptCode !== beforeNetworkIdleNormalize) {
+          console.log('ℹ️ Normalized playwright script: networkidle → domcontentloaded (SPA/WebSocket/OAuth-safe)');
+          if (jobId && this.backendLogger) {
+            try {
+              await this.backendLogger.appendJobLog(
+                jobId,
+                'info',
+                'ℹ️ Normalized generated playwright script: replaced networkidle waits with domcontentloaded for SPA/WebSocket/OAuth compatibility',
+                'WORKFLOW-ANALYZER',
+                { step_id: step?.id, step_name: step?.name }
+              );
+            } catch (_) {}
+          }
         }
         
         // Log a sample of the script to verify it's clean

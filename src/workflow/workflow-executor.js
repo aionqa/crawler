@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { uploadScreenshotFullFlow } from '../backend-logger.js';
+import { replaceNetworkIdleWithDomContentLoadedForAutomation } from './utils/normalize-playwright-network-idle.js';
 
 /**
  * WorkflowExecutor
@@ -2400,6 +2401,7 @@ class WorkflowExecutor {
           .replace(/\bwaitForTimeout\(\s*(\d{4,})\s*\)/gi, (m, raw) => `waitForTimeout(${Math.min(Number(raw), SCRIPT_TIMEOUT_CAP_MS)})`);
       };
       cleanedScript = applyTimeoutCaps(cleanedScript);
+      cleanedScript = replaceNetworkIdleWithDomContentLoadedForAutomation(cleanedScript);
       
       const urlBefore = page.url();
       const titleBefore = await page.title();

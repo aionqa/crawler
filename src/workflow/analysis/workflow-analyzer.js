@@ -6,6 +6,7 @@ import { isSearchEngineInfraUrl } from '../../utils/search-engine-infra-url.js';
 import { resolveScreenshotFullPage } from '../utils/resolve-screenshot-full-page.js';
 import { StaticNodeExecutor } from '../execution/static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../../step-requirements.js';
+import { replaceNetworkIdleWithDomContentLoadedForAutomation } from '../utils/normalize-playwright-network-idle.js';
 import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
@@ -756,7 +757,7 @@ class WorkflowAnalyzer {
       } catch (_) {}
     }
     try {
-      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+      await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
     } catch (_) {}
     await new Promise((r) => setTimeout(r, 200));
   }
@@ -14133,10 +14134,17 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         console.log(`🔍 Testing wrapper: wrappedPage.click is function? ${typeof wrappedPage.click === 'function'}`);
         console.log(`🔍 Testing wrapper: wrappedPage.locator is function? ${typeof wrappedPage.locator === 'function'}`);
         console.log(`🔍 Testing wrapper: wrappedPage type=${typeof wrappedPage}, isProxy=${wrappedPage !== pageObj}`);
+
+        const scriptForExecution = replaceNetworkIdleWithDomContentLoadedForAutomation(
+          typeof scriptCode === 'string' ? scriptCode : String(scriptCode || '')
+        );
+        if (scriptForExecution !== scriptCode) {
+          console.log('ℹ️ Normalized playwright script: networkidle → domcontentloaded (SPA/WebSocket/OAuth-safe)');
+        }
         
         // Use string concatenation (not template literals) to avoid escaping issues
         // This allows the script code to contain backticks, ${}, etc. without problems
-        const functionBody = 'return (async function() {\n' + scriptCode + '\n})();';
+        const functionBody = 'return (async function() {\n' + scriptForExecution + '\n})();';
         const journeyFnPreamble = `const input_input_credentials = input_credentials;
 const runJourney = async (task) => {
   if (typeof task === 'function') return await task();

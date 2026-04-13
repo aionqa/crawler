@@ -202,7 +202,7 @@ export async function handleLoginRedirect(
           html_id: htmlId,
           page_url: page.url()
         });
-        await page.reload({ waitUntil: 'networkidle', timeout: 45000 }).catch(() => page.reload().catch(() => {}));
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => page.reload().catch(() => {}));
         await page.waitForTimeout(1500);
       }
     } catch (_) {
