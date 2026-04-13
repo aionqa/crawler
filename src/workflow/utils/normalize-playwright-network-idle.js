@@ -8,6 +8,10 @@ export function replaceNetworkIdleWithDomContentLoadedForAutomation(source) {
   if (typeof source !== 'string' || !source) return source;
   let s = source;
   s = s.replace(/\bwaitForLoadState\s*\(\s*(['"])networkidle\1/gi, 'waitForLoadState($1domcontentloaded$1');
+  s = s.replace(/\bwaitForLoadState\s*\(\s*`networkidle`\s*\)/gi, 'waitForLoadState(`domcontentloaded`)');
   s = s.replace(/\bwaitUntil\s*:\s*(['"])networkidle\1/gi, 'waitUntil: $1domcontentloaded$1');
+  s = s.replace(/\bwaitUntil\s*:\s*`networkidle`/gi, 'waitUntil: `domcontentloaded`');
+  // Rare AI output: load state passed as identifier without quotes
+  s = s.replace(/\bwaitForLoadState\s*\(\s*networkidle\s*\)/gi, 'waitForLoadState(`domcontentloaded`)');
   return s;
 }

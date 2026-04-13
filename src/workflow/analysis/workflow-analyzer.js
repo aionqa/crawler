@@ -765,6 +765,110 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * SPA shells and some auth flows leave the main frame empty while same-origin iframes hold the real UI.
+   * Merge a bounded, generic inventory (no per-domain selectors) so prompts and determine_completion see signal.
+   */
+  async augmentAnalysisFromSameOriginFrames(page, analysis) {
+    if (!page || typeof page.frames !== 'function' || !analysis) return;
+    const menuLen = Array.isArray(analysis.menu_items) ? analysis.menu_items.length : 0;
+    const hasMainInventory =
+      (analysis.forms?.length || 0) +
+        (analysis.links?.length || 0) +
+        menuLen +
+        (analysis.interactive_elements?.length || 0) >
+      0;
+    if (hasMainInventory) return;
+
+    let mainOrigin;
+    try {
+      mainOrigin = new URL(page.url()).origin;
+    } catch {
+      return;
+    }
+
+    const seen = new Set();
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame()) continue;
+      let frameUrl = '';
+      try {
+        frameUrl = frame.url() || '';
+      } catch {
+        continue;
+      }
+      if (!frameUrl || frameUrl.startsWith('about:')) continue;
+      let frameOrigin;
+      try {
+        frameOrigin = new URL(frameUrl).origin;
+      } catch {
+        continue;
+      }
+      if (frameOrigin !== mainOrigin) continue;
+
+      const snapshot = await frame
+        .evaluate(() => {
+          const n = document.querySelectorAll('input,textarea,select,button,a[href]').length || 0;
+          const t = document.body && document.body.innerText ? document.body.innerText.trim().length : 0;
+          return { n, t };
+        })
+        .catch(() => null);
+      if (!snapshot || (snapshot.n === 0 && snapshot.t < 8)) continue;
+
+      const handles = await frame
+        .$$(
+          'input, textarea, select, button, a[href], [role="button"]'
+        )
+        .catch(() => []);
+      const slice = Array.isArray(handles) ? handles.slice(0, 48) : [];
+      for (const h of slice) {
+        try {
+          const tag = await h.evaluate((el) => el.tagName.toLowerCase());
+          const text = ((await h.textContent().catch(() => '')) || '').trim();
+          const sels = await this.getElementSelector(h);
+          const sel = sels[0]?.selector;
+          if (!sel) continue;
+          const key = `${frameUrl}\0${sel}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const base = {
+            selector: sel,
+            selectors: sels,
+            text: text.slice(0, 240),
+            in_same_origin_iframe: true,
+            frame_url: frameUrl
+          };
+          if (tag === 'a') {
+            const href = await h.evaluate((el) => el.href || '').catch(() => '');
+            if (href) {
+              analysis.links.push({
+                href,
+                text: text.slice(0, 240),
+                selector: sel,
+                selectors: sels,
+                in_same_origin_iframe: true,
+                frame_url: frameUrl
+              });
+            }
+            analysis.interactive_elements.push({
+              type: 'link',
+              role: 'link',
+              href: href || undefined,
+              ...base
+            });
+          } else {
+            analysis.interactive_elements.push({
+              type: tag === 'input' ? 'input' : tag,
+              role: tag === 'button' ? 'button' : undefined,
+              ...base
+            });
+          }
+        } catch {
+          // skip element
+        }
+      }
+    }
+  }
+
+  /**
    * Perform Playwright analysis to extract forms, links, interactive elements
    */
   async performPlaywrightAnalysis(page) {
@@ -1283,6 +1387,20 @@ class WorkflowAnalyzer {
 
     } catch (error) {
       console.error('Error during Playwright analysis:', error);
+    }
+
+    try {
+      const invEmpty =
+        (analysis.forms?.length || 0) +
+          (analysis.links?.length || 0) +
+          (Array.isArray(analysis.menu_items) ? analysis.menu_items.length : 0) +
+          (analysis.interactive_elements?.length || 0) ===
+        0;
+      if (invEmpty) {
+        await this.augmentAnalysisFromSameOriginFrames(page, analysis);
+      }
+    } catch (augErr) {
+      console.warn(`[PLAYWRIGHT] Same-origin iframe inventory merge failed: ${augErr.message}`);
     }
 
     return analysis;
