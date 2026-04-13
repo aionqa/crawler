@@ -12146,8 +12146,24 @@ return {
     // Remove type annotations in variable declarations: `const x: Foo = ...`
     s = s.replace(/\b(const|let|var)\s+([A-Za-z_$][\w$]*)\s*:\s*[^=;\n]+(?=\s*[=;])/g, '$1 $2');
 
-    // Remove simple type annotations in function params: `(a: string, b: number)`
-    s = s.replace(/([,(]\s*[A-Za-z_$][\w$]*)\s*:\s*[^,)\n]+/g, '$1');
+    // Remove simple type annotations in function params: `(a: string, b: number)`.
+    // Do not strip comma-separated *object literal* properties such as
+    // `waitFor({ state: 'visible', timeout: 1500 })` — the naive replace turned
+    // `timeout: 1500` into bare `timeout` (invalid / undefined timeout) and hung journeys.
+    const tsPrimitiveTypeName =
+      /^(?:string|number|boolean|bigint|symbol|any|unknown|never|void|object|undefined)$/;
+    s = s.replace(/([,(]\s*[A-Za-z_$][\w$]*)\s*:\s*[^,)\n]+/g, (full, pre) => {
+      const rest = full.slice(full.indexOf(':') + 1).trim();
+      const isCommaProperty = pre.trimStart().startsWith(',');
+      if (isCommaProperty) {
+        if (/^\d+(?:\.\d+)?$/.test(rest)) return full;
+        if (/^(['"`])/.test(rest)) return full;
+        if (/^(true|false)\b/.test(rest)) return full;
+        if (/^[{[]/.test(rest)) return full;
+        if (/^[a-z_$][\w$]*$/.test(rest) && !tsPrimitiveTypeName.test(rest)) return full;
+      }
+      return pre;
+    });
 
     // Remove non-null assertions: `el!.click()`
     s = s.replace(/([A-Za-z_$][\w$]*)!\s*(?=[\.\[\(])/g, '$1');
