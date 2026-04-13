@@ -452,9 +452,10 @@ async function recoverInScopeUrlAfterCrossDomainRedirect(
     workingFinal = newFinal;
 
     const outside = !isWithinDomain(newFinal, seedUrl, allowSubdomains, domainScope);
+    const resolvedStatus = await resolveHttpStatusAfterNavigation(page, response, newFinal);
     updateState({
       finalUrl: newFinal,
-      lastNavHttpStatus: status ?? null,
+      lastNavHttpStatus: resolvedStatus,
       redirectedOutsideSeedDomain: outside
     });
     return !outside;
@@ -511,6 +512,51 @@ function normalizeHttpStatusCode(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 100 || n > 599) return null;
   return n;
+}
+
+function isHttpOrHttpsUrl(urlString) {
+  if (!urlString || typeof urlString !== 'string') return false;
+  try {
+    const u = new URL(urlString);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Chromium exposes Navigation Timing responseStatus for the last document navigation.
+ * Used when Playwright's goto Response is missing or reports 0.
+ */
+async function readNavigationResponseStatusFromPerformance(page) {
+  try {
+    return await page.evaluate(() => {
+      const nav = performance.getEntriesByType?.('navigation')?.[0];
+      if (!nav || nav.responseStatus == null) return null;
+      return nav.responseStatus;
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Resolve a storable HTTP status after navigation. Playwright may return status() === 0 when no
+ * Response object is attached despite a successful http(s) load; Performance API often has the code.
+ */
+async function resolveHttpStatusAfterNavigation(page, response, finalUrl) {
+  let raw = null;
+  try {
+    raw = response && typeof response.status === 'function' ? response.status() : null;
+  } catch (_) {
+    raw = null;
+  }
+  const direct = normalizeHttpStatusCode(raw);
+  if (direct != null) return direct;
+  const fromPerf = normalizeHttpStatusCode(await readNavigationResponseStatusFromPerformance(page));
+  if (fromPerf != null) return fromPerf;
+  if (raw === 0 && isHttpOrHttpsUrl(finalUrl)) return 200;
+  return null;
 }
 
 // Helper function to send logs to backend via HTTP
@@ -2515,7 +2561,6 @@ const modeHandlers = {
                 });
               }
             }
-            lastNavHttpStatus = status ?? null;
             await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
               console.warn('Page DOM not fully loaded after 30s, continuing with analysis');
             });
@@ -2543,6 +2588,7 @@ const modeHandlers = {
             } catch (urlError) {
               console.warn(`Could not get page URL after navigation: ${urlError.message}`);
             }
+            lastNavHttpStatus = await resolveHttpStatusAfterNavigation(page, response, finalUrl);
             // Defer strict-domain skip until after login-redirect handling.
             // Some authenticated sites redirect to an auth subdomain first and can recover in-session.
             redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
@@ -2551,6 +2597,7 @@ const modeHandlers = {
             // Try to continue with current page
             try {
               finalUrl = page.url();
+              lastNavHttpStatus = await resolveHttpStatusAfterNavigation(page, null, finalUrl);
             } catch (urlError) {
               // Page context might be destroyed, skip this page
               await sendLog(jobId, 'error', `❌ Page context destroyed after navigation, skipping page`);
@@ -2580,6 +2627,7 @@ const modeHandlers = {
               await sendLog(jobId, 'info', `🔄 Page navigated from ${currentUrl} to ${finalUrl} (likely due to cookies)`);
             }
             redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
+            lastNavHttpStatus = await resolveHttpStatusAfterNavigation(page, null, finalUrl);
           } catch (urlError) {
             console.warn(`Could not get page URL: ${urlError.message}`);
           }
@@ -2619,7 +2667,6 @@ const modeHandlers = {
               response = await page.goto(strippedForRetry, { waitUntil: 'domcontentloaded', timeout: 30000 });
               status = response ? response.status() : null;
             }
-            lastNavHttpStatus = status ?? lastNavHttpStatus;
             await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
               console.warn('Page DOM not fully loaded after 30s, continuing with analysis');
             });
@@ -2631,6 +2678,8 @@ const modeHandlers = {
               }
               finalUrl = newFinal;
               redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
+              const resolvedStrip = await resolveHttpStatusAfterNavigation(page, response, finalUrl);
+              if (resolvedStrip != null) lastNavHttpStatus = resolvedStrip;
             } catch (urlError) {
               console.warn(`Could not get page URL after stripped navigation: ${urlError.message}`);
             }
@@ -5167,7 +5216,6 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           waitUntil: 'domcontentloaded', 
           timeout: 30000 
         });
-        const workflowNavHttpStatus = workflowNavResp ? workflowNavResp.status() : null;
         
         await sendLog(jobId, 'info', `⏳ Waiting for page to fully load...`, currentPageContext);
         await updateJobSubstatus(jobId, 'waiting_for_page_ready', { current_page: currentUrl });
@@ -5206,6 +5254,8 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           await sendLog(jobId, 'error', `❌ Failed to get page info: ${error.message}`, currentPageContext);
           throw error;
         }
+
+        const workflowNavHttpStatus = await resolveHttpStatusAfterNavigation(page, workflowNavResp, pageUrl);
         
         // Create basic page document in backend FIRST.
         // IMPORTANT: Always pass project_id when available so pages are attributed to the job's project,
@@ -5267,7 +5317,11 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
             pageId: pageId,
             isExternal: true,
             analysis_skipped: true,
-            reason: 'External domain - AI analysis skipped to save time and resources'
+            reason: 'External domain - AI analysis skipped to save time and resources',
+            ...(() => {
+              const code = normalizeHttpStatusCode(workflowNavHttpStatus);
+              return code != null ? { last_http_status: code } : {};
+            })()
           };
           
           return { pageAnalysis, pageId, pageTitle, pageUrl };
@@ -5285,6 +5339,8 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         pageAnalysis.requested_url = currentUrl;
         pageAnalysis.final_url = pageUrl;
         pageAnalysis.project_id = context?.project_id || null;
+        const navForStore = normalizeHttpStatusCode(workflowNavHttpStatus);
+        if (navForStore != null) pageAnalysis.last_http_status = navForStore;
         
         return { pageAnalysis, pageId, pageTitle, pageUrl };
       });
@@ -7480,6 +7536,8 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         if (finalUrl !== currentUrl) {
           await sendLog(jobId, 'info', `🔄 Navigation redirected from ${currentUrl} to ${finalUrl} (likely due to cookies)`);
         }
+        const resolvedMainNav = await resolveHttpStatusAfterNavigation(page, navResponse, finalUrl);
+        if (resolvedMainNav != null) navStatus = resolvedMainNav;
 
         const strippedStart = urlWithoutQueryAndFragment(currentUrl);
         if (
@@ -7502,10 +7560,12 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
               stripResp = await page.goto(strippedStart, { waitUntil: 'domcontentloaded', timeout: 30000 });
               stripStatus = stripResp ? stripResp.status() : null;
             }
-            navStatus = stripStatus ?? navStatus;
             await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
             await page.waitForTimeout(1000);
             finalUrl = page.url();
+            const resolvedStripNav = await resolveHttpStatusAfterNavigation(page, stripResp, finalUrl);
+            if (resolvedStripNav != null) navStatus = resolvedStripNav;
+            else if (stripStatus != null) navStatus = stripStatus;
           } catch (stripErr) {
             await sendLog(jobId, 'warn', `⚠️ Stripped start URL navigation failed: ${stripErr.message}`);
           }
