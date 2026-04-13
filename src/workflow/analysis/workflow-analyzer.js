@@ -10823,6 +10823,44 @@ return {
   }
 
   /**
+   * Detect visible success copy in headings / status nodes after client-side form flows.
+   * Complements body-level scans when :invalid or alert heuristics false-positive on dynamic forms.
+   */
+  async detectVisibleJourneySuccessChrome(page) {
+    if (!page || typeof page.evaluate !== 'function') return false;
+    try {
+      return await page.evaluate(() => {
+        const isUserVisible = (el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
+          if (style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+          let node = el;
+          while (node && node !== document.documentElement) {
+            if (node instanceof HTMLElement && window.getComputedStyle(node).display === 'none') {
+              return false;
+            }
+            node = node.parentElement;
+          }
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const successRe =
+          /(submitted\s+successfully|form\s+submitted|successfully\s+submitted|submission\s+was\s+successful|thank\s+you(\s+for)?|message\s+sent|registration\s+complete|order\s+confirmed)/i;
+        const selectors =
+          'h1,h2,h3,h4,h5,h6,[role="status"],[data-testid="success"],[data-testid="form-success"]';
+        for (const el of Array.from(document.querySelectorAll(selectors))) {
+          if (!isUserVisible(el)) continue;
+          const t = (el.textContent || '').trim();
+          if (successRe.test(t)) return true;
+        }
+        return false;
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Clean script to remove markdown code blocks and function declarations
    */
   /**
@@ -11848,6 +11886,13 @@ return {
         const indent = String(full.match(/^\s*/)?.[0] || '');
         return `${indent}await page.waitForTimeout(500); /* repaired unterminated waitForSelector string */`;
       }
+    );
+
+    // Models truncate `document.readyState === 'complete'` to `document.readyState === ` inside waitForFunction /
+    // waitForLoadState callbacks, which is a syntax error and breaks journey execution.
+    s = s.replace(
+      /document\.readyState\s*===\s*(?=\s*[\)\};,]|\s*$)/g,
+      "document.readyState === 'complete'"
     );
 
     // Some models wrap the script in an async IIFE:
@@ -14891,6 +14936,19 @@ const sleep = safeWait;
           if (hasPositiveSubmissionSignal) {
             hasBlockingValidation = false;
             console.log('✅ Positive submission signal detected — not treating validation scan as blocking for journey execution');
+          }
+        } catch (_) {
+          // best-effort only
+        }
+      }
+
+      // Headings and live regions often hold concise success copy while body-level scans miss it (timing, placeholders, long lists).
+      if (isJourneyScriptStep && hasBlockingValidation) {
+        try {
+          const chromeOk = await this.detectVisibleJourneySuccessChrome(page);
+          if (chromeOk) {
+            hasBlockingValidation = false;
+            console.log('✅ Visible journey success chrome (heading/status) — clearing blocking validation');
           }
         } catch (_) {
           // best-effort only
@@ -19447,10 +19505,35 @@ const sleep = safeWait;
       const status = String(iter?.step_result?.status || iter?.step_result?.completion_status || '').toLowerCase();
       return status === 'failure';
     });
+
+    let domJourneySuccessChrome = false;
+    try {
+      if (
+        page &&
+        typeof page.isClosed === 'function' &&
+        !page.isClosed() &&
+        typeof this.detectVisibleJourneySuccessChrome === 'function'
+      ) {
+        domJourneySuccessChrome = await this.detectVisibleJourneySuccessChrome(page);
+      }
+    } catch (_) {
+      domJourneySuccessChrome = false;
+    }
+
+    const lastExecSnapshot = workflowState.lastExecutionResult || {};
+    const validationOnlyExecutionFailure =
+      lastExecSnapshot.success === false &&
+      lastExecSnapshot.skipped !== true &&
+      lastExecSnapshot.execution_failed !== true &&
+      lastExecSnapshot.error_type !== 'execution' &&
+      !workflowState.executionErrorType &&
+      !lastExecSnapshot.error;
+
     const executionSucceeded =
-      workflowState.lastExecutionResult?.success === true ||
-      (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType && !workflowState.lastExecutionResult?.error);
-    
+      lastExecSnapshot.success === true ||
+      (validationOnlyExecutionFailure && domJourneySuccessChrome) ||
+      (lastExecSnapshot.success !== false && !workflowState.executionErrorType && !lastExecSnapshot.error);
+
     // Prefer AI justification status from the last while-loop iteration.
     if (!finalLegStatus && (lastAiStatus === 'success' || lastAiStatus === 'failure' || lastAiStatus === 'pending')) {
       if (lastAiStatus === 'success') {
@@ -19523,6 +19606,7 @@ const sleep = safeWait;
         const failureReason = String(lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || '').toLowerCase();
         const executionSucceeded =
           workflowState.lastExecutionResult?.success === true ||
+          (validationOnlyExecutionFailure && domJourneySuccessChrome) ||
           (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType) ||
           workflowState.lastExecutionResult?.error === undefined ||
           !workflowState.lastExecutionResult?.error;
@@ -19596,6 +19680,13 @@ const sleep = safeWait;
             finalLegStatus = 'skipped';
             finalLegResult = 'skipped_insufficient_signal';
             finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || `Insufficient signal for reliable journey execution after ${iteration} iterations`;
+          } else if (validationOnlyExecutionFailure && domJourneySuccessChrome) {
+            finalLegStatus = 'success';
+            finalLegResult = 'success';
+            finalLegError = null;
+            console.log(
+              '✅ Max iterations with continue/stuck but visible DOM success chrome — treating journey leg as success'
+            );
           } else {
             finalLegStatus = 'failure';
             finalLegResult = 'failure';
@@ -19649,6 +19740,13 @@ const sleep = safeWait;
         finalLegStatus = 'skipped';
         finalLegResult = 'skipped_insufficient_signal';
         finalLegError = lastDetermineCompletion?.reason || lastDetermineCompletion?.what_happened || 'Max iterations reached without reliable execution signal';
+      } else if (validationOnlyExecutionFailure && domJourneySuccessChrome) {
+        finalLegStatus = 'success';
+        finalLegResult = 'success';
+        finalLegError = null;
+        console.log(
+          '✅ Max iterations: visible DOM success chrome with validation-only execution snapshot — journey leg success'
+        );
       } else {
         finalLegStatus = 'failure';
         finalLegResult = 'failure';
