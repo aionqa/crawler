@@ -5325,7 +5325,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
 
       const interactiveForScript = this.getInteractiveJourneyActionsForScript(filteredJourney.actions);
       stepPayload.journey_script_allows_form_mutations =
-        this.journeyInteractiveActionsAllowFormMutations(interactiveForScript);
+        this.journeyInteractiveActionsAllowFormMutations(interactiveForScript) ||
+        this.journeyMetadataImpliesFormMutations(filteredJourney);
       stepPayload.journey_script_action_brief = buildJourneyScriptActionBrief(
         interactiveForScript.slice(0, 14),
         workflowState
@@ -11808,10 +11809,50 @@ return {
     return interactiveActions.some(formish);
   }
 
+  /**
+   * When structured journey actions are click-only but titles/instructions describe a form workflow,
+   * allow .fill/.selectOption in generated scripts (e.g. "Open Form Modal" with only click steps).
+   * Uses generic keywords only — no site or URL matching.
+   */
+  journeyMetadataImpliesFormMutations(journey) {
+    if (!journey || typeof journey !== 'object') return false;
+    const blob = [
+      journey.journey_id,
+      journey.id,
+      journey.leg_id,
+      journey.name,
+      journey.title,
+      journey.description,
+      journey.test_instructions,
+      journey.expected_outcome,
+    ]
+      .filter((v) => v != null && String(v).trim())
+      .map((v) => String(v).toLowerCase())
+      .join(' ');
+    if (!blob.trim()) return false;
+    const slugSpaced = blob.replace(/_/g, ' ');
+    if (/\b(form\s+modal|modal\s+form|open\s+form)\b/.test(blob)) return true;
+    if (/\b(form\s+modal|modal\s+form|open\s+form)\b/.test(slugSpaced)) return true;
+    if (
+      /\b(submit|text\s*field|input\s*field|email\s*field|password\s*field|textarea|dropdown|select\s+menu)\b/.test(
+        blob
+      )
+    ) {
+      return true;
+    }
+    if (/\bfill\b.+\b(field|form|input)\b/.test(blob)) return true;
+    if (/\benter\b.+\b(in\s+the\s+)?(field|form)\b/.test(blob)) return true;
+    return false;
+  }
+
   /** Detect form-mutating Playwright calls in generated script text. */
   aiJourneyScriptUsesFormMutations(script) {
     if (!script || typeof script !== 'string') return false;
-    return /\.(?:fill|selectOption)\s*\(/i.test(script);
+    return (
+      /\.(?:fill|selectOption)\s*\(/i.test(script) ||
+      /\bsafeFill\s*\(/.test(script) ||
+      /\bsafeType\s*\(/.test(script)
+    );
   }
 
   /**
@@ -13809,11 +13850,14 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     ) {
       const cj = workflowState.currentJourney || workflowState.currentItem || workflowState.currentLeg;
       const interactive = this.getInteractiveJourneyActionsForScript(cj?.actions);
+      const formMutationsAllowed =
+        this.journeyInteractiveActionsAllowFormMutations(interactive) ||
+        this.journeyMetadataImpliesFormMutations(cj);
       if (
         cj &&
         Array.isArray(cj.actions) &&
         interactive.length > 0 &&
-        !this.journeyInteractiveActionsAllowFormMutations(interactive) &&
+        !formMutationsAllowed &&
         this.aiJourneyScriptUsesFormMutations(code)
       ) {
         const scopeError =
@@ -18597,6 +18641,7 @@ const sleep = safeWait;
           const looksLikeDegenerateJourneyOutput =
             execErrLower.includes('no actionable interaction generated in journey script') ||
             execErrLower.includes('collapsed to empty after sanitization');
+          const looksLikeJourneyScopeBlock = execErrLower.includes('journey script scope error');
           const looksLikeAiScriptBug =
             execErrLower.includes('syntaxerror') ||
             execErrLower.includes('referenceerror') ||
@@ -18607,11 +18652,16 @@ const sleep = safeWait;
             execErrLower.includes('selector is not defined') ||
             execErrLower.includes('shouldbechecked is not defined') ||
             execErrLower.includes('journey script syntax error') ||
-            execErrLower.includes('journey script scope error') ||
             execErrLower.includes('missing ) after argument list') ||
             execErrLower.includes('unexpected end of input');
 
-          if (hasExecFailureSignal && (looksLikeSelectorOrTiming || looksLikeAiScriptBug || looksLikeDegenerateJourneyOutput)) {
+          if (
+            hasExecFailureSignal &&
+            (looksLikeSelectorOrTiming ||
+              looksLikeAiScriptBug ||
+              looksLikeDegenerateJourneyOutput ||
+              looksLikeJourneyScopeBlock)
+          ) {
             const patched = {
               status: 'continue',
               completion_status: 'continue',
@@ -18684,9 +18734,11 @@ const sleep = safeWait;
             if (jobId) {
               const inconclusiveLabel = looksLikeAiScriptBug
                 ? 'AI script bug'
-                : looksLikeDegenerateJourneyOutput
-                  ? 'empty or non-interactive journey script'
-                  : 'selector/timing';
+                : looksLikeJourneyScopeBlock
+                  ? 'journey script scope mismatch'
+                  : looksLikeDegenerateJourneyOutput
+                    ? 'empty or non-interactive journey script'
+                    : 'selector/timing';
               await this.sendLogToBackend(
                 jobId,
                 'info',
