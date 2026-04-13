@@ -7558,21 +7558,35 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
           const execResult = await executor.executeScript(page, rawStoredScript, jobId);
           const ok = execResult.success === true;
           let finalTitle = '';
+          let finalPageUrl = '';
           try {
             finalTitle = await page.title();
+            finalPageUrl = page.url();
           } catch (_) {
             finalTitle = '';
+            finalPageUrl = '';
           }
+          const storedScriptId = context.stored_script_id || context.options?.stored_script_id || null;
+          // Backend orchestration treats analyzed_pages<=0 as "no pages tested" and may fail the job.
+          // Stored-script runs intentionally skip full workflow crawl; report one tested page-equivalent.
           lastResult = {
             success: ok,
             mode: 'stored_script_only',
             message: ok ? 'Stored Playwright script completed' : (execResult.error || 'Script execution failed'),
             script_result: execResult.result ?? null,
             script_error: execResult.error || null,
-            stored_script_id: context.stored_script_id || context.options?.stored_script_id || null,
-            url: page.url(),
+            stored_script_id: storedScriptId,
+            analyzed_pages: 1,
+            details: {
+              total_pages: 1,
+              successful_pages: ok ? 1 : 0,
+            },
+            discovered_pages: finalPageUrl
+              ? [{ url: finalPageUrl, title: finalTitle || 'Stored script page' }]
+              : [],
+            url: finalPageUrl,
             title: finalTitle,
-            finalUrl: page.url(),
+            finalUrl: finalPageUrl,
             finalTitle,
             startTime,
             duration_ms: Date.now() - startTime,
