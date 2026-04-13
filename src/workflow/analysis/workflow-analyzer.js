@@ -11776,6 +11776,22 @@ return {
       /page\.selectOption\(\s*(#[A-Za-z0-9_-]+)\s*,/g,
       (_m, id) => `page.selectOption(${JSON.stringify(String(id || ''))},`
     );
+    // LLM: page.click(button[type="submit"], .fallback) with no string wrapper — `button` is parsed as JS (ReferenceError).
+    // Quote well-formed single-call selector lists before the generic unquoted-arg pass (which may miss comma unions).
+    cleaned = cleaned.replace(
+      /\bpage\.click\(\s*(button\s*\[\s*type\s*=\s*["']submit["']\s*\]\s*(?:,\s*[^)]+?)?)\s*\)/gi,
+      (_m, inner) => {
+        const selector = String(inner || '').trim();
+        return `page.click(${JSON.stringify(selector)})`;
+      }
+    );
+    cleaned = cleaned.replace(
+      /\bpage\.click\(\s*(input\s*\[\s*type\s*=\s*["']submit["']\s*\]\s*(?:,\s*[^)]+?)?)\s*\)/gi,
+      (_m, inner) => {
+        const selector = String(inner || '').trim();
+        return `page.click(${JSON.stringify(selector)})`;
+      }
+    );
     // Normalize unquoted selector args in common page.* calls (e.g., page.fill(input[name="x"]))
     cleaned = cleaned.replace(
       /page\.(click|fill|check|uncheck|isVisible|waitForSelector)\(\s*([a-zA-Z][^'"`)\n]*(?:\[[^\)\n]+\]|:[^)\n]+)[^)\n]*)\s*\)/g,
@@ -12570,6 +12586,10 @@ return {
    * fields. After submit, DOM churn can make those page.fill calls wait until the default action
    * timeout (~3 minutes). When the tail after the last submit-like click is only noise + page.fill,
    * drop the fills — general form-journey pattern, not site-specific.
+   *
+   * Models also append duplicate `await page.click(...)` lines with unquoted CSS (invalid JS →
+   * ReferenceError / inconclusive retries). Strip those from the same post-submit tail when they are
+   * the only non-noise lines after the last submit click.
    */
   stripTrailingRedundantPageFillsAfterSubmit(script) {
     if (!script || typeof script !== 'string') return script;
@@ -12624,6 +12644,14 @@ return {
       return false;
     };
 
+    /** Redundant LLM tail after a real submit: extra fills and/or broken unquoted page.click selectors. */
+    const shouldStripRedundantPostSubmitTailLine = (line) => {
+      if (isPageFillLine(line)) return true;
+      const t = trim(line);
+      if (/^await\s+page\.click\(\s*(?!['"`])/.test(t)) return true;
+      return false;
+    };
+
     let lastSubmitIdx = -1;
     for (let i = 0; i < lines.length; i++) {
       if (isSubmitClickLine(lines[i])) lastSubmitIdx = i;
@@ -12633,9 +12661,9 @@ return {
     const tail = lines.slice(lastSubmitIdx + 1);
     const nonNoiseTail = tail.filter((l) => !isNoiseLine(l));
     if (!nonNoiseTail.length) return script;
-    if (!nonNoiseTail.every((l) => isPageFillLine(l))) return script;
+    if (!nonNoiseTail.every((l) => shouldStripRedundantPostSubmitTailLine(l))) return script;
 
-    const keptTail = tail.filter((l) => !isPageFillLine(l));
+    const keptTail = tail.filter((l) => !shouldStripRedundantPostSubmitTailLine(l));
     return [...lines.slice(0, lastSubmitIdx + 1), ...keptTail].join('\n');
   }
 
@@ -18654,7 +18682,21 @@ const sleep = safeWait;
                 reasonLower.includes('insufficient signal') ||
                 reasonLower.includes('no actionable') ||
                 reasonLower.includes('low confidence') ||
-                reasonLower.includes('not possible to tell');
+                reasonLower.includes('not possible to tell') ||
+                (reasonLower.includes('toggle') &&
+                  (reasonLower.includes('label') ||
+                    reasonLower.includes('text') ||
+                    reasonLower.includes('uncertain') ||
+                    reasonLower.includes('changed'))) ||
+                (reasonLower.includes('checkbox') &&
+                  (reasonLower.includes('state') ||
+                    reasonLower.includes('whether') ||
+                    reasonLower.includes('could not') ||
+                    reasonLower.includes('cannot') ||
+                    reasonLower.includes('verify') ||
+                    reasonLower.includes('confirm'))) ||
+                reasonLower.includes('remember me') ||
+                /\bremember[\s_-]*me\b/i.test(String(justificationReason || ''));
               if (executionSucceeded && (softVerifierFalseNegative || uncertainVerifierAfterExec)) {
                 expectedOutcomeVerified = true;
                 justificationStatus = 'success';
@@ -19208,7 +19250,16 @@ const sleep = safeWait;
                 (jReason.includes('label') ||
                   jReason.includes('text') ||
                   jReason.includes('uncertain') ||
-                  jReason.includes('changed')));
+                  jReason.includes('changed'))) ||
+              (jReason.includes('checkbox') &&
+                (jReason.includes('state') ||
+                  jReason.includes('whether') ||
+                  jReason.includes('could not') ||
+                  jReason.includes('cannot') ||
+                  jReason.includes('verify') ||
+                  jReason.includes('confirm'))) ||
+              jReason.includes('remember me') ||
+              /\bremember[\s_-]*me\b/.test(jReason);
             if (jStatus === 'failure' && execOk && uncertainVerifier) {
               const patched = {
                 status: 'continue',
