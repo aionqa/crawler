@@ -12898,6 +12898,8 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       sourceField === 'journeyScriptToExecute' ||
       step.id === 'execute_journey_script' ||
       step.name?.includes('Execute Journey Action Script');
+    // Alias used by post-execute validation / SPA success heuristics (was referenced without a definition).
+    const isJourneyScriptStep = isJourneyScriptExecutionStep;
     const skipEmptyJourneyScriptExecution = async (phase, metadata = {}) => {
       const skipMessage = `No journey script generated (${phase}); skipping execute-code-from-variable step.`;
       const skipResult = {
@@ -17921,12 +17923,24 @@ const sleep = safeWait;
         // If execution failed due to selector/timing issues, do NOT treat this as a proven "failure".
         // Override determine_completion to continue so the loop retries (bounded by maxIterations).
         try {
-          const execErr = String(workflowState?.lastExecutionResult?.error || '');
+          const lastExecRes = workflowState?.lastExecutionResult || {};
+          const execErr = String(lastExecRes.error || '');
           const execErrLower = execErr.toLowerCase();
+          // If the latest run is a clean success (Playwright + post-validation), do not let a stale
+          // workflowState.executionErrorType from an earlier step/iteration force inconclusive retries.
+          const executionMarkedClean =
+            lastExecRes.success === true &&
+            lastExecRes.execution_failed !== true &&
+            lastExecRes.error_type !== 'execution' &&
+            lastExecRes.skipped !== true;
           const hasExecFailureSignal =
-            workflowState?.lastExecutionResult?.execution_failed === true ||
-            workflowState?.lastExecutionResult?.error_type === 'execution' ||
-            workflowState?.executionErrorType === 'execution';
+            !executionMarkedClean &&
+            (lastExecRes.execution_failed === true ||
+              lastExecRes.error_type === 'execution' ||
+              workflowState?.executionErrorType === 'execution');
+          if (executionMarkedClean && workflowState?.executionErrorType === 'execution') {
+            workflowState.executionErrorType = null;
+          }
           const looksLikeSelectorOrTiming =
             execErrLower.includes('timeout') ||
             execErrLower.includes('waiting for locator') ||
@@ -19432,6 +19446,23 @@ const sleep = safeWait;
       } else {
         finalLegError = lastAiReason || finalLegError;
       }
+    }
+
+    // justify_journey may stay on continue/stuck across bounded inconclusive retries; at max iterations,
+    // trust positive execution evidence instead of defaulting to terminal failure.
+    if (
+      !finalLegStatus &&
+      reachedIterationBudget &&
+      (lastAiStatus === 'continue' || lastAiStatus === 'stuck') &&
+      (executionSucceeded || hasSuccessfulIterationEvidence) &&
+      !hasHardFailureIteration
+    ) {
+      finalLegStatus = 'success';
+      finalLegResult = 'success';
+      finalLegError = null;
+      console.log(
+        '✅ Terminal continue/stuck at max iterations with successful execution evidence — journey leg treated as success'
+      );
     }
 
     // Only check determine_completion status if AI justification did not already set a final status
