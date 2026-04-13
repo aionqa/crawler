@@ -2775,6 +2775,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         const cleanedIter = {
           iteration_number: iter.iteration_number,
           status: iter.status,
+          completion_status: iter.completion_status,
+          is_complete: iter.is_complete,
           timestamp: iter.timestamp ? (iter.timestamp instanceof Date ? iter.timestamp.toISOString() : iter.timestamp) : null,
           screenshot_before: iter.screenshot_before,
           screenshot_after: iter.screenshot_after
@@ -18461,9 +18463,20 @@ const sleep = safeWait;
           
           // Now save iteration (copy the save logic from line 10738+)
           const currentItem = workflowState.currentJourney || workflowState.currentItem || workflowState.currentLeg || {};
-          const status = stepResultForSave.status || stepResultForSave.completion_status || 'unknown';
-          const isSuccess = status === 'success';
-          const isFailure = status === 'failure';
+          const stRaw = stepResultForSave?.status;
+          const csRaw = stepResultForSave?.completion_status;
+          const legFailedEarly =
+            stRaw === 'failure' ||
+            csRaw === 'failure' ||
+            stRaw === 'failed' ||
+            csRaw === 'failed';
+          const legSucceededEarly =
+            stRaw === 'success' ||
+            csRaw === 'success' ||
+            (stepResultForSave?.is_complete === true && !legFailedEarly);
+          const status = stRaw || csRaw || 'unknown';
+          const isSuccess = legSucceededEarly;
+          const isFailure = legFailedEarly;
           
           const hasJourneysToExecute = workflowState.journeysToExecute && Array.isArray(workflowState.journeysToExecute) && workflowState.journeysToExecute.length > 0;
           const hasJourneys = workflowState.journeys && Array.isArray(workflowState.journeys) && workflowState.journeys.length > 0;
@@ -18696,6 +18709,47 @@ const sleep = safeWait;
               if (verificationDetails) {
                 journey.verification_details = verificationDetails;
               }
+
+              const normFinalJS = String(finalJustificationStatus || status || '').trim().toLowerCase();
+              const derivedTerminalSuccess = [
+                'success',
+                'passed',
+                'completed',
+                'done',
+                'ok',
+                'resolved',
+              ].includes(normFinalJS);
+              const derivedTerminalFailure = [
+                'failure',
+                'failed',
+                'error',
+                'execution_failure',
+                'timeout',
+                'cancelled',
+                'stopped',
+                'blocked',
+              ].includes(normFinalJS);
+              const iterationResultNorm = derivedTerminalSuccess
+                ? 'success'
+                : derivedTerminalFailure
+                  ? 'failure'
+                  : isSuccess
+                    ? 'success'
+                    : isFailure
+                      ? 'failure'
+                      : 'in_progress';
+              const iterationComplete =
+                derivedTerminalSuccess || derivedTerminalFailure || isSuccess || isFailure;
+              const iterationStatusStr = finalJustificationStatus || status;
+
+              if (derivedTerminalSuccess) {
+                if (journey.status !== 'failure') {
+                  journey.status = 'success';
+                }
+                journey.completed_at = journey.completed_at || new Date().toISOString();
+              } else if (derivedTerminalFailure && journey.status !== 'success') {
+                journey.status = 'failure';
+              }
               
               console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Extracted justification: status=${finalJustificationStatus}, reason=${justificationReason ? justificationReason.substring(0, 100) + '...' : 'N/A'}`);
               
@@ -18839,12 +18893,12 @@ const sleep = safeWait;
               const iterationData = {
                 iteration_number: iteration,
                 attempt_number: iteration,
-                result: isSuccess ? 'success' : (isFailure ? 'failure' : 'in_progress'),
-                status: status,
-                completion_status: finalJustificationStatus || status,
-                is_complete: isSuccess || isFailure,
+                result: iterationResultNorm,
+                status: iterationStatusStr,
+                completion_status: iterationStatusStr,
+                is_complete: iterationComplete,
                 reason: justificationReason,
-                error: isFailure ? (justificationReason || 'Journey execution failed') : null,
+                error: derivedTerminalFailure ? (justificationReason || 'Journey execution failed') : null,
                 timestamp: new Date().toISOString(),
                 
                 // Page details for this iteration
