@@ -4097,12 +4097,29 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 }
               });
               
-              console.log(`✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) at workflow completion. Response status: ${response.status}`);
-              await this.sendLogToBackend(effectiveJobId, 'info', `✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) at workflow completion`, 'WORKFLOW-ANALYZER', {
-                journeys_count: newJourneys.length,
-                page_id: pageIdToUse,
-                response_status: response.status
-              });
+              const _rj = response?.data?.results?.journeys;
+              const _persisted =
+                _rj && typeof _rj.persisted_page_journeys === 'number' ? _rj.persisted_page_journeys : null;
+              const _persistNote =
+                _persisted != null
+                  ? `; persisted_page_journeys=${_persisted} (payload_rows=${_rj.payload_rows ?? 'n/a'})`
+                  : '';
+              console.log(
+                `✅ [JOURNEYS-FINAL] save-analysis completed: ${newJourneys.length} journey payload row(s) submitted${_persistNote}. Response status: ${response.status}`,
+              );
+              await this.sendLogToBackend(
+                effectiveJobId,
+                'info',
+                `✅ [JOURNEYS-FINAL] save-analysis: ${newJourneys.length} payload row(s)${_persisted != null ? `, ${String(_persisted)} row(s) on page after persist` : ''}`,
+                'WORKFLOW-ANALYZER',
+                {
+                  journeys_payload_rows: newJourneys.length,
+                  journeys_persisted_page: _persisted,
+                  journeys_payload_rows_request: _rj?.payload_rows,
+                  page_id: pageIdToUse,
+                  response_status: response.status,
+                },
+              );
             }
             // Re-crawl / mixed new+existing: whenever any journey_id already existed on the page, push the full
             // in-memory run snapshot so pre-existing rows are not left stale (fixes "Saved 1" while 2 legs stayed failed).
@@ -4127,13 +4144,30 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                   workflowState.pageId = pageIdToUse;
                 }
               });
-              console.log(`✅ [JOURNEYS-FINAL] Refreshed ${journeysToSave.length} journey(s). Response status: ${refreshResponse.status}`);
-              await this.sendLogToBackend(effectiveJobId, 'info', `✅ [JOURNEYS-FINAL] Refreshed ${journeysToSave.length} journey(s) at workflow completion`, 'WORKFLOW-ANALYZER', {
-                journeys_count: journeysToSave.length,
-                page_id: pageIdToUse,
-                response_status: refreshResponse.status,
-                refresh_existing: true
-              });
+              const _rjR = refreshResponse?.data?.results?.journeys;
+              const _persistedR =
+                _rjR && typeof _rjR.persisted_page_journeys === 'number' ? _rjR.persisted_page_journeys : null;
+              const _persistNoteR =
+                _persistedR != null
+                  ? `; persisted_page_journeys=${_persistedR} (payload_rows=${_rjR.payload_rows ?? 'n/a'})`
+                  : '';
+              console.log(
+                `✅ [JOURNEYS-FINAL] refresh save-analysis completed: ${journeysToSave.length} journey payload row(s)${_persistNoteR}. Response status: ${refreshResponse.status}`,
+              );
+              await this.sendLogToBackend(
+                effectiveJobId,
+                'info',
+                `✅ [JOURNEYS-FINAL] refresh save-analysis: ${journeysToSave.length} payload row(s)${_persistedR != null ? `, ${String(_persistedR)} row(s) on page after persist` : ''}`,
+                'WORKFLOW-ANALYZER',
+                {
+                  journeys_payload_rows: journeysToSave.length,
+                  journeys_persisted_page: _persistedR,
+                  journeys_payload_rows_request: _rjR?.payload_rows,
+                  page_id: pageIdToUse,
+                  response_status: refreshResponse.status,
+                  refresh_existing: true,
+                },
+              );
             }
           }
         } catch (finalError) {
@@ -8445,14 +8479,29 @@ return {
                 };
                 
                 const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId);
-                
-                console.log(`✅ [JOURNEYS-FINAL] Successfully saved ${newJourneys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
+
+                const _rjS = response?.data?.results?.journeys;
+                const _pS =
+                  _rjS && typeof _rjS.persisted_page_journeys === 'number' ? _rjS.persisted_page_journeys : null;
+                const _noteS =
+                  _pS != null ? `; persisted_page_journeys=${_pS} (payload_rows=${_rjS.payload_rows ?? 'n/a'})` : '';
+                console.log(
+                  `✅ [JOURNEYS-FINAL] save-analysis completed: ${newJourneys.length} journey payload row(s) to page ${pageIdToUse}${_noteS}. Response status: ${response.status}`,
+                );
                 if (jobId && this.backendLogger) {
-                  await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-FINAL] Saved ${newJourneys.length} journey(s) to page`, 'WORKFLOW-ANALYZER', {
-                    journeys_count: newJourneys.length,
-                    page_id: pageIdToUse,
-                    response_status: response.status
-                  });
+                  await this.backendLogger.appendJobLog(
+                    jobId,
+                    'info',
+                    `✅ [JOURNEYS-FINAL] save-analysis: ${newJourneys.length} payload row(s)${_pS != null ? `, ${String(_pS)} on page` : ''}`,
+                    'WORKFLOW-ANALYZER',
+                    {
+                      journeys_payload_rows: newJourneys.length,
+                      journeys_persisted_page: _pS,
+                      journeys_payload_rows_request: _rjS?.payload_rows,
+                      page_id: pageIdToUse,
+                      response_status: response.status,
+                    },
+                  );
                 }
               } catch (finalError) {
                 console.error(`❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`);
@@ -8471,14 +8520,33 @@ return {
                   job_id: jobId
                 };
                 const refreshResponse = await this.postRunnerSaveAnalysis(pageIdToUse, refreshPayload, jobId);
-                console.log(`✅ [JOURNEYS-FINAL] Refreshed ${journeysToSave.length} journey(s) on page ${pageIdToUse}. Response status: ${refreshResponse.status}`);
+                const _rjRf = refreshResponse?.data?.results?.journeys;
+                const _pRf =
+                  _rjRf && typeof _rjRf.persisted_page_journeys === 'number'
+                    ? _rjRf.persisted_page_journeys
+                    : null;
+                const _noteRf =
+                  _pRf != null
+                    ? `; persisted_page_journeys=${_pRf} (payload_rows=${_rjRf.payload_rows ?? 'n/a'})`
+                    : '';
+                console.log(
+                  `✅ [JOURNEYS-FINAL] refresh save-analysis: ${journeysToSave.length} journey payload row(s) on page ${pageIdToUse}${_noteRf}. Response status: ${refreshResponse.status}`,
+                );
                 if (jobId && this.backendLogger) {
-                  await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-FINAL] Refreshed ${journeysToSave.length} journey(s) (pre-existing overlap)`, 'WORKFLOW-ANALYZER', {
-                    journeys_count: journeysToSave.length,
-                    page_id: pageIdToUse,
-                    response_status: refreshResponse.status,
-                    refresh_existing: true
-                  });
+                  await this.backendLogger.appendJobLog(
+                    jobId,
+                    'info',
+                    `✅ [JOURNEYS-FINAL] refresh: ${journeysToSave.length} payload row(s)${_pRf != null ? `, ${String(_pRf)} on page` : ''} (overlap)`,
+                    'WORKFLOW-ANALYZER',
+                    {
+                      journeys_payload_rows: journeysToSave.length,
+                      journeys_persisted_page: _pRf,
+                      journeys_payload_rows_request: _rjRf?.payload_rows,
+                      page_id: pageIdToUse,
+                      response_status: refreshResponse.status,
+                      refresh_existing: true,
+                    },
+                  );
                 }
               } catch (refreshErr) {
                 console.error(`❌ [JOURNEYS-FINAL] Failed to refresh journeys: ${refreshErr.message}`);
@@ -8495,8 +8563,15 @@ return {
               };
               
               const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId);
-              
-              console.log(`✅ [JOURNEYS-FINAL] Successfully saved ${journeysToSave.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
+
+              const _rjF = response?.data?.results?.journeys;
+              const _pF =
+                _rjF && typeof _rjF.persisted_page_journeys === 'number' ? _rjF.persisted_page_journeys : null;
+              const _noteF =
+                _pF != null ? `; persisted_page_journeys=${_pF} (payload_rows=${_rjF.payload_rows ?? 'n/a'})` : '';
+              console.log(
+                `✅ [JOURNEYS-FINAL] save-analysis completed: ${journeysToSave.length} journey payload row(s) to page ${pageIdToUse}${_noteF}. Response status: ${response.status}`,
+              );
             } catch (finalError) {
               console.error(`❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`);
             }
