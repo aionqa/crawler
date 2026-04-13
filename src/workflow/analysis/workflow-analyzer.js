@@ -12966,8 +12966,6 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       sourceField === 'journeyScriptToExecute' ||
       step.id === 'execute_journey_script' ||
       step.name?.includes('Execute Journey Action Script');
-    // Alias used by post-execute validation / SPA success heuristics (was referenced without a definition).
-    const isJourneyScriptStep = isJourneyScriptExecutionStep;
     const skipEmptyJourneyScriptExecution = async (phase, metadata = {}) => {
       const skipMessage = `No journey script generated (${phase}); skipping execute-code-from-variable step.`;
       const skipResult = {
@@ -14744,7 +14742,7 @@ const sleep = safeWait;
 
       // Dismiss open modals/overlays before :invalid scanning so incidental empty required fields
       // inside closed/hidden panes do not flip journey success=false (common on stacked modal demos).
-      if (isJourneyScriptStep) {
+      if (isJourneyScriptExecutionStep) {
         try {
           await page.keyboard.press('Escape');
           await page.waitForTimeout(350);
@@ -14872,7 +14870,7 @@ const sleep = safeWait;
       let hasBlockingValidation = hasInlineErrorCopy || hasSurfacedConstraintMessage;
 
       // GET/form flows often land on a completion URL while the DOM still triggers noisy heuristics.
-      if (isJourneyScriptStep && hasBlockingValidation && pageChanged) {
+      if (isJourneyScriptExecutionStep && hasBlockingValidation && pageChanged) {
         const u = String(urlAfterAction || '').toLowerCase();
         if (/(complete|success|thank|confirm|submitted|done)(?:[._-]|$)/i.test(u) || /survey-complete|thank-you|confirmation/i.test(u)) {
           hasBlockingValidation = false;
@@ -14883,7 +14881,7 @@ const sleep = safeWait;
       // Journey scripts often complete a happy-path submit while :invalid or generic alert nodes still
       // appear in the DOM (SPA timing, duplicate fields, or success regions matching broad selectors).
       // If we see an unambiguous post-submit success signal, do not treat validation noise as failure.
-      if (isJourneyScriptStep && hasBlockingValidation) {
+      if (isJourneyScriptExecutionStep && hasBlockingValidation) {
         try {
           const hasPositiveSubmissionSignal = await page.evaluate(() => {
             const isUserVisible = (el) => {
@@ -14943,7 +14941,7 @@ const sleep = safeWait;
       }
 
       // Headings and live regions often hold concise success copy while body-level scans miss it (timing, placeholders, long lists).
-      if (isJourneyScriptStep && hasBlockingValidation) {
+      if (isJourneyScriptExecutionStep && hasBlockingValidation) {
         try {
           const chromeOk = await this.detectVisibleJourneySuccessChrome(page);
           if (chromeOk) {
