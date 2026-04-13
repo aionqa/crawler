@@ -3844,26 +3844,101 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                        this.context?.isLoginJob === true;
     
     if (isLoginJob) {
-      // Extract login status from determine_completion step result
-      const determineResult = 
+      const unwrapNamespacedAiFields = (raw) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+        const o = { ...raw };
+        for (const k of Object.keys(o)) {
+          const v = o[k];
+          if (v && typeof v === 'object' && !Array.isArray(v) && Object.prototype.hasOwnProperty.call(v, 'value')) {
+            const keys = Object.keys(v);
+            if (keys.length <= 3 && (v.namespace !== undefined || keys.length === 1)) {
+              o[k] = v.value;
+            }
+          }
+        }
+        return o;
+      };
+
+      const pickValidateLoginPayload = () => {
+        const preferred = workflowState.stepResults?.validate_login_success?.result;
+        if (preferred && typeof preferred === 'object') return unwrapNamespacedAiFields(preferred);
+        const fromResults = workflowState.results?.validate_login_success?.result;
+        if (fromResults && typeof fromResults === 'object') return unwrapNamespacedAiFields(fromResults);
+        const direct = workflowState.validate_login_success?.result;
+        if (direct && typeof direct === 'object') return unwrapNamespacedAiFields(direct);
+        const sr = workflowState.stepResults || {};
+        for (const [k, v] of Object.entries(sr)) {
+          if (/validate_login/i.test(k) && v?.result && typeof v.result === 'object') {
+            return unwrapNamespacedAiFields(v.result);
+          }
+        }
+        return null;
+      };
+
+      const statusLikeFromPayload = (payload) => {
+        if (!payload) return null;
+        const pick = (x) => {
+          if (typeof x === 'string') return x;
+          if (x && typeof x === 'object' && typeof x.value === 'string') return x.value;
+          if (x && typeof x === 'object' && typeof x.status === 'string') return x.status;
+          return null;
+        };
+        return pick(payload.status) || pick(payload.completion_status);
+      };
+
+      const blockingFromPayloadText = (payload) => {
+        const t = `${payload?.reason || ''} ${payload?.what_happened || ''}`.toLowerCase();
+        return /(invalid|incorrect|required|error|failed|failure|exception|timeout|blocked|captcha|unauthorized|forbidden)/.test(t);
+      };
+
+      // Loop progress uses determine_completion; final login jobs also run validate_login_success after the loop.
+      const determineResult =
         workflowState.results?.determine_completion?.result ||
         workflowState.determine_completion?.result ||
         workflowState.determine_completion ||
         workflowState.context?.determine_completion?.result ||
         workflowState.context?.determine_completion ||
         null;
-      
-      const loginStatus = determineResult?.status || determineResult?.completion_status || null;
-      const loginSuccess = loginStatus === 'success' || 
-                          (determineResult?.is_complete === true && loginStatus !== 'failure');
-      
+
+      const validatePayload = pickValidateLoginPayload();
+
+      const determineText = `${determineResult?.reason || ''} ${determineResult?.what_happened || ''}`.toLowerCase();
+      const hasBlockingSignal = /(invalid|incorrect|required|error|failed|failure|exception|timeout|blocked|captcha|unauthorized|forbidden)/.test(determineText);
+      const cleanExecution = workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType;
+
+      let loginStatus = statusLikeFromPayload(determineResult) || null;
+      let loginSuccess =
+        loginStatus === 'success' ||
+        (determineResult?.is_complete === true && loginStatus !== 'failure') ||
+        (loginStatus === 'continue' && cleanExecution && !hasBlockingSignal);
+
+      if (validatePayload) {
+        const vStatus = statusLikeFromPayload(validatePayload);
+        const vBlocking = blockingFromPayloadText(validatePayload);
+        if (vStatus === 'success' || (validatePayload.is_complete === true && vStatus !== 'failure')) {
+          loginSuccess = true;
+          loginStatus = 'success';
+        } else if (vStatus === 'failure' || (validatePayload.is_complete === true && vStatus === 'failure')) {
+          loginSuccess = false;
+          loginStatus = 'failure';
+        } else if (vStatus === 'continue' && cleanExecution && !vBlocking) {
+          loginSuccess = true;
+          loginStatus = 'success';
+        }
+      }
+
+      const successReason =
+        validatePayload && loginSuccess
+          ? validatePayload.reason || validatePayload.what_happened || 'Login confirmed by validate_login_success'
+          : determineResult?.reason || 'Login confirmed by AI analysis';
+
       if (loginSuccess) {
         await this.sendLogToBackend(effectiveJobId, 'info', `✅ LOGIN SUCCESSFUL - Job will stop after saving results`, 'WORKFLOW-ANALYZER', {
           login_status: 'success',
           workflow_id: workflowState.workflowId,
-          reason: determineResult?.reason || 'Login confirmed by AI analysis'
+          reason: successReason,
+          confirmation_source: validatePayload ? 'validate_login_success' : 'determine_completion'
         });
-        // Mark in workflowState that login was successful
         workflowState.loginSuccess = true;
         workflowState.loginStatus = 'success';
         workflowState.context = workflowState.context || {};
@@ -3873,7 +3948,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         await this.sendLogToBackend(effectiveJobId, 'warn', `⚠️ Login not confirmed (status: ${loginStatus || 'unknown'})`, 'WORKFLOW-ANALYZER', {
           login_status: loginStatus || 'unknown',
           workflow_id: workflowState.workflowId,
-          reason: determineResult?.reason || 'Login status unclear'
+          reason: validatePayload?.reason || determineResult?.reason || 'Login status unclear',
+          had_validate_step: !!validatePayload
         });
         workflowState.loginSuccess = false;
         workflowState.loginStatus = loginStatus || 'unknown';
@@ -4122,7 +4198,13 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     
     // Also include step results stored by slug or name (storeStepResult stores in multiple places)
     // Check for common step IDs like determine_completion, perform_login_attempts, etc.
-    const importantStepIds = ['determine_completion', 'perform_login_attempts', 'collect_iteration_cookies', 'collect_final_cookies'];
+    const importantStepIds = [
+      'determine_completion',
+      'validate_login_success',
+      'perform_login_attempts',
+      'collect_iteration_cookies',
+      'collect_final_cookies'
+    ];
     for (const stepId of importantStepIds) {
       if (workflowState[stepId] && !result[stepId]) {
         result[stepId] = workflowState[stepId];
