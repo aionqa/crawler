@@ -5858,6 +5858,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- JOURNEY SCOPE: Implement ONLY currentJourney (journey_id, description, test_instructions, and currentJourney.actions in order). Do not substitute an unrelated flow—for example, do not run a full login+submit sequence when the journey only exercises a checkbox, toggle, or other auxiliary control unless those login actions explicitly appear in currentJourney.actions.\n'
           + '- Credential fields (username/password): fill them ONLY when currentJourney.actions includes those input steps. If the journey targets only a non-credential control, interact only with that control and do not submit the primary login action unless it is part of the journey.\n'
           + '- Execute each listed action exactly once (no duplicate add/click actions unless explicitly repeated in currentJourney.actions).\n'
+          + '- Opener / modal-launch controls: use exactly one Playwright click path per visible label before any form fills (do not chain the same button:has-text(...) or getByRole("button", { name }) click twice).\n'
           + '- Generate script body for the EXISTING Playwright page only (assume page is already available). Never import playwright/chromium, never create browser/context/newPage, never call browser.close.\n'
           + '- Do not navigate to localhost/base URLs. Use current page state; only navigate if currentJourney explicitly requires a URL navigation action.\n'
           + '- For modal/wizard journeys: if target fields/buttons are not visible, first click the opener trigger (e.g., "Start", "Open", "Launch", "Begin") to display the modal/wizard, then continue actions.\n'
@@ -12106,6 +12107,98 @@ return {
     return [...lines.slice(0, lastSubmitIdx + 1), ...keptTail].join('\n');
   }
 
+  /**
+   * True when the line performs real form/input mutation (not just clicks/waits).
+   * Used to bound "pre-form" duplicate-click dedupe so wizard steps that reuse labels stay intact.
+   */
+  isJourneyFormMutationLine(line) {
+    const t = String(line || '').trim();
+    if (!t || t.startsWith('//') || t.startsWith('/*')) return false;
+    if (/await\s+[^;\n]*\.(fill|selectOption)\s*\(/i.test(t)) return true;
+    if (/await\s+[^;\n]*\.type\s*\(/i.test(t) && !/keyboard\.type/i.test(t)) return true;
+    return false;
+  }
+
+  /**
+   * LLMs often emit the same modal/wizard opener via a locator variable, then again with
+   * page.locator(button:has-text(...)).click and page.click(...). Redundant clicks on a control that
+   * is hidden or replaced after the first interaction can stall until action timeout.
+   * Remove duplicate clicks that target the same :has-text / getByRole(button) label before any
+   * fill/selectOption/type — general pattern, not site-specific.
+   */
+  dedupeRedundantPreFormButtonClicks(script) {
+    if (!script || typeof script !== 'string') return script;
+    const lines = script.split('\n');
+    const varRhs = new Map();
+    for (const line of lines) {
+      const m = line.match(/^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(.+);\s*$/);
+      if (m) varRhs.set(m[1], m[2].trim());
+    }
+
+    const extractHasTextLabels = (str) => {
+      if (!str) return [];
+      const out = [];
+      const re = /:has-text\(\s*["']([^"']+)["']\s*\)/gi;
+      let x;
+      while ((x = re.exec(str)) !== null) {
+        const lbl = String(x[1] || '')
+          .replace(/\\'/g, "'")
+          .replace(/\\"/g, '"')
+          .trim()
+          .toLowerCase();
+        if (lbl) out.push(lbl);
+      }
+      return out;
+    };
+
+    const extractGetByRoleButtonName = (str) => {
+      if (!str) return null;
+      const m = str.match(
+        /getByRole\s*\(\s*['"]button['"]\s*,\s*\{[^}]*name\s*:\s*['"]([^'"]+)['"]/i
+      );
+      return m ? m[1].trim().toLowerCase() : null;
+    };
+
+    const clickLinePrimaryLabel = (line) => {
+      const labels = new Set();
+      for (const l of extractHasTextLabels(line)) labels.add(l);
+      const gr = extractGetByRoleButtonName(line);
+      if (gr) labels.add(gr);
+      const vm = line.match(/await\s+([A-Za-z_$][\w$]*)\s*(?:\.\s*\w+\s*)*\.click\s*\(/);
+      if (vm) {
+        const rhs = varRhs.get(vm[1]);
+        if (rhs) {
+          for (const l of extractHasTextLabels(rhs)) labels.add(l);
+          const gr2 = extractGetByRoleButtonName(rhs);
+          if (gr2) labels.add(gr2);
+        }
+      }
+      if (labels.size === 1) return [...labels][0];
+      return null;
+    };
+
+    const isAwaitClickLine = (line) => /await\s+/.test(line) && /\.click\s*\(/.test(line);
+
+    let sawFormMutation = false;
+    const seenPreFormLabels = new Set();
+    const out = [];
+    for (const line of lines) {
+      if (!sawFormMutation && this.isJourneyFormMutationLine(line)) {
+        sawFormMutation = true;
+      }
+      if (!sawFormMutation && isAwaitClickLine(line)) {
+        const lab = clickLinePrimaryLabel(line);
+        if (lab && seenPreFormLabels.has(lab)) {
+          out.push(`// deduped redundant pre-form click (same visible label)`);
+          continue;
+        }
+        if (lab) seenPreFormLabels.add(lab);
+      }
+      out.push(line);
+    }
+    return out.join('\n');
+  }
+
   sanitizeAiPlaywrightScript(script) {
     if (!script || typeof script !== 'string') return script;
 
@@ -12750,6 +12843,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     }
 
     s = this.stripTrailingRedundantPageFillsAfterSubmit(s);
+    s = this.dedupeRedundantPreFormButtonClicks(s);
     s = this.injectUndeclaredLocatorAliasesFromQuotedIds(s);
     s = this.replaceEmptyJourneyFillValues(s);
 
