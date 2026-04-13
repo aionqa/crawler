@@ -11646,6 +11646,11 @@ return {
   journeyScriptHasUnloggedPlaywrightInteractions(script) {
     if (!script || typeof script !== 'string') return false;
     if (
+      /\bpage\.(goto|reload|goBack|goForward|setViewportSize|bringToFront)\s*\(/i.test(script)
+    ) {
+      return true;
+    }
+    if (
       /\bpage\.(\$\$?|waitForNavigation|waitForURL|expectNavigation|evaluate|evaluateHandle)\s*\(/i.test(script)
     ) {
       return true;
@@ -11656,7 +11661,7 @@ return {
       /\b(?:await\s+)?(?:page|wrapper)\.(?:locator|getBy(?:Role|Text|Label|Placeholder|TestId)|frameLocator)\b/i.test(
         script
       ) &&
-      /\b(?:await\s+)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\.(click|dblclick|fill|type|press|selectOption|check|uncheck)\s*\(/i.test(
+      /\b(?:await\s+)?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\.(click|dblclick|fill|type|press|selectOption|check|uncheck|hover|tap)\s*\(/i.test(
         script
       )
     ) {
@@ -11728,6 +11733,26 @@ return {
 
     lines.push("return { success: true, message: 'Deterministic journey script executed' };");
     return lines.join('\n');
+  }
+
+  /**
+   * Build a finalized journey script from currentJourney inventory actions, with SPA lead and
+   * parse/unlogged checks. Used when AI output is out-of-scope (e.g. fill on click-only journey)
+   * or parses as empty despite actionable UI — general fallback, not site-specific.
+   */
+  prepareDeterministicJourneyExecutionScript(workflowState) {
+    const built = this.buildDeterministicJourneyScriptFromCurrentJourney(workflowState);
+    if (!built || typeof built !== 'string' || !built.trim()) return null;
+    let s = this.finalizeAiGeneratedPlaywrightScript(built);
+    if (!s || !String(s).trim()) return null;
+    const spaLead = `await page.waitForLoadState('domcontentloaded').catch(() => {});\nawait page.waitForTimeout(350);\n`;
+    if (!/\bwaitForLoadState\s*\(\s*['"]domcontentloaded['"]/i.test(s)) {
+      s = spaLead + s;
+    }
+    const parsed = this.parseScriptActions(s);
+    const hasUnlogged = this.journeyScriptHasUnloggedPlaywrightInteractions(s);
+    if (parsed.length === 0 && !hasUnlogged) return null;
+    return s;
   }
 
   cleanScript(script) {
@@ -14258,35 +14283,60 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         !formMutationsAllowed &&
         this.aiJourneyScriptUsesFormMutations(code)
       ) {
-        const scopeError =
-          'Journey script scope error: form field interaction not permitted for currentJourney interactive actions';
-        const scopeResult = {
-          success: false,
-          execution_failed: true,
-          error_type: 'execution',
-          error: scopeError,
-          source_field: sourceField,
-          script_length: code.length,
-        };
-        workflowState.lastExecutedActionLines = [];
-        workflowState.lastExecutionResult = scopeResult;
-        workflowState.executionErrorType = 'execution';
-        await this.storeStepResult(step, scopeResult, workflowState);
-        if (jobId && this.backendLogger) {
-          await this.backendLogger.appendJobLog(
-            jobId,
-            'warn',
-            `${scopeError}; forcing bounded regeneration.`,
-            'WORKFLOW-ANALYZER',
-            {
-              step_id: step.id,
-              step_name: step.name,
-              journey_id: cj.journey_id || cj.id,
-              interactive_action_types: interactive.map((a) => a.type),
-            }
-          );
+        const det = this.prepareDeterministicJourneyExecutionScript(workflowState);
+        if (det) {
+          code = det;
+          workflowState.legScriptToExecute = det;
+          if (!workflowState.context) workflowState.context = {};
+          workflowState.context.legScriptToExecute = det;
+          this.initializeVariablePool(workflowState);
+          this.saveVariable(workflowState, 'legScriptToExecute', det, 'page', step);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'info',
+              'Using deterministic inventory journey script after AI script used disallowed form mutations for click-only journey.',
+              'WORKFLOW-ANALYZER',
+              {
+                step_id: step.id,
+                step_name: step.name,
+                journey_id: cj.journey_id || cj.id,
+                interactive_action_types: interactive.map((a) => a.type),
+                fallback_script_length: det.length,
+              }
+            );
+          }
+        } else {
+          const scopeError =
+            'Journey script scope error: form field interaction not permitted for currentJourney interactive actions';
+          const scopeResult = {
+            success: false,
+            execution_failed: true,
+            error_type: 'execution',
+            error: scopeError,
+            source_field: sourceField,
+            script_length: code.length,
+          };
+          workflowState.lastExecutedActionLines = [];
+          workflowState.lastExecutionResult = scopeResult;
+          workflowState.executionErrorType = 'execution';
+          await this.storeStepResult(step, scopeResult, workflowState);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `${scopeError}; forcing bounded regeneration.`,
+              'WORKFLOW-ANALYZER',
+              {
+                step_id: step.id,
+                step_name: step.name,
+                journey_id: cj.journey_id || cj.id,
+                interactive_action_types: interactive.map((a) => a.type),
+              }
+            );
+          }
+          return scopeResult;
         }
-        return scopeResult;
       }
     }
     
@@ -14346,7 +14396,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       actionLines = cleanedActionLines;
     }
 
-    const hasUnloggedPlaywright = this.journeyScriptHasUnloggedPlaywrightInteractions(code);
+    let hasUnloggedPlaywright = this.journeyScriptHasUnloggedPlaywrightInteractions(code);
 
     if (isJourneyScriptExecutionStep && actionLines.length === 0 && !hasUnloggedPlaywright) {
       const formsSignals = Array.isArray(workflowState?.playwrightAnalysis?.forms)
@@ -14365,40 +14415,70 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         });
       }
 
-      const noActionError = 'No actionable interaction generated in journey script';
-      const noActionResult = {
-        success: false,
-        execution_failed: true,
-        error_type: 'execution',
-        error: noActionError,
-        source_field: sourceField,
-        script_length: code.length,
-        forms_signals: formsSignals,
-        interactive_signals: interactiveSignals
-      };
-      workflowState.lastExecutedActionLines = [];
-      workflowState.lastExecutionResult = noActionResult;
-      workflowState.executionErrorType = 'execution';
-      await this.storeStepResult(step, noActionResult, workflowState);
-
-      if (jobId && this.backendLogger) {
-        await this.backendLogger.appendJobLog(
-          jobId,
-          'warn',
-          `${noActionError}; forcing retry instead of accepting no-op execution.`,
-          'WORKFLOW-ANALYZER',
-          {
-            step_id: step.id,
-            step_name: step.name,
-            source_field: sourceField,
-            script_length: code.length,
-            forms_signals: formsSignals,
-            interactive_signals: interactiveSignals
-          }
-        );
+      const det = this.prepareDeterministicJourneyExecutionScript(workflowState);
+      if (det) {
+        code = det;
+        workflowState.legScriptToExecute = det;
+        if (!workflowState.context) workflowState.context = {};
+        workflowState.context.legScriptToExecute = det;
+        this.initializeVariablePool(workflowState);
+        this.saveVariable(workflowState, 'legScriptToExecute', det, 'page', step);
+        actionLines = this.parseScriptActions(code);
+        hasUnloggedPlaywright = this.journeyScriptHasUnloggedPlaywrightInteractions(code);
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            'Using deterministic inventory journey script after AI script had no parseable user actions.',
+            'WORKFLOW-ANALYZER',
+            {
+              step_id: step.id,
+              step_name: step.name,
+              source_field: sourceField,
+              forms_signals: formsSignals,
+              interactive_signals: interactiveSignals,
+              fallback_script_length: det.length,
+            }
+          );
+        }
       }
 
-      return noActionResult;
+      if (actionLines.length === 0 && !hasUnloggedPlaywright) {
+        const noActionError = 'No actionable interaction generated in journey script';
+        const noActionResult = {
+          success: false,
+          execution_failed: true,
+          error_type: 'execution',
+          error: noActionError,
+          source_field: sourceField,
+          script_length: code.length,
+          forms_signals: formsSignals,
+          interactive_signals: interactiveSignals
+        };
+        workflowState.lastExecutedActionLines = [];
+        workflowState.lastExecutionResult = noActionResult;
+        workflowState.executionErrorType = 'execution';
+        await this.storeStepResult(step, noActionResult, workflowState);
+
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'warn',
+            `${noActionError}; forcing retry instead of accepting no-op execution.`,
+            'WORKFLOW-ANALYZER',
+            {
+              step_id: step.id,
+              step_name: step.name,
+              source_field: sourceField,
+              script_length: code.length,
+              forms_signals: formsSignals,
+              interactive_signals: interactiveSignals
+            }
+          );
+        }
+
+        return noActionResult;
+      }
     }
     
     try {
