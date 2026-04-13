@@ -5900,6 +5900,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- If visible validation/error text exists, return status="failure".\n'
           + '- If expected_outcome is visible in DOM, return status="success" and expected_outcome_verified=true.\n'
           + '- For non-reactive form submit journeys: when submit was attempted and page is in clean initial state after submit with NO visible validation/error text, treat as status="success" (submit likely reloaded/reset page).\n'
+          + '- For reactive controls (toggles, counters, dynamic button labels): when execution_result reports success and there is no error/validation banner, treat status="success" if the UI shows a plausible post-interaction state; do not return failure only because visible button text changed between before/after screenshots (e.g. "Click to Toggle" vs "Toggled ON").\n'
           + '- For embedded chat/support widgets: after a send action, treat status="success" when screenshots/DOM show a user-authored line, typing indicator cleared, delivery state, or an agent reply stub inside the chat surface (including inside iframes), even if the host page URL unchanged.\n'
           + '- Use status="pending" only when there is genuinely insufficient evidence and no success/failure signal.\n';
       }
@@ -12014,6 +12015,121 @@ return {
     return `${unique.join('\n')}\n${script}`;
   }
 
+  /**
+   * Map visible button/link text to the camelCase identifier pattern models often use
+   * (e.g. "Click to Toggle" -> clickToToggle). Used to repair undeclared locator variables.
+   */
+  journeyLabelTextToInferredVarName(label) {
+    const parts = String(label || '')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (!parts.length) return '';
+    const head = parts[0];
+    const tail = parts
+      .slice(1)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join('');
+    const first = head.charAt(0).toLowerCase() + head.slice(1).toLowerCase();
+    return `${first}${tail}`;
+  }
+
+  /**
+   * When the model emits `await foo.click()` without `const foo = page.locator(...)` but the same
+   * script already contains :has-text("...") or getByRole('button', { name: '...' }) with a label
+   * that matches `foo` via camelCase inference, inject the missing const. Prevents ReferenceError
+   * → "AI script bug" inconclusive retries on reactive / multi-control pages (general pattern).
+   */
+  injectUndeclaredLocatorAliasesFromInferredLabels(script) {
+    if (!script || typeof script !== 'string') return script;
+
+    const RESERVED_ROOT = new Set([
+      'page',
+      'safeClick',
+      'ensureChecked',
+      'safeFill',
+      'safeType',
+      'humanDelay',
+      'console',
+      'JSON',
+      'Math',
+      'Promise',
+      'Array',
+      'Object',
+      'String',
+      'Number',
+      'Boolean',
+      'Date',
+      'Error',
+      'RegExp',
+      'Set',
+      'Map',
+      'parseInt',
+      'parseFloat',
+      'isNaN',
+    ]);
+
+    const declared = new Set();
+    const declRe = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b/g;
+    let dm;
+    while ((dm = declRe.exec(script)) !== null) {
+      declared.add(dm[1]);
+    }
+
+    const awaitRoots = new Set();
+    const awaitRe = /\bawait\s+([A-Za-z_$][\w$]*)\s*\./g;
+    let am;
+    while ((am = awaitRe.exec(script)) !== null) {
+      const root = am[1];
+      if (!RESERVED_ROOT.has(root) && !declared.has(root)) {
+        awaitRoots.add(root);
+      }
+    }
+    if (awaitRoots.size === 0) return script;
+
+    /** @type {Map<string, string>} varName -> rhs expression (e.g. page.locator(...)) */
+    const inferred = new Map();
+
+    const tryAdd = (label, rhsExpr) => {
+      if (!label || !rhsExpr) return;
+      const v = this.journeyLabelTextToInferredVarName(label);
+      if (!v || !/^[A-Za-z_$][\w$]*$/.test(v)) return;
+      if (!inferred.has(v)) inferred.set(v, rhsExpr);
+    };
+
+    const hasTextRe = /has-text\(\s*(["'])((?:\\.|(?!\1).)*)\1\s*\)/g;
+    let hm;
+    while ((hm = hasTextRe.exec(script)) !== null) {
+      const inner = String(hm[2] || '')
+        .replace(/\\'/g, "'")
+        .replace(/\\"/g, '"')
+        .replace(/\\n/g, '\n')
+        .trim();
+      if (!inner) continue;
+      tryAdd(inner, `page.locator(${JSON.stringify(`button:has-text("${inner}")`)})`);
+    }
+
+    const roleNameRe =
+      /getByRole\(\s*['"]button['"]\s*,\s*\{[^}]*name\s*:\s*(['"])([^'"]*)\1/gi;
+    let rm;
+    while ((rm = roleNameRe.exec(script)) !== null) {
+      const inner = String(rm[2] || '').trim();
+      if (!inner) continue;
+      tryAdd(inner, `page.getByRole('button', { name: ${JSON.stringify(inner)} })`);
+    }
+
+    const injections = [];
+    for (const root of awaitRoots) {
+      const rhs = inferred.get(root);
+      if (rhs) {
+        injections.push(`const ${root} = ${rhs};`);
+      }
+    }
+    if (!injections.length) return script;
+    const unique = [...new Set(injections)];
+    return `${unique.join('\n')}\n${script}`;
+  }
+
   stripTypeScriptArtifacts(script) {
     if (!script || typeof script !== 'string') return script;
 
@@ -12845,6 +12961,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     s = this.stripTrailingRedundantPageFillsAfterSubmit(s);
     s = this.dedupeRedundantPreFormButtonClicks(s);
     s = this.injectUndeclaredLocatorAliasesFromQuotedIds(s);
+    s = this.injectUndeclaredLocatorAliasesFromInferredLabels(s);
     s = this.replaceEmptyJourneyFillValues(s);
 
     return s;
@@ -18574,7 +18691,12 @@ const sleep = safeWait;
               jReason.includes('insufficient signal') ||
               jReason.includes('skipped_insufficient') ||
               jReason.includes('low confidence') ||
-              jReason.includes('not possible to tell');
+              jReason.includes('not possible to tell') ||
+              (jReason.includes('toggle') &&
+                (jReason.includes('label') ||
+                  jReason.includes('text') ||
+                  jReason.includes('uncertain') ||
+                  jReason.includes('changed')));
             if (jStatus === 'failure' && execOk && uncertainVerifier) {
               const patched = {
                 status: 'continue',
