@@ -11348,8 +11348,10 @@ return {
     cleaned = cleaned.replace(
       /const\s+([a-zA-Z_$][\w$]*)\s*=\s*page\.locator\(\s*["']text=([^"']+)["']\s*\)\.first\(\)\s*;/g,
       (m, varName, labelRaw) => {
-        const label = String(labelRaw || '').replace(/"/g, '\\"');
-        return `const ${varName} = page.locator('a:has-text("${label}"), button:has-text("${label}"), [role="button"]:has-text("${label}"), [aria-haspopup="dialog"]:has-text("${label}")').first();`;
+        const label = String(labelRaw || '').trim();
+        const lit = JSON.stringify(label);
+        // Prefer role-based resolution: shorter than long CSS unions (LLM truncation often breaks those).
+        return `const ${varName} = page.getByRole('button', { name: ${lit} }).or(page.getByRole('link', { name: ${lit} })).first();`;
       }
     );
     // Replace undeclared pseudo-delay variables commonly emitted by LLMs.
@@ -12008,6 +12010,27 @@ return {
     s = s.replace(
       /\.locator\(\s*([a-z][a-z0-9_-]*:has-text\(\s*'((?:[^'\\]|\\.)*)'\s*\))\s*\)/gi,
       (_m, sel) => `.locator(${JSON.stringify(String(sel || ''))})`
+    );
+    // Missing opening quote before tag:has-text (LLM emits page.locator(a:has-text("Next")) as invalid JS).
+    s = s.replace(
+      /page\.locator\(\s*([a-z][a-z0-9_-]*):has-text\(\s*"((?:[^"\\]|\\.)*)"\s*\)\s*\)/gi,
+      (_m, tag, inner) => {
+        const unescaped = String(inner || '')
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\');
+        const css = `${tag}:has-text(${JSON.stringify(unescaped)})`;
+        return `page.locator(${JSON.stringify(css)})`;
+      }
+    );
+    s = s.replace(
+      /page\.locator\(\s*([a-z][a-z0-9_-]*):has-text\(\s*'((?:[^'\\]|\\.)*)'\s*\)\s*\)/gi,
+      (_m, tag, inner) => {
+        const unescaped = String(inner || '')
+          .replace(/\\'/g, "'")
+          .replace(/\\\\/g, '\\');
+        const css = `${tag}:has-text(${JSON.stringify(unescaped)})`;
+        return `page.locator(${JSON.stringify(css)})`;
+      }
     );
     // Comma-separated junk after unquoted tag:has-text("...") — models emit locator(a:has-text("x"), button) or longer invalid unions; keep first :has-text only.
     s = s.replace(
@@ -14504,6 +14527,13 @@ const sleep = safeWait;
       
       page.off('dialog', dialogHandler);
       workflowState.lastDialogMessage = dialogMessage;
+
+      // A prior iteration may have set executionErrorType when Playwright threw; if this run completed
+      // without entering the catch below, clear it so post-step inconclusive-retry logic does not mix
+      // stale execution signals with validation-only success=false (common on multi-step wizards).
+      if (isJourneyScriptExecutionStep) {
+        workflowState.executionErrorType = null;
+      }
       
       const executionTime = Date.now() - executionStartTime;
 
@@ -14708,7 +14738,12 @@ const sleep = safeWait;
             if (pane && !pane.classList.contains('active')) return false;
             return isUserVisible(el);
           });
-          const ariaInvalidEls = Array.from(document.querySelectorAll('[aria-invalid="true"]')).filter(isUserVisible);
+          const ariaInvalidEls = Array.from(document.querySelectorAll('[aria-invalid="true"]')).filter((el) => {
+            if (!isUserVisible(el)) return false;
+            const pane = el.closest('.step-content');
+            if (pane && !pane.classList.contains('active')) return false;
+            return true;
+          });
 
           const sampleInvalid = invalidEls.slice(0, 6).map((el) => {
             const v = el.validity || {};
@@ -14736,7 +14771,12 @@ const sleep = safeWait;
           const sampleErrors = Array.from(
             document.querySelectorAll('.error, .errors, .invalid-feedback, [role="alert"], [aria-live="assertive"]')
           )
-            .filter(isUserVisible)
+            .filter((el) => {
+              if (!isUserVisible(el)) return false;
+              const pane = el.closest('.step-content');
+              if (pane && !pane.classList.contains('active')) return false;
+              return true;
+            })
             .slice(0, 6)
             .map((el) => (el.textContent || '').trim())
             .filter(Boolean);
