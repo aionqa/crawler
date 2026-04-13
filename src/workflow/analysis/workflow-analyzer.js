@@ -11972,6 +11972,58 @@ return {
     return s;
   }
 
+  /**
+   * LLM journey scripts often perform real work via locator variables (nameInput.fill, etc.), then
+   * append submit, timeout tuning, waits, and redundant top-level await page.fill(...) on the same
+   * fields. After submit, DOM churn can make those page.fill calls wait until the default action
+   * timeout (~3 minutes). When the tail after the last submit-like click is only noise + page.fill,
+   * drop the fills — general form-journey pattern, not site-specific.
+   */
+  stripTrailingRedundantPageFillsAfterSubmit(script) {
+    if (!script || typeof script !== 'string') return script;
+
+    const hasLocatorStyleInteraction =
+      /\bawait\s+(?!page\b)[A-Za-z_$][\w$]*\.(?:fill|type)\s*\(/i.test(script);
+    if (!hasLocatorStyleInteraction) return script;
+
+    const lines = script.split('\n');
+    const trim = (line) => String(line || '').trim();
+
+    const isNoiseLine = (line) => {
+      const t = trim(line);
+      if (!t || t.startsWith('//') || t.startsWith('/*') || t.startsWith('*')) return true;
+      if (/^await\s+page\.setDefault(?:Navigation)?Timeout\s*\(/i.test(t)) return true;
+      if (/^await\s+page\.waitForLoadState\s*\(/i.test(t)) return true;
+      if (/^await\s+page\.waitForTimeout\s*\(/i.test(t)) return true;
+      return false;
+    };
+
+    const isSubmitClickLine = (line) => {
+      const t = trim(line);
+      if (!/\.click\s*\(/.test(t)) return false;
+      if (/\bsubmit\b/i.test(t)) return true;
+      if (/type\s*===?\s*['"]submit['"]/i.test(t)) return true;
+      if (/\[\s*type\s*=\s*['"]submit['"]\s*\]/i.test(t)) return true;
+      return false;
+    };
+
+    const isPageFillLine = (line) => /^await\s+page\.fill\s*\(/i.test(trim(line));
+
+    let lastSubmitIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (isSubmitClickLine(lines[i])) lastSubmitIdx = i;
+    }
+    if (lastSubmitIdx < 0) return script;
+
+    const tail = lines.slice(lastSubmitIdx + 1);
+    const nonNoiseTail = tail.filter((l) => !isNoiseLine(l));
+    if (!nonNoiseTail.length) return script;
+    if (!nonNoiseTail.every((l) => isPageFillLine(l))) return script;
+
+    const keptTail = tail.filter((l) => !isPageFillLine(l));
+    return [...lines.slice(0, lastSubmitIdx + 1), ...keptTail].join('\n');
+  }
+
   sanitizeAiPlaywrightScript(script) {
     if (!script || typeof script !== 'string') return script;
 
@@ -12615,6 +12667,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       }
     }
 
+    s = this.stripTrailingRedundantPageFillsAfterSubmit(s);
     s = this.injectUndeclaredLocatorAliasesFromQuotedIds(s);
     s = this.replaceEmptyJourneyFillValues(s);
 
