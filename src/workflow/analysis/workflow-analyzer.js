@@ -14964,6 +14964,32 @@ const sleep = safeWait;
         screenshotAfterKey,
         validation: validationCheck
       };
+
+      // LLM-generated scripts sometimes return { execution_failed: true, error: '...' } even when Playwright
+      // finished without throwing and post-DOM validation is clean. That mixed signal triggers bounded
+      // inconclusive retries and misleading "AI script bug" logs. Drop the spurious flags only when
+      // we have evidence the script body actually ran (parsed action lines) and the error is a known
+      // noop/degenerate classifier (not a real thrown Playwright error).
+      if (
+        isJourneyScriptExecutionStep &&
+        executionResult.success === true &&
+        executionResult.execution_failed === true
+      ) {
+        const errL = String(executionResult.error || '').toLowerCase();
+        const hadParsedActions =
+          (Array.isArray(actionLines) && actionLines.length > 0) ||
+          (Array.isArray(workflowState.lastExecutedActionLines) && workflowState.lastExecutedActionLines.length > 0);
+        const benignReturnedFailure =
+          errL.includes('no actionable interaction generated in journey script') ||
+          errL.includes('collapsed to empty after sanitization');
+        if (hadParsedActions && benignReturnedFailure) {
+          delete executionResult.execution_failed;
+          if (executionResult.error_type === 'execution') {
+            delete executionResult.error_type;
+          }
+          delete executionResult.error;
+        }
+      }
       
       try {
         const execPreview = JSON.stringify(executionResult);
@@ -18049,8 +18075,11 @@ const sleep = safeWait;
             execErrLower.includes('navigation') ||
             execErrLower.includes('frame was detached');
           // IMPORTANT:
-          // - "selector is not defined", SyntaxError, etc. are AI-script bugs (NOT proven product failures).
-          // - We still want to retry (bounded by maxIterations) to give the AI a chance to regenerate.
+          // - SyntaxError / ReferenceError / bad imports are true AI-script surface bugs (retry bounded).
+          // - "No actionable interaction" / collapsed sanitization are degenerate outputs, not JS engine bugs.
+          const looksLikeDegenerateJourneyOutput =
+            execErrLower.includes('no actionable interaction generated in journey script') ||
+            execErrLower.includes('collapsed to empty after sanitization');
           const looksLikeAiScriptBug =
             execErrLower.includes('syntaxerror') ||
             execErrLower.includes('referenceerror') ||
@@ -18062,12 +18091,10 @@ const sleep = safeWait;
             execErrLower.includes('shouldbechecked is not defined') ||
             execErrLower.includes('journey script syntax error') ||
             execErrLower.includes('journey script scope error') ||
-            execErrLower.includes('no actionable interaction generated in journey script') ||
-            execErrLower.includes('collapsed to empty after sanitization') ||
             execErrLower.includes('missing ) after argument list') ||
             execErrLower.includes('unexpected end of input');
 
-          if (hasExecFailureSignal && (looksLikeSelectorOrTiming || looksLikeAiScriptBug)) {
+          if (hasExecFailureSignal && (looksLikeSelectorOrTiming || looksLikeAiScriptBug || looksLikeDegenerateJourneyOutput)) {
             const patched = {
               status: 'continue',
               completion_status: 'continue',
@@ -18138,12 +18165,15 @@ const sleep = safeWait;
 
             console.log(`🟡 Overrode determine_completion -> continue due to inconclusive execution error`);
             if (jobId) {
+              const inconclusiveLabel = looksLikeAiScriptBug
+                ? 'AI script bug'
+                : looksLikeDegenerateJourneyOutput
+                  ? 'empty or non-interactive journey script'
+                  : 'selector/timing';
               await this.sendLogToBackend(
                 jobId,
                 'info',
-                looksLikeAiScriptBug
-                  ? `🟡 Inconclusive execution (AI script bug). Retrying journey (bounded).`
-                  : `🟡 Inconclusive execution (selector/timing). Retrying journey (bounded).`,
+                `🟡 Inconclusive execution (${inconclusiveLabel}). Retrying journey (bounded).`,
                 'WORKFLOW-ANALYZER',
                 { execution_error: execErr.substring(0, 500), patched_determine_completion: patched }
               );
@@ -20623,7 +20653,9 @@ const sleep = safeWait;
               // Mark as inconclusive (retryable) so UI doesn't go red for crawler/LLM brittleness.
               const execErr = String(lastExecutionResult?.error || '');
               const execErrLower = execErr.toLowerCase();
-              // "selector is not defined", SyntaxError, etc. are AI-script bugs (NOT proven product failures).
+              const looksLikeDegenerateJourneyOutput =
+                execErrLower.includes('no actionable interaction generated in journey script') ||
+                execErrLower.includes('collapsed to empty after sanitization');
               const looksLikeAiScriptBug =
                 execErrLower.includes('syntaxerror') ||
                 execErrLower.includes('referenceerror') ||
@@ -20649,7 +20681,7 @@ const sleep = safeWait;
                 executionErrorType === 'execution' ||
                 (lastExecutionResult && (lastExecutionResult.error_type === 'execution' || lastExecutionResult.execution_failed));
 
-              if (hasExecutionError && (looksLikeSelectorOrTiming || looksLikeAiScriptBug)) {
+              if (hasExecutionError && (looksLikeSelectorOrTiming || looksLikeAiScriptBug || looksLikeDegenerateJourneyOutput)) {
                 iterationResult = 'inconclusive';
               } else if (hasExecutionError) {
                 iterationResult = 'execution_failure';

@@ -2676,11 +2676,20 @@ const modeHandlers = {
         const handleLoginRedirect = context.handle_login_redirect ?? context?.options?.handle_login_redirect;
         if (!isLoginJob && handleLoginRedirect && (handleLoginRedirect === 'auto_retry' || handleLoginRedirect === 'fail' || handleLoginRedirect === 'warn_ignore')) {
           try {
-            await sendLog(jobId, 'info', `🔐 [LOGIN-REDIRECT] handler check: handle_login_redirect=${handleLoginRedirect}`, {
+            const loginRedirectPolicyLabel =
+              handleLoginRedirect === 'fail'
+                ? 'strict_stop_if_login_surface'
+                : handleLoginRedirect === 'auto_retry'
+                  ? 'auto_retry_reauth'
+                  : handleLoginRedirect === 'warn_ignore'
+                    ? 'warn_ignore'
+                    : String(handleLoginRedirect);
+            await sendLog(jobId, 'info', `🔐 [LOGIN-REDIRECT] handler invoked (${loginRedirectPolicyLabel}) — evaluating page vs configured login surfaces`, {
               final_url: finalUrl,
               intended_url: currentUrl,
               login_url: context?.login_url || null,
-              job_type: context?.jobType || context?.job_type || null
+              job_type: context?.jobType || context?.job_type || null,
+              login_redirect_policy: handleLoginRedirect
             });
             const { handleLoginRedirect: handleRedirect } = await import('../login/login-redirect-handler.js');
             const redirectResult = await handleRedirect(page, jobId, finalUrl, currentUrl, context, openaiClient, handleLoginRedirect);
