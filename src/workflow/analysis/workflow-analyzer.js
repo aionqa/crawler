@@ -458,6 +458,22 @@ const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
 /** Floor for generated journey Playwright scripts (forms, modals, nested SPAs); nested races use this minimum. */
 const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 5 * 60 * 1000;
 
+/** Journey Playwright execution may use `execute-code` or `execute-code-from-variable` depending on template. */
+function isJourneyScriptExecuteStep(step) {
+  if (!step || typeof step !== 'object') return false;
+  const sf = String(step.config?.sourceField || '').trim();
+  const nm = String(step.name || '').toLowerCase();
+  const baseId = String(step.id || '').split('::').pop() || '';
+  const bid = baseId.toLowerCase();
+  return (
+    sf === 'journeyScriptToExecute'
+    || sf === 'legScriptToExecute'
+    || bid === 'execute_journey_script'
+    || nm.includes('execute journey action script')
+    || nm.includes('journey action script')
+  );
+}
+
 class WorkflowAnalyzer {
   constructor(backendUrl, aiLogger, context = {}) {
     this.backendUrl = backendUrl;
@@ -563,17 +579,11 @@ class WorkflowAnalyzer {
 
     // Outer Promise.race uses getStepTimeout; journey script steps need the same floor as nested while-loop legs.
     const stepTypeNormForJourney = normalizeWorkflowStepType(step.type);
-    if (stepTypeNormForJourney === 'execute-code-from-variable') {
-      const sf = String(step.config?.sourceField || '').trim();
-      const nm = String(step.name || '').toLowerCase();
-      const isJourneyScriptStep =
-        sf === 'journeyScriptToExecute'
-        || sf === 'legScriptToExecute'
-        || step.id === 'execute_journey_script'
-        || nm.includes('execute journey action script');
-      if (isJourneyScriptStep) {
-        timeout = Math.max(Number(timeout) || 0, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS);
-      }
+    if (
+      (stepTypeNormForJourney === 'execute-code-from-variable' || stepTypeNormForJourney === 'execute-code')
+      && isJourneyScriptExecuteStep(step)
+    ) {
+      timeout = Math.max(Number(timeout) || 0, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS);
     }
 
     // ai-prompt: wall-clock includes attachment collection, nested auto page-description AI calls,
@@ -12007,6 +12017,31 @@ return {
    * Locator has no `[]`/`[]()` API; use `.nth(i)` or `.first()`. Without this, Node throws
    * TypeError / strict parse issues and journeys retry until exhaustion.
    */
+  /**
+   * Models sometimes close the selector string with an extra `)`, which makes Playwright's CSS parser
+   * reject the locator (e.g. button:has-text("OK")) — strip surplus closing parens from the *string*
+   * only when counts prove they are unmatched.
+   */
+  repairLocatorQuotedSelectorParenBalance(script) {
+    if (!script || typeof script !== 'string') return script;
+    const fixInner = (inner) => {
+      let s = inner;
+      while (s.length > 0 && s.endsWith(')')) {
+        const opens = (s.match(/\(/g) || []).length;
+        const closes = (s.match(/\)/g) || []).length;
+        if (closes <= opens) break;
+        s = s.slice(0, -1);
+      }
+      return s;
+    };
+    const pat =
+      /\b([A-Za-z_$][\w$]*)\.(locator|frameLocator)\s*\(\s*(['"])((?:\\.|(?!\3).)*)\3/g;
+    return script.replace(pat, (full, obj, method, q, body) => {
+      const fixed = fixInner(body);
+      return fixed === body ? full : `${obj}.${method}(${q}${fixed}${q}`;
+    });
+  }
+
   repairLocatorBracketIndexChains(script) {
     if (!script || typeof script !== 'string') return script;
     const skipRoot = new Set(['page', 'context', 'browser', 'frame', 'globalThis', 'window', 'console']);
@@ -12521,6 +12556,7 @@ return {
 
     s = this.repairQuotedActPseudocodeInFillAndType(s);
     s = this.repairLocatorBracketIndexChains(s);
+    s = this.repairLocatorQuotedSelectorParenBalance(s);
     s = this.replaceEmptyJourneyFillValues(s);
 
     // Models often append Playwright timeout tuning after substantive actions; it adds noise to parsers
@@ -13165,6 +13201,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     s = this.injectUndeclaredLocatorAliasesFromQuotedIds(s);
     s = this.injectUndeclaredLocatorAliasesFromInferredLabels(s);
     s = this.repairLocatorBracketIndexChains(s);
+    s = this.repairLocatorQuotedSelectorParenBalance(s);
     s = this.replaceEmptyJourneyFillValues(s);
 
     return s;
@@ -17778,15 +17815,10 @@ const sleep = safeWait;
             const nestedStepTimeoutRaw = this.getStepTimeout(nestedStep);
             const nestedLabel = `${nestedStep.type || ''} ${nestedStep.name || ''} ${nestedStep.id || ''}`.toLowerCase();
             const nestedTypeNorm = normalizeWorkflowStepType(nestedStep.type);
-            const nestedSourceField = String(nestedStep.config?.sourceField ?? '').trim();
-            const nestedName = String(nestedStep.name || '');
             const isJourneyExecutionNestedStep =
-              nestedTypeNorm === 'execute-code-from-variable' &&
-              (
-                nestedSourceField === 'journeyScriptToExecute'
-                || nestedSourceField === 'legScriptToExecute'
-                || nestedStep.id === 'execute_journey_script'
-                || nestedName.includes('Execute Journey Action Script')
+              (nestedTypeNorm === 'execute-code-from-variable' || nestedTypeNorm === 'execute-code')
+              && (
+                isJourneyScriptExecuteStep(nestedStep)
                 || /(journey|action\s*script|leg)/i.test(nestedLabel)
               );
             // Journey execution steps can include heavy DOM transitions/modals and should not be cut
