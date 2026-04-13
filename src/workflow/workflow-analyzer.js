@@ -8026,6 +8026,7 @@ return {
 
     const isJourneyScriptExecutionStep =
       sourceField === 'journeyScriptToExecute' ||
+      sourceField === 'legScriptToExecute' ||
       step.id === 'execute_journey_script' ||
       step.name?.includes('Execute Journey Action Script');
 
@@ -12361,11 +12362,14 @@ ${executableBody}`;
             const nestedLabel = `${nestedStep.type || ''} ${nestedStep.name || ''} ${nestedStep.id || ''}`.toLowerCase();
             const nestedTypeNorm = normalizeWorkflowStepType(nestedStep.type);
             const nestedSourceField = String(nestedStep.config?.sourceField ?? '').trim();
+            const nestedName = String(nestedStep.name || '');
             const isJourneyExecutionNestedStep =
               nestedTypeNorm === 'execute-code-from-variable' &&
               (
                 nestedSourceField === 'journeyScriptToExecute'
+                || nestedSourceField === 'legScriptToExecute'
                 || nestedStep.id === 'execute_journey_script'
+                || nestedName.includes('Execute Journey Action Script')
                 || /(journey|action\s*script|leg)/i.test(nestedLabel)
               );
             const nestedStepTimeout = isJourneyExecutionNestedStep

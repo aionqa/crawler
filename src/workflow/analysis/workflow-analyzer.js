@@ -13217,6 +13217,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
 
     const isJourneyScriptExecutionStep =
       sourceField === 'journeyScriptToExecute' ||
+      sourceField === 'legScriptToExecute' ||
       step.id === 'execute_journey_script' ||
       step.name?.includes('Execute Journey Action Script');
     const skipEmptyJourneyScriptExecution = async (phase, metadata = {}) => {
@@ -17361,11 +17362,14 @@ const sleep = safeWait;
             const nestedLabel = `${nestedStep.type || ''} ${nestedStep.name || ''} ${nestedStep.id || ''}`.toLowerCase();
             const nestedTypeNorm = normalizeWorkflowStepType(nestedStep.type);
             const nestedSourceField = String(nestedStep.config?.sourceField ?? '').trim();
+            const nestedName = String(nestedStep.name || '');
             const isJourneyExecutionNestedStep =
               nestedTypeNorm === 'execute-code-from-variable' &&
               (
                 nestedSourceField === 'journeyScriptToExecute'
+                || nestedSourceField === 'legScriptToExecute'
                 || nestedStep.id === 'execute_journey_script'
+                || nestedName.includes('Execute Journey Action Script')
                 || /(journey|action\s*script|leg)/i.test(nestedLabel)
               );
             // Journey execution steps can include heavy DOM transitions/modals and should not be cut
