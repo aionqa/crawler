@@ -455,6 +455,8 @@ function normalizeConditionRestSegments(rootObject, restSegments) {
  */
 /** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
 const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
+/** Floor for generated journey Playwright scripts (forms, modals, Vue); nested races use this minimum. */
+const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 3 * 60 * 1000;
 
 class WorkflowAnalyzer {
   constructor(backendUrl, aiLogger, context = {}) {
@@ -13383,9 +13385,9 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     
     try {
       const configuredTimeout = Number(step.config?.timeout) || 30000;
-      const stepLabel = `${String(step?.name || '')} ${String(step?.id || '')}`;
-      const isJourneyScriptStep = /journey|leg|execute.*action/i.test(stepLabel);
-      const timeout = isJourneyScriptStep ? Math.max(configuredTimeout, 90000) : configuredTimeout;
+      const timeout = isJourneyScriptExecutionStep
+        ? Math.max(configuredTimeout, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS)
+        : configuredTimeout;
 
       // Capture URL before action
       const urlBeforeAction = page.url();
@@ -16986,7 +16988,7 @@ const sleep = safeWait;
             // Journey execution steps can include heavy DOM transitions/modals and should not be cut
             // by strict template-level 60s overrides before executeCodeFromVariableStep finishes.
             const nestedStepTimeout = isJourneyExecutionNestedStep
-              ? Math.max(nestedStepTimeoutRaw, 90000)
+              ? Math.max(nestedStepTimeoutRaw, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS)
               : nestedStepTimeoutRaw;
             console.log(`⏱️  Nested step "${nestedStep.name || nestedStep.id}" timeout: ${Math.round(nestedStepTimeout / 1000)}s`);
             await this.sendLogToBackend(jobId, 'info', `🔄 While-loop iteration ${iteration}: running nested step ${nestedIdx + 1}/${nestedSteps.length} (${nestedStep.name || nestedStep.id}, type: ${nestedStep.type})`, 'WORKFLOW-ANALYZER', { iteration, nestedIdx, stepId: nestedStepId, stepType: nestedStep.type });

@@ -3194,11 +3194,14 @@ class WorkflowExecutor {
         await this.logCaptcha(jobId, 'warn', '⚠️ CAPTCHA pre-script check timed out; continuing', { phase: 'pre-script', timeout_ms: 15000 });
       }
       
-      // Increased timeout to 90 seconds for complex interactions and CAPTCHA handling
+      const journeyScriptExecMs = 3 * 60 * 1000;
       const result = await Promise.race([
         executeInNodeContext(page, scriptToRun, jobId),
-        new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Script execution timeout after 90 seconds')), 90000)
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Script execution timeout after ${Math.round(journeyScriptExecMs / 1000)} seconds`)),
+            journeyScriptExecMs
+          )
         )
       ]);
       

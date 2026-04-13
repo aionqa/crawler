@@ -28,6 +28,7 @@ function normalizeWorkflowStepType(type) {
 
 /** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
 const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
+const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 3 * 60 * 1000;
 
 /**
  * WorkflowAnalyzer - Updated 2025-10-15
@@ -7951,10 +7952,15 @@ return {
       }
       throw new Error(`${errorMessage}\nMissing JSON path: ${missingPath}\nFull step: ${JSON.stringify(step, null, 2)}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
     }
-    
+
+    const isJourneyScriptExecutionStep =
+      sourceField === 'journeyScriptToExecute' ||
+      step.id === 'execute_journey_script' ||
+      step.name?.includes('Execute Journey Action Script');
+
     // Resolve the path with slug support
     let code = null;
-    
+
     console.log(`🔍 Resolving code from sourceField: "${sourceField}"`);
     
     // CRITICAL: First check variable pool (page namespace) for direct variable access
@@ -8604,8 +8610,11 @@ return {
     }
     
     try {
-      const timeout = step.config?.timeout || 30000;
-      
+      const configuredTimeout = Number(step.config?.timeout) || 30000;
+      const timeout = isJourneyScriptExecutionStep
+        ? Math.max(configuredTimeout, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS)
+        : configuredTimeout;
+
       // Capture URL before action
       let urlBeforeAction = page.url();
       const resolvedPageUrl =
@@ -12277,11 +12286,16 @@ ${executableBody}`;
           const nestedStep = nestedSteps[nestedIdx];
           
           try {
-            // Get timeout for nested step
-            const nestedStepTimeout = this.getStepTimeout(nestedStep);
+            const nestedStepTimeoutRaw = this.getStepTimeout(nestedStep);
+            const nestedLabel = `${nestedStep.type || ''} ${nestedStep.name || ''} ${nestedStep.id || ''}`.toLowerCase();
+            const isJourneyExecutionNestedStep =
+              String(nestedStep.type || '').toLowerCase() === 'execute-code-from-variable' &&
+              /(journey|action\s*script|leg)/i.test(nestedLabel);
+            const nestedStepTimeout = isJourneyExecutionNestedStep
+              ? Math.max(nestedStepTimeoutRaw, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS)
+              : nestedStepTimeoutRaw;
             console.log(`⏱️  Nested step "${nestedStep.name || nestedStep.id}" timeout: ${Math.round(nestedStepTimeout / 1000)}s`);
-            
-            // Execute nested step with timeout protection
+
             let nestedStepCompleted = false;
             await Promise.race([
               (async () => {
@@ -12291,7 +12305,7 @@ ${executableBody}`;
                 });
                 nestedStepCompleted = true;
               })(),
-              new Promise((resolve, reject) => 
+              new Promise((resolve, reject) =>
                 setTimeout(() => {
                   if (!nestedStepCompleted) {
                     reject(new Error(`Nested step "${nestedStep.name || nestedStep.id}" timed out after ${Math.round(nestedStepTimeout / 1000)}s`));
