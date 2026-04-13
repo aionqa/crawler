@@ -28,7 +28,7 @@ function normalizeWorkflowStepType(type) {
 
 /** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
 const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
-const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 3 * 60 * 1000;
+const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
  * WorkflowAnalyzer - Updated 2025-10-15
@@ -134,6 +134,20 @@ class WorkflowAnalyzer {
 
       const stepType = normalizeWorkflowStepType(step.type) || 'ai-prompt';
       timeout = defaultTimeouts[stepType] || 120000; // Default: 2 minutes
+    }
+
+    const stepTypeNormForJourney = normalizeWorkflowStepType(step.type);
+    if (stepTypeNormForJourney === 'execute-code-from-variable') {
+      const sf = String(step.config?.sourceField || '').trim();
+      const nm = String(step.name || '').toLowerCase();
+      const isJourneyScriptStep =
+        sf === 'journeyScriptToExecute'
+        || sf === 'legScriptToExecute'
+        || step.id === 'execute_journey_script'
+        || nm.includes('execute journey action script');
+      if (isJourneyScriptStep) {
+        timeout = Math.max(Number(timeout) || 0, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS);
+      }
     }
 
     // ai-prompt steps include attachment prep, nested AI, persistence — wall-clock often exceeds template 300s.

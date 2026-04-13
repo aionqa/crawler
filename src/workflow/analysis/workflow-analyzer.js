@@ -455,8 +455,8 @@ function normalizeConditionRestSegments(rootObject, restSegments) {
  */
 /** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
 const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
-/** Floor for generated journey Playwright scripts (forms, modals, Vue); nested races use this minimum. */
-const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 3 * 60 * 1000;
+/** Floor for generated journey Playwright scripts (forms, modals, nested SPAs); nested races use this minimum. */
+const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 5 * 60 * 1000;
 
 class WorkflowAnalyzer {
   constructor(backendUrl, aiLogger, context = {}) {
@@ -559,6 +559,21 @@ class WorkflowAnalyzer {
 
       const stepType = normalizeWorkflowStepType(step.type) || 'ai-prompt';
       timeout = defaultTimeouts[stepType] || 120000; // Default: 2 minutes
+    }
+
+    // Outer Promise.race uses getStepTimeout; journey script steps need the same floor as nested while-loop legs.
+    const stepTypeNormForJourney = normalizeWorkflowStepType(step.type);
+    if (stepTypeNormForJourney === 'execute-code-from-variable') {
+      const sf = String(step.config?.sourceField || '').trim();
+      const nm = String(step.name || '').toLowerCase();
+      const isJourneyScriptStep =
+        sf === 'journeyScriptToExecute'
+        || sf === 'legScriptToExecute'
+        || step.id === 'execute_journey_script'
+        || nm.includes('execute journey action script');
+      if (isJourneyScriptStep) {
+        timeout = Math.max(Number(timeout) || 0, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS);
+      }
     }
 
     // ai-prompt: wall-clock includes attachment collection, nested auto page-description AI calls,
