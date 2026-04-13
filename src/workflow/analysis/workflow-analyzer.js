@@ -17277,9 +17277,15 @@ const sleep = safeWait;
             // Get timeout for nested step
             const nestedStepTimeoutRaw = this.getStepTimeout(nestedStep);
             const nestedLabel = `${nestedStep.type || ''} ${nestedStep.name || ''} ${nestedStep.id || ''}`.toLowerCase();
+            const nestedTypeNorm = normalizeWorkflowStepType(nestedStep.type);
+            const nestedSourceField = String(nestedStep.config?.sourceField ?? '').trim();
             const isJourneyExecutionNestedStep =
-              String(nestedStep.type || '').toLowerCase() === 'execute-code-from-variable' &&
-              /(journey|action\s*script|leg)/i.test(nestedLabel);
+              nestedTypeNorm === 'execute-code-from-variable' &&
+              (
+                nestedSourceField === 'journeyScriptToExecute'
+                || nestedStep.id === 'execute_journey_script'
+                || /(journey|action\s*script|leg)/i.test(nestedLabel)
+              );
             // Journey execution steps can include heavy DOM transitions/modals and should not be cut
             // by strict template-level 60s overrides before executeCodeFromVariableStep finishes.
             const nestedStepTimeout = isJourneyExecutionNestedStep
@@ -19700,10 +19706,16 @@ const sleep = safeWait;
       const verified = iter?.step_result?.expected_outcome_verified;
       return verified === true || verified === 'true';
     });
-    const hasHardFailureIteration = loopIterations.some((iter) => {
-      const status = String(iter?.step_result?.status || iter?.step_result?.completion_status || '').toLowerCase();
-      return status === 'failure';
-    });
+    // Only the final iteration reflects the terminal verifier outcome; earlier failures may be
+    // retried away (SPA/modal flows) and must not block success promotion at the budget.
+    const lastIterForFailure = loopIterations.length ? loopIterations[loopIterations.length - 1] : null;
+    const lastIterationHardFailure =
+      !!lastIterForFailure &&
+      String(
+        lastIterForFailure?.step_result?.status ||
+        lastIterForFailure?.step_result?.completion_status ||
+        '',
+      ).toLowerCase() === 'failure';
 
     let domJourneySuccessChrome = false;
     try {
@@ -19754,7 +19766,7 @@ const sleep = safeWait;
         if (insufficientSignalForJourney) {
           finalLegStatus = 'skipped';
           finalLegResult = 'skipped_insufficient_signal';
-        } else if (reachedIterationBudget && (executionSucceeded || hasSuccessfulIterationEvidence) && !hasHardFailureIteration) {
+        } else if (reachedIterationBudget && (executionSucceeded || hasSuccessfulIterationEvidence) && !lastIterationHardFailure) {
           // Do not leave a terminal journey in pending when execution evidence is positive and no hard failure was observed.
           finalLegStatus = 'success';
           finalLegResult = 'success';
@@ -19777,7 +19789,7 @@ const sleep = safeWait;
       reachedIterationBudget &&
       (lastAiStatus === 'continue' || lastAiStatus === 'stuck') &&
       (executionSucceeded || hasSuccessfulIterationEvidence) &&
-      !hasHardFailureIteration
+      !lastIterationHardFailure
     ) {
       finalLegStatus = 'success';
       finalLegResult = 'success';

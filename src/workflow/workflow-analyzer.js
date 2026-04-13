@@ -12288,9 +12288,15 @@ ${executableBody}`;
           try {
             const nestedStepTimeoutRaw = this.getStepTimeout(nestedStep);
             const nestedLabel = `${nestedStep.type || ''} ${nestedStep.name || ''} ${nestedStep.id || ''}`.toLowerCase();
+            const nestedTypeNorm = normalizeWorkflowStepType(nestedStep.type);
+            const nestedSourceField = String(nestedStep.config?.sourceField ?? '').trim();
             const isJourneyExecutionNestedStep =
-              String(nestedStep.type || '').toLowerCase() === 'execute-code-from-variable' &&
-              /(journey|action\s*script|leg)/i.test(nestedLabel);
+              nestedTypeNorm === 'execute-code-from-variable' &&
+              (
+                nestedSourceField === 'journeyScriptToExecute'
+                || nestedStep.id === 'execute_journey_script'
+                || /(journey|action\s*script|leg)/i.test(nestedLabel)
+              );
             const nestedStepTimeout = isJourneyExecutionNestedStep
               ? Math.max(nestedStepTimeoutRaw, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS)
               : nestedStepTimeoutRaw;
