@@ -456,7 +456,7 @@ function normalizeConditionRestSegments(rootObject, restSegments) {
 /** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
 const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
 /** Floor for generated journey Playwright scripts (forms, modals, nested SPAs); nested races use this minimum. */
-const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 5 * 60 * 1000;
+const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Journey Playwright execution may use `execute-code` or `execute-code-from-variable` depending on template. */
 function isJourneyScriptExecuteStep(step) {
