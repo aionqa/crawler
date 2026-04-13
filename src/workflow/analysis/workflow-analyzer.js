@@ -6025,37 +6025,71 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
             );
             const cached = cacheLookup?.data?.hit ? cacheLookup.data.script : null;
             if (cached && cached.script_code) {
-              aiResponse = {
-                playwright_script: cached.script_code,
-                description: cached.description || 'Cached script reused (not expired).',
-                expected_result: cached.expected_outcome || cached.expected_result || null,
-                cache_hit: true,
-                cached_script_id: cached._id,
-                cache_expires_at: cached.cache_expires_at || null
-              };
-              console.log(`✅ [SCRIPTS-CACHE] Cache HIT for ${step.id} (${cacheBucket})`);
-              // Always report cache hits to backend logs so scripts are discoverable immediately.
-              if (jobId) {
-                try {
-                  await axios.post(
-                    `${this.backendUrl}/api/logs/jobs/append`,
-                    {
-                      jobId: String(jobId),
-                      level: 'info',
-                      message: `✅ [SCRIPTS-CACHE] Reused cached script -> /scripts/${cached._id}`,
-                      component: 'SCRIPTS',
-                      metadata: {
-                        step_id: step.id,
-                        cache_bucket: cacheBucket,
-                        cache_key: cacheKey,
-                        cached_script_id: cached._id,
-                        cache_expires_at: cached.cache_expires_at || null
-                      }
-                    },
-                    { headers: this.getAuthHeaders(), timeout: 8000 }
-                  );
-                } catch {
-                  // ignore
+              const journeyGenStep =
+                step.id === 'generate_journey_script' ||
+                String(step.id || '').toLowerCase().includes('generate_journey_script');
+              const cacheLooksDegenerate =
+                journeyGenStep && this.isDegenerateJourneyScriptForActionablePage(cached.script_code, workflowState);
+              if (cacheLooksDegenerate) {
+                console.log(
+                  `⚠️ [SCRIPTS-CACHE] Cache HIT ignored for ${step.id}: script parses to no actions while page has forms/controls — regenerating`
+                );
+                if (jobId) {
+                  try {
+                    await axios.post(
+                      `${this.backendUrl}/api/logs/jobs/append`,
+                      {
+                        jobId: String(jobId),
+                        level: 'warn',
+                        message: `⚠️ [SCRIPTS-CACHE] Ignored degenerate cached journey script -> /scripts/${cached._id} (will call AI)`,
+                        component: 'SCRIPTS',
+                        metadata: {
+                          step_id: step.id,
+                          cache_bucket: cacheBucket,
+                          cache_key: cacheKey,
+                          cached_script_id: cached._id,
+                          cache_expires_at: cached.cache_expires_at || null
+                        }
+                      },
+                      { headers: this.getAuthHeaders(), timeout: 8000 }
+                    );
+                  } catch {
+                    // ignore
+                  }
+                }
+              } else {
+                aiResponse = {
+                  playwright_script: cached.script_code,
+                  description: cached.description || 'Cached script reused (not expired).',
+                  expected_result: cached.expected_outcome || cached.expected_result || null,
+                  cache_hit: true,
+                  cached_script_id: cached._id,
+                  cache_expires_at: cached.cache_expires_at || null
+                };
+                console.log(`✅ [SCRIPTS-CACHE] Cache HIT for ${step.id} (${cacheBucket})`);
+                // Always report cache hits to backend logs so scripts are discoverable immediately.
+                if (jobId) {
+                  try {
+                    await axios.post(
+                      `${this.backendUrl}/api/logs/jobs/append`,
+                      {
+                        jobId: String(jobId),
+                        level: 'info',
+                        message: `✅ [SCRIPTS-CACHE] Reused cached script -> /scripts/${cached._id}`,
+                        component: 'SCRIPTS',
+                        metadata: {
+                          step_id: step.id,
+                          cache_bucket: cacheBucket,
+                          cache_key: cacheKey,
+                          cached_script_id: cached._id,
+                          cache_expires_at: cached.cache_expires_at || null
+                        }
+                      },
+                      { headers: this.getAuthHeaders(), timeout: 8000 }
+                    );
+                  } catch {
+                    // ignore
+                  }
                 }
               }
             } else {
@@ -11630,6 +11664,26 @@ return {
   }
 
   /**
+   * Cached journey scripts that parse to zero user actions while Playwright analysis sees forms/controls
+   * cause empty-script execution and bounded retries; treat as cache miss and avoid persisting them.
+   */
+  isDegenerateJourneyScriptForActionablePage(scriptCode, workflowState) {
+    if (!scriptCode || typeof scriptCode !== 'string') return true;
+    const finalized = this.finalizeAiGeneratedPlaywrightScript(scriptCode) || '';
+    const parsed = this.parseScriptActions(finalized);
+    const hasUnlogged = this.journeyScriptHasUnloggedPlaywrightInteractions(finalized);
+    const formsSignals = Array.isArray(workflowState?.playwrightAnalysis?.forms)
+      ? workflowState.playwrightAnalysis.forms.length
+      : 0;
+    const interactiveSignals = Array.isArray(workflowState?.playwrightAnalysis?.interactive_elements)
+      ? workflowState.playwrightAnalysis.interactive_elements.length
+      : 0;
+    const hasActionableUi = formsSignals > 0 || interactiveSignals > 0;
+    if (!hasActionableUi) return false;
+    return parsed.length === 0 && !hasUnlogged;
+  }
+
+  /**
    * Deterministic Playwright steps from currentJourney.actions (inventory selectors).
    * Used when AI-generated scripts fail syntax/runtime ReferenceErrors.
    */
@@ -12519,7 +12573,7 @@ return {
     if (!script || typeof script !== 'string') return script;
 
     const hasLocatorStyleInteraction =
-      /\bawait\s+(?!page\b)[A-Za-z_$][\w$]*\.(?:fill|type)\s*\(/i.test(script);
+      /\bawait\s+(?!page\b)[A-Za-z_$][\w$]*\.(?:fill|type|selectOption)\s*\(/i.test(script);
     if (!hasLocatorStyleInteraction) return script;
 
     const lines = script.split('\n');
@@ -12540,10 +12594,33 @@ return {
       if (/\bsubmit\b/i.test(t)) return true;
       if (/type\s*===?\s*['"]submit['"]/i.test(t)) return true;
       if (/\[\s*type\s*=\s*['"]submit['"]\s*\]/i.test(t)) return true;
+      // LLM-named primary actions (placeOrderBtn, submitBtn, …) — not domain-specific literals.
+      const awaitVarClick = t.match(/^await\s+([A-Za-z_$][\w$]*)\s*\.\s*click\s*\(/i);
+      if (awaitVarClick) {
+        const vn = String(awaitVarClick[1] || '').toLowerCase();
+        if (/(submit|order|place|confirm|checkout|purchase|save|send|continue|finish|pay)/.test(vn)) {
+          return true;
+        }
+      }
+      if (/getByRole\s*\(\s*['"]button['"]/i.test(t)) {
+        if (/\b(?:submit|order|place|confirm|save|send|continue|checkout|purchase)\b/i.test(t)) return true;
+      }
       return false;
     };
 
-    const isPageFillLine = (line) => /^await\s+page\.fill\s*\(/i.test(trim(line));
+    const isPageFillLine = (line) => {
+      const t = trim(line);
+      if (/^await\s+page\.fill\s*\(/i.test(t)) return true;
+      if (/^await\s+page\.locator\(.+\)\.(?:fill|selectOption)\s*\(/i.test(t)) return true;
+      if (
+        /^await\s+page\.getBy(?:Role|Text|Label|Placeholder|AltText|Title|TestId)\(.+\)\.(?:fill|selectOption)\s*\(/i.test(
+          t
+        )
+      ) {
+        return true;
+      }
+      return false;
+    };
 
     let lastSubmitIdx = -1;
     for (let i = 0; i < lines.length; i++) {
@@ -22675,6 +22752,26 @@ const sleep = safeWait;
             step_name: step?.name || null,
             project_id: projectId || null,
             page_id: pageId || null,
+            cache_bucket: cacheBucket,
+            cache_key: cacheKey
+          }
+        );
+        return;
+      }
+
+      const isJourneyGenUpsert =
+        step?.id === 'generate_journey_script' ||
+        String(step?.id || '').toLowerCase().includes('generate_journey_script');
+      if (isJourneyGenUpsert && this.isDegenerateJourneyScriptForActionablePage(scriptCode, workflowState)) {
+        console.warn('⚠️ [SCRIPTS] Skipping upsert: degenerate journey script (no parsed actions) on actionable page');
+        await appendJobLog(
+          'warn',
+          '⚠️ [SCRIPTS] Skipped persisting degenerate generate_journey_script (would poison script cache)',
+          {
+            step_id: step?.id || null,
+            step_name: step?.name || null,
+            project_id: String(projectId),
+            page_id: String(pageId),
             cache_bucket: cacheBucket,
             cache_key: cacheKey
           }
