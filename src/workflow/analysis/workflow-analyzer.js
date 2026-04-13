@@ -12832,6 +12832,27 @@ return {
       }
     );
 
+    // Unquoted compound CSS inside page.locator(...): unions like button[type="submit"], button and
+    // optional "form ..." ancestors. Models also emit ") -> first())" / "));" corruption before .click/.fill.
+    const quotePageLocatorUnionBody = (rawSel) =>
+      JSON.stringify(
+        String(rawSel || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+      );
+    s = s.replace(
+      /\bpage\.locator\(\s*((?:form\s+)?(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])+(?:\s*,\s*(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])?)*)\s*\)\s*->\s*first\(\s*\)\s*\)/gi,
+      (_m, rawSel) => `page.locator(${quotePageLocatorUnionBody(rawSel)}).first()`
+    );
+    s = s.replace(
+      /\bpage\.locator\(\s*((?:form\s+)?(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])+(?:\s*,\s*(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])?)*)\s*\)\s*\)\s*;?\s*\.(click|dblclick|fill|tap)\b/gi,
+      (_m, rawSel, method) => `page.locator(${quotePageLocatorUnionBody(rawSel)}).${method}`
+    );
+    s = s.replace(
+      /\bpage\.locator\(\s*((?:form\s+)?(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])+(?:\s*,\s*(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])?)*)\s*\)\s*;?\s*\.(click|dblclick|fill|tap)\b/gi,
+      (_m, rawSel, method) => `page.locator(${quotePageLocatorUnionBody(rawSel)}).${method}`
+    );
+
     // :has-text(Label) with a bare word label (no quotes) is invalid in a CSS string; quote the label.
     s = s.replace(/:has-text\(\s*([A-Za-z][A-Za-z0-9_\-]*)\s*\)/g, (_m, label) => {
       const lbl = String(label || '').trim();
