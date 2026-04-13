@@ -11598,6 +11598,8 @@ return {
     // Replace undeclared pseudo-delay variables commonly emitted by LLMs.
     cleaned = cleaned.replace(/waitForTimeout\(\s*(humanDelay|humanPause|maxMs|max|delayMs)\s*\)/g, 'waitForTimeout(300)');
     cleaned = cleaned.replace(/timeout:\s*(humanDelay|humanPause|maxMs|max|delayMs)\b/g, 'timeout: 10000');
+    // LLMs sometimes emit TS-only placeholders; stripTypeScriptArtifacts used to reduce these to bare `timeout` and hang waits.
+    cleaned = cleaned.replace(/\btimeout:\s*number\b/g, 'timeout: 15000');
     // Repair malformed quoted waitForSelector with selector variable + options packed into one string.
     cleaned = cleaned.replace(
       /page\.waitForSelector\(\s*(['"])([a-zA-Z_$][\w$]*)\s*,\s*(\{[\s\S]*?\})\1\s*\)/g,
@@ -12218,15 +12220,30 @@ return {
     // `timeout: 1500` into bare `timeout` (invalid / undefined timeout) and hung journeys.
     const tsPrimitiveTypeName =
       /^(?:string|number|boolean|bigint|symbol|any|unknown|never|void|object|undefined)$/;
+    /** When the model uses TS types as object literal values (e.g. waitFor({ timeout: number })), replacing with `pre` alone yields `, timeout` and Playwright sees undefined timeout → long hangs. */
+    const playwrightOptionTsPrimitiveFallback = {
+      timeout: '15000',
+      strict: 'true',
+      trial: 'false',
+      noWaitAfter: 'false',
+      force: 'false',
+      disabled: 'false',
+    };
     s = s.replace(/([,(]\s*[A-Za-z_$][\w$]*)\s*:\s*[^,)\n]+/g, (full, pre) => {
-      const rest = full.slice(full.indexOf(':') + 1).trim();
+      const rawRest = full.slice(full.indexOf(':') + 1).trim();
+      const rest = rawRest.replace(/^(\d+(?:\.\d+)?)\s+as\s+\w+/i, '$1').trim();
       const isCommaProperty = pre.trimStart().startsWith(',');
+      const propMatch = isCommaProperty ? pre.match(/,\s*([A-Za-z_$][\w$]*)\s*$/) : null;
+      const propName = propMatch ? propMatch[1] : '';
       if (isCommaProperty) {
         if (/^\d+(?:\.\d+)?$/.test(rest)) return full;
         if (/^(['"`])/.test(rest)) return full;
         if (/^(true|false)\b/.test(rest)) return full;
         if (/^[{[]/.test(rest)) return full;
         if (/^[a-z_$][\w$]*$/.test(rest) && !tsPrimitiveTypeName.test(rest)) return full;
+        if (tsPrimitiveTypeName.test(rest) && Object.prototype.hasOwnProperty.call(playwrightOptionTsPrimitiveFallback, propName)) {
+          return `${pre}: ${playwrightOptionTsPrimitiveFallback[propName]}`;
+        }
       }
       return pre;
     });
@@ -12400,7 +12417,19 @@ return {
   sanitizeAiPlaywrightScript(script) {
     if (!script || typeof script !== 'string') return script;
 
-    let s = this.repairQuotedActPseudocodeInFillAndType(script);
+    let s = script;
+    // TS strip or LLM truncation sometimes leaves `.waitFor({ state: 'visible', timeout` with no value
+    // (bare `timeout` shorthand → undefined ms and 180s step timeout). Normalize to a bounded wait.
+    s = s.replace(
+      /\.waitFor\(\{\s*state:\s*(['"][^'"]*['"])\s*,\s*timeout\s*\}\s*\)/gs,
+      '.waitFor({ state: $1, timeout: 15000 })'
+    );
+    s = s.replace(
+      /\.waitFor\(\{\s*state:\s*(['"][^'"]*['"])\s*,\s*timeout\s*\)/gs,
+      '.waitFor({ state: $1, timeout: 15000 })'
+    );
+
+    s = this.repairQuotedActPseudocodeInFillAndType(s);
     s = this.repairLocatorBracketIndexChains(s);
     s = this.replaceEmptyJourneyFillValues(s);
 
