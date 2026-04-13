@@ -6,6 +6,15 @@
 
 import * as backendLogger from './backend-logger.js';
 
+/** Web vitals from the browser should be small positive durations (ms), not epoch timestamps. */
+function sanitizeWebVitalMs(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  // Reject epoch-scale values (legacy PerformanceTiming.* uses UNIX ms) and absurd durations.
+  if (n > 600000) return 0;
+  return n;
+}
+
 /**
  * Analyze page performance using Playwright's Performance API
  * @param {Object} page - Playwright page object
@@ -37,9 +46,9 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
     // Get performance metrics using Playwright's evaluate
     const performanceMetrics = await page.evaluate(() => {
       const perfData = window.performance.timing;
-      const navigation = performance.getEntriesByType('navigation')[0];
       const paintEntries = performance.getEntriesByType('paint');
-      
+      const navStart = perfData.navigationStart || 0;
+
       // Calculate key metrics
       const dns = perfData.domainLookupEnd - perfData.domainLookupStart;
       const tcp = perfData.connectEnd - perfData.connectStart;
@@ -49,14 +58,28 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
       const domProcessing = perfData.domComplete - perfData.domLoading;
       const domContentLoaded = perfData.domContentLoadedEventEnd - perfData.domContentLoadedEventStart;
       const loadComplete = perfData.loadEventEnd - perfData.loadEventStart;
-      
-      // Find paint entries
-      const fcp = paintEntries.find(e => e.name === 'first-contentful-paint')?.startTime || 0;
-      const fmp = perfData.responseEnd || 0;
-      
+
+      // Find paint entries (relative high-resolution time, ms)
+      const fcp = paintEntries.find((e) => e.name === 'first-contentful-paint')?.startTime || 0;
+
+      // True LCP from Paint Timing / Element Timing (relative ms); avoid legacy timing fields — they are often UNIX epoch ms.
+      const lcpEntries = performance.getEntriesByType('largest-contentful-paint');
+      let largestContentfulPaint = 0;
+      if (lcpEntries && lcpEntries.length) {
+        const last = lcpEntries[lcpEntries.length - 1];
+        largestContentfulPaint = last.renderTime || last.loadTime || last.startTime || 0;
+      }
+      if (!largestContentfulPaint && navStart > 0 && perfData.loadEventEnd > navStart) {
+        largestContentfulPaint = perfData.loadEventEnd - navStart;
+      }
+
+      // Rough response-complete duration (never use raw responseEnd as a paint metric)
+      const responseCompleteMs =
+        navStart > 0 && perfData.responseEnd > navStart ? perfData.responseEnd - navStart : 0;
+
       // Calculate total page load time
-      const pageLoadTime = perfData.loadEventEnd - perfData.navigationStart;
-      
+      const pageLoadTime = navStart > 0 ? perfData.loadEventEnd - navStart : 0;
+
       return {
         dnsTime: dns,
         tcpTime: tcp,
@@ -67,9 +90,10 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
         domContentLoadedTime: domContentLoaded,
         loadCompleteTime: loadComplete,
         firstContentfulPaint: fcp,
-        firstMeaningfulPaint: fmp,
+        firstMeaningfulPaint: responseCompleteMs,
+        largestContentfulPaint,
         pageLoadTime: pageLoadTime,
-        totalTime: perfData.loadEventEnd - perfData.navigationStart,
+        totalTime: pageLoadTime,
         domSize: document.querySelectorAll('*').length,
         resourceCount: performance.getEntriesByType('resource').length
       };
@@ -90,19 +114,26 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
       first_contentful_paint: performanceMetrics.firstContentfulPaint
     });
 
+    const fcpMs = sanitizeWebVitalMs(performanceMetrics.firstContentfulPaint);
+    const lcpMs = sanitizeWebVitalMs(
+      performanceMetrics.largestContentfulPaint ?? performanceMetrics.firstMeaningfulPaint,
+    );
+    const ttiMs = sanitizeWebVitalMs(performanceMetrics.domContentLoadedTime);
+    const ttfbMs = sanitizeWebVitalMs(performanceMetrics.ttfb);
+
     return {
       success: true,
       metrics: {
         performance: performanceScore,
-        firstContentfulPaint: performanceMetrics.firstContentfulPaint,
-        largestContentfulPaint: performanceMetrics.firstMeaningfulPaint,
-        speedIndex: performanceMetrics.pageLoadTime,
+        firstContentfulPaint: fcpMs,
+        largestContentfulPaint: lcpMs,
+        speedIndex: sanitizeWebVitalMs(performanceMetrics.pageLoadTime),
         cumulativeLayoutShift: 0, // Not available via Performance API
         totalBlockingTime: 0, // Not available via Performance API
-        interactive: performanceMetrics.domContentLoadedTime,
-        serverResponseTime: performanceMetrics.ttfb,
+        interactive: ttiMs,
+        serverResponseTime: ttfbMs,
         domSize: performanceMetrics.domSize,
-        pageLoadTime: performanceMetrics.pageLoadTime,
+        pageLoadTime: sanitizeWebVitalMs(performanceMetrics.pageLoadTime),
         dnsTime: performanceMetrics.dnsTime,
         tcpTime: performanceMetrics.tcpTime,
         sslTime: performanceMetrics.sslTime,
