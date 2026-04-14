@@ -4007,50 +4007,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       }
     }
     
-    // CRITICAL: Final save of journeys before workflow completes
-    // This ensures journeys are saved even if earlier save attempts failed
-    // Check multiple sources for journeys - "Execute Workflow Journeys" runs, so journeys must exist somewhere
-    const journeysFromPool = this.readVariable(workflowState, 'journeysToExecute', 'page');
-    let journeysToSave = null;
-    if (Array.isArray(journeysFromPool)) {
-      // Prefer variable pool when set (including explicit []) so we never resurrect stale workflowState.journeys
-      journeysToSave = journeysFromPool;
-    } else {
-      journeysToSave = workflowState.journeysToExecute || workflowState.context?.journeysToExecute || workflowState.journeys || null;
-    }
-    if (!journeysToSave || journeysToSave.length === 0) {
-      // Check variablePool for journeys extracted by variableOutputs
-      const journeysVar = this.readVariable(workflowState, 'journeysToExecute', 'page');
-      if (journeysVar && Array.isArray(journeysVar) && journeysVar.length > 0) {
-        journeysToSave = journeysVar;
-        console.log(`🔍 [WORKFLOW-COMPLETE] Found ${journeysVar.length} journey(s) in variablePool`);
-      }
-    }
-    if (!journeysToSave || journeysToSave.length === 0) {
-      // Check context for journeys
-      if (workflowState.context?.journeysToExecute && Array.isArray(workflowState.context.journeysToExecute) && workflowState.context.journeysToExecute.length > 0) {
-        journeysToSave = workflowState.context.journeysToExecute;
-        console.log(`🔍 [WORKFLOW-COMPLETE] Found ${journeysToSave.length} journey(s) in context`);
-      }
-    }
-    
-    // CRITICAL: Check stepResults for journeys (might be stored there by storeStepResult)
-    if (!journeysToSave || journeysToSave.length === 0) {
-      if (workflowState.stepResults) {
-        for (const [stepId, stepResult] of Object.entries(workflowState.stepResults)) {
-          if (stepResult?.result?.journeys && Array.isArray(stepResult.result.journeys) && stepResult.result.journeys.length > 0) {
-            journeysToSave = stepResult.result.journeys;
-            console.log(`🔍 [WORKFLOW-COMPLETE] Found ${journeysToSave.length} journey(s) in stepResults[${stepId}]`);
-            break;
-          }
-        }
-      }
-    }
-    
-    if (journeysToSave && Array.isArray(journeysToSave) && journeysToSave.length > 0) {
-      journeysToSave = journeysToSave.filter((j) => Array.isArray(j?.actions) && j.actions.length > 0);
-    }
-    if (journeysToSave && Array.isArray(journeysToSave) && journeysToSave.length > 0) {
+    // CRITICAL: Final save of journeys before workflow completes (resolver shared with analyzePage() return payload)
+    let journeysToSave = this.resolvePersistableCompletionJourneys(workflowState);
+    if (journeysToSave.length > 0) {
       let pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
       let projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
       
@@ -4225,12 +4184,12 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       }
     }
     
-    // Send log to backend
+    // Send log to backend (align legs/journey counts with persistable completion rows when state.legs stayed empty)
     await this.sendLogToBackend(effectiveJobId, 'info', `✅ ALL WORKFLOW STEPS COMPLETED${workflowState.workflowId ? ` (workflow: ${workflowState.workflowId})` : ' (no workflow_id)'}`, 'WORKFLOW-ANALYZER', {
       total_steps: this.workflowTemplate.steps.length,
       workflow_id: workflowState.workflowId,
-      legs_count: workflowState.legs?.length || 0,
-      journeys_count: workflowState.journeys?.length || 0,
+      legs_count: Math.max(workflowState.legs?.length || 0, journeysToSave.length),
+      journeys_count: Math.max(workflowState.journeys?.length || 0, journeysToSave.length),
       is_login_job: isLoginJob,
       login_success: isLoginJob ? (workflowState.loginSuccess || false) : undefined
     });
@@ -4253,6 +4212,18 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       }));
       console.log(`✅ [WORKFLOW-RESULT] Derived ${resultLegs.length} legs from journeysToExecute for result (caller will see testable legs)`);
     }
+    if (resultLegs.length === 0 && journeysToSave.length > 0) {
+      resultLegs = journeysToSave.map((journey) => ({
+        leg_id: journey.journey_id,
+        description: journey.description,
+        test_instructions: journey.test_instructions,
+        expected_outcome: journey.expected_outcome,
+        actions: journey.actions || [],
+        journey_id: journey.journey_id,
+        status: journey.status || journey.justification_status || journey.final_result || 'pending'
+      }));
+      console.log(`✅ [WORKFLOW-RESULT] Derived ${resultLegs.length} legs from completion journey resolver (pool/context/stepResults; matches JOURNEYS-FINAL persist filter)`);
+    }
     
     // Build result object with all step results accessible
     const result = {
@@ -4260,7 +4231,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       legs_count: resultLegs.length,
       page_description: workflowState.pageDescription,
       legs: resultLegs,
-      journeys: workflowState.journeysToExecute || [], // Include so caller can check journey status (success/failure)
+      journeys: journeysToSave.length > 0 ? journeysToSave : (workflowState.journeysToExecute || []), // Caller uses length>0 to skip duplicate leg execution
       ai_analysis: workflowState.aiAnalysisResult,
       context: workflowState.context || {},
       collectedCookies: workflowState.collectedCookies || [],
@@ -10637,6 +10608,46 @@ return {
         };
       }
     }
+  }
+
+  /**
+   * Resolve journeys at workflow completion using the same sources as JOURNEYS-FINAL (pool, state, context, stepResults),
+   * then keep only rows with non-empty actions (persist filter). Used for backend save and for analyzePage() return
+   * so unified-operations sees legs_count/journeys aligned with persisted data (avoids "0 legs" vs save-analysis drift).
+   */
+  resolvePersistableCompletionJourneys(workflowState) {
+    const journeysFromPool = this.readVariable(workflowState, 'journeysToExecute', 'page');
+    let journeysToSave = null;
+    if (Array.isArray(journeysFromPool)) {
+      journeysToSave = journeysFromPool;
+    } else {
+      journeysToSave = workflowState.journeysToExecute || workflowState.context?.journeysToExecute || workflowState.journeys || null;
+    }
+    if (!journeysToSave || journeysToSave.length === 0) {
+      const journeysVar = this.readVariable(workflowState, 'journeysToExecute', 'page');
+      if (journeysVar && Array.isArray(journeysVar) && journeysVar.length > 0) {
+        journeysToSave = journeysVar;
+      }
+    }
+    if (!journeysToSave || journeysToSave.length === 0) {
+      if (workflowState.context?.journeysToExecute && Array.isArray(workflowState.context.journeysToExecute) && workflowState.context.journeysToExecute.length > 0) {
+        journeysToSave = workflowState.context.journeysToExecute;
+      }
+    }
+    if (!journeysToSave || journeysToSave.length === 0) {
+      if (workflowState.stepResults) {
+        for (const [, stepResult] of Object.entries(workflowState.stepResults)) {
+          if (stepResult?.result?.journeys && Array.isArray(stepResult.result.journeys) && stepResult.result.journeys.length > 0) {
+            journeysToSave = stepResult.result.journeys;
+            break;
+          }
+        }
+      }
+    }
+    if (!journeysToSave || !Array.isArray(journeysToSave) || journeysToSave.length === 0) {
+      return [];
+    }
+    return journeysToSave.filter((j) => Array.isArray(j?.actions) && j.actions.length > 0);
   }
 
   /**
