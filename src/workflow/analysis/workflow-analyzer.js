@@ -5422,7 +5422,10 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       });
     }
     console.log(`🤖 Executing AI prompt (${step.name})`);
-    
+    // One ai-prompt invocation may otherwise POST the same journeys several times (immediate + save + fallback),
+    // each with multi-minute axios retries — exceeding the outer step Promise.race budget during backend restarts.
+    workflowState.__journeysBulkSaveOkThisStep = false;
+
     // Prompt template MUST be embedded directly in step config, not fetched from database
     const customTemplate = step.config?.template || step.config?.user_message_template || null;
     const systemMessage = step.config?.system_message || step.config?.system_message_template || null;
@@ -7783,8 +7786,12 @@ return {
                 }
                 
                 console.log(`🔍 [JOURNEYS-IMMEDIATE] Saving ${journeys.length} journey(s) immediately after extraction to page ${pageIdToSave}`);
-                const response = await this.postRunnerSaveAnalysis(pageIdToSave, payload, jobId, { timeout: 180000 });
-                
+                const response = await this.postRunnerSaveAnalysis(pageIdToSave, payload, jobId, {
+                  timeout: 120000,
+                  maxAttempts: 4
+                });
+                workflowState.__journeysBulkSaveOkThisStep = true;
+
                 console.log(`✅ [JOURNEYS-IMMEDIATE] Successfully saved ${journeys.length} journey(s) immediately. Response status: ${response.status}`);
                 if (jobId && this.backendLogger) {
                   await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-IMMEDIATE] Saved ${journeys.length} journey(s) immediately after extraction`, 'WORKFLOW-ANALYZER', {
@@ -7995,8 +8002,12 @@ return {
               };
               
               console.log(`🔍 [JOURNEYS-CONVERT] Saving ${cleanedConvertJourneys.length} journey(s) after conversion to page ${pageIdToSave}`);
-              const response = await this.postRunnerSaveAnalysis(pageIdToSave, payload, jobId, { timeout: 180000 });
-              
+              const response = await this.postRunnerSaveAnalysis(pageIdToSave, payload, jobId, {
+                timeout: 120000,
+                maxAttempts: 4
+              });
+              workflowState.__journeysBulkSaveOkThisStep = true;
+
               console.log(`✅ [JOURNEYS-CONVERT] Successfully saved ${journeys.length} journey(s) after conversion. Response status: ${response.status}`);
               if (jobId && this.backendLogger) {
                 await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-CONVERT] Saved ${journeys.length} journey(s) after conversion`, 'WORKFLOW-ANALYZER', {
@@ -8136,6 +8147,8 @@ return {
               
               if (cleanedJourneys.length === 0) {
                 console.log(`⚠️ [JOURNEYS-SAVE] No journeys with actions to persist; skipping save-analysis`);
+              } else if (workflowState.__journeysBulkSaveOkThisStep) {
+                console.log(`ℹ️ [JOURNEYS-SAVE] Skipping duplicate journey save-analysis (already persisted this step)`);
               } else {
               const payload = {
                 saveLegs: true, // CRITICAL: Must be true for backend to process journeys (backend checks: if (saveLegs && journeys.length > 0))
@@ -8156,8 +8169,12 @@ return {
                 });
               }
               
-              const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, { timeout: 180000 });
-              
+              const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, {
+                timeout: 120000,
+                maxAttempts: 4
+              });
+              workflowState.__journeysBulkSaveOkThisStep = true;
+
               console.log(`💾 [JOURNEYS-SAVE] ✅ Successfully saved ${cleanedJourneys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
               if (jobId && this.backendLogger) {
                 await this.backendLogger.appendJobLog(jobId, 'info', `💾 [JOURNEYS-SAVE] ✅ Successfully saved ${cleanedJourneys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`, 'WORKFLOW-ANALYZER', {
@@ -8310,7 +8327,12 @@ return {
       
       // CRITICAL: If journeys exist in workflowState but weren't saved yet, save them now
       // This is a fallback to ensure journeys are saved even if the earlier save code didn't execute
-      if (workflowState.journeys && Array.isArray(workflowState.journeys) && workflowState.journeys.length > 0) {
+      if (
+        workflowState.journeys &&
+        Array.isArray(workflowState.journeys) &&
+        workflowState.journeys.length > 0 &&
+        !workflowState.__journeysBulkSaveOkThisStep
+      ) {
         const pageIdToUse = workflowState.pageId || this.context?.page_id || this.context?.pageId || null;
         const projectIdToUse = workflowState.projectId || this.context?.project_id || this.context?.projectId || null;
         
@@ -8341,8 +8363,12 @@ return {
               job_id: jobId
             };
             
-            const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, { timeout: 180000 });
-            
+            const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, {
+              timeout: 120000,
+              maxAttempts: 4
+            });
+            workflowState.__journeysBulkSaveOkThisStep = true;
+
             console.log(`✅ [JOURNEYS-FALLBACK] Successfully saved ${workflowState.journeys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
             if (jobId && this.backendLogger) {
               await this.backendLogger.appendJobLog(jobId, 'info', `✅ [JOURNEYS-FALLBACK] Saved ${workflowState.journeys.length} journey(s) to page`, 'WORKFLOW-ANALYZER', {
@@ -16412,6 +16438,12 @@ const sleep = safeWait;
     let pid = pageId != null ? String(pageId) : '';
     // Align with ALB idle budget after infra bump (terraform idle_timeout); save-analysis can be Mongo-heavy.
     const timeout = options.timeout ?? 165000;
+    // Default 6 (was 12): multiple sequential save-analysis calls inside one ai-prompt step must not
+    // consume the entire outer getStepTimeout window (900s) when the backend is slow or restarting.
+    const maxAttempts =
+      Number.isFinite(Number(options.maxAttempts)) && Number(options.maxAttempts) > 0
+        ? Math.min(12, Math.max(1, Math.floor(Number(options.maxAttempts))))
+        : 6;
     const buildOpts = (authExtra = {}) => ({
       headers: {
         ...this.getAuthHeaders(authExtra),
@@ -16444,7 +16476,6 @@ const sleep = safeWait;
         throw runnerErr;
       }
     };
-    const maxAttempts = 12;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         return await postSaveAnalysis();
