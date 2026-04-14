@@ -3002,6 +3002,63 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
   }
 
   /**
+   * When live Playwright inventory is empty after reload/navigation, hydrate from the persisted page
+   * document if this crawl already wrote discovery fields earlier (same page_id). Covers job re-queue
+   * after orchestrator restart where in-memory workflowState lost playwrightAnalysis but Mongo still
+   * holds inventory from an earlier step in the same job.
+   *
+   * @param {function} logRecovery - optional async (msg, extra) => void for job logs
+   * @returns {object|null} analysis-shaped object or null
+   */
+  async tryHydratePlaywrightAnalysisFromPersistedPage(workflowState, jobId, logRecovery) {
+    const pageId = workflowState?.pageId != null ? String(workflowState.pageId).trim() : '';
+    if (!pageId || !workflowState?.projectId) {
+      return null;
+    }
+    try {
+      const doc = await this.fetchAutomationPageById(pageId);
+      const p = doc && typeof doc === 'object' ? doc : {};
+      const forms = Array.isArray(p.forms) ? p.forms : [];
+      const links = Array.isArray(p.links) ? p.links : [];
+      const menu_items = Array.isArray(p.menu_items) ? p.menu_items : [];
+      const interactive_elements = Array.isArray(p.interactive_elements) ? p.interactive_elements : [];
+      const non_interactive_elements = Array.isArray(p.non_interactive_elements)
+        ? p.non_interactive_elements
+        : [];
+      const invSum =
+        forms.length + links.length + menu_items.length + interactive_elements.length;
+      if (invSum === 0) {
+        return null;
+      }
+      const pid = String(p.project_id || '').trim();
+      if (pid && String(workflowState.projectId).trim() !== pid) {
+        return null;
+      }
+      if (typeof logRecovery === 'function') {
+        await logRecovery(
+          '♻️ [PLAYWRIGHT] Hydrated inventory from persisted page snapshot (transient empty DOM / runner recovery)',
+          {
+            page_id: pageId,
+            forms: forms.length,
+            links: links.length,
+            interactive: interactive_elements.length,
+          },
+        );
+      }
+      return {
+        forms,
+        links,
+        menu_items,
+        interactive_elements,
+        non_interactive_elements,
+      };
+    } catch (e) {
+      console.warn(`⚠️ [PLAYWRIGHT] Persisted page hydrate failed: ${e.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Update workflow with AI analysis and legs
    * Also creates action documents for each leg
    */
@@ -4724,6 +4781,20 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           }
         } catch (goErr) {
           console.warn(`⚠️ [PLAYWRIGHT] Seed URL re-scan failed: ${goErr.message}`);
+        }
+      }
+
+      if (playwrightInventoryIsEmpty(analysis) && workflowState.pageId && workflowState.projectId) {
+        const hydrated = await this.tryHydratePlaywrightAnalysisFromPersistedPage(
+          workflowState,
+          jobId,
+          logRecovery,
+        );
+        if (hydrated && !playwrightInventoryIsEmpty(hydrated)) {
+          analysis = hydrated;
+          if (existingIECount > 0 && analysis.interactive_elements.length < existingIECount) {
+            analysis.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
+          }
         }
       }
 
