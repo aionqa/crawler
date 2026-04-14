@@ -502,8 +502,14 @@ function normalizeConditionRestSegments(rootObject, restSegments) {
  */
 /** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
 const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
+/**
+ * Upper bound for step timeouts derived from job/project settings (ms).
+ * Must stay aligned with backend `normalizeSubjobDurationMs` / per-job caps (up to 1h) so distributed
+ * page jobs are not cut off at 15m while the job document still allows a longer execution window.
+ */
+const STEP_TIMEOUT_SETTINGS_CEILING_MS = 60 * 60 * 1000;
 /** Floor for generated journey Playwright scripts (forms, modals, nested SPAs); nested races use this minimum. */
-/** 15m floor — matches getStepTimeout clamp max; Vue/SPA journeys often need full window inside nested while-loop races. */
+/** 15m floor — Vue/SPA journeys often need full window inside nested while-loop races. */
 const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 15 * 60 * 1000;
 
 /** Journey Playwright execution may use `execute-code` or `execute-code-from-variable` depending on template. */
@@ -610,19 +616,19 @@ class WorkflowAnalyzer {
    * Get timeout for a workflow step (in milliseconds)
    * Returns step-specific timeout or default based on step type.
    * For workflow-analysis and page-discovery uses context.max_job_duration_ms (from project "Max time per subjob") when available.
-   * Range: 1 minute (60000ms) to 15 minutes (900000ms)
+   * Range: 1 minute (60000ms) up to STEP_TIMEOUT_SETTINGS_CEILING_MS for settings-driven and loop steps.
    */
   getStepTimeout(step) {
     let timeout;
-    // If step has explicit timeout config, use it (clamped to 1m-15m range)
+    // If step has explicit timeout config, use it (clamped to 1m .. settings ceiling)
     if (step.config?.timeout_ms !== undefined) {
-      timeout = Math.max(60000, Math.min(900000, step.config.timeout_ms));
+      timeout = Math.max(60000, Math.min(STEP_TIMEOUT_SETTINGS_CEILING_MS, step.config.timeout_ms));
     } else if (step.config?.timeout !== undefined) {
-      timeout = Math.max(60000, Math.min(900000, step.config.timeout));
+      timeout = Math.max(60000, Math.min(STEP_TIMEOUT_SETTINGS_CEILING_MS, step.config.timeout));
     } else {
       // Step types that use project "Max time per subjob" from context (no hardcoded value)
       const maxFromSettings = this.context?.max_job_duration_ms != null && Number.isFinite(Number(this.context.max_job_duration_ms))
-        ? Math.max(60000, Math.min(900000, Number(this.context.max_job_duration_ms)))
+        ? Math.max(60000, Math.min(STEP_TIMEOUT_SETTINGS_CEILING_MS, Number(this.context.max_job_duration_ms)))
         : DEFAULT_MAX_STEP_TIMEOUT_MS;
 
       const defaultTimeouts = {
@@ -632,8 +638,10 @@ class WorkflowAnalyzer {
         'playwright-analysis': 120000, // 2 minutes - Playwright analysis
         'execute-code': 120000,        // 2 minutes - Code execution
         'execute-code-from-variable': 120000, // 2 minutes
-        'while-loop': 600000,          // 10 minutes - Journey iteration (generate+execute+justify per stage) needs multiple AI calls
-        'for-each': 600000,            // 10 minutes - Iterations can take time with nested while-loops
+        // Journey batches: must scale with job/subjob budget — fixed 10m caused outer Promise.race to abort
+        // multi-journey for-each while children still had wall time left (distributed page jobs up to 1h).
+        'while-loop': maxFromSettings,
+        'for-each': maxFromSettings,
         'screenshot': 240000,          // 4m — full-page + heavy SVG/test pages often exceed 90s in production crawls
         'cookie-collect': 120000,      // 2 minutes - browser cookies + optional backend save (GET job, POST project cookies)
         'content-change': 60000,       // 1 minute - Variable operations
@@ -669,7 +677,7 @@ class WorkflowAnalyzer {
       timeout = Math.max(timeout, AI_PROMPT_FLOOR_MS);
     }
 
-    return Math.min(timeout, 900000);
+    return Math.min(timeout, STEP_TIMEOUT_SETTINGS_CEILING_MS);
   }
 
   detectCapabilities(steps = []) {
