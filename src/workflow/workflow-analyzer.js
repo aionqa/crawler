@@ -4,6 +4,7 @@ import { resolveScreenshotFullPage } from './utils/resolve-screenshot-full-page.
 import { StaticNodeExecutor } from './static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../step-requirements.js';
 import { replaceNetworkIdleWithDomContentLoadedForAutomation } from './utils/normalize-playwright-network-idle.js';
+import { evaluateLoginSessionEvidenceOverride } from './utils/login-session-evidence-override.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -2579,8 +2580,25 @@ IMPORTANT OUTPUT REQUIREMENTS:
         }
       }
 
-      const successReason =
-        validatePayload && loginSuccess
+      let sessionRuntimeOverride = null;
+      if (!loginSuccess) {
+        sessionRuntimeOverride = evaluateLoginSessionEvidenceOverride({
+          page,
+          workflowState,
+          validatePayload,
+          determineResult,
+          cleanExecution,
+          seedUrl: this.context?.seed_url || this.context?.start_url || this.context?.page_url,
+        });
+        if (sessionRuntimeOverride?.confirm) {
+          loginSuccess = true;
+          loginStatus = 'success';
+        }
+      }
+
+      const successReason = sessionRuntimeOverride?.confirm
+        ? sessionRuntimeOverride.reason
+        : validatePayload && loginSuccess
           ? validatePayload.reason || validatePayload.what_happened || 'Login confirmed by validate_login_success'
           : determineResult?.reason || 'Login confirmed by AI analysis';
 
@@ -2589,7 +2607,11 @@ IMPORTANT OUTPUT REQUIREMENTS:
           login_status: 'success',
           workflow_id: workflowState.workflowId,
           reason: successReason,
-          confirmation_source: validatePayload ? 'validate_login_success' : 'determine_completion'
+          confirmation_source: sessionRuntimeOverride?.confirm
+            ? 'session_runtime_override'
+            : validatePayload
+              ? 'validate_login_success'
+              : 'determine_completion'
         });
         workflowState.loginSuccess = true;
         workflowState.loginStatus = 'success';

@@ -1,6 +1,7 @@
 import WorkflowAnalyzer from '../workflow/workflow-analyzer.js';
 import { AIConversationLogger } from '../../shared/ai-conversation-logger.js';
 import * as backendLogger from '../backend-logger.js';
+import { evaluateLoginSessionEvidenceOverride } from '../workflow/utils/login-session-evidence-override.js';
 
 /**
  * Login Workflow Engine
@@ -45,9 +46,22 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
         }
       };
 
+      page.__aionqaTargetAssetSignals = { http5xxScript: 0, chunkOrModuleErrors: 0 };
+
       page.on('pageerror', async (err) => {
         try {
           const msg = (err && (err.stack || err.message)) ? String(err.stack || err.message) : String(err);
+          try {
+            const m = msg.toLowerCase();
+            if (
+              /chunkload|loading chunk|failed to load module|import\(\) failed|dynamic import|__next_error__/.test(
+                m
+              )
+            ) {
+              page.__aionqaTargetAssetSignals.chunkOrModuleErrors =
+                (Number(page.__aionqaTargetAssetSignals.chunkOrModuleErrors) || 0) + 1;
+            }
+          } catch (_) {}
           await backendLogger.appendJobLog(jobId, 'error', `🧨 [PAGEERROR] ${redact(msg)}`.slice(0, 4000), 'BROWSER');
         } catch (_) {}
       });
@@ -114,6 +128,10 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
           netCount++;
           const url = redact(resp.url());
           const ct = resp.headers()?.['content-type'] || '';
+          if (status >= 500 && ['script', 'fetch', 'xhr'].includes(rt)) {
+            page.__aionqaTargetAssetSignals.http5xxScript =
+              (Number(page.__aionqaTargetAssetSignals.http5xxScript) || 0) + 1;
+          }
           await backendLogger.appendJobLog(jobId, 'warn', `🚫 [HTTP ${status}] ${rt} ${url} (content-type=${redact(ct)})`.slice(0, 2000), 'BROWSER');
         } catch (_) {}
       });
@@ -354,21 +372,29 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
     }
   }
 
-  // Heuristic success: if script moved to authenticated app area and auth/session cookies are present,
-  // trust runtime evidence over conservative UI-only validator outputs.
+  // When validators disagree but the browser session + target asset degradation match login reality,
+  // align with workflow-analyzer session_runtime_override semantics (shared util).
   try {
-    const currentUrl = page && typeof page.url === 'function' ? String(page.url() || '') : '';
-    const normalizedUrl = currentUrl.toLowerCase();
-    const leftLoginPage = normalizedUrl && !/\/login(?:[/?#]|$)/.test(normalizedUrl);
-    const landedOnAppArea = /\/dashboard(?:[/?#]|$)|\/n\/dashboard(?:[/?#]|$)|\/app(?:[/?#]|$)|\/home(?:[/?#]|$)/.test(normalizedUrl);
-    const hasAuthCookie = cookies.some((cookie) => /auth|token|session|id_token|refresh|sso/i.test(String(cookie?.name || '')));
-    if (!success && cookies.length >= 5 && hasAuthCookie && leftLoginPage && landedOnAppArea) {
-      success = true;
-      loginStatus = 'success';
-      console.log(`✅ Login success inferred from runtime evidence: url=${currentUrl}, authCookies=${cookies.length}`);
+    if (!success) {
+      const override = evaluateLoginSessionEvidenceOverride({
+        page,
+        workflowState: {
+          collectedCookies: cookies,
+          pageUrl: page && typeof page.url === 'function' ? String(page.url() || '') : '',
+        },
+        validatePayload: validateResult,
+        determineResult,
+        cleanExecution: true,
+        seedUrl: pageUrl || normalizedContext.seed_url || normalizedContext.page_url,
+      });
+      if (override?.confirm) {
+        success = true;
+        loginStatus = 'success';
+        console.log(`✅ Login success inferred from runtime/session evidence: ${override.reason}`);
+      }
     }
   } catch (heuristicError) {
-    console.warn(`⚠️ Login heuristic check skipped: ${heuristicError?.message || heuristicError}`);
+    console.warn(`⚠️ Login session-evidence override skipped: ${heuristicError?.message || heuristicError}`);
   }
 
   return {
