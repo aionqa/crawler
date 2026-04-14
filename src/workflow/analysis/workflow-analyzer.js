@@ -4629,14 +4629,24 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
    */
   async executePlaywrightAnalysisStep(page, step, workflowState, jobId) {
     console.log(`🔍 Performing Playwright analysis (${step.name})`);
-    
+
+    const playwrightInventoryIsEmpty = (a) =>
+      !a ||
+      (a.forms?.length || 0) +
+        (a.links?.length || 0) +
+        (Array.isArray(a.menu_items) ? a.menu_items.length : 0) +
+        (a.interactive_elements?.length || 0) ===
+      0;
+
     // CRITICAL: Preserve existing interactive_elements if they exist and new analysis has fewer
     // This prevents form fields from being lost when analysis runs multiple times
     const existingIECount = workflowState.playwrightAnalysis?.interactive_elements?.length || 0;
-    
+    const hadPriorFullInventory =
+      workflowState.playwrightAnalysis && !playwrightInventoryIsEmpty(workflowState.playwrightAnalysis);
+
     await this.waitForSpaInteractiveReady(page);
     let analysis = await this.performPlaywrightAnalysis(page);
-    
+
     // If we had more interactive elements before and new analysis has fewer, preserve the existing ones
     // This handles the case where form fields were added in a previous run
     if (existingIECount > 0 && analysis.interactive_elements.length < existingIECount) {
@@ -4644,13 +4654,33 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       analysis.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
     }
 
-    const playwrightInventoryIsEmpty = (a) =>
-      (a.forms?.length || 0)
-      + (a.links?.length || 0)
-      + (Array.isArray(a.menu_items) ? a.menu_items.length : 0)
-      + (a.interactive_elements?.length || 0) === 0;
-
     if (playwrightInventoryIsEmpty(analysis)) {
+      const logRecovery = async (msg, extra = {}) => {
+        console.log(msg);
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(jobId, 'info', msg, 'WORKFLOW-STEP', {
+            step_id: step?.id,
+            step_name: step?.name,
+            ...extra,
+          });
+        }
+      };
+
+      // Generic overlay/modal dismissal (no site-specific selectors)
+      try {
+        for (let i = 0; i < 4; i++) {
+          await page.keyboard.press('Escape').catch(() => {});
+          await new Promise((r) => setTimeout(r, 120));
+        }
+      } catch (_) {}
+      await this.waitForSpaInteractiveReady(page);
+
+      const seedUrl = String(
+        workflowState.pageUrl || this.context?.start_url || this.context?.seed_url || '',
+      ).trim();
+      const canGotoSeed =
+        /^https?:\/\//i.test(seedUrl) && !seedUrl.startsWith('chrome-error://');
+
       let recoverUrl = '';
       try {
         recoverUrl = page.url() || '';
@@ -4658,24 +4688,20 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         recoverUrl = '';
       }
       const canHardReload =
-        recoverUrl
-        && recoverUrl !== 'about:blank'
-        && !String(recoverUrl).startsWith('chrome-error://');
+        recoverUrl &&
+        recoverUrl !== 'about:blank' &&
+        !String(recoverUrl).startsWith('chrome-error://');
+
+      const scan = async () => this.performPlaywrightAnalysis(page);
+
       if (canHardReload) {
-        console.log('♻️ [PLAYWRIGHT] Empty DOM inventory; performing one reload + SPA wait + re-scan (post-recovery / hydration continuity)');
-        if (jobId && this.backendLogger) {
-          await this.backendLogger.appendJobLog(
-            jobId,
-            'info',
-            '♻️ [PLAYWRIGHT] Empty inventory — single reload + re-scan for SPA continuity after recovery or slow hydration',
-            'WORKFLOW-STEP',
-            { step_id: step?.id, step_name: step?.name, url: recoverUrl },
-          );
-        }
+        await logRecovery('♻️ [PLAYWRIGHT] Empty inventory — dismiss overlays, reload + SPA wait + re-scan', {
+          url: recoverUrl,
+        });
         try {
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
           await this.waitForSpaInteractiveReady(page);
-          const secondPass = await this.performPlaywrightAnalysis(page);
+          const secondPass = await scan();
           if (!playwrightInventoryIsEmpty(secondPass)) {
             analysis = secondPass;
             if (existingIECount > 0 && analysis.interactive_elements.length < existingIECount) {
@@ -4684,6 +4710,46 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           }
         } catch (reErr) {
           console.warn(`⚠️ [PLAYWRIGHT] Reload re-scan failed: ${reErr.message}`);
+        }
+      }
+
+      if (playwrightInventoryIsEmpty(analysis) && canGotoSeed) {
+        await logRecovery('♻️ [PLAYWRIGHT] Still empty after reload — navigating to workflow seed URL + re-scan', {
+          seed_url: seedUrl,
+        });
+        try {
+          await page.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
+          await this.waitForSpaInteractiveReady(page);
+          const thirdPass = await scan();
+          if (!playwrightInventoryIsEmpty(thirdPass)) {
+            analysis = thirdPass;
+            if (existingIECount > 0 && analysis.interactive_elements.length < existingIECount) {
+              analysis.interactive_elements = workflowState.playwrightAnalysis.interactive_elements;
+            }
+          }
+        } catch (goErr) {
+          console.warn(`⚠️ [PLAYWRIGHT] Seed URL re-scan failed: ${goErr.message}`);
+        }
+      }
+
+      if (playwrightInventoryIsEmpty(analysis) && hadPriorFullInventory) {
+        await logRecovery(
+          '♻️ [PLAYWRIGHT] Re-scan still empty — restoring prior playwright snapshot (journey retry / modal stacks / runner recovery)',
+          {
+            prior_forms: workflowState.playwrightAnalysis.forms?.length,
+            prior_interactive: workflowState.playwrightAnalysis.interactive_elements?.length,
+          },
+        );
+        try {
+          analysis = JSON.parse(JSON.stringify(workflowState.playwrightAnalysis));
+        } catch {
+          analysis = {
+            forms: [...(workflowState.playwrightAnalysis.forms || [])],
+            links: [...(workflowState.playwrightAnalysis.links || [])],
+            menu_items: [...(workflowState.playwrightAnalysis.menu_items || [])],
+            interactive_elements: [...(workflowState.playwrightAnalysis.interactive_elements || [])],
+            non_interactive_elements: [...(workflowState.playwrightAnalysis.non_interactive_elements || [])],
+          };
         }
       }
     }
