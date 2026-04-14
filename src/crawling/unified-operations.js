@@ -3447,14 +3447,22 @@ const modeHandlers = {
 
           // Queue-based distributed: report discovered links to backend so it can queue new page tasks for helpers
           const parentJobId = context.distributed_parent_job_id;
-          if (parentJobId && crawlableInternalLinks.length > 0) {
+          const isLoginJobForReport =
+            context?.jobType === 'login' ||
+            context?.job_type === 'login' ||
+            context?.isLoginJob === true ||
+            context?.preventCrawling === true ||
+            context?.preventLinkDiscovery === true;
+          if (parentJobId && crawlableInternalLinks.length > 0 && !isLoginJobForReport) {
             const linksToReport = crawlableInternalLinks
               .map((link) => (link?.urlWithoutHash || link?.href || '').trim())
               .filter(
                 (u) =>
                   u &&
                   (u.startsWith('http://') || u.startsWith('https://')) &&
-                  !isSearchEngineInfraUrl(u)
+                  !isSearchEngineInfraUrl(u) &&
+                  isWithinDomain(u, seedUrl, allowSubdomains, domainScope) &&
+                  !isLoginPageUrl(u, loginUrls)
               );
             if (linksToReport.length > 0) {
               try {
