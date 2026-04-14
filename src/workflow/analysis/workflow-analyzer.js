@@ -4195,6 +4195,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
               };
               response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, effectiveJobId, {
                 timeout: 165000,
+                maxAttempts: 12,
                 on404: async () => {
                   if (!workflowState.pageUrl) return null;
                   console.warn(`⚠️ [JOURNEYS-FINAL] save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
@@ -4243,6 +4244,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
               };
               const refreshResponse = await this.postRunnerSaveAnalysis(pageIdToUse, refreshPayload, effectiveJobId, {
                 timeout: 165000,
+                maxAttempts: 12,
                 on404: async () => {
                   if (!workflowState.pageUrl) return null;
                   console.warn(`⚠️ [JOURNEYS-FINAL] refresh save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
@@ -8781,7 +8783,10 @@ return {
                   job_id: jobId
                 };
                 
-                const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId);
+                const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, {
+                  timeout: 165000,
+                  maxAttempts: 12,
+                });
 
                 const _rjS = response?.data?.results?.journeys;
                 const _pS =
@@ -8807,11 +8812,24 @@ return {
                   );
                 }
               } catch (finalError) {
-                console.error(`❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`);
+                const finalErrMsg = String(finalError?.message || '');
+                const transientFailure =
+                  isTransientGatewayError(finalError) ||
+                  /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNABORTED|timeout/i.test(finalErrMsg);
+                const level = transientFailure ? 'warn' : 'error';
+                const icon = transientFailure ? '⚠️' : '❌';
+                console.error(`${icon} [JOURNEYS-FINAL] Failed to save journeys: ${finalErrMsg}`);
                 if (jobId && this.backendLogger) {
-                  await this.backendLogger.appendJobLog(jobId, 'error', `❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`, 'WORKFLOW-ANALYZER', {
-                    error: finalError.message
-                  });
+                  await this.backendLogger.appendJobLog(
+                    jobId,
+                    level,
+                    `${icon} [JOURNEYS-FINAL] Failed to save journeys: ${finalErrMsg}`,
+                    'WORKFLOW-ANALYZER',
+                    {
+                      error: finalError.message,
+                      status: finalError.response?.status,
+                    },
+                  );
                 }
               }
             }
@@ -8822,7 +8840,10 @@ return {
                   journeys: journeysToSave.map((j) => this.cleanJourneyForSave(j)),
                   job_id: jobId
                 };
-                const refreshResponse = await this.postRunnerSaveAnalysis(pageIdToUse, refreshPayload, jobId);
+                const refreshResponse = await this.postRunnerSaveAnalysis(pageIdToUse, refreshPayload, jobId, {
+                  timeout: 165000,
+                  maxAttempts: 12,
+                });
                 const _rjRf = refreshResponse?.data?.results?.journeys;
                 const _pRf =
                   _rjRf && typeof _rjRf.persisted_page_journeys === 'number'
@@ -8852,7 +8873,12 @@ return {
                   );
                 }
               } catch (refreshErr) {
-                console.error(`❌ [JOURNEYS-FINAL] Failed to refresh journeys: ${refreshErr.message}`);
+                const msg = String(refreshErr?.message || '');
+                const transient =
+                  isTransientGatewayError(refreshErr) ||
+                  /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNABORTED|timeout/i.test(msg);
+                const icon = transient ? '⚠️' : '❌';
+                console.error(`${icon} [JOURNEYS-FINAL] Failed to refresh journeys: ${msg}`);
               }
             }
           } catch (checkError) {
@@ -8865,7 +8891,10 @@ return {
                 job_id: jobId
               };
               
-              const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId);
+              const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, {
+                timeout: 165000,
+                maxAttempts: 12,
+              });
 
               const _rjF = response?.data?.results?.journeys;
               const _pF =
@@ -8876,7 +8905,12 @@ return {
                 `✅ [JOURNEYS-FINAL] save-analysis completed: ${journeysToSave.length} journey payload row(s) to page ${pageIdToUse}${_noteF}. Response status: ${response.status}`,
               );
             } catch (finalError) {
-              console.error(`❌ [JOURNEYS-FINAL] Failed to save journeys: ${finalError.message}`);
+              const msg = String(finalError?.message || '');
+              const transient =
+                isTransientGatewayError(finalError) ||
+                /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNABORTED|timeout/i.test(msg);
+              const icon = transient ? '⚠️' : '❌';
+              console.error(`${icon} [JOURNEYS-FINAL] Failed to save journeys: ${msg}`);
             }
           }
         } else {
@@ -16438,12 +16472,12 @@ const sleep = safeWait;
     let pid = pageId != null ? String(pageId) : '';
     // Align with ALB idle budget after infra bump (terraform idle_timeout); save-analysis can be Mongo-heavy.
     const timeout = options.timeout ?? 165000;
-    // Default 6 (was 12): multiple sequential save-analysis calls inside one ai-prompt step must not
-    // consume the entire outer getStepTimeout window (900s) when the backend is slow or restarting.
+    // Default 10: balance ALB/504 recovery vs total wall time when multiple save-analysis calls run
+    // inside one ai-prompt step (outer Promise.race still caps at getStepTimeout).
     const maxAttempts =
       Number.isFinite(Number(options.maxAttempts)) && Number(options.maxAttempts) > 0
         ? Math.min(12, Math.max(1, Math.floor(Number(options.maxAttempts))))
-        : 6;
+        : 10;
     const buildOpts = (authExtra = {}) => ({
       headers: {
         ...this.getAuthHeaders(authExtra),
