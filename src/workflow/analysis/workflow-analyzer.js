@@ -1,5 +1,5 @@
 import { createBackendAxiosWithRetries, retryTransientAsync } from '../../utils/backend-http-retry.js';
-import { isTransientGatewayError } from '../../openai-client-factory.js';
+import { isTransientGatewayError, isNetworkUnreachableError } from '../../openai-client-factory.js';
 
 const axios = createBackendAxiosWithRetries();
 import { isSearchEngineInfraUrl } from '../../utils/search-engine-infra-url.js';
@@ -6295,8 +6295,60 @@ return {
 
       // Reuse step classification for retry behavior
       const configuredRetries = Number.isFinite(step.config?.maxRetries) ? step.config.maxRetries : 1;
-      const maxAttempts = Math.max(1, configuredRetries + 1);
-      for (let attempt = 1; !aiResponse && attempt <= maxAttempts; attempt += 1) {
+      const baseMaxAttempts = Math.max(1, configuredRetries + 1);
+      // Extra attempts when OpenAI/AI-service/ALB returns transient HTTP (502/503/504) or network blips (matches collected incident: backend restart + 503).
+      const TRANSIENT_AI_EXTRA_ATTEMPTS = 5;
+      const maxAttemptsLoop = baseMaxAttempts + TRANSIENT_AI_EXTRA_ATTEMPTS;
+
+      const applyDeterministicPageSummaryFallback = async (reasonLog) => {
+        const interactive = Array.isArray(stepPayload?.interactive_elements) ? stepPayload.interactive_elements : [];
+        const forms = Array.isArray(stepPayload?.forms) ? stepPayload.forms : [];
+        const pageUrl = String(stepPayload?.page_url || page.url() || '');
+        const titleText = String(stepPayload?.page_title || '').trim();
+        const journeyId = `journey_0_${(pageUrl.split('/').pop() || 'page').replace(/[^a-zA-Z0-9]+/g, '_')}`.replace(/_+/g, '_').toLowerCase();
+        const actions = interactive.slice(0, 8).map((el, idx) => ({
+          action_id: `action_${idx + 1}`,
+          type: (String(el?.type || '').toLowerCase().includes('input') || String(el?.role || '').toLowerCase().includes('textbox')) ? 'input' : 'click',
+          selector: String(el?.selector || el?.css_selector || el?.xpath || ''),
+          description: String(el?.text || el?.label || el?.name || `Interact with element ${idx + 1}`),
+          order: idx
+        })).filter((action) => action.selector);
+
+        aiResponse = {
+          page_summary: {
+            short_description: titleText || 'Page ready for automated interaction testing.',
+            primary_purpose: forms.length > 0 ? 'Form interaction and submission' : 'Interactive page validation',
+            forms_present: forms.length > 0
+          },
+          journeys: [{
+            journey_id: journeyId || 'journey_0',
+            description: forms.length > 0
+              ? 'User fills required fields and submits the main form flow.'
+              : 'User interacts with primary visible controls on the page.',
+            priority: 'high',
+            confidence: 0.6,
+            expected_outcome: forms.length > 0
+              ? 'Form submission attempt completes without blocking validation errors.'
+              : 'Primary interactions execute without runtime errors.',
+            test_instructions: forms.length > 0
+              ? 'Fill visible required inputs with valid values and submit once.'
+              : 'Click/trigger key visible interactive elements once.',
+            actions
+          }]
+        };
+
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'warn',
+            reasonLog,
+            'WORKFLOW-ANALYZER',
+            { page_url: pageUrl, interactive_count: interactive.length, forms_count: forms.length, actions_built: actions.length }
+          );
+        }
+      };
+
+      for (let attempt = 1; !aiResponse && attempt <= maxAttemptsLoop; attempt += 1) {
         try {
           aiResponse = await this.aiLogger.makeAICallWithPrompt(
             promptIdentifier,
@@ -6628,55 +6680,28 @@ return {
               aiErrorText.includes('Invalid token') ||
               isAiUnavailableError)
           ) {
-            const interactive = Array.isArray(stepPayload?.interactive_elements) ? stepPayload.interactive_elements : [];
-            const forms = Array.isArray(stepPayload?.forms) ? stepPayload.forms : [];
-            const pageUrl = String(stepPayload?.page_url || page.url() || '');
-            const titleText = String(stepPayload?.page_title || '').trim();
-            const journeyId = `journey_0_${(pageUrl.split('/').pop() || 'page').replace(/[^a-zA-Z0-9]+/g, '_')}`.replace(/_+/g, '_').toLowerCase();
-            const actions = interactive.slice(0, 8).map((el, idx) => ({
-              action_id: `action_${idx + 1}`,
-              type: (String(el?.type || '').toLowerCase().includes('input') || String(el?.role || '').toLowerCase().includes('textbox')) ? 'input' : 'click',
-              selector: String(el?.selector || el?.css_selector || el?.xpath || ''),
-              description: String(el?.text || el?.label || el?.name || `Interact with element ${idx + 1}`),
-              order: idx
-            })).filter(action => action.selector);
-
-            aiResponse = {
-              page_summary: {
-                short_description: titleText || 'Page ready for automated interaction testing.',
-                primary_purpose: forms.length > 0 ? 'Form interaction and submission' : 'Interactive page validation',
-                forms_present: forms.length > 0
-              },
-              journeys: [{
-                journey_id: journeyId || 'journey_0',
-                description: forms.length > 0
-                  ? 'User fills required fields and submits the main form flow.'
-                  : 'User interacts with primary visible controls on the page.',
-                priority: 'high',
-                confidence: 0.6,
-                expected_outcome: forms.length > 0
-                  ? 'Form submission attempt completes without blocking validation errors.'
-                  : 'Primary interactions execute without runtime errors.',
-                test_instructions: forms.length > 0
-                  ? 'Fill visible required inputs with valid values and submit once.'
-                  : 'Click/trigger key visible interactive elements once.',
-                actions
-              }]
-            };
-
-            if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(
-                jobId,
-                'warn',
-                `⚠️ AI unavailable for ${step.id || step.name}; using deterministic page-summary fallback`,
-                'WORKFLOW-ANALYZER',
-                { page_url: pageUrl, interactive_count: interactive.length, forms_count: forms.length, actions_built: actions.length }
-              );
-            }
+            await applyDeterministicPageSummaryFallback(
+              `⚠️ AI unavailable for ${step.id || step.name}; using deterministic page-summary fallback`
+            );
             break;
           }
 
-          const errorMessage = `OpenAI API call failed for step "${step.name || step.id}" (attempt ${attempt}/${maxAttempts}): ${aiError.message}`;
+          const isTransientAiFailure =
+            isTransientGatewayError(aiError) || isNetworkUnreachableError(aiError);
+          const attemptCap = isTransientAiFailure ? maxAttemptsLoop : baseMaxAttempts;
+
+          if (
+            isPageSummaryStep &&
+            isTransientAiFailure &&
+            attempt >= attemptCap
+          ) {
+            await applyDeterministicPageSummaryFallback(
+              `⚠️ Transient AI/gateway failures exhausted (${attemptCap} attempts) for ${step.id || step.name}; using deterministic page-summary fallback so the crawl can complete`
+            );
+            break;
+          }
+
+          const errorMessage = `OpenAI API call failed for step "${step.name || step.id}" (attempt ${attempt}/${attemptCap}): ${aiError.message}`;
           const fullContext = {
             step_id: step.id,
             step_name: step.name,
@@ -6685,7 +6710,7 @@ return {
             step_config: step.config,
             step_payload_keys: Object.keys(safeStepPayload || {}),
             attempt,
-            max_attempts: maxAttempts,
+            max_attempts: attemptCap,
             error: aiError.message,
             error_stack: aiError.stack
           };
@@ -6693,7 +6718,20 @@ return {
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'error', errorMessage, 'WORKFLOW-ANALYZER', fullContext);
           }
-          if (attempt < maxAttempts) {
+          if (attempt < attemptCap) {
+            if (isTransientAiFailure) {
+              const delayMs = Math.min(25000, 600 * 2 ** Math.min(attempt - 1, 10));
+              const retryNote = `[WORKFLOW-ANALYZER] Transient AI failure for ${step.id || step.name}; backing off ${delayMs}ms before retry ${attempt + 1}/${attemptCap}`;
+              console.warn(retryNote);
+              if (jobId && this.backendLogger) {
+                await this.backendLogger.appendJobLog(jobId, 'warn', retryNote, 'WORKFLOW-ANALYZER', {
+                  step_id: step.id,
+                  delay_ms: delayMs,
+                  error: aiError.message
+                });
+              }
+              await new Promise((r) => setTimeout(r, delayMs));
+            }
             continue;
           }
           throw new Error(`${errorMessage}\nFull context: ${JSON.stringify(fullContext, null, 2)}`);
@@ -6709,14 +6747,14 @@ return {
           (aiResponse.error.includes('OpenAI returned empty or undefined content') ||
             aiResponse.error.includes('"status":"incomplete"'));
 
-        if (isIncompleteResponse && attempt < maxAttempts) {
-          const retryMessage = `⚠️ Incomplete OpenAI output for ${step.id || step.name} (attempt ${attempt}/${maxAttempts}) - retrying`;
+        if (isIncompleteResponse && attempt < baseMaxAttempts) {
+          const retryMessage = `⚠️ Incomplete OpenAI output for ${step.id || step.name} (attempt ${attempt}/${baseMaxAttempts}) - retrying`;
           console.warn(retryMessage);
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(jobId, 'warn', retryMessage, 'WORKFLOW-ANALYZER', {
               step_id: step.id,
               attempt,
-              max_attempts: maxAttempts
+              max_attempts: baseMaxAttempts
             });
           }
           continue;
