@@ -21553,6 +21553,18 @@ const sleep = safeWait;
             console.log(
               '✅ Max iterations with continue/stuck but visible DOM success chrome — treating journey leg as success'
             );
+          } else if (
+            !lastIterationHardFailure &&
+            (executionSucceeded || hasSuccessfulIterationEvidence)
+          ) {
+            // Verifier may keep returning continue/stuck while Playwright shows a completed session
+            // (SPA chunk/CDN blips, RSC prefetch aborts). Mirror pending-at-budget promotion (see above).
+            finalLegStatus = 'success';
+            finalLegResult = 'success';
+            finalLegError = null;
+            console.log(
+              '✅ continue/stuck at iteration budget with successful execution evidence — treating journey leg as success'
+            );
           } else {
             finalLegStatus = 'failure';
             finalLegResult = 'failure';
@@ -21997,7 +22009,7 @@ const sleep = safeWait;
         await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
           jobId: jobId,
           level: 'info',
-          message: `✅ While-loop completed after ${iteration} iterations${finalLegStatus ? ` (final status: ${finalLegStatus})` : ''}`,
+          message: `✅ While-loop completed after ${iteration} iterations${finalJustificationStatus ? ` (final justification_status: ${finalJustificationStatus})` : (finalLegStatus ? ` (final status: ${finalLegStatus})` : '')}`,
           component: 'WORKFLOW-ANALYZER',
           metadata: {
             step_id: step.id,
@@ -22008,6 +22020,7 @@ const sleep = safeWait;
             exited_early: finalResult.exitedEarly,
             final_condition: finalResult.finalCondition,
             final_leg_status: finalLegStatus,
+            final_justification_status: finalJustificationStatus,
             final_leg_result: finalLegResult,
             timestamp: new Date().toISOString()
           }
