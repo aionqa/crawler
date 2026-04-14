@@ -62,6 +62,27 @@ function isLikelyPlatformOrBrowserInterruptionError(messageLike) {
 }
 
 /**
+ * True only when a while-loop iteration shows verifier success *and* summarized execution is clean.
+ * Broader "any step_result success" counts nested screenshots/prompts and must not block restart
+ * normalization for inconclusive journey legs after orchestrator recovery.
+ */
+function hasStrongJourneyIterationSuccessEvidence(loopIterations) {
+  if (!Array.isArray(loopIterations) || loopIterations.length === 0) return false;
+  return loopIterations.some((iter) => {
+    const verified = iter?.step_result?.expected_outcome_verified;
+    if (verified === true || verified === 'true') return true;
+    const status = String(iter?.step_result?.status || iter?.step_result?.completion_status || '').toLowerCase();
+    if (status !== 'success') return false;
+    const lr = iter?.lastResult;
+    if (lr && typeof lr === 'object') {
+      if (lr.execution_failed === true) return false;
+      if (lr.error) return false;
+    }
+    return true;
+  });
+}
+
+/**
  * Compute a stable journey ID from page URL and journey content so the same logical journey
  * keeps the same id across runs even when the testable website's DOM ids/selectors change.
  * Uses normalized description + action signatures (type + normalized selector/description).
@@ -21115,10 +21136,14 @@ const sleep = safeWait;
       !workflowState.executionErrorType &&
       !lastExecSnapshot.error;
 
+    const ambiguousExecutionOk =
+      lastExecSnapshot.success !== false &&
+      !workflowState.executionErrorType &&
+      !lastExecSnapshot.error;
     const executionSucceeded =
       lastExecSnapshot.success === true ||
       (validationOnlyExecutionFailure && domJourneySuccessChrome) ||
-      (lastExecSnapshot.success !== false && !workflowState.executionErrorType && !lastExecSnapshot.error);
+      (!workflowState.platformRestartResume && ambiguousExecutionOk);
 
     // Prefer AI justification status from the last while-loop iteration.
     if (!finalLegStatus && (lastAiStatus === 'success' || lastAiStatus === 'failure' || lastAiStatus === 'pending')) {
@@ -21142,7 +21167,7 @@ const sleep = safeWait;
           if (
             workflowState.platformRestartResume &&
             !executionSucceeded &&
-            !hasSuccessfulIterationEvidence &&
+            !hasStrongJourneyIterationSuccessEvidence(loopIterations) &&
             iteration <= 1
           ) {
             interruptParts.push('system_restart_recovery_requeue');
@@ -21215,12 +21240,15 @@ const sleep = safeWait;
         // If loop exited early but determine_completion says failure, 
         // check if execution actually succeeded (execution result takes precedence)
         const failureReason = String(lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || '').toLowerCase();
+        const lastInner = workflowState.lastExecutionResult || {};
+        const innerAmbiguousOk =
+          lastInner.success !== false &&
+          !workflowState.executionErrorType &&
+          !lastInner.error;
         const executionSucceeded =
-          workflowState.lastExecutionResult?.success === true ||
+          lastInner.success === true ||
           (validationOnlyExecutionFailure && domJourneySuccessChrome) ||
-          (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType) ||
-          workflowState.lastExecutionResult?.error === undefined ||
-          !workflowState.lastExecutionResult?.error;
+          (!workflowState.platformRestartResume && innerAmbiguousOk);
         const softVerifierFailure =
           failureReason.includes('step indicator not visible') ||
           failureReason.includes('step indicator not clearly visible') ||
@@ -21370,7 +21398,7 @@ const sleep = safeWait;
     if (
       workflowState.platformRestartResume &&
       !executionSucceeded &&
-      !hasSuccessfulIterationEvidence &&
+      !hasStrongJourneyIterationSuccessEvidence(loopIterations) &&
       iteration <= 1 &&
       finalLegStatus === 'failure' &&
       finalLegResult === 'failure'
