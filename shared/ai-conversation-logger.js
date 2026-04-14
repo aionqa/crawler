@@ -1203,6 +1203,15 @@ export class AIConversationLogger {
           this.context?.context?.project_id ||
           this.context?.context?.projectId
       };
+      const httpTimeoutRaw = Number(
+        payload?.ai_http_timeout_ms ??
+          sourcePayload?.ai_http_timeout_ms ??
+          this.context?.ai_http_timeout_ms ??
+          NaN
+      );
+      if (Number.isFinite(httpTimeoutRaw) && httpTimeoutRaw >= 30000) {
+        contextUpdate.ai_http_timeout_ms = Math.min(900000, Math.floor(httpTimeoutRaw));
+      }
       // AI service must be explicitly configured (no fallbacks). Prefer ai_services; if absent,
       // derive a single service from llm_config.endpoint for compatibility with login flows.
       const endpointFromLlmConfig = this.collectLlmEndpointFromContext(payload, sourcePayload);

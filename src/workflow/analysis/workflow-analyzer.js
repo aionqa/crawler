@@ -6205,6 +6205,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       console.log(`📄 VAR_DUMP: executeAIPromptStep - jobId=${jobId}`);
       console.log(`📄 VAR_DUMP: executeAIPromptStep - promptIdentifier=${promptIdentifier}`);
       console.log(`📄 VAR_DUMP: executeAIPromptStep - stepPayload.input_credentials=${stepPayload.input_credentials ? JSON.stringify({username: stepPayload.input_credentials.username || 'MISSING', password: stepPayload.input_credentials.password ? '***' : 'MISSING'}) : 'MISSING'}`);
+      stepPayload.ai_http_timeout_ms = this.getAiHttpTimeoutMsForWorkflowCall(workflowState, step);
       const safeStepPayload = this.makeJsonSafe(stepPayload);
       
       let aiResponse;
@@ -16558,6 +16559,32 @@ const sleep = safeWait;
       return { timeout: 40000, maxAttempts: 2, ...overrides };
     }
     return { timeout: 60000, maxAttempts: 3, ...overrides };
+  }
+
+  /**
+   * Axios timeout for a single AI-service HTTP request inside workflow ai-prompt steps.
+   * Keeps hung upstream sockets from burning the entire outer step Promise.race budget (900s);
+   * workflow-level retries + transient handling recover legitimate platform blips.
+   */
+  getAiHttpTimeoutMsForWorkflowCall(workflowState, step) {
+    const fromState = Number(workflowState?.systemRestartRecoveryCount ?? NaN);
+    const stateRecovery =
+      Number.isFinite(fromState) && fromState > 0 ? Math.floor(fromState) : 0;
+    const sig = this.readOrchestratorRestartSignals(this.context);
+    const recovery = Math.max(stateRecovery, sig.recoveryCount);
+    const stressed =
+      workflowState?.platformRestartResume === true ||
+      sig.platformRestartResume ||
+      recovery > 0;
+    const scriptGen =
+      step?.id === 'generate_journey_script' ||
+      step?.id === 'generate_login_script' ||
+      String(step?.name || '').includes('Generate Journey Action Script') ||
+      String(step?.name || '').includes('Generate Login Script');
+    if (scriptGen) {
+      return stressed ? 300000 : 480000;
+    }
+    return stressed ? 120000 : 300000;
   }
 
   /**

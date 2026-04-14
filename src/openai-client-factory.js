@@ -152,6 +152,14 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
 
   const MAX_TRANSIENT_RETRIES = 6;
 
+  /** Per-request axios timeout to AI service (workflow can lower via context.ai_http_timeout_ms). */
+  const rawHttpTimeout = Number(context.ai_http_timeout_ms);
+  const defaultAiHttpTimeoutMs = 900000;
+  const aiHttpTimeoutMs =
+    Number.isFinite(rawHttpTimeout) && rawHttpTimeout >= 30000
+      ? Math.min(900000, Math.floor(rawHttpTimeout))
+      : defaultAiHttpTimeoutMs;
+
   const postToAiServiceWithFailover = async (requestBody, requestConfig, initialToken) => {
     let currentToken = initialToken;
     let lastError;
@@ -246,7 +254,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                     'Content-Type': 'application/json',
                     ...(authToken && { 'Authorization': `Bearer ${authToken}` })
                   },
-                  timeout: 900000 // 15 minutes timeout for AI requests
+                  timeout: aiHttpTimeoutMs
                 });
                 const response = await postToAiServiceWithFailover(requestBody, requestConfig, token);
 
@@ -314,7 +322,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                   'Content-Type': 'application/json',
                   ...(authToken && { 'Authorization': `Bearer ${authToken}` })
                 },
-                timeout: 900000 // 15 minutes timeout for AI requests
+                timeout: aiHttpTimeoutMs
               });
               const response = await postToAiServiceWithFailover(requestBody, requestConfig, token);
 
