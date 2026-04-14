@@ -12131,12 +12131,28 @@ return {
       }
       return s;
     };
-    const pat =
-      /\b([A-Za-z_$][\w$]*)\.(locator|frameLocator)\s*\(\s*(['"])((?:\\.|(?!\3).)*)\3/g;
-    return script.replace(pat, (full, obj, method, q, body) => {
-      const fixed = fixInner(body);
-      return fixed === body ? full : `${obj}.${method}(${q}${fixed}${q}`;
-    });
+
+    let s = script;
+    s = s.replace(
+      /\b([A-Za-z_$][\w$]*)\.(locator|frameLocator)\s*\(\s*(['"])((?:\\.|(?!\3).)*)\3/g,
+      (full, obj, method, q, body) => {
+        const fixed = fixInner(body);
+        return fixed === body ? full : `${obj}.${method}(${q}${fixed}${q}`;
+      },
+    );
+    const pageSelectorMethods =
+      'click|dblclick|fill|check|uncheck|hover|tap|press|focus|selectOption|waitForSelector|locator|getByPlaceholder|getByText|getByLabel|getByTitle|getByAltText';
+    s = s.replace(
+      new RegExp(
+        `\\bpage\\.(${pageSelectorMethods})\\s*\\(\\s*(['"])((?:\\\\.|(?!\\2).)*)\\2`,
+        'g',
+      ),
+      (full, method, q, body) => {
+        const fixed = fixInner(body);
+        return fixed === body ? full : `page.${method}(${q}${fixed}${q}`;
+      },
+    );
+    return s;
   }
 
   repairLocatorBracketIndexChains(script) {
