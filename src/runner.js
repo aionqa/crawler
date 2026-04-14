@@ -31,6 +31,8 @@ const MAX_SITEMAP_SCAN_DEPTH = 5;
 const MAX_SITEMAP_SCAN_CHILD_SITEMAPS = 25;
 const MAX_SITEMAP_SCAN_ENTRIES = 5000;
 const DEFAULT_AVAILABILITY_TIMEOUT_MS = 10000;
+/** Bootstrap GET /api/jobs/:id in ECS single-job mode; ALB/backend can be slow right after deploy or recovery. */
+const SINGLE_JOB_FETCH_TIMEOUT_MS = parseInt(process.env.RUNNER_JOB_FETCH_TIMEOUT_MS || '45000', 10);
 // Generate unique runner ID if not provided (includes hostname and UUID for uniqueness)
 // For service-managed runners, include type in ID
 const RUNNER_ID = process.env.RUNNER_ID || (RUNNER_TYPE === 'service-managed' 
@@ -269,7 +271,10 @@ function isRetryableBackendError(error) {
   if (!error) return false;
   const code = error.code || '';
   const status = error.response?.status;
-  if (['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'ENETUNREACH'].includes(code)) return true;
+  // ECONNABORTED: axios client-side timeout / aborted request — common when API is cold after ECS/ALB recovery.
+  if (['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'ENETUNREACH', 'ECONNABORTED'].includes(code)) return true;
+  const msg = String(error.message || '');
+  if (/timeout/i.test(msg) && !status) return true;
   if (status >= 500 || status === 408) return true;
   return false;
 }
@@ -2696,11 +2701,15 @@ async function executeSingleJob() {
   try {
     // Fetch job data from backend API instead of environment variable
     // This avoids ECS container overrides 8192 character limit
-    console.log(`📥 Fetching job data from backend API for job ${JOB_ID}`);
-    const response = await axios.get(`${BACKEND_URL}/api/jobs/${JOB_ID}`, {
-      headers: getAuthHeaders(),
-      timeout: 10000
-    });
+    console.log(`📥 Fetching job data from backend API for job ${JOB_ID} (timeout ${SINGLE_JOB_FETCH_TIMEOUT_MS}ms, with backend retry)`);
+    const response = await withBackendRetry(
+      () =>
+        axios.get(`${BACKEND_URL}/api/jobs/${JOB_ID}`, {
+          headers: getAuthHeaders(),
+          timeout: SINGLE_JOB_FETCH_TIMEOUT_MS
+        }),
+      `single-job fetch /api/jobs/${JOB_ID}`
+    );
     
     if (!response.data) {
       console.error(`❌ Job ${JOB_ID} not found in backend`);
