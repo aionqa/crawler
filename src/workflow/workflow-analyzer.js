@@ -13139,9 +13139,49 @@ ${executableBody}`;
     let finalLegStatus = null;
     let finalLegResult = 'skipped';
     let finalLegError = null;
+
+    // Bounded login loops (json-login / while-loop): mirror analysis/workflow-analyzer semantics so
+    // "continue" at max iterations with clean Playwright runs is not mis-labeled terminal failure
+    // when downstream validate-login steps still succeed (avoids misleading job logs / monitors).
+    const loopIterations = Array.isArray(loopState?.iterations) ? loopState.iterations : [];
+    const hasSuccessfulIterationEvidence = loopIterations.some((iter) => {
+      const dc = iter?.determine_completion?.result || iter?.determine_completion;
+      const s = String(dc?.status || dc?.completion_status || '').toLowerCase();
+      return s === 'success';
+    });
+    const lastIterForFailure = loopIterations.length ? loopIterations[loopIterations.length - 1] : null;
+    const lastIterDc = lastIterForFailure?.determine_completion?.result || lastIterForFailure?.determine_completion;
+    const lastIterationHardFailure =
+      String(lastIterDc?.status || lastIterDc?.completion_status || '').toLowerCase() === 'failure';
+
+    const lastExecSnapshot = workflowState.lastExecutionResult || {};
+    const ambiguousExecutionOk =
+      lastExecSnapshot.success !== false &&
+      !workflowState.executionErrorType &&
+      !lastExecSnapshot.error;
+    const executionSucceededForLoginLoop =
+      lastExecSnapshot.success === true ||
+      (!workflowState.platformRestartResume && ambiguousExecutionOk);
+
+    const completionTextForBlocker = `${lastDetermineCompletion?.reason || ''} ${lastDetermineCompletion?.what_happened || ''}`.toLowerCase();
+    const loginLoopVerifierBlockingSignal = (() => {
+      const t = completionTextForBlocker;
+      if (!t.trim()) return false;
+      if (/\b(no error|no errors|non-blocking|not blocking)\b/i.test(t)) return false;
+      if (
+        /\b(invalid|required|failed|failure|exception|timeout|blocked|captcha|unauthorized|forbidden|denied)\b/i.test(t)
+      ) {
+        return true;
+      }
+      if (/\b(errors?)\b/i.test(t) && /\b(login|auth|credential|password|session|form|submit)\b/i.test(t)) {
+        return true;
+      }
+      return false;
+    })();
     
     if (lastDetermineCompletion) {
-      const status = lastDetermineCompletion.status || lastDetermineCompletion.completion_status || 'unknown';
+      const statusRaw = lastDetermineCompletion.status || lastDetermineCompletion.completion_status || 'unknown';
+      const status = String(statusRaw).toLowerCase();
       const isComplete = lastDetermineCompletion.is_complete === true;
       
       if (status === 'success' || (isComplete && status !== 'failure')) {
@@ -13162,18 +13202,21 @@ ${executableBody}`;
         }
         finalLegError = lastDetermineCompletion.reason || lastDetermineCompletion.what_happened || 'Action execution failed';
       } else if (status === 'continue' || status === 'stuck') {
-        // If max iterations reached and status is still 'continue' or 'stuck', mark as failure
-        // This indicates the action couldn't be completed within the iteration limit
+        // If max iterations reached and status is still 'continue' or 'stuck', prefer success when
+        // execution stayed clean and the verifier did not emit a hard blocking signal (aligned with
+        // analysis/workflow-analyzer journey loops).
         if (iteration >= maxIterations) {
-          const executionSucceeded =
-            workflowState.lastExecutionResult?.success === true ||
-            (workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType);
-          const completionText = `${lastDetermineCompletion?.reason || ''} ${lastDetermineCompletion?.what_happened || ''}`.toLowerCase();
-          const hasBlockingSignal = /(invalid|required|error|failed|failure|exception|timeout|blocked|captcha)/.test(completionText);
-          if (executionSucceeded && !hasBlockingSignal) {
+          const allowContinueBudgetSuccess =
+            !lastIterationHardFailure &&
+            !loginLoopVerifierBlockingSignal &&
+            (executionSucceededForLoginLoop || hasSuccessfulIterationEvidence);
+          if (allowContinueBudgetSuccess) {
             finalLegStatus = 'success';
             finalLegResult = 'success';
             finalLegError = null;
+            console.log(
+              '✅ Login while-loop: continue/stuck at iteration budget with clean execution evidence — terminal leg status success'
+            );
           } else {
             finalLegStatus = 'failure';
             finalLegResult = 'failure';
