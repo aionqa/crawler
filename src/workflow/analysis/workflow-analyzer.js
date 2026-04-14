@@ -17673,6 +17673,83 @@ const sleep = safeWait;
     }
   }
 
+  _coerceWorkflowUrlString(raw) {
+    if (raw == null) return '';
+    if (typeof raw === 'string') return raw.trim();
+    if (typeof raw === 'object' && typeof raw.value === 'string') return String(raw.value).trim();
+    return String(raw).trim();
+  }
+
+  _canonicalWorkflowPageUrlKey(url) {
+    try {
+      const u = new URL(String(url || '').trim());
+      u.hash = '';
+      const path = u.pathname.replace(/\/+$/, '') || '/';
+      if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) {
+        u.port = '';
+      }
+      return `${u.protocol}//${u.host}${path}${u.search}`.toLowerCase();
+    } catch {
+      const s = String(url || '').split('#')[0].trim().toLowerCase();
+      return s.replace(/\/+$/, '') || s;
+    }
+  }
+
+  /**
+   * Journey scripts often navigate away (CTAs, modals). Later journeys in the same workflow for-each
+   * must start from the analyzed marketing/page URL or Playwright analysis sees an empty/wrong DOM.
+   */
+  async ensureAnalyzedPageContextForJourneys(page, workflowState, jobId, meta = {}) {
+    if (!page || typeof page.goto !== 'function' || !jobId) return;
+    const poolPageUrl = this._coerceWorkflowUrlString(this.readVariable(workflowState, 'page_url', 'page'));
+    const target = String(
+      workflowState.pageUrl ||
+      workflowState.context?.pageUrl ||
+      poolPageUrl ||
+      this.context?.seed_url ||
+      this.context?.start_url ||
+      ''
+    ).trim();
+    if (!target || target === 'about:blank') return;
+
+    let current = '';
+    try {
+      current = page.url();
+    } catch (_) {
+      return;
+    }
+
+    const tKey = this._canonicalWorkflowPageUrlKey(target);
+    const cKey = this._canonicalWorkflowPageUrlKey(current);
+    const needsLoad = !current || current === 'about:blank' || !tKey || !cKey || tKey !== cKey;
+    if (!needsLoad) return;
+
+    const idx = meta.journeyForEachIndex;
+    const reason =
+      typeof idx === 'number' && idx > 0
+        ? 'Prior journey left the browser on a different URL; reloading the analyzed page before the next journey.'
+        : 'Browser URL does not match the analyzed crawl page; reloading so journey scripting sees the correct DOM.';
+
+    await this.sendLogToBackend(jobId, 'info', `🧭 ${reason}`, 'WORKFLOW-ANALYZER', {
+      action: 'journey_page_context_reset',
+      target_url: target,
+      previous_url: current || null,
+      journey_for_each_index: idx,
+      ...meta
+    });
+    try {
+      await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
+      const settle = Number(workflowState.options?.spa_settle_ms);
+      const ms = Number.isFinite(settle) && settle > 0 ? Math.min(settle, 5000) : 800;
+      await page.waitForTimeout(ms);
+    } catch (navErr) {
+      await this.sendLogToBackend(jobId, 'warn', `⚠️ Could not reload analyzed page for journey context: ${navErr.message}`, 'WORKFLOW-ANALYZER', {
+        target_url: target,
+        previous_url: current || null
+      });
+    }
+  }
+
   /**
    * Execute for-each step - iterate over items and execute nested steps
    */
@@ -17830,6 +17907,12 @@ const sleep = safeWait;
       // This ensures while-loop can find the journey in journeysToExecute
       if (itemVariable === 'currentJourney' || item.journey_id) {
         workflowState.currentJourney = item;
+      }
+      if (itemsPath === 'journeysToExecute' && jobId) {
+        await this.ensureAnalyzedPageContextForJourneys(page, workflowState, jobId, {
+          journeyForEachIndex: idx,
+          parent_for_each_step_id: step.id
+        });
       }
       console.log(`🔁 Iteration ${idx + 1}/${effectiveItems.length}: Processing item`);
       
@@ -18205,6 +18288,20 @@ const sleep = safeWait;
       workflowState.screenshotBase64 = null;
       workflowState.screenshotUrl = null;
       workflowState.screenshotFileId = null;
+
+      const isJourneyTestWhileLoop =
+        stepIdLower.includes('test_journey') ||
+        stepNameLower.includes('test journey') ||
+        (stepIdLower.includes('journey') && stepIdLower.includes('iter'));
+      if (iteration === 1 && isJourneyTestWhileLoop && jobId) {
+        const jIdxRaw = workflowState.currentJourneyIndex;
+        const jIdx = Number.isFinite(Number(jIdxRaw)) ? Number(jIdxRaw) : undefined;
+        await this.ensureAnalyzedPageContextForJourneys(page, workflowState, jobId, {
+          journeyForEachIndex: jIdx,
+          while_loop_step_id: step.id,
+          pass: 'while_loop_first_iteration'
+        });
+      }
       
       // Update status to 'testing' when starting iteration (first iteration only)
       if (iteration === 1 && workflowState.workflowId && currentLeg?.leg_id) {
