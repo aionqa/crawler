@@ -68,24 +68,6 @@ export function evaluateLoginSessionEvidenceOverride({
     };
     const sessionishCookies = cookies.filter(looksSessionish);
 
-    const signals =
-      page && typeof page === 'object' && page.__aionqaTargetAssetSignals && typeof page.__aionqaTargetAssetSignals === 'object'
-        ? page.__aionqaTargetAssetSignals
-        : null;
-    const assetDegraded =
-      signals &&
-      ((Number(signals.http5xxScript) || 0) >= 1 || (Number(signals.chunkOrModuleErrors) || 0) >= 1);
-
-    const validatorMentionsLoadBreakage =
-      /\b(502|503|504|5xx|chunk|failed to load|could not load|load chunk|chunkload|bundle|bad gateway|degraded|incomplete|\brsc\b)\b/i.test(
-        combined
-      ) ||
-      /\b(no interactive|not interactive|empty page|blank|broken ui)\b/i.test(combined) ||
-      /\b(unable|not\s+able)\s+to\s+confirm\b.*\b(authenticated|session|login)\b/i.test(combined) ||
-      /\b(cannot|could\s+not)\s+(reliably\s+)?(verify|confirm)\b.*\b(authenticated|session|login)\b/i.test(
-        combined
-      );
-
     const segments = urlObj.pathname.split('/').filter(Boolean);
     const pathDepth = segments.length;
     if (pathDepth < 2) return null;
@@ -106,9 +88,61 @@ export function evaluateLoginSessionEvidenceOverride({
       [...cookieHosts].some((h) => pageHost === h || pageHost.endsWith(`.${h}`));
     if (!hostRelated) return null;
 
-    if (!(assetDegraded || validatorMentionsLoadBreakage)) return null;
+    const signals =
+      page && typeof page === 'object' && page.__aionqaTargetAssetSignals && typeof page.__aionqaTargetAssetSignals === 'object'
+        ? page.__aionqaTargetAssetSignals
+        : null;
+    const rscAborted = Number(signals?.rscAbortedSameHost) || 0;
+    const assetDegraded =
+      signals &&
+      ((Number(signals.http5xxScript) || 0) >= 1 ||
+        (Number(signals.chunkOrModuleErrors) || 0) >= 1 ||
+        rscAborted >= 2);
 
+    const validatorMentionsLoadBreakage =
+      /\b(502|503|504|5xx|chunk|failed to load|could not load|load chunk|chunkload|bundle|bad gateway|degraded|incomplete|\brsc\b)\b/i.test(
+        combined
+      ) ||
+      /\b(no interactive|not interactive|empty page|blank|broken ui)\b/i.test(combined) ||
+      /\b(unable|not\s+able)\s+to\s+confirm\b.*\b(authenticated|session|login)\b/i.test(combined) ||
+      /\b(cannot|could\s+not)\s+(reliably\s+)?(verify|confirm)\b.*\b(authenticated|session|login)\b/i.test(
+        combined
+      );
+
+    const detStatus = String(
+      determineResult?.status ||
+        determineResult?.completion_status ||
+        (typeof determineResult === 'string' ? determineResult : '') ||
+        ''
+    ).toLowerCase();
+    const aiWantsMoreWork = detStatus === 'continue' || detStatus === 'stuck';
+    const loginSurfaceMentionedInAi = /\b(login form|sign[-\s]?in page|sign[-\s]?in form|email field|password field|credentials field|still (on|at) the login|on the login page|presented with login)\b/i.test(
+      combined
+    );
+    const postAuthPathHint =
+      /(\/|^)(dashboard|home|portal|workspace|console|account|profile|app|main|ticksheets|calendar|documents)(\b|\/)/i.test(
+        pathLower
+      ) || /\/n\/[a-z0-9_-]{2,}\b/i.test(pathLower);
+    const oauthAuthorizeSurface = /\/oauth\/authorize(\/|$|\?)/i.test(pathLower);
+
+    const degradationSignal = assetDegraded || validatorMentionsLoadBreakage;
     const hasSessionSignal = sessionishCookies.length >= 1 || cookies.length >= 4;
+
+    if (
+      aiWantsMoreWork &&
+      !oauthAuthorizeSurface &&
+      postAuthPathHint &&
+      !loginSurfaceMentionedInAi &&
+      sessionishCookies.length >= 1
+    ) {
+      return {
+        confirm: true,
+        reason:
+          'Login inferred from runtime URL + session cookies while AI returned continue/stuck: post-auth path on seed-related host, session-shaped cookies, no credential-failure language, and last script execution was clean — treat as authenticated despite inconclusive validator.',
+      };
+    }
+
+    if (!degradationSignal) return null;
     if (!hasSessionSignal) return null;
 
     return {

@@ -46,7 +46,7 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
         }
       };
 
-      page.__aionqaTargetAssetSignals = { http5xxScript: 0, chunkOrModuleErrors: 0 };
+      page.__aionqaTargetAssetSignals = { http5xxScript: 0, chunkOrModuleErrors: 0, rscAbortedSameHost: 0 };
 
       page.on('pageerror', async (err) => {
         try {
@@ -108,10 +108,32 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
         try {
           if (netCount >= maxNet) return;
           netCount++;
-          const url = redact(req.url());
+          const rawUrl = req.url();
+          const url = redact(rawUrl);
           const method = req.method();
           const rt = req.resourceType();
           const err = req.failure()?.errorText || 'requestfailed';
+          try {
+            if (!page.__aionqaTargetAssetSignals) {
+              page.__aionqaTargetAssetSignals = { http5xxScript: 0, chunkOrModuleErrors: 0, rscAbortedSameHost: 0 };
+            }
+            if (
+              rt === 'fetch' &&
+              /[?&]_rsc=/i.test(String(rawUrl || '')) &&
+              /ERR_ABORTED|aborted/i.test(String(err || ''))
+            ) {
+              let sameHost = false;
+              try {
+                const ru = new URL(String(rawUrl));
+                const pu = page.url();
+                if (pu) sameHost = ru.hostname === new URL(pu).hostname;
+              } catch (_) {}
+              if (sameHost) {
+                page.__aionqaTargetAssetSignals.rscAbortedSameHost =
+                  (Number(page.__aionqaTargetAssetSignals.rscAbortedSameHost) || 0) + 1;
+              }
+            }
+          } catch (_) {}
           await backendLogger.appendJobLog(jobId, 'warn', `🌐 [REQUESTFAILED] ${method} ${rt} ${url} :: ${redact(err)}`.slice(0, 2000), 'BROWSER');
         } catch (_) {}
       });

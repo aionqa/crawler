@@ -4049,9 +4049,11 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         return pick(payload.status) || pick(payload.completion_status);
       };
 
-      const blockingFromPayloadText = (payload) => {
-        const t = `${payload?.reason || ''} ${payload?.what_happened || ''}`.toLowerCase();
-        return /(invalid|incorrect|required|error|failed|failure|exception|timeout|blocked|captcha|unauthorized|forbidden)/.test(t);
+      const textLooksLikeCredentialFailure = (raw) => {
+        const t = String(raw || '').toLowerCase();
+        return /\b(invalid\s+credentials|incorrect\s+password|wrong\s+password|bad\s+credentials|authentication\s+failed|login\s+failed|access\s+denied|account\s+locked|blocked\s+by\s+captcha|captcha\s+blocked)\b/i.test(
+          t
+        );
       };
 
       // Loop progress uses determine_completion; final login jobs also run validate_login_success after the loop.
@@ -4066,25 +4068,30 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       const validatePayload = pickValidateLoginPayload();
 
       const determineText = `${determineResult?.reason || ''} ${determineResult?.what_happened || ''}`.toLowerCase();
-      const hasBlockingSignal = /(invalid|incorrect|required|error|failed|failure|exception|timeout|blocked|captcha|unauthorized|forbidden)/.test(determineText);
       const cleanExecution = workflowState.lastExecutionResult?.success !== false && !workflowState.executionErrorType;
 
       let loginStatus = statusLikeFromPayload(determineResult) || null;
+      const determineContinueOrStuck =
+        loginStatus === 'continue' || loginStatus === 'stuck' || loginStatus === 'continuing';
       let loginSuccess =
         loginStatus === 'success' ||
         (determineResult?.is_complete === true && loginStatus !== 'failure') ||
-        (loginStatus === 'continue' && cleanExecution && !hasBlockingSignal);
+        (determineContinueOrStuck && cleanExecution && !textLooksLikeCredentialFailure(determineText));
 
       if (validatePayload) {
         const vStatus = statusLikeFromPayload(validatePayload);
-        const vBlocking = blockingFromPayloadText(validatePayload);
+        const vText = `${validatePayload?.reason || ''} ${validatePayload?.what_happened || ''}`;
         if (vStatus === 'success' || (validatePayload.is_complete === true && vStatus !== 'failure')) {
           loginSuccess = true;
           loginStatus = 'success';
         } else if (vStatus === 'failure' || (validatePayload.is_complete === true && vStatus === 'failure')) {
           loginSuccess = false;
           loginStatus = 'failure';
-        } else if (vStatus === 'continue' && cleanExecution && !vBlocking) {
+        } else if (
+          (vStatus === 'continue' || vStatus === 'stuck' || vStatus === 'continuing') &&
+          cleanExecution &&
+          !textLooksLikeCredentialFailure(vText)
+        ) {
           loginSuccess = true;
           loginStatus = 'success';
         }
