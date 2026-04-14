@@ -8455,7 +8455,8 @@ return {
                 contentData: normalizedContentAnalysis,
                 job_id: jobId
               },
-              jobId
+              jobId,
+              this.getRunnerSaveAnalysisOptionsForStep(workflowState),
             );
             console.log(`✅ [CONTENT-OPTIMIZER] Saved content_analysis to page ${pageIdToUse}`);
             if (jobId && this.backendLogger) {
@@ -8536,7 +8537,8 @@ return {
                 seoData: normalizedSeoAnalysis,
                 job_id: jobId
               },
-              jobId
+              jobId,
+              this.getRunnerSaveAnalysisOptionsForStep(workflowState),
             );
             console.log(`✅ [SEO-ASSISTANT] Saved seo_analysis to page ${pageIdToUse}`);
             if (jobId && this.backendLogger) {
@@ -8610,7 +8612,8 @@ return {
                 accessibilityData: normalizedAccessibility,
                 job_id: jobId
               },
-              jobId
+              jobId,
+              this.getRunnerSaveAnalysisOptionsForStep(workflowState),
             );
             console.log(`✅ [ACCESSIBILITY] Saved accessibility_analysis to page ${pageIdToUse}`);
             if (jobId && this.backendLogger) {
@@ -8690,7 +8693,8 @@ return {
                 complianceData: normalizedCompliance,
                 job_id: jobId
               },
-              jobId
+              jobId,
+              this.getRunnerSaveAnalysisOptionsForStep(workflowState),
             );
             console.log(`✅ [COMPLIANCE] Saved compliance_analysis to page ${pageIdToUse}`);
             if (jobId && this.backendLogger) {
@@ -10197,7 +10201,12 @@ return {
       }
 
       console.log(`💾 [SAVE-DATA] POSTing to ${this.backendUrl}/api/runner/pages/${workflowState.pageId}/save-analysis with ${journeys.length} journeys`);
-      const response = await this.postRunnerSaveAnalysis(workflowState.pageId, payload, jobId);
+      const response = await this.postRunnerSaveAnalysis(
+        workflowState.pageId,
+        payload,
+        jobId,
+        this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+      );
       
       console.log(`✅ [SAVE-DATA] Backend responded with status ${response.status}`);
       const results = response.data?.results || {};
