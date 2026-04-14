@@ -4194,7 +4194,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 job_id: effectiveJobId
               };
               response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, effectiveJobId, {
-                timeout: 120000,
+                timeout: 165000,
                 on404: async () => {
                   if (!workflowState.pageUrl) return null;
                   console.warn(`⚠️ [JOURNEYS-FINAL] save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
@@ -4242,7 +4242,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 job_id: effectiveJobId
               };
               const refreshResponse = await this.postRunnerSaveAnalysis(pageIdToUse, refreshPayload, effectiveJobId, {
-                timeout: 120000,
+                timeout: 165000,
                 on404: async () => {
                   if (!workflowState.pageUrl) return null;
                   console.warn(`⚠️ [JOURNEYS-FINAL] refresh save-analysis 404 for page ${pageIdToUse}; re-discovering and retrying`);
@@ -4282,7 +4282,10 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           }
         } catch (finalError) {
           const finalErrMsg = String(finalError?.message || '');
-          const transientNetworkFailure = /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|timeout/i.test(finalErrMsg);
+          const transientHttp = isTransientGatewayError(finalError);
+          const transientNetworkFailure =
+            transientHttp ||
+            /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNABORTED|timeout/i.test(finalErrMsg);
           const level = transientNetworkFailure ? 'warn' : 'error';
           const icon = transientNetworkFailure ? '⚠️' : '❌';
           console.error(`${icon} [JOURNEYS-FINAL] Failed to save journeys at workflow completion: ${finalErrMsg}`);
@@ -16407,7 +16410,8 @@ const sleep = safeWait;
    */
   async postRunnerSaveAnalysis(pageId, payload, jobId, options = {}) {
     let pid = pageId != null ? String(pageId) : '';
-    const timeout = options.timeout ?? 120000;
+    // Align with ALB idle budget after infra bump (terraform idle_timeout); save-analysis can be Mongo-heavy.
+    const timeout = options.timeout ?? 165000;
     const buildOpts = (authExtra = {}) => ({
       headers: {
         ...this.getAuthHeaders(authExtra),
@@ -16440,7 +16444,7 @@ const sleep = safeWait;
         throw runnerErr;
       }
     };
-    const maxAttempts = 8;
+    const maxAttempts = 12;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
         return await postSaveAnalysis();
@@ -16494,11 +16498,14 @@ const sleep = safeWait;
         }
         const msg = String(postErr?.message || '');
         const retryableNet =
-          attempt < maxAttempts - 1 && /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg);
+          attempt < maxAttempts - 1 &&
+          /socket hang up|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNABORTED|ERR_NETWORK/i.test(msg);
         const retryableGateway = attempt < maxAttempts - 1 && isTransientGatewayError(postErr);
         if (retryableNet || retryableGateway) {
           const st = postErr.response?.status;
-          const delayMs = retryableGateway ? 800 + 500 * (attempt + 1) : 1000 * (attempt + 1);
+          const delayMs = retryableGateway
+            ? Math.min(25000, 1500 * 2 ** Math.min(attempt, 6))
+            : Math.min(20000, 1000 * (attempt + 1));
           console.warn(
             `[postRunnerSaveAnalysis] retry after transient failure (attempt ${attempt + 1}/${maxAttempts}) status=${st || 'n/a'}: ${postErr.message}`
           );
