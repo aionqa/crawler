@@ -24,6 +24,9 @@ export function getStealthLaunchArgs(viewport) {
   return [
     '--no-sandbox',
     '--disable-dev-shm-usage',
+    // Prefer HTTP/1.1 for main document/subresources when servers or intermediaries
+    // mishandle HTTP/2 (common symptom: net::ERR_HTTP2_PROTOCOL_ERROR, empty DOM).
+    '--disable-http2',
     `--window-size=${v.width},${v.height}`,
     // Opt in to software WebGL to silence "Automatic fallback to software WebGL has been deprecated" (headless/CI often has no GPU)
     '--enable-unsafe-swiftshader',
