@@ -37,6 +37,30 @@ function isSameSiteOrigin(pageUrl, linkHref) {
 }
 
 /**
+ * Playwright/browser errors when the session ends due to infra (deploy, backend restart, OOM) —
+ * not a target-site journey defect. Used to avoid scoring those as leg/journey failures.
+ */
+function isLikelyPlatformOrBrowserInterruptionError(messageLike) {
+  const s = String(messageLike ?? '').toLowerCase();
+  if (!s.trim()) return false;
+  return (
+    s.includes('target closed') ||
+    s.includes('browser has been closed') ||
+    (s.includes('has been closed') &&
+      (s.includes('browser') || s.includes('context') || s.includes('page'))) ||
+    s.includes('context was destroyed') ||
+    s.includes('execution context was destroyed') ||
+    s.includes('page crashed') ||
+    (s.includes('protocol error') && s.includes('target')) ||
+    s.includes('econnreset') ||
+    s.includes('socket hang up') ||
+    (s.includes('websocket') && (s.includes('close') || s.includes('closed'))) ||
+    s.includes('connection closed') ||
+    s.includes('net::err_connection_reset')
+  );
+}
+
+/**
  * Compute a stable journey ID from page URL and journey content so the same logical journey
  * keeps the same id across runs even when the testable website's DOM ids/selectors change.
  * Uses normalized description + action signatures (type + normalized selector/description).
@@ -19255,7 +19279,8 @@ const sleep = safeWait;
             execErrLower.includes('not visible') ||
             execErrLower.includes('target closed') ||
             execErrLower.includes('navigation') ||
-            execErrLower.includes('frame was detached');
+            execErrLower.includes('frame was detached') ||
+            isLikelyPlatformOrBrowserInterruptionError(execErr);
           // IMPORTANT:
           // - SyntaxError / ReferenceError / bad imports are true AI-script surface bugs (retry bounded).
           // - "No actionable interaction" / collapsed sanitization are degenerate outputs, not JS engine bugs.
@@ -20793,8 +20818,25 @@ const sleep = safeWait;
           finalLegError = null;
           console.log('✅ Overriding AI failure: journey script execution succeeded (no blocking validation / throw)');
         } else {
-          finalLegStatus = insufficientSignalForJourney ? 'skipped' : 'failure';
-          finalLegResult = insufficientSignalForJourney ? 'skipped_insufficient_signal' : 'failure';
+          const interruptParts = [lastExecSnapshot.error, workflowState.lastExecutionResult?.error];
+          for (const iter of loopIterations) {
+            if (iter?.lastResult?.error) interruptParts.push(iter.lastResult.error);
+            if (iter?.error) interruptParts.push(iter.error);
+          }
+          const interruptBlob = interruptParts.filter(Boolean).join('\n');
+          if (isLikelyPlatformOrBrowserInterruptionError(interruptBlob)) {
+            finalLegStatus = 'skipped';
+            finalLegResult = 'skipped_platform_interrupt';
+            finalLegError =
+              String(interruptBlob).trim().slice(0, 500) ||
+              'Journey execution interrupted by platform/browser lifecycle (not scored as site failure)';
+            console.log(
+              '✅ Overriding AI failure: platform/browser interruption — classifying as skipped_platform_interrupt'
+            );
+          } else {
+            finalLegStatus = insufficientSignalForJourney ? 'skipped' : 'failure';
+            finalLegResult = insufficientSignalForJourney ? 'skipped_insufficient_signal' : 'failure';
+          }
         }
       } else {
         if (insufficientSignalForJourney) {
@@ -20811,7 +20853,7 @@ const sleep = safeWait;
       }
       if (finalLegStatus === 'success') {
         finalLegError = null;
-      } else {
+      } else if (finalLegResult !== 'skipped_platform_interrupt') {
         finalLegError = lastAiReason || finalLegError;
       }
     }
@@ -21190,6 +21232,9 @@ const sleep = safeWait;
     if (finalLegStatus === 'skipped' && finalLegResult === 'skipped_insufficient_signal') {
       finalJustificationStatus = 'skipped_insufficient_signal';
     }
+    if (finalLegStatus === 'skipped' && finalLegResult === 'skipped_platform_interrupt') {
+      finalJustificationStatus = 'skipped_platform_interrupt';
+    }
     
     // CRITICAL: Update journey with final justification_status and ai_justification after while-loop completes
     // Check multiple locations: currentJourney (from template), currentItem (default), or find from journeysToExecute
@@ -21216,8 +21261,10 @@ const sleep = safeWait;
           journey.status = 'success';
         } else if (terminalForStatus === 'failure' || terminalForStatus === 'failed') {
           journey.status = 'failure';
+        } else if (finalLegResult === 'skipped_platform_interrupt' || terminalForStatus === 'skipped_platform_interrupt') {
+          journey.status = 'skipped';
         }
-        if (finalLegResult === 'skipped_insufficient_signal') {
+        if (finalLegResult === 'skipped_insufficient_signal' || finalLegResult === 'skipped_platform_interrupt') {
           journey.final_result = finalLegResult;
         }
         if (finalExpectedOutcomeVerified !== undefined) {
@@ -21242,8 +21289,10 @@ const sleep = safeWait;
               workflowState.journeys[journeysIndex].status = 'success';
             } else if (terminalForStatus === 'failure' || terminalForStatus === 'failed') {
               workflowState.journeys[journeysIndex].status = 'failure';
+            } else if (finalLegResult === 'skipped_platform_interrupt' || terminalForStatus === 'skipped_platform_interrupt') {
+              workflowState.journeys[journeysIndex].status = 'skipped';
             }
-            if (finalLegResult === 'skipped_insufficient_signal') {
+            if (finalLegResult === 'skipped_insufficient_signal' || finalLegResult === 'skipped_platform_interrupt') {
               workflowState.journeys[journeysIndex].final_result = finalLegResult;
             }
             if (finalExpectedOutcomeVerified !== undefined) {
@@ -21260,7 +21309,12 @@ const sleep = safeWait;
               ...journey,
               ai_justification: journey.ai_justification || finalAiJustification || null,
               justification_status: journey.justification_status || finalJustificationStatus || null,
-              final_result: journey.final_result || (finalLegResult === 'skipped_insufficient_signal' ? finalLegResult : null) || null,
+              final_result:
+                journey.final_result ||
+                (finalLegResult === 'skipped_insufficient_signal' || finalLegResult === 'skipped_platform_interrupt'
+                  ? finalLegResult
+                  : null) ||
+                null,
               expected_outcome_verified: journey.expected_outcome_verified !== undefined ? journey.expected_outcome_verified : (finalExpectedOutcomeVerified !== undefined ? finalExpectedOutcomeVerified : undefined),
               verification_details: journey.verification_details || null
             };
@@ -21892,7 +21946,8 @@ const sleep = safeWait;
                 execErrLower.includes('not visible') ||
                 execErrLower.includes('target closed') ||
                 execErrLower.includes('navigation') ||
-                execErrLower.includes('frame was detached');
+                execErrLower.includes('frame was detached') ||
+                isLikelyPlatformOrBrowserInterruptionError(execErr);
 
               const hasExecutionError =
                 executionErrorType === 'execution' ||
