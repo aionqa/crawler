@@ -56,7 +56,8 @@ function isLikelyPlatformOrBrowserInterruptionError(messageLike) {
     s.includes('socket hang up') ||
     (s.includes('websocket') && (s.includes('close') || s.includes('closed'))) ||
     s.includes('connection closed') ||
-    s.includes('net::err_connection_reset')
+    s.includes('net::err_connection_reset') ||
+    s.includes('system_restart_recovery_requeue')
   );
 }
 
@@ -3550,6 +3551,19 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     workflowState.pageId = pageId || null;
     workflowState.projectId = projectId || null;
     workflowState.jobId = effectiveJobId; // Use effectiveJobId (from parameter or context)
+
+    const jobRecoveryCtx =
+      this.context?.context && typeof this.context.context === 'object' ? this.context.context : {};
+    const recoveryCountRaw = Number(
+      jobRecoveryCtx.system_restart_recovery_count ?? this.context?.system_restart_recovery_count ?? 0,
+    );
+    const recoveryCount =
+      Number.isFinite(recoveryCountRaw) && recoveryCountRaw > 0 ? Math.floor(recoveryCountRaw) : 0;
+    workflowState.platformRestartResume =
+      jobRecoveryCtx.platform_restart_resume === true ||
+      this.context?.platform_restart_resume === true ||
+      recoveryCount > 0;
+    workflowState.systemRestartRecoveryCount = recoveryCount;
 
     // If we already have a projectId but no pageId, try to upsert/discover the page early
     if (!workflowState.pageId && workflowState.projectId) {
@@ -17841,7 +17855,16 @@ const sleep = safeWait;
     const tKey = this._canonicalWorkflowPageUrlKey(target);
     const cKey = this._canonicalWorkflowPageUrlKey(current);
     const needsLoad = !current || current === 'about:blank' || !tKey || !cKey || tKey !== cKey;
-    if (!needsLoad) return;
+    if (!needsLoad) {
+      if (workflowState.platformRestartResume) {
+        try {
+          await this.waitForSpaInteractiveReady(page);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      return;
+    }
 
     const idx = meta.journeyForEachIndex;
     const reason =
@@ -17861,6 +17884,13 @@ const sleep = safeWait;
       const settle = Number(workflowState.options?.spa_settle_ms);
       const ms = Number.isFinite(settle) && settle > 0 ? Math.min(settle, 5000) : 800;
       await page.waitForTimeout(ms);
+      if (workflowState.platformRestartResume) {
+        try {
+          await this.waitForSpaInteractiveReady(page);
+        } catch (_) {
+          /* ignore */
+        }
+      }
     } catch (navErr) {
       await this.sendLogToBackend(jobId, 'warn', `⚠️ Could not reload analyzed page for journey context: ${navErr.message}`, 'WORKFLOW-ANALYZER', {
         target_url: target,
@@ -21050,6 +21080,14 @@ const sleep = safeWait;
             if (iter?.lastResult?.error) interruptParts.push(iter.lastResult.error);
             if (iter?.error) interruptParts.push(iter.error);
           }
+          if (
+            workflowState.platformRestartResume &&
+            !executionSucceeded &&
+            !hasSuccessfulIterationEvidence &&
+            iteration <= 1
+          ) {
+            interruptParts.push('system_restart_recovery_requeue');
+          }
           const interruptBlob = interruptParts.filter(Boolean).join('\n');
           if (isLikelyPlatformOrBrowserInterruptionError(interruptBlob)) {
             finalLegStatus = 'skipped';
@@ -21268,11 +21306,36 @@ const sleep = safeWait;
       }
     }
 
+    // After backend/orchestrator restart recovery, the first while-loop cycle may end as "failure"
+    // without a completed Playwright run (mid-click interrupt). Do not score that as a site defect.
+    if (
+      workflowState.platformRestartResume &&
+      !executionSucceeded &&
+      !hasSuccessfulIterationEvidence &&
+      iteration <= 1 &&
+      finalLegStatus === 'failure' &&
+      finalLegResult === 'failure'
+    ) {
+      finalLegStatus = 'skipped';
+      finalLegResult = 'skipped_platform_interrupt';
+      finalLegError =
+        finalLegError ||
+        'Journey leg inconclusive after system restart recovery (first cycle; not scored as target-site failure)';
+      console.log(
+        '✅ Normalized restart-recovery first-cycle leg failure to skipped_platform_interrupt',
+      );
+    }
+
     // Policy: non-success is allowed only when AI explicitly provides a reason.
     // If there is no AI reason for a terminal non-success, promote to success.
+    // Never promote intentional platform/signal skips (would mis-report monitor rollups).
     const explicitAiReason = String(lastAiReason || '').trim();
     const isNonSuccessTerminal = finalLegStatus && finalLegStatus !== 'success' && finalLegStatus !== 'completed';
-    if (isNonSuccessTerminal && !explicitAiReason) {
+    const isIntentionalSkipTerminal =
+      String(finalLegStatus || '').toLowerCase() === 'skipped' ||
+      finalLegResult === 'skipped_platform_interrupt' ||
+      finalLegResult === 'skipped_insufficient_signal';
+    if (isNonSuccessTerminal && !explicitAiReason && !isIntentionalSkipTerminal) {
       finalLegStatus = 'success';
       finalLegResult = 'success';
       finalLegError = null;
