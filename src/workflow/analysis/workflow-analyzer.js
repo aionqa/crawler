@@ -17859,9 +17859,12 @@ const sleep = safeWait;
       const settle = Number(workflowState.options?.spa_settle_ms);
       return Number.isFinite(settle) && settle > 0 ? Math.min(settle, 5000) : 800;
     };
+    const whileIter = Number(meta.while_loop_iteration);
+    const isJourneyWhileRetry = Number.isFinite(whileIter) && whileIter > 1;
+    const spaAfterJourneyNav =
+      workflowState.platformRestartResume === true || isJourneyWhileRetry;
     if (!needsLoad) {
-      const retryIter = Number(meta.while_loop_iteration);
-      if (Number.isFinite(retryIter) && retryIter > 1) {
+      if (isJourneyWhileRetry) {
         await this.sendLogToBackend(
           jobId,
           'info',
@@ -17871,14 +17874,14 @@ const sleep = safeWait;
             action: 'journey_page_context_retry_reload',
             target_url: target,
             previous_url: current || null,
-            while_loop_iteration: retryIter,
+            while_loop_iteration: whileIter,
             ...meta
           }
         );
         try {
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 });
           await page.waitForTimeout(settleMs());
-          if (workflowState.platformRestartResume) {
+          if (spaAfterJourneyNav) {
             try {
               await this.waitForSpaInteractiveReady(page);
             } catch (_) {
@@ -17896,7 +17899,7 @@ const sleep = safeWait;
           try {
             await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
             await page.waitForTimeout(settleMs());
-            if (workflowState.platformRestartResume) {
+            if (spaAfterJourneyNav) {
               try {
                 await this.waitForSpaInteractiveReady(page);
               } catch (_) {
@@ -17939,7 +17942,7 @@ const sleep = safeWait;
       await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
       const ms = settleMs();
       await page.waitForTimeout(ms);
-      if (workflowState.platformRestartResume) {
+      if (spaAfterJourneyNav) {
         try {
           await this.waitForSpaInteractiveReady(page);
         } catch (_) {
