@@ -534,6 +534,33 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Normalize orchestrator/backend restart markers from every place the runner merges job JSON.
+   * If recovery count is missing from nested `context.context` but present on `context` or `options`,
+   * we still treat the run as restart-stressed for save-analysis HTTP budgets.
+   */
+  readOrchestratorRestartSignals(ctx = {}) {
+    const nested = ctx.context && typeof ctx.context === 'object' ? ctx.context : {};
+    const opts = ctx.options && typeof ctx.options === 'object' ? ctx.options : {};
+    const nestedOptsCtx = opts.context && typeof opts.context === 'object' ? opts.context : {};
+    const raw = Number(
+      nested.system_restart_recovery_count ??
+        ctx.system_restart_recovery_count ??
+        opts.system_restart_recovery_count ??
+        nestedOptsCtx.system_restart_recovery_count ??
+        0,
+    );
+    const recoveryCount =
+      Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+    const platformRestartResume =
+      nested.platform_restart_resume === true ||
+      ctx.platform_restart_resume === true ||
+      opts.platform_restart_resume === true ||
+      nestedOptsCtx.platform_restart_resume === true ||
+      recoveryCount > 0;
+    return { recoveryCount, platformRestartResume };
+  }
+
+  /**
    * Load workflow template from backend
    */
   async loadWorkflowTemplate() {
@@ -3574,17 +3601,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     workflowState.projectId = projectId || null;
     workflowState.jobId = effectiveJobId; // Use effectiveJobId (from parameter or context)
 
-    const jobRecoveryCtx =
-      this.context?.context && typeof this.context.context === 'object' ? this.context.context : {};
-    const recoveryCountRaw = Number(
-      jobRecoveryCtx.system_restart_recovery_count ?? this.context?.system_restart_recovery_count ?? 0,
-    );
-    const recoveryCount =
-      Number.isFinite(recoveryCountRaw) && recoveryCountRaw > 0 ? Math.floor(recoveryCountRaw) : 0;
-    workflowState.platformRestartResume =
-      jobRecoveryCtx.platform_restart_resume === true ||
-      this.context?.platform_restart_resume === true ||
-      recoveryCount > 0;
+    const { recoveryCount, platformRestartResume } = this.readOrchestratorRestartSignals(this.context);
+    workflowState.platformRestartResume = platformRestartResume;
     workflowState.systemRestartRecoveryCount = recoveryCount;
 
     // If we already have a projectId but no pageId, try to upsert/discover the page early
@@ -16524,21 +16542,22 @@ const sleep = safeWait;
    * axios timeouts per POST (incident: AI finished in ~12s then step hit 900s outer timeout).
    */
   getRunnerSaveAnalysisOptionsForStep(workflowState, overrides = {}) {
-    const recoveryRaw =
-      workflowState?.systemRestartRecoveryCount ??
-      this.context?.system_restart_recovery_count ??
-      this.context?.context?.system_restart_recovery_count ??
-      0;
-    const recovery = Number.isFinite(Number(recoveryRaw)) ? Math.max(0, Math.floor(Number(recoveryRaw))) : 0;
+    const fromState = Number(workflowState?.systemRestartRecoveryCount ?? NaN);
+    const stateRecovery =
+      Number.isFinite(fromState) && fromState > 0 ? Math.floor(fromState) : 0;
+    const sig = this.readOrchestratorRestartSignals(this.context);
+    const recovery = Math.max(stateRecovery, sig.recoveryCount);
     const stressed =
       workflowState?.platformRestartResume === true ||
-      this.context?.platform_restart_resume === true ||
-      (this.context?.context && this.context.context.platform_restart_resume === true) ||
+      sig.platformRestartResume ||
       recovery > 0;
+    // postRunnerSaveAnalysis has its own retry loop; __skipBackendRetry avoids stacking axios
+    // interceptor retries (up to 8) on top of outer attempts — that combination exceeded ai-prompt
+    // Promise.race (900s) when the backend flapped during journey persistence after a fast AI call.
     if (stressed) {
-      return { timeout: 45000, maxAttempts: 3, ...overrides };
+      return { timeout: 40000, maxAttempts: 2, ...overrides };
     }
-    return { timeout: 120000, maxAttempts: 4, ...overrides };
+    return { timeout: 60000, maxAttempts: 3, ...overrides };
   }
 
   /**
@@ -16563,6 +16582,9 @@ const sleep = safeWait;
       timeout,
       maxBodyLength: Infinity,
       maxContentLength: Infinity,
+      // Outer for-loop already applies auth/gateway/network retries; disable axios interceptor
+      // stacking so total wall time stays within workflow step Promise.race budgets.
+      __skipBackendRetry: true,
     });
     let postOpts = buildOpts();
     let lastErr = null;
