@@ -7788,10 +7788,12 @@ return {
                 }
                 
                 console.log(`🔍 [JOURNEYS-IMMEDIATE] Saving ${journeys.length} journey(s) immediately after extraction to page ${pageIdToSave}`);
-                const response = await this.postRunnerSaveAnalysis(pageIdToSave, payload, jobId, {
-                  timeout: 120000,
-                  maxAttempts: 4
-                });
+                const response = await this.postRunnerSaveAnalysis(
+                  pageIdToSave,
+                  payload,
+                  jobId,
+                  this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+                );
                 workflowState.__journeysBulkSaveOkThisStep = true;
 
                 console.log(`✅ [JOURNEYS-IMMEDIATE] Successfully saved ${journeys.length} journey(s) immediately. Response status: ${response.status}`);
@@ -8004,10 +8006,12 @@ return {
               };
               
               console.log(`🔍 [JOURNEYS-CONVERT] Saving ${cleanedConvertJourneys.length} journey(s) after conversion to page ${pageIdToSave}`);
-              const response = await this.postRunnerSaveAnalysis(pageIdToSave, payload, jobId, {
-                timeout: 120000,
-                maxAttempts: 4
-              });
+              const response = await this.postRunnerSaveAnalysis(
+                pageIdToSave,
+                payload,
+                jobId,
+                this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+              );
               workflowState.__journeysBulkSaveOkThisStep = true;
 
               console.log(`✅ [JOURNEYS-CONVERT] Successfully saved ${journeys.length} journey(s) after conversion. Response status: ${response.status}`);
@@ -8171,10 +8175,12 @@ return {
                 });
               }
               
-              const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, {
-                timeout: 120000,
-                maxAttempts: 4
-              });
+              const response = await this.postRunnerSaveAnalysis(
+                pageIdToUse,
+                payload,
+                jobId,
+                this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+              );
               workflowState.__journeysBulkSaveOkThisStep = true;
 
               console.log(`💾 [JOURNEYS-SAVE] ✅ Successfully saved ${cleanedJourneys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
@@ -8365,10 +8371,12 @@ return {
               job_id: jobId
             };
             
-            const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, {
-              timeout: 120000,
-              maxAttempts: 4
-            });
+            const response = await this.postRunnerSaveAnalysis(
+              pageIdToUse,
+              payload,
+              jobId,
+              this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+            );
             workflowState.__journeysBulkSaveOkThisStep = true;
 
             console.log(`✅ [JOURNEYS-FALLBACK] Successfully saved ${workflowState.journeys.length} journey(s) to page ${pageIdToUse}. Response status: ${response.status}`);
@@ -8738,6 +8746,20 @@ return {
       // CRITICAL: After storing step result, ensure journeys are saved to backend
       // This is a final safety net to ensure journeys are saved even if earlier save attempts failed
       // Check both workflowState.journeys and variablePool for journeys (variableOutputs might have extracted them)
+      if (workflowState.__journeysBulkSaveOkThisStep) {
+        console.log(
+          `ℹ️ [JOURNEYS-PERSIST] Skipping JOURNEYS-FINAL and AI-PROMPT-END save-analysis (journeys already persisted this step)`,
+        );
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            `ℹ️ [JOURNEYS-PERSIST] Skipped redundant post-store journey POSTs (__journeysBulkSaveOkThisStep)`,
+            'WORKFLOW-ANALYZER',
+            { step_id: step.id },
+          );
+        }
+      } else {
       let journeysToSave = workflowState.journeys || null;
       if (!journeysToSave || journeysToSave.length === 0) {
         // Check variablePool for journeys extracted by variableOutputs
@@ -8783,10 +8805,12 @@ return {
                   job_id: jobId
                 };
                 
-                const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, {
-                  timeout: 165000,
-                  maxAttempts: 12,
-                });
+                const response = await this.postRunnerSaveAnalysis(
+                  pageIdToUse,
+                  payload,
+                  jobId,
+                  this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+                );
 
                 const _rjS = response?.data?.results?.journeys;
                 const _pS =
@@ -8840,10 +8864,12 @@ return {
                   journeys: journeysToSave.map((j) => this.cleanJourneyForSave(j)),
                   job_id: jobId
                 };
-                const refreshResponse = await this.postRunnerSaveAnalysis(pageIdToUse, refreshPayload, jobId, {
-                  timeout: 165000,
-                  maxAttempts: 12,
-                });
+                const refreshResponse = await this.postRunnerSaveAnalysis(
+                  pageIdToUse,
+                  refreshPayload,
+                  jobId,
+                  this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+                );
                 const _rjRf = refreshResponse?.data?.results?.journeys;
                 const _pRf =
                   _rjRf && typeof _rjRf.persisted_page_journeys === 'number'
@@ -8891,10 +8917,12 @@ return {
                 job_id: jobId
               };
               
-              const response = await this.postRunnerSaveAnalysis(pageIdToUse, payload, jobId, {
-                timeout: 165000,
-                maxAttempts: 12,
-              });
+              const response = await this.postRunnerSaveAnalysis(
+                pageIdToUse,
+                payload,
+                jobId,
+                this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+              );
 
               const _rjF = response?.data?.results?.journeys;
               const _pF =
@@ -8968,7 +8996,12 @@ return {
                   job_id: jobId
                 };
                 
-                const response = await this.postRunnerSaveAnalysis(pageIdFinal, payload, jobId);
+                const response = await this.postRunnerSaveAnalysis(
+                  pageIdFinal,
+                  payload,
+                  jobId,
+                  this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+                );
                 
                 console.log(`✅ [AI-PROMPT-END] Successfully saved ${newOnes.length} journey(s). Response status: ${response.status}`);
                 if (jobId && this.backendLogger) {
@@ -8985,7 +9018,12 @@ return {
                   journeys: finalJourneysToSave.map((j) => this.cleanJourneyForSave(j)),
                   job_id: jobId
                 };
-                const refreshResponse = await this.postRunnerSaveAnalysis(pageIdFinal, refreshPayload, jobId);
+                const refreshResponse = await this.postRunnerSaveAnalysis(
+                  pageIdFinal,
+                  refreshPayload,
+                  jobId,
+                  this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+                );
                 console.log(`✅ [AI-PROMPT-END] Refreshed ${finalJourneysToSave.length} journey(s). Response status: ${refreshResponse.status}`);
                 if (jobId && this.backendLogger) {
                   await this.backendLogger.appendJobLog(jobId, 'info', `✅ [AI-PROMPT-END] Refreshed ${finalJourneysToSave.length} journey(s) (pre-existing overlap)`, 'WORKFLOW-ANALYZER', {
@@ -9005,7 +9043,12 @@ return {
                 job_id: jobId
               };
               
-              const response = await this.postRunnerSaveAnalysis(pageIdFinal, payload, jobId);
+              const response = await this.postRunnerSaveAnalysis(
+                pageIdFinal,
+                payload,
+                jobId,
+                this.getRunnerSaveAnalysisOptionsForStep(workflowState),
+              );
               
               console.log(`✅ [AI-PROMPT-END] Successfully saved ${finalJourneysToSave.length} journey(s). Response status: ${response.status}`);
               if (jobId && this.backendLogger) {
@@ -9029,6 +9072,7 @@ return {
         }
       } else {
         console.warn(`⚠️ [AI-PROMPT-END] No journeys found to save (finalJourneysToSave=${finalJourneysToSave ? finalJourneysToSave.length : 'null'})`);
+      }
       }
       
       // CRITICAL: For determine_completion step, also store directly by ID for easy access
@@ -16462,6 +16506,30 @@ const sleep = safeWait;
       }
     }
     return headers;
+  }
+
+  /**
+   * HTTP budget for save-analysis calls that run inside a single ai-prompt step (still bounded by
+   * executeWorkflowSteps Promise.race). After a successful bulk journey save, redundant FINAL/END
+   * blocks are skipped — when they do run, cap retries so backend restarts cannot stack minutes of
+   * axios timeouts per POST (incident: AI finished in ~12s then step hit 900s outer timeout).
+   */
+  getRunnerSaveAnalysisOptionsForStep(workflowState, overrides = {}) {
+    const recoveryRaw =
+      workflowState?.systemRestartRecoveryCount ??
+      this.context?.system_restart_recovery_count ??
+      this.context?.context?.system_restart_recovery_count ??
+      0;
+    const recovery = Number.isFinite(Number(recoveryRaw)) ? Math.max(0, Math.floor(Number(recoveryRaw))) : 0;
+    const stressed =
+      workflowState?.platformRestartResume === true ||
+      this.context?.platform_restart_resume === true ||
+      (this.context?.context && this.context.context.platform_restart_resume === true) ||
+      recovery > 0;
+    if (stressed) {
+      return { timeout: 45000, maxAttempts: 3, ...overrides };
+    }
+    return { timeout: 120000, maxAttempts: 4, ...overrides };
   }
 
   /**
