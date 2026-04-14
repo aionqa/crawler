@@ -17855,7 +17855,63 @@ const sleep = safeWait;
     const tKey = this._canonicalWorkflowPageUrlKey(target);
     const cKey = this._canonicalWorkflowPageUrlKey(current);
     const needsLoad = !current || current === 'about:blank' || !tKey || !cKey || tKey !== cKey;
+    const settleMs = () => {
+      const settle = Number(workflowState.options?.spa_settle_ms);
+      return Number.isFinite(settle) && settle > 0 ? Math.min(settle, 5000) : 800;
+    };
     if (!needsLoad) {
+      const retryIter = Number(meta.while_loop_iteration);
+      if (Number.isFinite(retryIter) && retryIter > 1) {
+        await this.sendLogToBackend(
+          jobId,
+          'info',
+          '🧭 Journey while-loop retry pass: reloading analyzed URL to refresh DOM before regenerating the journey script.',
+          'WORKFLOW-ANALYZER',
+          {
+            action: 'journey_page_context_retry_reload',
+            target_url: target,
+            previous_url: current || null,
+            while_loop_iteration: retryIter,
+            ...meta
+          }
+        );
+        try {
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 });
+          await page.waitForTimeout(settleMs());
+          if (workflowState.platformRestartResume) {
+            try {
+              await this.waitForSpaInteractiveReady(page);
+            } catch (_) {
+              /* ignore */
+            }
+          }
+        } catch (relErr) {
+          await this.sendLogToBackend(
+            jobId,
+            'warn',
+            `⚠️ Retry reload failed (${relErr.message}); attempting goto fallback for journey context.`,
+            'WORKFLOW-ANALYZER',
+            { target_url: target, previous_url: current || null, ...meta }
+          );
+          try {
+            await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
+            await page.waitForTimeout(settleMs());
+            if (workflowState.platformRestartResume) {
+              try {
+                await this.waitForSpaInteractiveReady(page);
+              } catch (_) {
+                /* ignore */
+              }
+            }
+          } catch (navErr) {
+            await this.sendLogToBackend(jobId, 'warn', `⚠️ Goto fallback after retry reload failed: ${navErr.message}`, 'WORKFLOW-ANALYZER', {
+              target_url: target,
+              previous_url: current || null
+            });
+          }
+        }
+        return;
+      }
       if (workflowState.platformRestartResume) {
         try {
           await this.waitForSpaInteractiveReady(page);
@@ -17881,8 +17937,7 @@ const sleep = safeWait;
     });
     try {
       await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
-      const settle = Number(workflowState.options?.spa_settle_ms);
-      const ms = Number.isFinite(settle) && settle > 0 ? Math.min(settle, 5000) : 800;
+      const ms = settleMs();
       await page.waitForTimeout(ms);
       if (workflowState.platformRestartResume) {
         try {
@@ -18442,13 +18497,14 @@ const sleep = safeWait;
         stepIdLower.includes('test_journey') ||
         stepNameLower.includes('test journey') ||
         (stepIdLower.includes('journey') && stepIdLower.includes('iter'));
-      if (iteration === 1 && isJourneyTestWhileLoop && jobId) {
+      if (isJourneyTestWhileLoop && jobId) {
         const jIdxRaw = workflowState.currentJourneyIndex;
         const jIdx = Number.isFinite(Number(jIdxRaw)) ? Number(jIdxRaw) : undefined;
         await this.ensureAnalyzedPageContextForJourneys(page, workflowState, jobId, {
           journeyForEachIndex: jIdx,
           while_loop_step_id: step.id,
-          pass: 'while_loop_first_iteration'
+          while_loop_iteration: iteration,
+          pass: iteration === 1 ? 'while_loop_first_iteration' : 'while_loop_retry_iteration'
         });
       }
       
