@@ -28,7 +28,8 @@ function normalizeWorkflowStepType(type) {
 
 /** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
 const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
-const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 10 * 60 * 1000;
+/** 15m floor — aligned with analysis/workflow-analyzer (SPA journey nested steps). */
+const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
  * WorkflowAnalyzer - Updated 2025-10-15

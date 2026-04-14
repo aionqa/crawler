@@ -480,7 +480,8 @@ function normalizeConditionRestSegments(rootObject, restSegments) {
 /** Default max step timeout for workflow-analysis and page-discovery (ms). Use project "Max time per subjob" when available via context.max_job_duration_ms. */
 const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
 /** Floor for generated journey Playwright scripts (forms, modals, nested SPAs); nested races use this minimum. */
-const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 10 * 60 * 1000;
+/** 15m floor — matches getStepTimeout clamp max; Vue/SPA journeys often need full window inside nested while-loop races. */
+const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 15 * 60 * 1000;
 
 /** Journey Playwright execution may use `execute-code` or `execute-code-from-variable` depending on template. */
 function isJourneyScriptExecuteStep(step) {
@@ -13028,6 +13029,15 @@ return {
     s = this.repairQuotedActPseudocodeInFillAndType(s);
     s = this.repairLocatorBracketIndexChains(s);
     s = this.repairLocatorQuotedSelectorParenBalance(s);
+    // Redundant with fixInner but catches union typos outside quoted-arg regex coverage (concat / odd escaping).
+    s = s.replace(
+      /(button\[type=(?:['"]submit['"]|\\"submit\\")\]\s*,\s*button)\)/gi,
+      '$1',
+    );
+    s = s.replace(
+      /(input\[type=(?:['"]submit['"]|\\"submit\\")\]\s*,\s*(?:button|input))\)/gi,
+      '$1',
+    );
     s = this.replaceEmptyJourneyFillValues(s);
     s = this.normalizeConstrainedHtmlJourneyFills(s);
 
