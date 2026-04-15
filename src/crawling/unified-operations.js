@@ -4668,111 +4668,162 @@ async function extractPageElements(page, jobId) {
 
 // performStaticLogin function completely removed - all login operations must use workflow templates (rule 95-remove-deprecated-immediately.mdc)
 
-// Comprehensive link extraction
+/**
+ * Browser-side: normalize anchors into link rows. Used with frame.$$eval (each frame uses its own document URL as base).
+ * Self-contained — do not close over Node state.
+ */
+function _browserCollectLinksFromAnchorElements(elements, opts) {
+  const baseUrl = opts?.baseUrl || '';
+  const allowSubdomains = Boolean(opts?.allowSubdomains);
+  const projectDomains = Array.isArray(opts?.projectDomains) ? opts.projectDomains : [];
+  const apiDomains = Array.isArray(opts?.apiDomains) ? opts.apiDomains : [];
+  const linkSet = new Set();
+  const links = [];
+
+  const normalizeHost = (value) => String(value || '').toLowerCase().replace(/^www\./, '');
+  const getBaseDomain = (hostname) => {
+    const parts = normalizeHost(hostname).split('.').filter(Boolean);
+    if (parts.length < 2) return normalizeHost(hostname);
+    return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+  };
+  const hostMatchesDomain = (host, domain, allowSubs) => {
+    const h = normalizeHost(host);
+    const d = normalizeHost(domain);
+    if (!h || !d) return false;
+    if (h === d) return true;
+    if (allowSubs && (h.endsWith(`.${d}`) || getBaseDomain(h) === getBaseDomain(d))) return true;
+    return false;
+  };
+  const isProjectHost = (host, baseHost) => {
+    if (host === baseHost) return true;
+    if (projectDomains.length === 0) {
+      return allowSubdomains && getBaseDomain(host) === getBaseDomain(baseHost);
+    }
+    return projectDomains.some((domain) => hostMatchesDomain(host, domain, allowSubdomains));
+  };
+  const isApiHost = (host) => {
+    if (projectDomains.length > 0 && projectDomains.some((d) => hostMatchesDomain(host, d, true))) return false;
+    return apiDomains.some((apiDomain) => hostMatchesDomain(host, apiDomain, true));
+  };
+
+  elements.forEach((el) => {
+    const href = el.href || el.getAttribute('data-href') || el.getAttribute('data-url') || '';
+    if (!href || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:') || href === '#') {
+      return;
+    }
+
+    const text = el.textContent?.trim() || el.alt || el.title || '';
+
+    let isInternal = false;
+    let isApi = false;
+    let fullUrl = href;
+    try {
+      const linkUrl = new URL(href);
+      const baseUrlObj = new URL(baseUrl);
+      const linkHost = normalizeHost(linkUrl.hostname);
+      const baseHost = normalizeHost(baseUrlObj.hostname);
+      isApi = isApiHost(linkHost);
+      isInternal = !isApi && isProjectHost(linkHost, baseHost);
+      fullUrl = linkUrl.href;
+    } catch (e) {
+      if (href.startsWith('/') || href.startsWith('./') || href.startsWith('../') || !href.includes('://')) {
+        isInternal = true;
+        try {
+          fullUrl = new URL(href, baseUrl).href;
+          const relHost = normalizeHost(new URL(fullUrl).hostname);
+          isApi = isApiHost(relHost);
+          if (isApi) isInternal = false;
+        } catch (e2) {
+          fullUrl = href;
+        }
+      }
+    }
+
+    const urlWithoutHash = fullUrl.split('#')[0];
+    const hashFragment = fullUrl.includes('#') ? fullUrl.split('#')[1] : null;
+
+    if (!linkSet.has(fullUrl)) {
+      linkSet.add(fullUrl);
+      links.push({
+        text: text.substring(0, 200),
+        href: fullUrl,
+        urlWithoutHash: urlWithoutHash,
+        hashFragment: hashFragment,
+        title: el.title || '',
+        isInternal: isInternal,
+        isApi: isApi,
+        target: el.target || '',
+        rel: el.rel || ''
+      });
+    }
+  });
+
+  return links;
+}
+
+const LINK_EXTRACTION_SELECTOR = 'a[href], area[href], [data-href], [data-url]';
+
+// Comprehensive link extraction (main frame + all attached frames — iframes were previously skipped)
 async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false, domainScope = null) {
   try {
-    await sendLog(jobId, 'info', '🔗 Extracting all links from page (comprehensive scan)...');
-    
-    // Playwright's $$eval only supports passing a single argument; wrap inputs.
-    const links = await page.$$eval('a[href], area[href], [data-href], [data-url]', (elements, opts) => {
-      const baseUrl = opts?.baseUrl || '';
-      const allowSubdomains = Boolean(opts?.allowSubdomains);
-      const projectDomains = Array.isArray(opts?.projectDomains) ? opts.projectDomains : [];
-      const apiDomains = Array.isArray(opts?.apiDomains) ? opts.apiDomains : [];
-      const linkSet = new Set();
-      const links = [];
+    await sendLog(jobId, 'info', '🔗 Extracting all links from page (all frames, including iframes)...');
 
-      const normalizeHost = (value) => String(value || '').toLowerCase().replace(/^www\./, '');
-      const getBaseDomain = (hostname) => {
-        const parts = normalizeHost(hostname).split('.').filter(Boolean);
-        if (parts.length < 2) return normalizeHost(hostname);
-        return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
-      };
-      const hostMatchesDomain = (host, domain, allowSubs) => {
-        const h = normalizeHost(host);
-        const d = normalizeHost(domain);
-        if (!h || !d) return false;
-        if (h === d) return true;
-        if (allowSubs && (h.endsWith(`.${d}`) || getBaseDomain(h) === getBaseDomain(d))) return true;
-        return false;
-      };
-      const isProjectHost = (host, baseHost) => {
-        if (host === baseHost) return true;
-        if (projectDomains.length === 0) {
-          return allowSubdomains && getBaseDomain(host) === getBaseDomain(baseHost);
+    const projectDomains = Array.isArray(domainScope?.projectDomains) ? domainScope.projectDomains : [];
+    const apiDomains = Array.isArray(domainScope?.apiDomains) ? domainScope.apiDomains : [];
+
+    const aggregated = [];
+    let framesOk = 0;
+    let framesSkipped = 0;
+    const frames = typeof page.frames === 'function' ? page.frames() : [page.mainFrame()].filter(Boolean);
+
+    for (const frame of frames) {
+      if (!frame) continue;
+      let frameBase = baseUrl;
+      try {
+        const fu = frame.url();
+        if (fu && typeof fu === 'string' && !fu.startsWith('about:') && !fu.startsWith('chrome-error://')) {
+          frameBase = fu.split('#')[0];
         }
-        return projectDomains.some((domain) => hostMatchesDomain(host, domain, allowSubdomains));
+      } catch (_) {
+        frameBase = baseUrl;
+      }
+
+      const opts = {
+        baseUrl: frameBase,
+        allowSubdomains,
+        projectDomains,
+        apiDomains
       };
-      // API only if host matches apiDomain and is NOT in project (project takes precedence)
-      const isApiHost = (host) => {
-        if (projectDomains.length > 0 && projectDomains.some((d) => hostMatchesDomain(host, d, true))) return false;
-        return apiDomains.some((apiDomain) => hostMatchesDomain(host, apiDomain, true));
-      };
-      
-      elements.forEach(el => {
-        const href = el.href || el.getAttribute('data-href') || el.getAttribute('data-url') || '';
-        if (!href || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:') || href === '#') {
-          return;
+
+      try {
+        const part = await frame.$$eval(LINK_EXTRACTION_SELECTOR, _browserCollectLinksFromAnchorElements, opts);
+        if (Array.isArray(part) && part.length) {
+          aggregated.push(...part);
         }
-        
-        const text = el.textContent?.trim() || el.alt || el.title || '';
-        
-        // Parse URL to check if it's within domain
-        let isInternal = false;
-        let isApi = false;
-        let fullUrl = href;
-        try {
-          const linkUrl = new URL(href);
-          const baseUrlObj = new URL(baseUrl);
-          const linkHost = normalizeHost(linkUrl.hostname);
-          const baseHost = normalizeHost(baseUrlObj.hostname);
-          isApi = isApiHost(linkHost);
-          isInternal = !isApi && isProjectHost(linkHost, baseHost);
-          fullUrl = linkUrl.href;
-        } catch (e) {
-          // Relative URL or invalid
-          if (href.startsWith('/') || href.startsWith('./') || href.startsWith('../') || !href.includes('://')) {
-            // Relative links are internal to current page host by definition.
-            isInternal = true;
-            try {
-              fullUrl = new URL(href, baseUrl).href;
-              const relHost = normalizeHost(new URL(fullUrl).hostname);
-              isApi = isApiHost(relHost);
-              if (isApi) isInternal = false;
-            } catch (e2) {
-              fullUrl = href;
-            }
-          }
-        }
-        
-        // Preserve all hash fragments - always use full URL for deduplication
-        const urlWithoutHash = fullUrl.split('#')[0];
-        const hashFragment = fullUrl.includes('#') ? fullUrl.split('#')[1] : null;
-        
-        // Deduplicate URLs using full URL (preserving hash fragments)
-        if (!linkSet.has(fullUrl)) {
-          linkSet.add(fullUrl);
-          links.push({
-            text: text.substring(0, 200), // Limit text length
-            href: fullUrl,
-            urlWithoutHash: urlWithoutHash,
-            hashFragment: hashFragment,
-            title: el.title || '',
-            isInternal: isInternal,
-            isApi: isApi,
-            target: el.target || '',
-            rel: el.rel || ''
-          });
-        }
-      });
-      
-      return links;
-    }, {
-      baseUrl,
-      allowSubdomains,
-      projectDomains: Array.isArray(domainScope?.projectDomains) ? domainScope.projectDomains : [],
-      apiDomains: Array.isArray(domainScope?.apiDomains) ? domainScope.apiDomains : []
-    });
+        framesOk++;
+      } catch (e) {
+        framesSkipped++;
+        await sendLog(
+          jobId,
+          'info',
+          `🔗 Link scan skipped a frame (${String(e?.message || e).slice(0, 160)})`
+        );
+      }
+    }
+
+    await sendLog(
+      jobId,
+      'info',
+      `🔗 Frame scan: ${framesOk} frame(s) scanned${framesSkipped ? `, ${framesSkipped} skipped (detached/cross-origin policy)` : ''}`
+    );
+
+    const mergedByHref = new Map();
+    for (const l of aggregated) {
+      const k = l?.href;
+      if (!k || mergedByHref.has(k)) continue;
+      mergedByHref.set(k, l);
+    }
+    const links = Array.from(mergedByHref.values());
     
     const normalizeUrlForDedup = (value) => {
       try {

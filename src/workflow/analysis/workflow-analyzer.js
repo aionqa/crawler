@@ -1311,31 +1311,54 @@ class WorkflowAnalyzer {
         }
       }
 
-      // Extract links (excluding pure anchors, but preserving all hash fragments in full URLs)
-      const links = await page.$$('a[href]');
-      for (const link of links.slice(0, 50)) { // Limit to first 50 links
-        // Use resolved href (full URL) instead of raw attribute to get complete URLs with hash fragments
-        const href = await link.evaluate(el => el.href || el.getAttribute('href'));
-        const text = await link.textContent();
-        const onclickAttr = await link.getAttribute('onclick');
-        
-        const isPureAnchor = href.startsWith('#') && !href.startsWith('http');
-        
-        // Exclude pure anchor links (#section) but include all full URLs with any hash fragments
-        if (href && 
-            !href.startsWith('javascript:') && 
-            !isPureAnchor && // Exclude pure anchors like "#section"
+      // Extract links (excluding pure anchors, but preserving all hash fragments in full URLs).
+      // Scan every frame — SPAs often mount nav in same-origin iframes; page.$$ only saw the main frame before.
+      const seenWorkflowHrefs = new Set();
+      let workflowLinkBudget = 50;
+      for (const frame of page.frames()) {
+        if (workflowLinkBudget <= 0) break;
+        let frameAnchors = [];
+        try {
+          frameAnchors = await frame.$$('a[href]');
+        } catch (_) {
+          continue;
+        }
+        for (const link of frameAnchors) {
+          if (workflowLinkBudget <= 0) break;
+          const href = await link.evaluate((el) => el.href || el.getAttribute('href'));
+          if (!href || seenWorkflowHrefs.has(href)) continue;
+          const text = await link.textContent();
+          const onclickAttr = await link.getAttribute('onclick');
+
+          const isPureAnchor = href.startsWith('#') && !href.startsWith('http');
+
+          if (
+            href &&
+            !href.startsWith('javascript:') &&
+            !isPureAnchor &&
             !href.startsWith('mailto:') &&
             !href.startsWith('tel:') &&
-            href.trim() !== '') {
-          const linkSelectors = await this.getElementSelector(link);
-          analysis.links.push({
-            href,
-            text: text?.trim(),
-            onclick: onclickAttr ? onclickAttr.substring(0, 400) : null,
-            selector: linkSelectors[0]?.selector, // Primary selector
-            selectors: linkSelectors // All strategies
-          });
+            href.trim() !== ''
+          ) {
+            seenWorkflowHrefs.add(href);
+            const linkSelectors = await this.getElementSelector(link);
+            analysis.links.push({
+              href,
+              text: text?.trim(),
+              onclick: onclickAttr ? onclickAttr.substring(0, 400) : null,
+              selector: linkSelectors[0]?.selector,
+              selectors: linkSelectors,
+              in_frame: frame !== page.mainFrame(),
+              frame_url: (() => {
+                try {
+                  return frame.url() || '';
+                } catch {
+                  return '';
+                }
+              })()
+            });
+            workflowLinkBudget--;
+          }
         }
       }
 
