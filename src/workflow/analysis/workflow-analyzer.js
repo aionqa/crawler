@@ -9,6 +9,15 @@ import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../.
 import { replaceNetworkIdleWithDomContentLoadedForAutomation } from '../utils/normalize-playwright-network-idle.js';
 import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
 import { evaluateLoginSessionEvidenceOverride } from '../utils/login-session-evidence-override.js';
+import {
+  settlePageUrlAfterNavigation,
+  getDomInventoryPrimitives,
+  summarizePlaywrightInventoryScore,
+  assessScreenshotVsPlaywrightInventory,
+  augmentInventoryFromHtmlAi,
+  mergeHtmlAiCandidatesIntoAnalysis,
+  shouldAttemptReconciliation,
+} from './extraction-reconciliation.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -4792,6 +4801,14 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     const hadPriorFullInventory =
       workflowState.playwrightAnalysis && !playwrightInventoryIsEmpty(workflowState.playwrightAnalysis);
 
+    // After auth redirects, settle final URL before DOM inventory (then SPA hydration wait).
+    await settlePageUrlAfterNavigation(page, (line) => {
+      if (jobId && this.backendLogger) {
+        this.backendLogger.appendJobLog(jobId, 'info', line, 'WORKFLOW-ANALYZER', {
+          action: 'extraction_settle_navigation',
+        }).catch(() => {});
+      }
+    });
     await this.waitForSpaInteractiveReady(page);
     let analysis = await this.performPlaywrightAnalysis(page);
 
@@ -4915,6 +4932,109 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         }
       }
     }
+
+    // Playwright + screenshot + DOM primitives vs structured inventory; optional HTML-AI augmentation (evidence-driven, not URL rules).
+    try {
+      const projectId = workflowState.projectId || this.context?.project_id || null;
+      let viewportShotB64 = null;
+      try {
+        const buf = await page.screenshot({ type: 'png', fullPage: false }).catch(() => null);
+        viewportShotB64 = buf ? buf.toString('base64') : null;
+      } catch (_) {}
+      const domPrim = await getDomInventoryPrimitives(page);
+      const pwScore = summarizePlaywrightInventoryScore(analysis);
+      let vision = null;
+      if (this.aiLogger && viewportShotB64 && (playwrightInventoryIsEmpty(analysis) || pwScore <= 4)) {
+        vision = await assessScreenshotVsPlaywrightInventory({
+          aiLogger: this.aiLogger,
+          jobId,
+          pageUrl: workflowState.pageUrl || '',
+          screenshotBase64: viewportShotB64,
+          playwrightScore: pwScore,
+          domPrimitives: domPrim,
+          projectId,
+        });
+      }
+      const mismatchLikely = shouldAttemptReconciliation({
+        playwrightScore: pwScore,
+        domPrimitives: domPrim,
+        vision,
+      });
+      let htmlAiResult = null;
+      if (mismatchLikely && this.aiLogger) {
+        const html = await page.content().catch(() => '');
+        if (html && html.length > 400) {
+          htmlAiResult = await augmentInventoryFromHtmlAi({
+            aiLogger: this.aiLogger,
+            jobId,
+            pageUrl: workflowState.pageUrl || '',
+            html,
+            projectId,
+          });
+          if (htmlAiResult) {
+            analysis = mergeHtmlAiCandidatesIntoAnalysis(analysis, htmlAiResult);
+          }
+        }
+      }
+      const stillEmpty = playwrightInventoryIsEmpty(analysis);
+      workflowState.extractionReconciliation = {
+        playwright_score: pwScore,
+        dom_primitive_nodes: domPrim.approximateInteractiveNodes,
+        vision_assessment: vision,
+        html_ai_fallback_applied: Boolean(
+          htmlAiResult &&
+            ((Array.isArray(htmlAiResult.links) && htmlAiResult.links.length > 0) ||
+              (Array.isArray(htmlAiResult.interactive_elements) && htmlAiResult.interactive_elements.length > 0)),
+        ),
+        inventory_still_empty_after_reconciliation: stillEmpty,
+        screenshot_used_for_assessment: Boolean(viewportShotB64),
+      };
+      const payload = {
+        playwright_score: pwScore,
+        dom_primitive_nodes: domPrim.approximateInteractiveNodes,
+        html_ai_fallback_applied: workflowState.extractionReconciliation.html_ai_fallback_applied,
+        inventory_still_empty: stillEmpty,
+        screenshot_assessed: Boolean(vision),
+      };
+      const msg = `[EXTRACTION_RECONCILIATION] ${JSON.stringify(payload)}`;
+      const level =
+        stillEmpty && (domPrim.approximateInteractiveNodes >= 12 || vision?.ui_surface_likelihood === 'high')
+          ? 'warn'
+          : workflowState.extractionReconciliation.html_ai_fallback_applied
+            ? 'warn'
+            : 'info';
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(jobId, level, msg, 'WORKFLOW-ANALYZER', {
+          action: 'extraction_reconciliation',
+          ...payload,
+        });
+      }
+      if (workflowState.extractionReconciliation.html_ai_fallback_applied && jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'warn',
+          '⚠️ [EXTRACTION_RECONCILIATION] html_ai_fallback_applied — inventory was augmented using full-HTML AI analysis because Playwright structured extraction and screenshot/DOM evidence indicated missing inventory. Prefer fixing Playwright/DOM capture so primary inventory comes from browser extraction, not HTML inference.',
+          'WORKFLOW-ANALYZER',
+          { action: 'extraction_html_ai_warning' },
+        );
+      }
+      if (
+        stillEmpty &&
+        (domPrim.approximateInteractiveNodes >= 12 || vision?.ui_surface_likelihood === 'high') &&
+        jobId &&
+        this.backendLogger
+      ) {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'warn',
+          '⚠️ [EXTRACTION_RECONCILIATION] extraction_still_empty_after_reconciliation — screenshot/DOM suggest a populated UI but structured inventory remained empty; treat page analysis as degraded (not a clean success).',
+          'WORKFLOW-ANALYZER',
+          { action: 'extraction_still_empty', dom_primitive_nodes: domPrim.approximateInteractiveNodes },
+        );
+      }
+    } catch (recErr) {
+      console.warn('[WORKFLOW-ANALYZER] extraction reconciliation failed:', recErr?.message || recErr);
+    }
     
     workflowState.playwrightAnalysis = analysis;
     
@@ -4972,7 +5092,10 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
             links: Array.isArray(analysis.links) ? analysis.links : [],
             menu_items: Array.isArray(analysis.menu_items) ? analysis.menu_items : [],
             interactive_elements: Array.isArray(analysis.interactive_elements) ? analysis.interactive_elements : [],
-            non_interactive_elements: Array.isArray(analysis.non_interactive_elements) ? analysis.non_interactive_elements : []
+            non_interactive_elements: Array.isArray(analysis.non_interactive_elements) ? analysis.non_interactive_elements : [],
+            ...(workflowState.extractionReconciliation
+              ? { extraction_reconciliation: workflowState.extractionReconciliation }
+              : {})
           }
         );
         console.log(`✅ Playwright analysis data saved directly to page: ${analysis.forms.length} forms, ${analysis.interactive_elements.length} interactive elements`);

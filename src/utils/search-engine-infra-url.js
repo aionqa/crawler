@@ -1,5 +1,5 @@
 /**
- * Crawler/indexing infrastructure URLs — not human-facing HTML pages.
+ * Crawler/indexing infrastructure URLs — not human-facing HTML pages (robots, sitemaps, well-known).
  * Skip for crawl queue, link discovery, recursive crawl targets, SEO/content steps, and backend discover.
  */
 export function isSearchEngineInfraUrl(urlString) {
