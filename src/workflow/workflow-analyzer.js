@@ -2439,7 +2439,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
             executionResult: workflowState.lastExecutionResult || null
           };
           // Continue to next step (self-adjustable-ai-workflow) which will handle retry
-        } else if (step.config?.critical && !nextStepIsAdjustable) {
+        } else if (step.continueOnError === true) {
+          await this.sendLogToBackend(effectiveJobId, 'warn', `⚠️ Step "${step.name || step.id}" failed but continueOnError=true — continuing workflow`, 'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            step_name: step.name || step.type,
+            step_type: step.type,
+            step_order: i + 1,
+            error: stepError.message,
+          });
+          continue;
+        } else {
+          // Default: abort workflow on step failure (matches analysis/workflow-analyzer.js).
+          // Previous logic only rethrew when step.config.critical was set, which swallowed timeouts
+          // and produced contradictory downstream "success" for login jobs.
           throw stepError;
         }
       }
