@@ -6568,6 +6568,7 @@ return {
             aiErrorCode === 'ECONNREFUSED' ||
             aiErrorCode === 'ENOTFOUND' ||
             aiErrorCode === 'ETIMEDOUT' ||
+            aiErrorCode === 'ECONNRESET' ||
             aiErrorTextLower.includes('econnrefused') ||
             aiErrorTextLower.includes('socket hang up') ||
             aiErrorTextLower.includes('service unavailable') ||
@@ -6576,9 +6577,8 @@ return {
             aiErrorTextLower.includes('timed out') ||
             aiErrorTextLower.includes('timeout');
 
-          // Runner helpers can occasionally execute without local AI provider configured.
-          // For login validation steps, provide a deterministic page-state fallback instead of hard-failing the job.
-          if (isLoginValidationStep && aiErrorText.includes('AI not configured')) {
+          // When AI is missing, unreachable, or times out, avoid stalling login on validation prompts.
+          if (isLoginValidationStep && isAiUnavailableError) {
             let bodyText = '';
             let hasPasswordField = false;
             let hasEmailField = false;
@@ -6609,6 +6609,10 @@ return {
             const isLoginStatusUrl = currentUrl.includes('login-status');
 
             const onLoginUrl = !isLoginSuccessUrl && !isLoginStatusUrl && /\/login\b/.test(currentUrl);
+            const looksLikeAuthenticatedLanding =
+              /\/dashboard(\/|$|\?|#)/i.test(currentUrl) ||
+              /\/portal(\/|$|\?|#)/i.test(currentUrl) ||
+              /\/console(\/|$|\?|#)/i.test(currentUrl);
 
             // URL alone is a weak signal (status pages still contain "login" in path).
             const hasLoginControls = hasPasswordField || hasEmailField || hasSubmitLikeButton;
@@ -6618,6 +6622,8 @@ return {
               ? 'success'
               : hasErrorSignal
                 ? 'failure'
+                : (looksLikeAuthenticatedLanding && !hasErrorSignal)
+                  ? 'success'
                 : (!looksLikeLoginFlow && hasSuccessSignal)
                   ? 'success'
                   : 'continue';
@@ -6626,7 +6632,7 @@ return {
             aiResponse = {
               status,
               is_complete: isComplete,
-              reason: 'AI provider unavailable on runner helper; used deterministic DOM-based login validation fallback.',
+              reason: 'AI unavailable or transport/timed out; used deterministic DOM-based login validation fallback.',
               what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}, isLoginSuccessUrl=${isLoginSuccessUrl}, isLoginStatusUrl=${isLoginStatusUrl}`,
               new_content_detected: status !== 'continue',
               content_type: 'page',
@@ -6644,7 +6650,7 @@ return {
               await this.backendLogger.appendJobLog(
                 jobId,
                 'warn',
-                `⚠️ AI unavailable for ${step.id || step.name}; using deterministic login validation fallback`,
+                `⚠️ AI unavailable or transport error for ${step.id || step.name}; using deterministic login validation fallback`,
                 'WORKFLOW-ANALYZER',
                 { status, current_url: currentUrl, has_email_field: hasEmailField, has_password_field: hasPasswordField, has_submit_like_button: hasSubmitLikeButton, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
               );

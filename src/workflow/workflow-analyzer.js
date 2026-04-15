@@ -4312,6 +4312,24 @@ return {
         }
       } catch (aiError) {
         const aiErrorText = String(aiError?.message || '');
+        const aiErrorCode = String(aiError?.code || '');
+        const aiErrorTextLower = aiErrorText.toLowerCase();
+        const isAiUnavailableForLoginValidation =
+          aiErrorText.includes('AI not configured') ||
+          aiErrorTextLower.includes('openai api key') ||
+          aiErrorTextLower.includes('api key') ||
+          aiErrorTextLower.includes('not provided') ||
+          aiErrorCode === 'ECONNREFUSED' ||
+          aiErrorCode === 'ENOTFOUND' ||
+          aiErrorCode === 'ETIMEDOUT' ||
+          aiErrorCode === 'ECONNRESET' ||
+          aiErrorTextLower.includes('econnrefused') ||
+          aiErrorTextLower.includes('socket hang up') ||
+          aiErrorTextLower.includes('service unavailable') ||
+          aiErrorTextLower.includes('getaddrinfo') ||
+          aiErrorTextLower.includes('enotfound') ||
+          aiErrorTextLower.includes('timed out') ||
+          aiErrorTextLower.includes('timeout');
         const stepIdLower = String(step.id || '').toLowerCase();
         const stepNameLower = String(step.name || '').toLowerCase();
         const isLoginValidationStep =
@@ -4345,9 +4363,8 @@ return {
           }
         }
 
-        // Some helpers run without local AI provider configured.
-        // For login validation steps, provide deterministic DOM-based fallback instead of hard-failing.
-        if (!aiResponse && isLoginValidationStep && aiErrorText.includes('AI not configured')) {
+        // When AI is missing, unreachable, or times out, avoid stalling the whole login workflow on validation prompts.
+        if (!aiResponse && isLoginValidationStep && isAiUnavailableForLoginValidation) {
           let bodyText = '';
           let hasPasswordField = false;
           let hasEmailField = false;
@@ -4383,6 +4400,10 @@ return {
           const isLoginStatusUrl = currentUrl.includes('login-status');
           // Treat explicit success/status pages as NOT being "still on login".
           const onLoginUrl = !isLoginSuccessUrl && !isLoginStatusUrl && (/\/login\b/.test(currentUrl) || currentUrl.includes('auth'));
+          const looksLikeAuthenticatedLanding =
+            /\/dashboard(\/|$|\?|#)/i.test(currentUrl) ||
+            /\/portal(\/|$|\?|#)/i.test(currentUrl) ||
+            /\/console(\/|$|\?|#)/i.test(currentUrl);
 
           // Without AI, be conservative:
           // - if we're still clearly on a login flow (URL contains login/auth OR login fields/buttons exist) => continue
@@ -4406,6 +4427,8 @@ return {
             ? 'success'
             : hasErrorSignal
               ? 'failure'
+              : (looksLikeAuthenticatedLanding && !hasErrorSignal)
+                ? 'success'
               : hasVerificationEvidence
                 ? 'success'
               : (!looksLikeLoginFlow && hasSuccessSignal)
@@ -4416,7 +4439,7 @@ return {
           aiResponse = {
             status,
             is_complete: isComplete,
-            reason: 'AI provider unavailable on runner helper; used deterministic DOM-based login validation fallback.',
+            reason: 'AI unavailable or transport/timed out; used deterministic DOM-based login validation fallback.',
             what_happened: `URL=${currentUrl}, hasEmailField=${hasEmailField}, hasPasswordField=${hasPasswordField}, hasSubmitLikeButton=${hasSubmitLikeButton}, successSignal=${hasSuccessSignal}, errorSignal=${hasErrorSignal}, verificationEvidence=${hasVerificationEvidence}, cookies=${Array.isArray(cookies) ? cookies.length : 0}`,
             new_content_detected: status !== 'continue',
             content_type: 'page',
@@ -4434,7 +4457,7 @@ return {
             await this.backendLogger.appendJobLog(
               jobId,
               'warn',
-              `⚠️ AI unavailable for ${step.id || step.name}; using deterministic login validation fallback`,
+              `⚠️ AI unavailable or transport error for ${step.id || step.name}; using deterministic login validation fallback`,
               'WORKFLOW-ANALYZER',
               { status, current_url: currentUrl, has_password_field: hasPasswordField, has_success_signal: hasSuccessSignal, has_error_signal: hasErrorSignal }
             );
