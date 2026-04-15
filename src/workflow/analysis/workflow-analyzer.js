@@ -5674,8 +5674,27 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     const effectiveAdditionalPrompt = await this.getEffectiveAdditionalPromptText(workflowState);
     const stepIndex = stepContext?.stepIndex;
     const totalSteps = stepContext?.siblings?.length ?? this.workflowTemplate?.steps?.length ?? null;
+
+    // Keep page_url aligned with live navigation (OAuth redirects, SPA transitions). Stale
+    // workflowState.pageUrl caused determine_completion / AI logs to show "/login" on dashboard URLs.
+    let liveBrowserUrl = '';
+    try {
+      const u = String(page.url() || '');
+      if (u && u !== 'about:blank') liveBrowserUrl = u;
+    } catch (_) {}
+    if (liveBrowserUrl) {
+      workflowState.pageUrl = liveBrowserUrl;
+      try {
+        if (!workflowState.variablePool) {
+          workflowState.variablePool = { job: {}, page: {}, cycle: [], steps: {} };
+        }
+        if (!workflowState.variablePool.page) workflowState.variablePool.page = {};
+        workflowState.variablePool.page.page_url = liveBrowserUrl;
+      } catch (_) {}
+    }
+
     const stepPayload = {
-      page_url: workflowState.pageUrl,
+      page_url: liveBrowserUrl || workflowState.pageUrl,
       page_title: workflowState.pageTitle || await page.title(),
       page_content: workflowState.htmlContent || await page.content(),
       additional_prompt_text: effectiveAdditionalPrompt,
@@ -6398,8 +6417,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         response_schema: responseSchema
       };
       
-      // CRITICAL: Ensure pageUrl is set correctly for AI conversation logging
-      const effectivePageUrl = workflowState.pageUrl || workflowState.expectedLoginUrl || page.url();
+      // CRITICAL: Prefer live URL over stale workflowState.pageUrl (synced at start of this step).
+      const effectivePageUrl = liveBrowserUrl || workflowState.pageUrl || workflowState.expectedLoginUrl || page.url();
       console.log(`📄 VAR_DUMP: executeAIPromptStep - effectivePageUrl=${effectivePageUrl}`);
       console.log(`📄 VAR_DUMP: executeAIPromptStep - jobId=${jobId}`);
       console.log(`📄 VAR_DUMP: executeAIPromptStep - promptIdentifier=${promptIdentifier}`);
@@ -22209,7 +22228,7 @@ const sleep = safeWait;
             await axios.post(
               `${this.backendUrl}/api/runner/pages/${workflowState.pageId}/save-analysis`,
               payload,
-              { headers: this.getAuthHeaders() }
+              { headers: this.getAuthHeaders(), timeout: 120000 }
             );
             console.log(`💾 [WHILE-LOOP-COMPLETE] ✅ Successfully saved journey ${journeyId} with final justification after while-loop completion`);
           } catch (saveError) {
@@ -22256,7 +22275,7 @@ const sleep = safeWait;
                 journeys: [safeJourney],
                 job_id: jobId
               },
-              { headers: this.getAuthHeaders() }
+              { headers: this.getAuthHeaders(), timeout: 120000 }
             );
             console.log(`💾 [WHILE-LOOP-FINAL] ✅ Successfully saved ${journey.iterations.length} iteration(s) for journey ${journeyId}`);
           } catch (saveError) {
@@ -22288,7 +22307,8 @@ const sleep = safeWait;
             timestamp: new Date().toISOString()
           }
         }, {
-          headers: this.getAuthHeaders()
+          headers: this.getAuthHeaders(),
+          timeout: 120000
         });
       } catch (error) {
         console.error(`⚠️ Failed to log while-loop completion: ${error.message}`);

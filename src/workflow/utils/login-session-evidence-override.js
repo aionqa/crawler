@@ -63,6 +63,8 @@ export function evaluateLoginSessionEvidenceOverride({
       const name = String(c?.name || '');
       if (!name) return false;
       if (/^(session|sess|sid|jwt|auth|token|id_token|refresh|sso|connect\.sid)/i.test(name)) return true;
+      // OAuth/BFF stacks often use __Host- / __Secure- prefixed cookies; treat as session-shaped when non-trivial.
+      if (/^(__host-|__secure-)/i.test(name) && String(c?.value || '').length >= 8) return true;
       if (c?.httpOnly === true && String(c?.value || '').length >= 16) return true;
       return false;
     };

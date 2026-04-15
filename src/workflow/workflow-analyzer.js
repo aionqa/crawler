@@ -3458,10 +3458,29 @@ IMPORTANT OUTPUT REQUIREMENTS:
     const contextInfo = this.resolveStepContext(step, stepContext, this.workflowTemplate?.steps);
     const requirementText = contextInfo.requirementText;
     const decoratedTemplate = appendRequirementToTemplate(customTemplate, requirementText);
-    
+
+    // Align workflow page metadata with the live main-frame URL. Login/OAuth flows navigate away
+    // from the seed URL while workflowState.pageUrl stayed at the initial value, so AI prompts and
+    // logs showed "/login" even on post-auth surfaces (dashboard), biasing determine_completion.
+    let liveBrowserUrl = '';
+    try {
+      const u = String(page.url() || '');
+      if (u && u !== 'about:blank') liveBrowserUrl = u;
+    } catch (_) {}
+    if (liveBrowserUrl) {
+      workflowState.pageUrl = liveBrowserUrl;
+      try {
+        if (!workflowState.variablePool) {
+          workflowState.variablePool = { job: {}, page: {}, cycle: [], steps: {} };
+        }
+        if (!workflowState.variablePool.page) workflowState.variablePool.page = {};
+        workflowState.variablePool.page.page_url = liveBrowserUrl;
+      } catch (_) {}
+    }
+
     // Prepare payload based on step configuration
     const stepPayload = {
-      page_url: workflowState.pageUrl,
+      page_url: liveBrowserUrl || workflowState.pageUrl,
       page_title: workflowState.pageTitle || await page.title(),
       page_content: workflowState.htmlContent || await page.content(),
       additional_prompt_text: this.context.additional_prompt_text || ''
@@ -3950,8 +3969,8 @@ IMPORTANT OUTPUT REQUIREMENTS:
         response_schema: responseSchema
       };
       
-      // CRITICAL: Ensure pageUrl is set correctly for AI conversation logging
-      const effectivePageUrl = workflowState.pageUrl || workflowState.expectedLoginUrl || page.url();
+      // CRITICAL: Prefer live navigation URL over stale workflowState.pageUrl (see sync above).
+      const effectivePageUrl = liveBrowserUrl || workflowState.pageUrl || workflowState.expectedLoginUrl || page.url();
       console.log(`📄 VAR_DUMP: executeAIPromptStep - effectivePageUrl=${effectivePageUrl}`);
       console.log(`📄 VAR_DUMP: executeAIPromptStep - jobId=${jobId}`);
       console.log(`📄 VAR_DUMP: executeAIPromptStep - promptIdentifier=${promptIdentifier}`);
@@ -13374,7 +13393,8 @@ ${executableBody}`;
                 job_id: jobId  // CRITICAL: Include job_id for action matching
               },
               {
-                headers: this.getAuthHeaders()
+                headers: this.getAuthHeaders(),
+                timeout: 120000
               }
             );
             console.log(`✅ Marked journey ${journeyId} as completed with status: ${finalLegResult} (job_id: ${jobId})`);
@@ -13422,7 +13442,8 @@ ${executableBody}`;
             timestamp: new Date().toISOString()
           }
         }, {
-          headers: this.getAuthHeaders()
+          headers: this.getAuthHeaders(),
+          timeout: 120000
         });
       } catch (error) {
         console.error(`⚠️ Failed to log while-loop completion: ${error.message}`);
