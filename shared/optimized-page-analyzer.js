@@ -4,11 +4,12 @@
  */
 
 import { AIConversationLogger } from './ai-conversation-logger.js';
+import { getRunnerBackendUrl } from '../src/utils/runner-service-urls.js';
 
 export class OptimizedPageAnalyzer {
   constructor(backendUrl = null) {
-    this.aiLogger = new AIConversationLogger(backendUrl);
-    this.backendUrl = backendUrl || process.env.BACKEND_URL || 'http://back:4000';
+    this.backendUrl = backendUrl || getRunnerBackendUrl();
+    this.aiLogger = new AIConversationLogger(this.backendUrl);
   }
 
   /**

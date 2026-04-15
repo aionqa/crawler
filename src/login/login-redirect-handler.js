@@ -5,6 +5,7 @@
 
 import * as backendLogger from '../backend-logger.js';
 import { executeLoginWithWorkflow } from './login-workflow-engine.js';
+import { getRunnerBackendUrl } from '../utils/runner-service-urls.js';
 
 /**
  * Send log to backend (wrapper for backendLogger)
@@ -104,7 +105,7 @@ export async function handleLoginRedirect(
   openaiClient,
   handleLoginRedirect = 'auto_retry'
 ) {
-  const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+  const backendUrl = getRunnerBackendUrl();
   const projectId = context.project_id || context.projectId;
   const loginUrl = context.login_url || null;
   const runnerToken = context.runner_token || null;

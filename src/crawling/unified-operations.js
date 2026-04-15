@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import * as backendLogger from '../backend-logger.js';
 import fs from 'fs';
 import { createOpenAIClient } from '../openai-client-factory.js';
+import { getRunnerBackendUrl } from '../utils/runner-service-urls.js';
 import ffmpeg from 'fluent-ffmpeg';
 import WorkflowAnalyzer from '../workflow/analysis/workflow-analyzer.js';
 import WorkflowExecutor from '../workflow/execution/workflow-executor.js';
@@ -31,7 +32,7 @@ let aiConversationLogger = null;
  */
 async function checkJobStatus(jobId, runnerToken = null) {
   try {
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const backendUrl = getRunnerBackendUrl();
     const headers = {};
     if (runnerToken) {
       headers['Authorization'] = `Bearer ${runnerToken}`;
@@ -574,7 +575,7 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
       return null;
     }
     
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const backendUrl = getRunnerBackendUrl();
     console.log(`[INCREMENTAL-STORAGE] Creating basic page document: ${pageUrl}`);
     
     // Prepare request body with Lighthouse data if available
@@ -658,7 +659,7 @@ async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allo
       return null;
     }
     
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const backendUrl = getRunnerBackendUrl();
     console.log(`[INCREMENTAL-STORAGE] Sending analyzed page to backend: ${pageData.url}`);
 
     // Prefer /api/pages/discover for both "basic" and "analyzed" updates.
@@ -718,7 +719,7 @@ async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allo
  */
 async function updateJobSubstatus(jobId, substatus, progress = {}) {
   try {
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const backendUrl = getRunnerBackendUrl();
     await fetch(`${backendUrl}/api/jobs/${jobId}/substatus`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -859,7 +860,7 @@ function sanitizeHeaders(headers) {
 async function sendApiCallsToBackend(jobId, projectId, calls, runnerToken = '') {
   if (!calls || calls.length === 0) return;
   try {
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const backendUrl = getRunnerBackendUrl();
     const projectIdStr = projectId != null ? (typeof projectId === 'object' ? projectId.toString() : String(projectId)) : null;
     await axios.post(`${backendUrl}/api/jobs/${jobId}/api-calls`, {
       project_id: projectIdStr,
@@ -896,7 +897,7 @@ async function sendApiCallsToBackend(jobId, projectId, calls, runnerToken = '') 
 async function sendWebSocketMessagesToBackend(jobId, projectId, messages, runnerToken = '') {
   if (!messages || messages.length === 0) return;
   try {
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const backendUrl = getRunnerBackendUrl();
     const projectIdStr = projectId != null ? (typeof projectId === 'object' ? projectId.toString() : String(projectId)) : null;
     await axios.post(`${backendUrl}/api/jobs/${jobId}/websocket-messages`, {
       project_id: projectIdStr,
@@ -998,7 +999,7 @@ async function uploadVideoAsync(jobId, videoBuffer) {
     
     // Step 5: Track media file in backend
     try {
-      const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+      const backendUrl = getRunnerBackendUrl();
       await fetch(`${backendUrl}/track-media-file`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1807,7 +1808,7 @@ async function takeScreenshot(page, jobId, action = 'screenshot', context = {}) 
 
     // Step 5: Track media file creation in job tracking
     try {
-      const jobTrackingUrl = process.env.BACKEND_URL || 'http://back:4000';
+      const jobTrackingUrl = getRunnerBackendUrl();
       await fetch(`${jobTrackingUrl}/track-media-file`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2202,7 +2203,7 @@ async function withBrowser(action, options = {}) {
           if (uploadSuccess) {
             screenshotFileId = key;
             // Get public URL for screenshot
-            const publicUrl = prepareResult.publicUrl || `${process.env.BACKEND_URL || 'http://back:4000'}/files/${key}`;
+            const publicUrl = prepareResult.publicUrl || `${getRunnerBackendUrl()}/files/${key}`;
             await sendLog(options.job_id || 'unknown', 'info', `📸 Screenshot captured successfully: ${key}`, {
               screenshotKey: key,
               screenshotId: key,
@@ -2251,7 +2252,7 @@ const modeHandlers = {
   optimized: async (page, context, openaiClient, operation) => {
     const jobId = context.job_id || 'unknown-job';
     const projectId = context.project_id || null;
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const backendUrl = getRunnerBackendUrl();
     const allowSubdomains = context?.allow_subdomains === true;
     
     await sendLog(jobId, 'info', `🚀 OPTIMIZED MODE: QA-like testing with minimal token usage`);
@@ -2304,7 +2305,7 @@ const modeHandlers = {
   workflow: async (page, context, openaiClient, operation) => {
     const jobId = context.job_id || 'unknown-job';
     const projectId = context.project_id || null;
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const backendUrl = getRunnerBackendUrl();
     const requestedMaxPages = context.options?.max_pages ?? context.max_pages;
     const requestedMaxDepth = context.options?.max_depth ?? context.max_depth;
     const allowSubdomains = context?.allow_subdomains === true;
@@ -3259,7 +3260,7 @@ const modeHandlers = {
                 // For single-page scans, temporarily update workflow in database to filter navigation legs
                 if (isSinglePageScan && legsToExecute.length < (analysisResult.legs?.length || 0)) {
                   const axios = (await import('axios')).default;
-                  const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+                  const backendUrl = getRunnerBackendUrl();
                   const workflowId = analysisResult.workflow_id;
                   
                   // Get original workflow
@@ -3303,7 +3304,7 @@ const modeHandlers = {
                   // First, update workflow temporarily with legs to execute (if we're filtering)
                   try {
                     const axios = (await import('axios')).default;
-                    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+                    const backendUrl = getRunnerBackendUrl();
                     const workflowId = analysisResult.workflow_id;
                     
                     // Get original workflow
@@ -4864,7 +4865,7 @@ async function analyzeSinglePage(page, jobId, baseUrl, approach, openaiClient, p
   // If skip_already_analyzed is enabled, check if page was already analyzed
   else if (skipAlreadyAnalyzed && pageId) {
     try {
-      const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+      const backendUrl = getRunnerBackendUrl();
       const checkResponse = await fetch(`${backendUrl}/api/pages/check-analyzed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5161,7 +5162,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
     // Check if job has been cancelled
     try {
       const axios = (await import('axios')).default;
-      const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+      const backendUrl = getRunnerBackendUrl();
       const headers = {};
       if (options.runner_token) {
         headers['Authorization'] = `Bearer ${options.runner_token}`;
@@ -6480,7 +6481,7 @@ async function executeStaticApproach(page, jobId, context, openaiClient, pageId,
   await sendLog(jobId, 'info', '🎯 APPROACH 4: Static (AI Script Generation for QA Automation)', { page_url: pageUrl });
   
   try {
-    const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    const backendUrl = getRunnerBackendUrl();
     const runnerToken = context?.runner_token || process.env.RUNNER_TOKEN || null;
     const authHeaders = runnerToken ? { 'Authorization': `Bearer ${runnerToken}` } : {};
     const cacheBucket = 'static-approach';
@@ -6981,7 +6982,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     if (workflowTemplateId && projectId) {
       try {
         await sendLog(jobId, 'info', `🔍 Loading workflow template ${workflowTemplateId} to check for pre-navigation cookie steps...`);
-        const workflowResponse = await backendDiscoverAxios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/workflow-templates/${workflowTemplateId}`, {
+        const workflowResponse = await backendDiscoverAxios.get(`${getRunnerBackendUrl()}/api/workflow-templates/${workflowTemplateId}`, {
           headers: {
             'Authorization': `Bearer ${context.runner_token || ''}`
           }
@@ -7325,7 +7326,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
           const axios = (await import('axios')).default;
           const projectIdStr = typeof projectId === 'object' ? projectId.toString() : String(projectId || '');
           if (projectIdStr) {
-            const projectCookiesResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/projects/${projectIdStr}/cookies`, {
+            const projectCookiesResponse = await axios.get(`${getRunnerBackendUrl()}/api/projects/${projectIdStr}/cookies`, {
               headers: { 'Authorization': `Bearer ${context.runner_token || ''}` }
             });
             if (projectCookiesResponse.data && Array.isArray(projectCookiesResponse.data) && projectCookiesResponse.data.length > 0) {
@@ -7364,7 +7365,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
                   continue;
                 }
                 
-                const projectCookiesResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/projects/${projectIdStr}/cookies`, {
+                const projectCookiesResponse = await axios.get(`${getRunnerBackendUrl()}/api/projects/${projectIdStr}/cookies`, {
                   headers: {
                     'Authorization': `Bearer ${context.runner_token || ''}`
                   }
@@ -7403,7 +7404,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
             if (projectIdStr) {
               await sendLog(jobId, 'info', `🍪 Loading cookies from project (no pre-navigation steps defined)...`);
               try {
-                const projectCookiesResponse = await axios.get(`${process.env.BACKEND_URL || 'http://back:4000'}/api/projects/${projectIdStr}/cookies`, {
+                const projectCookiesResponse = await axios.get(`${getRunnerBackendUrl()}/api/projects/${projectIdStr}/cookies`, {
                   headers: {
                     'Authorization': `Bearer ${context.runner_token || ''}`
                   }
@@ -7620,7 +7621,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
             '📜 Stored script run (Scripts UI): executing Playwright on this page; full page workflow is skipped.',
             { mode }
           );
-          const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+          const backendUrl = getRunnerBackendUrl();
           const { default: EnhancedWorkflowExecutor } = await import('../workflow/execution/enhanced-workflow-executor.js');
           const executor = new EnhancedWorkflowExecutor(backendUrl, null, backendLogger, context);
           const execResult = await executor.executeScript(page, rawStoredScript, jobId);

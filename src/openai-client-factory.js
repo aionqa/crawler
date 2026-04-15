@@ -6,8 +6,11 @@
 import OpenAI from 'openai';
 import axios from 'axios';
 import { getAIServiceToken, getAIServiceTokenInternal, invalidateAIServiceToken } from './ai-token-manager.js';
+import {
+  getDefaultAiServiceBaseUrl,
+  isDockerInternalBackendAiUrl,
+} from './utils/runner-service-urls.js';
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
 // Prefer context.ai_services (injected by backend / helper config).
 const AI_SERVICE_TOKEN = process.env.RUNNER_TOKEN || process.env.AI_SERVICE_TOKEN;
 
@@ -17,7 +20,7 @@ function collectAiServiceBaseUrlCandidates(primaryUrl, context) {
   const out = [];
   const push = (u) => {
     const t = typeof u === 'string' ? u.trim() : '';
-    if (!t || seen.has(t)) return;
+    if (!t || seen.has(t) || isDockerInternalBackendAiUrl(t)) return;
     seen.add(t);
     out.push(t);
   };
@@ -115,24 +118,26 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
   const jobId = context.job_id || context.jobId;
 
   // All AI requests must use the project's configured AI service (context from backend/helper).
-  // Prefer llm_config.endpoint, then context.ai_services (injected per project); env only when no project/job.
+  // Prefer llm_config.endpoint, then context.ai_services (injected per project); never use backend docker proxy URLs.
   const aiServiceUrl = (() => {
-    const explicit = llmConfig.endpoint && String(llmConfig.endpoint).trim();
+    const explicitRaw = llmConfig.endpoint && String(llmConfig.endpoint).trim();
+    const explicit = explicitRaw && !isDockerInternalBackendAiUrl(explicitRaw) ? explicitRaw : '';
+
     if (explicit) return explicit;
 
     const fromServices = Array.isArray(context.ai_services) ? context.ai_services : [];
     const firstUrl = fromServices
       .map((s) => (s && s.url) ? String(s.url).trim() : '')
-      .find(Boolean);
+      .find((u) => u && !isDockerInternalBackendAiUrl(u));
     if (firstUrl) return firstUrl;
 
-    // When running in a job with project context, do not fall back to env — project must have configured AI.
+    // Jobs must reach hosted or self-deployed AI; default to managed AWS when misconfigured lists were empty.
     if (projectId || jobId) {
-      return '';
+      return getDefaultAiServiceBaseUrl();
     }
-    // Local dev only: allow env when no project/job (e.g. local Docker, scripts).
     const fromEnv = process.env.AI_SERVICE_URL && String(process.env.AI_SERVICE_URL).trim();
-    return fromEnv || '';
+    if (fromEnv && !isDockerInternalBackendAiUrl(fromEnv)) return fromEnv;
+    return getDefaultAiServiceBaseUrl();
   })();
   if (!aiServiceUrl) {
     throw new Error('AI not configured. Set the project\'s AI service (Settings → LLM / endpoint) or add at least one AI service in the helper config.');

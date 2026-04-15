@@ -2,6 +2,7 @@ import WorkflowAnalyzer from '../workflow/workflow-analyzer.js';
 import { AIConversationLogger } from '../../shared/ai-conversation-logger.js';
 import * as backendLogger from '../backend-logger.js';
 import { evaluateLoginSessionEvidenceOverride } from '../workflow/utils/login-session-evidence-override.js';
+import { getRunnerBackendUrl } from '../utils/runner-service-urls.js';
 
 /**
  * Login Workflow Engine
@@ -14,7 +15,7 @@ import { evaluateLoginSessionEvidenceOverride } from '../workflow/utils/login-se
  * which executes the workflow template steps inside the runner.
  */
 export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKey, workflowContext) {
-  const backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+  const backendUrl = getRunnerBackendUrl();
 
   // Capture browser diagnostics to explain "client-side exception" screenshots.
   // Keep best-effort and bounded to avoid log spam.

@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import workflowRoutes from './workflow-routes.js';
+import { getRunnerBackendUrl } from '../../utils/runner-service-urls.js';
 
 /**
  * Workflow API Server
@@ -17,7 +18,7 @@ class WorkflowServer {
   setupMiddleware() {
     // Enable CORS for backend communication
     this.app.use(cors({
-      origin: process.env.BACKEND_URL || 'http://back:4000',
+      origin: getRunnerBackendUrl(),
       credentials: true
     }));
 

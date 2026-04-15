@@ -9,10 +9,11 @@ import axios from 'axios';
 // Note: AIConversationLogger import is handled dynamically in unified-operations.js
 // import { AIConversationLogger } from '../../shared/ai-conversation-logger.js';
 import * as backendLogger from '../../backend-logger.js';
+import { getRunnerBackendUrl } from '../../utils/runner-service-urls.js';
 
 export class OptimizedWorkflowAnalyzer {
   constructor(backendUrl = null, aiLogger = null, context = {}) {
-    this.backendUrl = backendUrl || process.env.BACKEND_URL || 'http://back:4000';
+    this.backendUrl = backendUrl || getRunnerBackendUrl();
     // Note: OptimizedPageAnalyzer is deprecated - using workflow-based approach instead
     // this.pageAnalyzer = new OptimizedPageAnalyzer(backendUrl);
     // Note: aiLogger should be passed in from unified-operations.js

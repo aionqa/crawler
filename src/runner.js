@@ -21,7 +21,9 @@ import VideoStreamManager from './browser/video-stream-manager.js';
 import VideoRecorder from './browser/video-recorder.js';
 // Minimal HTTP server for ECS health checks only (not for workflow endpoints - rule 51-runner-architecture.mdc)
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
+import { getRunnerBackendUrl } from './utils/runner-service-urls.js';
+
+const BACKEND_URL = getRunnerBackendUrl();
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
 const RUNNER_TOKEN = process.env.RUNNER_TOKEN; // GitHub Actions-style runner token
 const RUNNER_TYPE = process.env.RUNNER_TYPE || 'user-managed'; // 'service-managed' or 'user-managed'

@@ -11,6 +11,7 @@ import { chromium } from 'playwright';
 import axios from 'axios';
 import { createOpenAIClient, isNetworkUnreachableError, isTransientGatewayError } from '../src/openai-client-factory.js';
 import { prepareScreenshotUpload, uploadScreenshotToPresignedUrl } from '../src/backend-logger.js';
+import { getRunnerBackendUrl } from '../src/utils/runner-service-urls.js';
 
 /**
  * Extract the first complete JSON object or array from a string that may contain
@@ -128,7 +129,7 @@ function ensureStrictSchema(schema) {
 export class AIConversationLogger {
   constructor(backendUrl = null, runnerToken = null, context = {}) {
     // Use environment variable if available, otherwise fallback to default
-    this.backendUrl = backendUrl || process.env.BACKEND_URL || 'http://back:4000';
+    this.backendUrl = backendUrl || getRunnerBackendUrl();
     this.runnerToken = runnerToken || process.env.RUNNER_TOKEN;
     this.context = context; // Store context for AI service URL configuration
     this._openaiClient = null; // Lazy initialization
@@ -2878,7 +2879,7 @@ Respond with just a short description (1-2 sentences) of what the AI accomplishe
 // Singleton instance - will be recreated with context when needed
 // Note: This is deprecated - use new AIConversationLogger(backendUrl, runnerToken, context) instead
 export const aiConversationLogger = new AIConversationLogger(
-  process.env.BACKEND_URL || 'http://back:4000',
+  getRunnerBackendUrl(),
   process.env.RUNNER_TOKEN,
   {}
 );

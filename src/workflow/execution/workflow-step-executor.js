@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import axios from 'axios';
 import { AIConversationLogger } from '../../../shared/ai-conversation-logger.js';
 import * as BackendLogger from '../../backend-logger.js';
+import { getRunnerBackendUrl } from '../../utils/runner-service-urls.js';
 
 /**
  * WorkflowStepExecutor
@@ -10,7 +11,7 @@ import * as BackendLogger from '../../backend-logger.js';
  */
 export class WorkflowStepExecutor {
   constructor() {
-    this.backendUrl = process.env.BACKEND_URL || 'http://back:4000';
+    this.backendUrl = getRunnerBackendUrl();
     const RUNNER_TOKEN = process.env.RUNNER_TOKEN;
     this.aiLogger = new AIConversationLogger(this.backendUrl, RUNNER_TOKEN);
     this.activeBrowsers = new Map(); // Track active browser instances per job

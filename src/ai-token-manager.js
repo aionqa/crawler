@@ -4,10 +4,11 @@
  */
 
 import { createBackendAxiosWithRetries } from './utils/backend-http-retry.js';
+import { getRunnerBackendUrl } from './utils/runner-service-urls.js';
 
 const axios = createBackendAxiosWithRetries({ maxRetries: 10, capDelayMs: 25000 });
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
+const BACKEND_URL = getRunnerBackendUrl();
 const RUNNER_TOKEN = process.env.RUNNER_TOKEN;
 
 // Token cache: job_id -> { token, expires_at, project_id }

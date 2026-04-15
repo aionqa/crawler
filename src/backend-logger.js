@@ -13,7 +13,9 @@
  * - POST /api/files/prepare-screenshot
  */
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://back:4000';
+import { getRunnerBackendUrl } from './utils/runner-service-urls.js';
+
+const BACKEND_URL = getRunnerBackendUrl();
 
 /**
  * Create a job log context
