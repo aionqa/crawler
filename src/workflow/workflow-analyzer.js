@@ -2513,20 +2513,46 @@ IMPORTANT OUTPUT REQUIREMENTS:
         return o;
       };
 
-      const pickValidateLoginPayload = () => {
-        const preferred = workflowState.stepResults?.validate_login_success?.result;
-        if (preferred && typeof preferred === 'object') return unwrapNamespacedAiFields(preferred);
-        const fromResults = workflowState.results?.validate_login_success?.result;
-        if (fromResults && typeof fromResults === 'object') return unwrapNamespacedAiFields(fromResults);
-        const direct = workflowState.validate_login_success?.result;
-        if (direct && typeof direct === 'object') return unwrapNamespacedAiFields(direct);
-        const sr = workflowState.stepResults || {};
-        for (const [k, v] of Object.entries(sr)) {
-          if (/validate_login/i.test(k) && v?.result && typeof v.result === 'object') {
-            return unwrapNamespacedAiFields(v.result);
-          }
+      const normalizeValidateLoginShape = (raw) => {
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return raw;
+        let merged = raw;
+        const c = raw.content;
+        if (c && typeof c === 'object' && !Array.isArray(c)) {
+          merged = { ...raw, ...c };
         }
-        return null;
+        return unwrapNamespacedAiFields(merged);
+      };
+
+      const pickValidateLoginPayload = () => {
+        const tryKey = (key) => {
+          if (!key) return null;
+          const sr = workflowState.stepResults?.[key]?.result;
+          if (sr && typeof sr === 'object') return normalizeValidateLoginShape(sr);
+          const fr = workflowState.results?.[key]?.result;
+          if (fr && typeof fr === 'object') return normalizeValidateLoginShape(fr);
+          const slugR = workflowState[key]?.result;
+          if (slugR && typeof slugR === 'object') return normalizeValidateLoginShape(slugR);
+          const pool = workflowState.variablePool?.steps?.[key]?.result;
+          if (pool && typeof pool === 'object') return normalizeValidateLoginShape(pool);
+          return null;
+        };
+        for (const id of ['validate_login_success', 'validate-login-success']) {
+          const hit = tryKey(id);
+          if (hit) return hit;
+        }
+        const scanBag = (bag) => {
+          if (!bag || typeof bag !== 'object') return null;
+          for (const [k, v] of Object.entries(bag)) {
+            const kl = String(k).toLowerCase();
+            const nameMatch = kl.includes('validate') && kl.includes('login');
+            const slugish = /validate[-_]login/i.test(k);
+            if ((nameMatch || slugish) && v?.result && typeof v.result === 'object') {
+              return normalizeValidateLoginShape(v.result);
+            }
+          }
+          return null;
+        };
+        return scanBag(workflowState.stepResults) || scanBag(workflowState.results);
       };
 
       const statusLikeFromPayload = (payload) => {
@@ -2535,6 +2561,10 @@ IMPORTANT OUTPUT REQUIREMENTS:
           if (typeof x === 'string') return x;
           if (x && typeof x === 'object' && typeof x.value === 'string') return x.value;
           if (x && typeof x === 'object' && typeof x.status === 'string') return x.status;
+          if (x && typeof x === 'object' && x.status && typeof x.status === 'object') {
+            const inner = pick(x.status);
+            if (inner) return inner;
+          }
           return null;
         };
         return pick(payload.status) || pick(payload.completion_status);
