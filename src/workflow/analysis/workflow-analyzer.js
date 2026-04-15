@@ -21845,6 +21845,26 @@ const sleep = safeWait;
       const jst = String(finalJustificationStatus || '').toLowerCase();
       if (jst === 'failure' || jst === 'failed' || jst === 'error') {
         finalJustificationStatus = finalLegStatus;
+      } else {
+        // justify_journey may still emit workflow tokens like "continue" after a successful leg;
+        // persisting those leaves page.journeys non-terminal while the job is completed (self-monitor drift).
+        const justifyStillNonTerminal =
+          !jst
+          || jst === 'continue'
+          || jst === 'continuing'
+          || jst === 'stuck'
+          || jst === 'pending'
+          || jst === 'discovered'
+          || jst === 'analyzing'
+          || jst === 'testing'
+          || jst === 'queued'
+          || jst === 'in_progress'
+          || jst === 'in-progress'
+          || jst === 'running'
+          || jst === 'started';
+        if (justifyStillNonTerminal) {
+          finalJustificationStatus = finalLegStatus;
+        }
       }
       if (finalExpectedOutcomeVerified === false) {
         finalExpectedOutcomeVerified = true;
