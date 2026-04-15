@@ -382,6 +382,56 @@ function cookieDomainInCrawlScope(cookie, domainScope, allowSubdomains) {
 }
 
 /**
+ * Whether a stored cookie's Domain would attach to this page host (subdomain rules).
+ */
+function cookieAppliesToHostForProject(cookie, pageHostnameNorm) {
+  const h = normalizeDomainHost(pageHostnameNorm);
+  if (!h || !cookie) return false;
+  const domRaw = cookie.domain != null ? String(cookie.domain).trim() : '';
+  if (!domRaw) return false;
+  const cd = normalizeDomainHost(domRaw.replace(/^\./, ''));
+  if (!cd) return false;
+  if (h === cd) return true;
+  if (h.endsWith(`.${cd}`)) return true;
+  return false;
+}
+
+/**
+ * Same as strict {@link isWithinDomain}, OR the URL host receives at least one project-scoped
+ * session cookie (post-login redirect to another product host, multi-app SSO, etc.).
+ * Prevents skipping analysis and avoids partner-redirect cookie recovery that would drop auth.
+ */
+function isWithinDomainOrProjectSessionUrl(pageUrl, seedUrl, allowSubdomains, domainScope, cookies) {
+  if (isWithinDomain(pageUrl, seedUrl, allowSubdomains, domainScope)) return true;
+  const list = Array.isArray(cookies) ? cookies : [];
+  if (list.length === 0) return false;
+  let host;
+  try {
+    host = normalizeDomainHost(new URL(ensureSchemeForParse(pageUrl)).hostname);
+  } catch {
+    return false;
+  }
+  if (!host) return false;
+  for (const c of list) {
+    if (!cookieDomainInCrawlScope(c, domainScope, allowSubdomains)) continue;
+    if (cookieAppliesToHostForProject(c, host)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when navigation landed strictly off seed/project domains AND session cookies do not justify
+ * staying on the final host (for logging / diagnostics).
+ */
+function computeRedirectedOutsideSeedDomain(finalUrl, seedUrl, allowSubdomains, domainScope, cookies) {
+  if (isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope)) return false;
+  if (isWithinDomainOrProjectSessionUrl(finalUrl, seedUrl, allowSubdomains, domainScope, cookies)) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * When an in-scope navigation lands outside the crawl domain (often stale partner cookies on the
  * project), retry after (1) dropping cookies scoped to the destination host, then (2) keeping only
  * project/API-scoped cookies, then (3) if still off-domain, one anonymous navigation (empty jar)
@@ -399,6 +449,27 @@ async function recoverInScopeUrlAfterCrossDomainRedirect(
 ) {
   const ctx = page.context();
   let workingFinal = finalUrlBefore;
+
+  let preCookies = [];
+  try {
+    preCookies = await ctx.cookies();
+  } catch (_) {
+    preCookies = [];
+  }
+  if (
+    !isWithinDomain(workingFinal, seedUrl, allowSubdomains, domainScope) &&
+    isWithinDomainOrProjectSessionUrl(workingFinal, seedUrl, allowSubdomains, domainScope, preCookies)
+  ) {
+    await sendLog(jobId, 'info', `✅ Redirect target host matches project session cookies (post-login / multi-host app); skipping partner-style cookie recovery: ${workingFinal}`, {
+      component: 'CRAWLER-TEXT',
+      action: 'session_host_skip_cookie_recovery',
+    });
+    updateState({
+      finalUrl: workingFinal,
+      redirectedOutsideSeedDomain: false,
+    });
+    return;
+  }
 
   const runPass = async (label, filterFn, options = {}) => {
     const { anonymousSession = false } = options;
@@ -452,7 +523,13 @@ async function recoverInScopeUrlAfterCrossDomainRedirect(
     }
     workingFinal = newFinal;
 
-    const outside = !isWithinDomain(newFinal, seedUrl, allowSubdomains, domainScope);
+    let jarAfter = [];
+    try {
+      jarAfter = await ctx.cookies();
+    } catch (_) {
+      jarAfter = [];
+    }
+    const outside = computeRedirectedOutsideSeedDomain(newFinal, seedUrl, allowSubdomains, domainScope, jarAfter);
     const resolvedStatus = await resolveHttpStatusAfterNavigation(page, response, newFinal);
     updateState({
       finalUrl: newFinal,
@@ -563,16 +640,34 @@ async function resolveHttpStatusAfterNavigation(page, response, finalUrl) {
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
-async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = null, baseUrl = null, lighthouseResults = null, allowSubdomains = false, domainScope = null, lastHttpStatus = null) {
+async function sendBasicPageToBackend(
+  jobId,
+  pageUrl,
+  pageTitle,
+  projectId = null,
+  baseUrl = null,
+  lighthouseResults = null,
+  allowSubdomains = false,
+  domainScope = null,
+  lastHttpStatus = null,
+  sessionCookies = null
+) {
   try {
     if (isSearchEngineInfraUrl(pageUrl)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping crawler infrastructure URL: ${pageUrl}`);
       return null;
     }
-    // Domain filtering: Only send internal pages to backend
-    if (baseUrl && !isWithinDomain(pageUrl, baseUrl, allowSubdomains, domainScope)) {
-      console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageUrl}`);
-      return null;
+    // Domain filtering: seed/project hosts, or hosts justified by project session cookies (SSO / multi-app)
+    if (baseUrl) {
+      const strict = isWithinDomain(pageUrl, baseUrl, allowSubdomains, domainScope);
+      const sessionOk =
+        Array.isArray(sessionCookies) &&
+        sessionCookies.length > 0 &&
+        isWithinDomainOrProjectSessionUrl(pageUrl, baseUrl, allowSubdomains, domainScope, sessionCookies);
+      if (!strict && !sessionOk) {
+        console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageUrl}`);
+        return null;
+      }
     }
     
     const backendUrl = getRunnerBackendUrl();
@@ -647,16 +742,29 @@ async function sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId = nul
 
 // Send discovered page to backend immediately (incremental storage)
 // Returns the pageId from the backend
-async function sendDiscoveredPageToBackend(jobId, pageData, baseUrl = null, allowSubdomains = false, domainScope = null) {
+async function sendDiscoveredPageToBackend(
+  jobId,
+  pageData,
+  baseUrl = null,
+  allowSubdomains = false,
+  domainScope = null,
+  sessionCookies = null
+) {
   try {
     if (isSearchEngineInfraUrl(pageData?.url)) {
       console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping crawler infrastructure URL: ${pageData.url}`);
       return null;
     }
-    // Domain filtering: Only send internal pages to backend
-    if (baseUrl && !isWithinDomain(pageData.url, baseUrl, allowSubdomains, domainScope)) {
-      console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageData.url}`);
-      return null;
+    if (baseUrl) {
+      const strict = isWithinDomain(pageData.url, baseUrl, allowSubdomains, domainScope);
+      const sessionOk =
+        Array.isArray(sessionCookies) &&
+        sessionCookies.length > 0 &&
+        isWithinDomainOrProjectSessionUrl(pageData.url, baseUrl, allowSubdomains, domainScope, sessionCookies);
+      if (!strict && !sessionOk) {
+        console.log(`[INCREMENTAL-STORAGE] ⏭️ Skipping external page (not in domain): ${pageData.url}`);
+        return null;
+      }
     }
     
     const backendUrl = getRunnerBackendUrl();
@@ -2264,7 +2372,22 @@ const modeHandlers = {
       // Get or create page ID
       const pageUrl = page.url();
       const pageTitle = await page.title();
-      const pageResult = await sendBasicPageToBackend(jobId, pageUrl, pageTitle, projectId, pageUrl, null, allowSubdomains);
+      const pdOpt = Array.isArray(context?.project_domains) ? context.project_domains : [];
+      const adOpt = Array.isArray(context?.api_domains) ? context.api_domains : [];
+      const domainScopeOpt = buildDomainScope(pageUrl, allowSubdomains, pdOpt, adOpt);
+      const jarOpt = await page.context().cookies().catch(() => []);
+      const pageResult = await sendBasicPageToBackend(
+        jobId,
+        pageUrl,
+        pageTitle,
+        projectId,
+        pageUrl,
+        null,
+        allowSubdomains,
+        domainScopeOpt,
+        null,
+        jarOpt
+      );
       const pageId =
         pageResult && typeof pageResult === 'object' && pageResult.pageId != null
           ? String(pageResult.pageId)
@@ -2592,7 +2715,16 @@ const modeHandlers = {
             lastNavHttpStatus = await resolveHttpStatusAfterNavigation(page, response, finalUrl);
             // Defer strict-domain skip until after login-redirect handling.
             // Some authenticated sites redirect to an auth subdomain first and can recover in-session.
-            redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
+            {
+              const __scopeJar = await page.context().cookies().catch(() => []);
+              redirectedOutsideSeedDomain = computeRedirectedOutsideSeedDomain(
+                finalUrl,
+                seedUrl,
+                allowSubdomains,
+                domainScope,
+                __scopeJar
+              );
+            }
           } catch (navError) {
             await sendLog(jobId, 'warn', `⚠️ Navigation failed: ${navError.message}`);
             // Try to continue with current page
@@ -2627,7 +2759,16 @@ const modeHandlers = {
             if (urlKeyForDedupe(actualUrl) !== urlKeyForDedupe(currentUrl)) {
               await sendLog(jobId, 'info', `🔄 Page navigated from ${currentUrl} to ${finalUrl} (likely due to cookies)`);
             }
-            redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
+            {
+              const __scopeJar = await page.context().cookies().catch(() => []);
+              redirectedOutsideSeedDomain = computeRedirectedOutsideSeedDomain(
+                finalUrl,
+                seedUrl,
+                allowSubdomains,
+                domainScope,
+                __scopeJar
+              );
+            }
             lastNavHttpStatus = await resolveHttpStatusAfterNavigation(page, null, finalUrl);
           } catch (urlError) {
             console.warn(`Could not get page URL: ${urlError.message}`);
@@ -2637,11 +2778,18 @@ const modeHandlers = {
         // When the queued URL is in crawl scope but query/hash sends the browser off-domain (e.g. ?share=… → social login),
         // retry once without query or fragment so the same path can be analyzed in-scope.
         const strippedForRetry = urlWithoutQueryAndFragment(currentUrl);
+        let __stripJar = [];
+        try {
+          __stripJar = await page.context().cookies();
+        } catch (_) {
+          __stripJar = [];
+        }
         if (
           strippedForRetry &&
           strippedForRetry !== currentUrl &&
           isWithinDomain(strippedForRetry, seedUrl, allowSubdomains, domainScope) &&
-          !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope)
+          !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope) &&
+          !isWithinDomainOrProjectSessionUrl(finalUrl, seedUrl, allowSubdomains, domainScope, __stripJar)
         ) {
           await sendLog(
             jobId,
@@ -2678,7 +2826,16 @@ const modeHandlers = {
                 await sendLog(jobId, 'info', `🔄 Page redirected from ${strippedForRetry} to ${newFinal}`);
               }
               finalUrl = newFinal;
-              redirectedOutsideSeedDomain = !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
+              {
+                const __scopeJar = await page.context().cookies().catch(() => []);
+                redirectedOutsideSeedDomain = computeRedirectedOutsideSeedDomain(
+                  finalUrl,
+                  seedUrl,
+                  allowSubdomains,
+                  domainScope,
+                  __scopeJar
+                );
+              }
               const resolvedStrip = await resolveHttpStatusAfterNavigation(page, response, finalUrl);
               if (resolvedStrip != null) lastNavHttpStatus = resolvedStrip;
             } catch (urlError) {
@@ -2691,10 +2848,13 @@ const modeHandlers = {
 
         // Stale third-party cookies on the project (e.g. partner domains) can send an in-scope URL
         // off-domain even when the URL has no query string. Retry after cookie hygiene (general).
-        if (
-          isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope) &&
-          !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope)
-        ) {
+        {
+          const __recoverJar = await page.context().cookies().catch(() => []);
+          if (
+            isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope) &&
+            !isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope) &&
+            !isWithinDomainOrProjectSessionUrl(finalUrl, seedUrl, allowSubdomains, domainScope, __recoverJar)
+          ) {
           await recoverInScopeUrlAfterCrossDomainRedirect(
             page,
             jobId,
@@ -2711,6 +2871,7 @@ const modeHandlers = {
               }
             }
           );
+          }
         }
         
         // CRITICAL: Check for login page redirection and handle it
@@ -2793,15 +2954,28 @@ const modeHandlers = {
           await recordApiDomainClassification(jobId, projectId, finalUrl, currentUrl, context?.runner_token || '');
           continue;
         }
-        if (!isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope)) {
-          await sendLog(
-            jobId,
-            'info',
-            redirectedOutsideSeedDomain
-              ? `⏭️ Skipping page outside crawl domain (redirect): ${finalUrl} (seed: ${seedUrl})`
-              : `⏭️ Skipping page outside crawl domain: ${finalUrl} (seed: ${seedUrl})`
-          );
-          continue;
+        {
+          const __analyzeJar = await page.context().cookies().catch(() => []);
+          const strictIn = isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope);
+          const sessionIn =
+            !strictIn &&
+            isWithinDomainOrProjectSessionUrl(finalUrl, seedUrl, allowSubdomains, domainScope, __analyzeJar);
+          if (sessionIn) {
+            await sendLog(jobId, 'info', `🍪 In crawl scope via project session cookies (post-login / multi-host redirect): ${finalUrl}`, {
+              component: 'CRAWLER-TEXT',
+              action: 'session_cookie_scope_accept',
+            });
+          }
+          if (!strictIn && !sessionIn) {
+            await sendLog(
+              jobId,
+              'info',
+              redirectedOutsideSeedDomain
+                ? `⏭️ Skipping page outside crawl domain (redirect): ${finalUrl} (seed: ${seedUrl})`
+                : `⏭️ Skipping page outside crawl domain: ${finalUrl} (seed: ${seedUrl})`
+            );
+            continue;
+          }
         }
         // Login page (configured): use for auth only — do not scan or test
         if (isLoginPageUrl(finalUrl, loginUrls)) {
@@ -2867,15 +3041,21 @@ const modeHandlers = {
             continue;
           }
         }
-        // Strict domain: only analyze pages within the crawl's seed domain (never other domains)
+        // Strict domain + session: only analyze pages on seed/project hosts or hosts covered by project session cookies
+        const sessionJarForStorage = await page.context().cookies().catch(() => []);
         if (isApiDomain(actualPageUrl, domainScope)) {
           await sendLog(jobId, 'warn', `↪️ Navigated to API domain within project scope, skipping page storage and recording in API Explorer: ${actualPageUrl}`);
           await recordApiDomainClassification(jobId, projectId, actualPageUrl, currentUrl, context?.runner_token || '');
           continue;
         }
-        if (!isWithinDomain(actualPageUrl, seedUrl, allowSubdomains, domainScope)) {
-          await sendLog(jobId, 'info', `⏭️ Skipping page outside crawl domain: ${actualPageUrl} (seed: ${seedUrl})`);
-          continue;
+        {
+          const actualOk =
+            isWithinDomain(actualPageUrl, seedUrl, allowSubdomains, domainScope) ||
+            isWithinDomainOrProjectSessionUrl(actualPageUrl, seedUrl, allowSubdomains, domainScope, sessionJarForStorage);
+          if (!actualOk) {
+            await sendLog(jobId, 'info', `⏭️ Skipping page outside crawl domain: ${actualPageUrl} (seed: ${seedUrl})`);
+            continue;
+          }
         }
         const projectStartUrl = seedUrl; // Use seed URL so we only store pages from this crawl's domain
         const requestedPageUrlCanonical = urlKeyForDedupe(currentUrl);
@@ -2926,7 +3106,8 @@ const modeHandlers = {
                 },
                 projectStartUrl,
                 allowSubdomains,
-                domainScope
+                domainScope,
+                sessionJarForStorage
               );
               await sendLog(
                 jobId,
@@ -2953,7 +3134,8 @@ const modeHandlers = {
           lighthouseResults,
           allowSubdomains,
           domainScope,
-          lastNavHttpStatus
+          lastNavHttpStatus,
+          sessionJarForStorage
         );
         const createdPageId =
           pageResult && typeof pageResult === 'object' && pageResult.pageId != null
@@ -3454,17 +3636,18 @@ const modeHandlers = {
             context?.isLoginJob === true ||
             context?.preventCrawling === true ||
             context?.preventLinkDiscovery === true;
+          const __linkJar = await page.context().cookies().catch(() => []);
+          const linkUrlCrawlable = (u) =>
+            u &&
+            (u.startsWith('http://') || u.startsWith('https://')) &&
+            !isSearchEngineInfraUrl(u) &&
+            (isWithinDomain(u, seedUrl, allowSubdomains, domainScope) ||
+              isWithinDomainOrProjectSessionUrl(u, seedUrl, allowSubdomains, domainScope, __linkJar)) &&
+            !isLoginPageUrl(u, loginUrls);
           if (parentJobId && crawlableInternalLinks.length > 0 && !isLoginJobForReport) {
             const linksToReport = crawlableInternalLinks
               .map((link) => (link?.urlWithoutHash || link?.href || '').trim())
-              .filter(
-                (u) =>
-                  u &&
-                  (u.startsWith('http://') || u.startsWith('https://')) &&
-                  !isSearchEngineInfraUrl(u) &&
-                  isWithinDomain(u, seedUrl, allowSubdomains, domainScope) &&
-                  !isLoginPageUrl(u, loginUrls)
-              );
+              .filter((u) => linkUrlCrawlable(u));
             if (linksToReport.length > 0) {
               try {
                 const reportUrl = `${backendUrl}/jobs/${parentJobId}/domain-crawl/report-links`;
@@ -3508,8 +3691,13 @@ const modeHandlers = {
               // Regular link - use base URL (without hash) for deduplication
               const urlToCheck = urlKeyForDedupe((link?.urlWithoutHash || link?.href || '').split('#')[0].trim());
               if (!urlToCheck) continue;
-              // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
-              if (!isWithinDomain(urlToCheck, seedUrl, allowSubdomains, domainScope)) continue;
+              // Strict domain + session: queue URLs on seed/project hosts or hosts covered by project session cookies
+              if (
+                !isWithinDomain(urlToCheck, seedUrl, allowSubdomains, domainScope) &&
+                !isWithinDomainOrProjectSessionUrl(urlToCheck, seedUrl, allowSubdomains, domainScope, __linkJar)
+              ) {
+                continue;
+              }
               // Login pages (configured) are for auth only — never queue as a page to test
               if (isLoginPageUrl(urlToCheck, loginUrls)) continue;
               if (isSearchEngineInfraUrl(urlToCheck)) continue;
@@ -5265,6 +5453,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         }
 
         const workflowNavHttpStatus = await resolveHttpStatusAfterNavigation(page, workflowNavResp, pageUrl);
+        const sessionJarWorkflowPage = await page.context().cookies().catch(() => []);
         
         // Create basic page document in backend FIRST.
         // IMPORTANT: Always pass project_id when available so pages are attributed to the job's project,
@@ -5278,7 +5467,8 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           null,
           allowSubdomains,
           domainScope,
-          workflowNavHttpStatus
+          workflowNavHttpStatus,
+          sessionJarWorkflowPage
         );
         let pageId =
           basicPageResult && typeof basicPageResult === 'object' && basicPageResult.pageId != null
@@ -5301,8 +5491,10 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           });
         }
         
-        // Check if this page is within the target domain before AI analysis
-        const isWithinTargetDomain = isWithinDomain(currentUrl, startUrl, allowSubdomains, domainScope);
+        // Check if this page is within the target domain before AI analysis (include session-cookie hosts)
+        const isWithinTargetDomain =
+          isWithinDomain(currentUrl, startUrl, allowSubdomains, domainScope) ||
+          isWithinDomainOrProjectSessionUrl(currentUrl, startUrl, allowSubdomains, domainScope, sessionJarWorkflowPage);
         
         if (!isWithinTargetDomain) {
           // Skip AI analysis for external domains - just collect basic info
@@ -5369,7 +5561,8 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         
         // Update the page with full analysis data
         if (pageId) {
-          await sendDiscoveredPageToBackend(jobId, pageAnalysis, startUrl, allowSubdomains, domainScope);
+          const sessionJarDiscover = await page.context().cookies().catch(() => []);
+          await sendDiscoveredPageToBackend(jobId, pageAnalysis, startUrl, allowSubdomains, domainScope, sessionJarDiscover);
           await sendLog(jobId, 'info', `✓ Page analysis complete and stored`, {
             ...currentPageContext,
             pageId: pageId,
@@ -7549,11 +7742,18 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         if (resolvedMainNav != null) navStatus = resolvedMainNav;
 
         const strippedStart = urlWithoutQueryAndFragment(currentUrl);
+        let __startStripJar = [];
+        try {
+          __startStripJar = await page.context().cookies();
+        } catch (_) {
+          __startStripJar = [];
+        }
         if (
           strippedStart &&
           strippedStart !== currentUrl &&
           isWithinDomain(strippedStart, currentUrl, allowSubdomains, domainScope) &&
-          !isWithinDomain(finalUrl, currentUrl, allowSubdomains, domainScope)
+          !isWithinDomain(finalUrl, currentUrl, allowSubdomains, domainScope) &&
+          !isWithinDomainOrProjectSessionUrl(finalUrl, currentUrl, allowSubdomains, domainScope, __startStripJar)
         ) {
           await sendLog(
             jobId,
@@ -7580,20 +7780,31 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
           }
         }
 
-        if (!isWithinDomain(finalUrl, currentUrl, allowSubdomains, domainScope)) {
-          await recoverInScopeUrlAfterCrossDomainRedirect(
-            page,
-            jobId,
-            currentUrl,
-            currentUrl,
-            allowSubdomains,
-            domainScope,
-            finalUrl,
-            (patch) => {
-              if (patch.finalUrl != null) finalUrl = patch.finalUrl;
-              if ('lastNavHttpStatus' in patch) navStatus = patch.lastNavHttpStatus;
-            }
-          );
+        {
+          let __startRecoverJar = [];
+          try {
+            __startRecoverJar = await page.context().cookies();
+          } catch (_) {
+            __startRecoverJar = [];
+          }
+          if (
+            !isWithinDomain(finalUrl, currentUrl, allowSubdomains, domainScope) &&
+            !isWithinDomainOrProjectSessionUrl(finalUrl, currentUrl, allowSubdomains, domainScope, __startRecoverJar)
+          ) {
+            await recoverInScopeUrlAfterCrossDomainRedirect(
+              page,
+              jobId,
+              currentUrl,
+              currentUrl,
+              allowSubdomains,
+              domainScope,
+              finalUrl,
+              (patch) => {
+                if (patch.finalUrl != null) finalUrl = patch.finalUrl;
+                if ('lastNavHttpStatus' in patch) navStatus = patch.lastNavHttpStatus;
+              }
+            );
+          }
         }
         
         try {
