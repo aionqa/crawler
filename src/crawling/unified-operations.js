@@ -19,6 +19,7 @@ import axios from 'axios';
 import { createBackendAxiosWithRetries, retryTransientAsync } from '../utils/backend-http-retry.js';
 import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
+import { collectIframeEmbedLinkRows } from '../utils/iframe-embed-discovery.js';
 
 const backendDiscoverAxios = createBackendAxiosWithRetries();
 
@@ -4866,7 +4867,16 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false, do
       };
 
       try {
-        const part = await frame.$$eval(LINK_EXTRACTION_SELECTOR, _browserCollectLinksFromAnchorElements, opts);
+        await frame.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+        let part = await frame
+          .$$eval(LINK_EXTRACTION_SELECTOR, _browserCollectLinksFromAnchorElements, opts)
+          .catch(() => null);
+        if (!part || !part.length) {
+          await frame.waitForLoadState('load', { timeout: 4000 }).catch(() => {});
+          part = await frame
+            .$$eval(LINK_EXTRACTION_SELECTOR, _browserCollectLinksFromAnchorElements, opts)
+            .catch(() => null);
+        }
         if (Array.isArray(part) && part.length) {
           aggregated.push(...part);
         }
@@ -4884,8 +4894,27 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false, do
     await sendLog(
       jobId,
       'info',
-      `🔗 Frame scan: ${framesOk} frame(s) scanned${framesSkipped ? `, ${framesSkipped} skipped (detached/cross-origin policy)` : ''}`
+      `🔗 Frame scan: ${framesOk} frame(s) scanned${framesSkipped ? `, ${framesSkipped} skipped (detached/unreachable)` : ''}`
     );
+
+    try {
+      const embedRows = await collectIframeEmbedLinkRows(page, {
+        baseUrl,
+        allowSubdomains,
+        domainScope: { projectDomains, apiDomains },
+        log: (level, msg) => sendLog(jobId, level, msg),
+      });
+      if (embedRows.length) {
+        await sendLog(
+          jobId,
+          'info',
+          `🔗 Iframe/embed src: ${embedRows.length} URL(s) from parent-visible embed attributes (includes cross-origin targets)`
+        );
+        aggregated.push(...embedRows);
+      }
+    } catch (e) {
+      await sendLog(jobId, 'info', `🔗 Iframe embed discovery skipped: ${String(e?.message || e).slice(0, 140)}`);
+    }
 
     const mergedByHref = new Map();
     for (const l of aggregated) {

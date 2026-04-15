@@ -19,6 +19,7 @@ import {
   shouldAttemptReconciliation,
 } from './extraction-reconciliation.js';
 import { snapshotPageHtml } from '../../utils/page-html-snapshot.js';
+import { collectIframeEmbedLinkRows } from '../../utils/iframe-embed-discovery.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -885,8 +886,9 @@ class WorkflowAnalyzer {
   }
 
   /**
-   * SPA shells and some auth flows leave the main frame empty while same-origin iframes hold the real UI.
+   * SPA shells and some auth flows leave the main frame empty while iframes hold the real UI.
    * Merge a bounded, generic inventory (no per-domain selectors) so prompts and determine_completion see signal.
+   * Includes cross-origin frames when Playwright can script them (automation context).
    */
   async augmentAnalysisFromSameOriginFrames(page, analysis) {
     if (!page || typeof page.frames !== 'function' || !analysis) return;
@@ -922,7 +924,7 @@ class WorkflowAnalyzer {
       } catch {
         continue;
       }
-      if (frameOrigin !== mainOrigin) continue;
+      const crossOriginIframe = frameOrigin !== mainOrigin;
 
       const snapshot = await frame
         .evaluate(() => {
@@ -953,7 +955,8 @@ class WorkflowAnalyzer {
             selector: sel,
             selectors: sels,
             text: text.slice(0, 240),
-            in_same_origin_iframe: true,
+            in_same_origin_iframe: !crossOriginIframe,
+            cross_origin_iframe: crossOriginIframe,
             frame_url: frameUrl
           };
           if (tag === 'a') {
@@ -964,7 +967,8 @@ class WorkflowAnalyzer {
                 text: text.slice(0, 240),
                 selector: sel,
                 selectors: sels,
-                in_same_origin_iframe: true,
+                in_same_origin_iframe: !crossOriginIframe,
+                cross_origin_iframe: crossOriginIframe,
                 frame_url: frameUrl
               });
             }
@@ -1322,6 +1326,7 @@ class WorkflowAnalyzer {
         if (workflowLinkBudget <= 0) break;
         let frameAnchors = [];
         try {
+          await frame.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
           frameAnchors = await frame.$$('a[href], [role="link"][href]');
         } catch (_) {
           continue;
@@ -1363,6 +1368,39 @@ class WorkflowAnalyzer {
             workflowLinkBudget--;
           }
         }
+      }
+
+      try {
+        let pageBase = '';
+        try {
+          pageBase = page.url() || '';
+        } catch {
+          pageBase = '';
+        }
+        const pd = Array.isArray(this.context?.project_domains) ? this.context.project_domains : [];
+        const ad = Array.isArray(this.context?.api_domains) ? this.context.api_domains : [];
+        const embedRows = await collectIframeEmbedLinkRows(page, {
+          baseUrl: pageBase || 'https://invalid.invalid/',
+          allowSubdomains: this.context?.allow_subdomains !== false,
+          domainScope: { projectDomains: pd, apiDomains: ad },
+          log: () => {},
+        });
+        for (const row of embedRows) {
+          if (!row?.href || seenWorkflowHrefs.has(row.href)) continue;
+          seenWorkflowHrefs.add(row.href);
+          analysis.links.push({
+            href: row.href,
+            text: row.text,
+            discovered_via: row.discovered_via,
+            embed_tag: row.embed_tag,
+            parent_frame_url: row.parent_frame_url,
+            in_frame: false,
+            selector: null,
+            selectors: [],
+          });
+        }
+      } catch (embErr) {
+        console.warn(`[PLAYWRIGHT] iframe embed link merge failed: ${embErr.message}`);
       }
 
       // javascript: links — stay in the link map and may be scheduled as interaction journeys
