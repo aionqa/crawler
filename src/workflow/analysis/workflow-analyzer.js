@@ -388,7 +388,7 @@ function shouldDropFormIntentJourneyOnFormlessPage(journey) {
   const types = actions.map((a) => String(a?.type || a?.action_type || '').toLowerCase());
 
   if (types.some((t) => t === 'form_submit' || t === 'submit')) return true;
-  if (/form_submit|submit_form|_form_submit\b/i.test(jid)) return true;
+  if (/form_submit|submit_form|_form_submit\b|form_submission\b/i.test(jid)) return true;
   if (
     /\b(submit the form|form submission|complete the form|fill out the form|fill required fields|registration form|contact form|login form|survey form)\b/i.test(
       blob
@@ -405,7 +405,9 @@ function shouldDropFormIntentJourneyOnFormlessPage(journey) {
     });
   if (
     onlyPassive &&
-    /\b(verifiable form|no verifiable form|multi-?field form|form element|form_submit)\b/i.test(blob)
+    /\b(verifiable form|no verifiable form|multi-?field form|form element|form_submit|no interactive form|no html form|without interactive form)\b/i.test(
+      blob
+    )
   ) {
     return true;
   }
@@ -1833,6 +1835,12 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     const kept = [];
     for (const journey of rawJourneys) {
       if (!journey || typeof journey !== 'object') continue;
+      if (shouldDropFormIntentJourneyOnFormlessPage(journey)) {
+        console.log(
+          `⚠️ Dropping form-intent journey on document-only surface: ${journey.journey_id || journey.description || 'unknown'}`
+        );
+        continue;
+      }
       const actions = Array.isArray(journey.actions) ? journey.actions : [];
       if (actions.length === 0) continue;
       if (actions.some((a) => isInteractiveActionType(a?.type))) {
@@ -18506,6 +18514,39 @@ const sleep = safeWait;
       // CRITICAL: Set workflowState.journeysToExecute so while-loop can access it
       // The while-loop checks workflowState.journeysToExecute, not the variable pool
       if (itemsPath === 'journeysToExecute') {
+        const pa = workflowState?.playwrightAnalysis;
+        const formsLen = Array.isArray(pa?.forms) ? pa.forms.length : 0;
+        const interactives = Array.isArray(pa?.interactive_elements)
+          ? pa.interactive_elements
+          : Array.isArray(pa?.interactiveElements)
+            ? pa.interactiveElements
+            : [];
+        const significantIe = interactives.filter((element) => {
+          const elementType = String(element?.element_type || element?.type || '').toLowerCase();
+          if (!elementType) return true;
+          return !['input', 'select', 'textarea', 'checkbox', 'radio'].includes(elementType);
+        }).length;
+        const menuTrees = Array.isArray(pa?.menu_items) ? pa.menu_items : [];
+        const menuCount = menuTrees.filter((m) => Array.isArray(m?.items) && m.items.length > 0).length;
+        const formlessRuntime = formsLen === 0 && significantIe === 0 && menuCount === 0;
+        if (formlessRuntime && Array.isArray(items) && items.length > 0) {
+          const beforeRt = items.length;
+          const filtered = items.filter((j) => !shouldDropFormIntentJourneyOnFormlessPage(j));
+          if (filtered.length !== beforeRt) {
+            console.log(
+              `✅ [JOURNEYS-FORMLESS-RUNTIME] For-each: removed ${beforeRt - filtered.length} form-intent journey(s) (zero forms / no actionable controls in Playwright analysis)`
+            );
+            items = filtered;
+            try {
+              this.saveVariable(workflowState, 'journeysToExecute', items, 'page', step);
+            } catch (e) {
+              console.warn(`⚠️ [JOURNEYS-FORMLESS-RUNTIME] Could not rewrite variable pool: ${e.message}`);
+            }
+            if (workflowState.context) {
+              workflowState.context.journeysToExecute = items;
+            }
+          }
+        }
         workflowState.journeysToExecute = items;
         console.log(`✅ For-each step: Set workflowState.journeysToExecute with ${items.length} journey(s)`);
       } else if (itemsPath === 'legsToExecute') {
