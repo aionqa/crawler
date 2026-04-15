@@ -18117,20 +18117,32 @@ const sleep = safeWait;
     };
     const whileIter = Number(meta.while_loop_iteration);
     const isJourneyWhileRetry = Number.isFinite(whileIter) && whileIter > 1;
+    // After job-orchestrator re-queue the browser can still sit on the seed URL with a half-mutated
+    // DOM while Node resumes; iteration 1 previously only waited for SPA readiness, which is
+    // insufficient when Playwright was mid-script before restart (nested execute timeout / stuck waits).
+    const isFirstWhileAfterPlatformResume =
+      workflowState.platformRestartResume === true &&
+      Number.isFinite(whileIter) &&
+      whileIter === 1;
+    const shouldReloadAnalyzedPageForJourneyDom =
+      isJourneyWhileRetry || isFirstWhileAfterPlatformResume;
     const spaAfterJourneyNav =
       workflowState.platformRestartResume === true || isJourneyWhileRetry;
     if (!needsLoad) {
-      if (isJourneyWhileRetry) {
+      if (shouldReloadAnalyzedPageForJourneyDom) {
+        const isRetryPass = isJourneyWhileRetry;
         await this.sendLogToBackend(
           jobId,
           'info',
-          '🧭 Journey while-loop retry pass: reloading analyzed URL to refresh DOM before regenerating the journey script.',
+          isRetryPass
+            ? '🧭 Journey while-loop retry pass: reloading analyzed URL to refresh DOM before regenerating the journey script.'
+            : '🧭 Platform restart resume: reloading analyzed URL before the first journey while iteration to clear stale SPA state after infra recovery.',
           'WORKFLOW-ANALYZER',
           {
-            action: 'journey_page_context_retry_reload',
+            action: isRetryPass ? 'journey_page_context_retry_reload' : 'journey_page_context_post_restart_reload',
             target_url: target,
             previous_url: current || null,
-            while_loop_iteration: whileIter,
+            while_loop_iteration: Number.isFinite(whileIter) ? whileIter : null,
             ...meta
           }
         );
@@ -18148,7 +18160,7 @@ const sleep = safeWait;
           await this.sendLogToBackend(
             jobId,
             'warn',
-            `⚠️ Retry reload failed (${relErr.message}); attempting goto fallback for journey context.`,
+            `⚠️ Journey context reload failed (${relErr.message}); attempting goto fallback for journey context.`,
             'WORKFLOW-ANALYZER',
             { target_url: target, previous_url: current || null, ...meta }
           );
