@@ -13249,6 +13249,30 @@ ${executableBody}`;
         // If not at max iterations yet, finalLegStatus remains null so loop can continue
       }
     }
+
+    // Login / bounded loops: hitting maxIterations while the per-iteration condition still requests
+    // another pass is an iteration-budget stop, not a terminal "login failed" outcome when the last
+    // verifier response was not a hard failure, Playwright stayed healthy, and the verifier text did
+    // not emit a blocking signal. Downstream steps (e.g. validate_login_success) remain authoritative.
+    if (isLoginLoop && iteration >= maxIterations) {
+      const lastIter = loopIterations.length ? loopIterations[loopIterations.length - 1] : null;
+      const lastIterWantedContinue =
+        lastIter != null && (invertCondition ? lastIter.condition === false : lastIter.condition === true);
+      const eligibleForBudgetHandoff =
+        lastIterWantedContinue &&
+        !lastIterationHardFailure &&
+        !loginLoopVerifierBlockingSignal &&
+        executionSucceededForLoginLoop &&
+        (finalLegStatus === 'failure' || !finalLegStatus);
+      if (eligibleForBudgetHandoff) {
+        finalLegStatus = 'success';
+        finalLegResult = 'success';
+        finalLegError = null;
+        console.log(
+          '✅ Login while-loop: iteration cap reached while condition still requested continue; treating loop leg as success (pending downstream validation steps)'
+        );
+      }
+    }
     
     // If still no final status and max iterations reached, mark as failure
     if (!finalLegStatus && iteration >= maxIterations) {
