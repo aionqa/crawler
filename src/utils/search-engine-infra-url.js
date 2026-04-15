@@ -1,5 +1,6 @@
 /**
- * Crawler/indexing infrastructure URLs — not human-facing HTML pages (robots, sitemaps, well-known).
+ * Crawler/indexing infrastructure URLs — not human-facing HTML app shells.
+ * Includes robots/sitemaps, well-known, and PWA/build JSON manifests (not crawl targets).
  * Skip for crawl queue, link discovery, recursive crawl targets, SEO/content steps, and backend discover.
  */
 export function isSearchEngineInfraUrl(urlString) {
@@ -26,6 +27,12 @@ export function isSearchEngineInfraUrl(urlString) {
 
   if (/sitemap[^/]*\.xml(\.gz)?$/i.test(path)) return true;
   if (path === '/sitemap.txt' || path.endsWith('/sitemap.txt')) return true;
+
+  if (path.endsWith('/manifest.json') || path === '/manifest.json') return true;
+  if (path.endsWith('.webmanifest') || path.endsWith('/site.webmanifest')) return true;
+  if (/\/asset-manifest\.json$/i.test(path)) return true;
+  if (/\/build-manifest\.json$/i.test(path)) return true;
+  if (/\/precache-manifest\.json$/i.test(path)) return true;
 
   return false;
 }
