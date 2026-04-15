@@ -5,6 +5,7 @@ import { StaticNodeExecutor } from './static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../step-requirements.js';
 import { replaceNetworkIdleWithDomContentLoadedForAutomation } from './utils/normalize-playwright-network-idle.js';
 import { evaluateLoginSessionEvidenceOverride } from './utils/login-session-evidence-override.js';
+import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -568,7 +569,7 @@ class WorkflowAnalyzer {
       }
 
       // Extract links (excluding pure anchors, but preserving all hash fragments in full URLs)
-      const links = await page.$$('a[href]');
+      const links = await page.$$('a[href], [role="link"][href]');
       for (const link of links.slice(0, 50)) { // Limit to first 50 links
         // Use resolved href (full URL) instead of raw attribute to get complete URLs with hash fragments
         const href = await link.evaluate(el => el.href || el.getAttribute('href'));
@@ -2947,6 +2948,14 @@ IMPORTANT OUTPUT REQUIREMENTS:
     console.log(`🔍 Performing Playwright analysis (${step.name})`);
     
     const analysis = await this.performPlaywrightAnalysis(page);
+    try {
+      const rawHtml = await page.content();
+      const snap = snapshotPageHtml(rawHtml);
+      workflowState.htmlContent = snap.content;
+      workflowState.page_html_meta = snap.page_html_meta;
+    } catch (htmlSnapErr) {
+      console.warn('[WORKFLOW-ANALYZER] page HTML snapshot failed:', htmlSnapErr?.message || htmlSnapErr);
+    }
     workflowState.playwrightAnalysis = analysis;
     
     // Store result - storeStepResult will structure it according to schema
@@ -3053,7 +3062,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
       workflowState.pageTitle = await page.title();
     }
     if (!workflowState.htmlContent) {
-      workflowState.htmlContent = await page.content();
+      const snap = snapshotPageHtml(await page.content());
+      workflowState.htmlContent = snap.content;
+      workflowState.page_html_meta = snap.page_html_meta;
     }
     if (!workflowState.visibleText) {
       workflowState.visibleText = await page.evaluate(() => {
@@ -5833,6 +5844,9 @@ return {
     
     if (includeContent && workflowState.htmlContent) {
       discoveryData.content = workflowState.htmlContent;
+    }
+    if (workflowState.page_html_meta) {
+      discoveryData.page_html_meta = workflowState.page_html_meta;
     }
     if (includeForms && workflowState.playwrightAnalysis?.forms) {
       discoveryData.forms = workflowState.playwrightAnalysis.forms;

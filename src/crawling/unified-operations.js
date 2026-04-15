@@ -18,6 +18,7 @@ import OptimizedWorkflowAnalyzer from '../workflow/analysis/optimized-workflow-a
 import axios from 'axios';
 import { createBackendAxiosWithRetries, retryTransientAsync } from '../utils/backend-http-retry.js';
 import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
+import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 
 const backendDiscoverAxios = createBackendAxiosWithRetries();
 
@@ -778,6 +779,7 @@ async function sendDiscoveredPageToBackend(
       url: pageData.url,
       title: pageData.title,
       content: pageData.content,
+      page_html_meta: pageData.page_html_meta,
       forms: pageData.forms,
       links: pageData.links || pageData.internal_links || [],
       interactive_elements: pageData.interactive_elements || pageData.interactiveElements || [],
@@ -4761,7 +4763,8 @@ function _browserCollectLinksFromAnchorElements(elements, opts) {
   return links;
 }
 
-const LINK_EXTRACTION_SELECTOR = 'a[href], area[href], [data-href], [data-url]';
+const LINK_EXTRACTION_SELECTOR =
+  'a[href], area[href], [role="link"][href], [data-href], [data-url]';
 
 /** Count harvestable nodes across all frames (matches LINK_EXTRACTION_SELECTOR). */
 async function countHarvestableAnchorsAllFrames(page) {
@@ -5366,11 +5369,13 @@ Respond with JSON format:
     }
   }
   
+  const htmlForStorage = snapshotPageHtml(pageContent);
   // Build page analysis
   const pageAnalysis = {
     url: currentUrl,
     title: currentTitle,
-    content: pageContent,
+    content: htmlForStorage.content,
+    page_html_meta: htmlForStorage.page_html_meta,
     timestamp: new Date().toISOString(),
     screenshot_file_id: screenshotResult?.fileId || null,
     conversation_id: conversationId,

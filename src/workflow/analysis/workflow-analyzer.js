@@ -18,6 +18,7 @@ import {
   mergeHtmlAiCandidatesIntoAnalysis,
   shouldAttemptReconciliation,
 } from './extraction-reconciliation.js';
+import { snapshotPageHtml } from '../../utils/page-html-snapshot.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -1321,7 +1322,7 @@ class WorkflowAnalyzer {
         if (workflowLinkBudget <= 0) break;
         let frameAnchors = [];
         try {
-          frameAnchors = await frame.$$('a[href]');
+          frameAnchors = await frame.$$('a[href], [role="link"][href]');
         } catch (_) {
           continue;
         }
@@ -5096,7 +5097,16 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     } catch (recErr) {
       console.warn('[WORKFLOW-ANALYZER] extraction reconciliation failed:', recErr?.message || recErr);
     }
-    
+
+    try {
+      const rawHtml = await page.content();
+      const snap = snapshotPageHtml(rawHtml);
+      workflowState.htmlContent = snap.content;
+      workflowState.page_html_meta = snap.page_html_meta;
+    } catch (htmlSnapErr) {
+      console.warn('[WORKFLOW-ANALYZER] page HTML snapshot failed:', htmlSnapErr?.message || htmlSnapErr);
+    }
+
     workflowState.playwrightAnalysis = analysis;
     
     // Store result - storeStepResult will structure it according to schema
@@ -5156,7 +5166,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
             non_interactive_elements: Array.isArray(analysis.non_interactive_elements) ? analysis.non_interactive_elements : [],
             ...(workflowState.extractionReconciliation
               ? { extraction_reconciliation: workflowState.extractionReconciliation }
-              : {})
+              : {}),
+            ...(workflowState.htmlContent ? { content: workflowState.htmlContent } : {}),
+            ...(workflowState.page_html_meta ? { page_html_meta: workflowState.page_html_meta } : {})
           }
         );
         console.log(`✅ Playwright analysis data saved directly to page: ${analysis.forms.length} forms, ${analysis.interactive_elements.length} interactive elements`);
@@ -5235,7 +5247,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       workflowState.pageTitle = await page.title();
     }
     if (!workflowState.htmlContent) {
-      workflowState.htmlContent = await page.content();
+      const snap = snapshotPageHtml(await page.content());
+      workflowState.htmlContent = snap.content;
+      workflowState.page_html_meta = snap.page_html_meta;
     }
     if (!workflowState.visibleText) {
       workflowState.visibleText = await page.evaluate(() => {
@@ -9753,6 +9767,9 @@ return {
     
     if (includeContent && workflowState.htmlContent) {
       discoveryData.content = workflowState.htmlContent;
+    }
+    if (workflowState.page_html_meta) {
+      discoveryData.page_html_meta = workflowState.page_html_meta;
     }
     // CRITICAL: Always save forms/interactive_elements from playwrightAnalysis (not conditional)
     // This ensures elements are populated even if workflow steps don't explicitly request them
