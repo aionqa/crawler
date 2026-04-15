@@ -4763,10 +4763,77 @@ function _browserCollectLinksFromAnchorElements(elements, opts) {
 
 const LINK_EXTRACTION_SELECTOR = 'a[href], area[href], [data-href], [data-url]';
 
+/** Count harvestable nodes across all frames (matches LINK_EXTRACTION_SELECTOR). */
+async function countHarvestableAnchorsAllFrames(page) {
+  if (!page || typeof page.frames !== 'function') return 0;
+  let total = 0;
+  for (const frame of page.frames()) {
+    try {
+      const n = await frame.evaluate(
+        (sel) => document.querySelectorAll(sel).length,
+        LINK_EXTRACTION_SELECTOR
+      );
+      total += n;
+    } catch (_) {
+      // detached / blocked frame
+    }
+  }
+  return total;
+}
+
+/**
+ * Heavy client-side apps: real <a href> nodes often appear after hydration, routing, and XHR.
+ * Wait for network idle plus a short stability window on anchor counts across frames.
+ */
+async function waitForDomBeforeLinkHarvest(page, jobId) {
+  try {
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+  } catch (_) {}
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
+  } catch (_) {}
+  try {
+    await page.waitForTimeout(600);
+  } catch (_) {}
+
+  let last = -1;
+  let stableStreak = 0;
+  for (let i = 0; i < 12; i++) {
+    let n = 0;
+    try {
+      n = await countHarvestableAnchorsAllFrames(page);
+    } catch (_) {
+      break;
+    }
+    if (last >= 0 && n === last) {
+      stableStreak++;
+      if (stableStreak >= 2) break;
+    } else {
+      stableStreak = 0;
+    }
+    last = n;
+    try {
+      await page.waitForTimeout(400);
+    } catch (_) {
+      break;
+    }
+  }
+  if (jobId) {
+    try {
+      await sendLog(
+        jobId,
+        'info',
+        `🔗 SPA settle before link harvest: ~${last} harvestable node(s) across frames (networkidle + count stability)`
+      );
+    } catch (_) {}
+  }
+}
+
 // Comprehensive link extraction (main frame + all attached frames — iframes were previously skipped)
 async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false, domainScope = null) {
   try {
     await sendLog(jobId, 'info', '🔗 Extracting all links from page (all frames, including iframes)...');
+    await waitForDomBeforeLinkHarvest(page, jobId);
 
     const projectDomains = Array.isArray(domainScope?.projectDomains) ? domainScope.projectDomains : [];
     const apiDomains = Array.isArray(domainScope?.apiDomains) ? domainScope.apiDomains : [];
