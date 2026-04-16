@@ -886,20 +886,17 @@ class WorkflowAnalyzer {
   }
 
   /**
-   * SPA shells and some auth flows leave the main frame empty while iframes hold the real UI.
-   * Merge a bounded, generic inventory (no per-domain selectors) so prompts and determine_completion see signal.
-   * Includes cross-origin frames when Playwright can script them (automation context).
+   * Merge iframe inventory into analysis using generic selectors.
+   * Handles both empty-main-frame shells and mixed layouts where primary controls live inside iframes.
    */
   async augmentAnalysisFromSameOriginFrames(page, analysis) {
     if (!page || typeof page.frames !== 'function' || !analysis) return;
-    const menuLen = Array.isArray(analysis.menu_items) ? analysis.menu_items.length : 0;
-    const hasMainInventory =
-      (analysis.forms?.length || 0) +
-        (analysis.links?.length || 0) +
-        menuLen +
-        (analysis.interactive_elements?.length || 0) >
-      0;
-    if (hasMainInventory) return;
+    if (!Array.isArray(analysis.links)) analysis.links = [];
+    if (!Array.isArray(analysis.interactive_elements)) analysis.interactive_elements = [];
+    if (!Array.isArray(analysis.non_interactive_elements)) analysis.non_interactive_elements = [];
+
+    const frames = page.frames().filter((frame) => frame && frame !== page.mainFrame());
+    if (!frames.length) return;
 
     let mainOrigin;
     try {
@@ -908,9 +905,26 @@ class WorkflowAnalyzer {
       return;
     }
 
-    const seen = new Set();
-    for (const frame of page.frames()) {
-      if (frame === page.mainFrame()) continue;
+    const norm = (value) => String(value || '').trim().toLowerCase();
+    const linkSeen = new Set(
+      analysis.links.map((row) => `${norm(row?.href)}|${norm(row?.selector)}|${norm(row?.frame_url)}`),
+    );
+    const interactiveSeen = new Set(
+      analysis.interactive_elements.map((row) =>
+        `${norm(row?.type)}|${norm(row?.selector)}|${norm(row?.href)}|${norm(row?.text)}|${norm(row?.frame_url)}`,
+      ),
+    );
+    const nonInteractiveSeen = new Set(
+      analysis.non_interactive_elements.map((row) =>
+        `${norm(row?.type)}|${norm(row?.selector)}|${norm(row?.text)}|${norm(row?.frame_url)}`,
+      ),
+    );
+
+    const linkCap = Math.max(220, analysis.links.length + 140);
+    const interactiveCap = Math.max(280, analysis.interactive_elements.length + 180);
+    const nonInteractiveCap = Math.max(180, analysis.non_interactive_elements.length + 100);
+
+    for (const frame of frames) {
       let frameUrl = '';
       try {
         frameUrl = frame.url() || '';
@@ -928,7 +942,9 @@ class WorkflowAnalyzer {
 
       const snapshot = await frame
         .evaluate(() => {
-          const n = document.querySelectorAll('input,textarea,select,button,a[href]').length || 0;
+          const n = document.querySelectorAll(
+            'input,textarea,select,button,a[href],[role="button"],[role="link"],[data-href],[data-url],[routerlink],[router-link],[to],[data-route],[data-path],[ng-reflect-router-link],[onclick]',
+          ).length || 0;
           const t = document.body && document.body.innerText ? document.body.innerText.trim().length : 0;
           return { n, t };
         })
@@ -937,34 +953,102 @@ class WorkflowAnalyzer {
 
       const handles = await frame
         .$$(
-          'input, textarea, select, button, a[href], [role="button"]'
+          'input, textarea, select, button, a[href], area[href], [role="button"], [role="link"], [data-href], [data-url], [routerlink], [router-link], [to], [data-route], [data-path], [ng-reflect-router-link], [onclick]'
         )
         .catch(() => []);
-      const slice = Array.isArray(handles) ? handles.slice(0, 48) : [];
+      const slice = Array.isArray(handles) ? handles.slice(0, 72) : [];
       for (const h of slice) {
         try {
           const tag = await h.evaluate((el) => el.tagName.toLowerCase());
-          const text = ((await h.textContent().catch(() => '')) || '').trim();
+          const role = ((await h.getAttribute('role').catch(() => '')) || '').trim().toLowerCase();
+          const text = ((await h.textContent().catch(() => '')) || '').trim().slice(0, 240);
           const sels = await this.getElementSelector(h);
           const sel = sels[0]?.selector;
           if (!sel) continue;
-          const key = `${frameUrl}\0${sel}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
+
+          const href = await h.evaluate((el) => {
+            const normalize = (raw) => {
+              let value = String(raw || '').trim();
+              if (!value) return '';
+              if (
+                (value.startsWith('"') && value.endsWith('"')) ||
+                (value.startsWith('\'') && value.endsWith('\'')) ||
+                (value.startsWith('`') && value.endsWith('`'))
+              ) {
+                value = value.slice(1, -1).trim();
+              }
+              if (!value) return '';
+              if (value === '#' || value === 'null' || value === 'undefined' || value === '[object Object]') return '';
+              if (/^(javascript:|mailto:|tel:|blob:|data:)/i.test(value)) return '';
+              if (
+                (value.startsWith('{') && value.endsWith('}')) ||
+                (value.startsWith('[') && value.endsWith(']'))
+              ) {
+                return '';
+              }
+              return value;
+            };
+            const extractOnclick = () => {
+              const onclick = String(el.getAttribute('onclick') || '');
+              if (!onclick) return '';
+              const patterns = [
+                /(?:window\.)?location(?:\.href)?\s*=\s*['"`]([^'"`]+)['"`]/i,
+                /location\.(?:assign|replace)\(\s*['"`]([^'"`]+)['"`]\s*\)/i,
+                /router\.(?:push|replace)\(\s*['"`]([^'"`]+)['"`]\s*\)/i,
+                /history\.pushState\([^,]*,[^,]*,\s*['"`]([^'"`]+)['"`]\s*\)/i,
+              ];
+              for (const pattern of patterns) {
+                const match = onclick.match(pattern);
+                if (match && match[1]) {
+                  const normalized = normalize(match[1]);
+                  if (normalized) return normalized;
+                }
+              }
+              return '';
+            };
+            const candidates = [
+              el.href,
+              el.getAttribute('href'),
+              el.getAttribute('data-href'),
+              el.getAttribute('data-url'),
+              el.getAttribute('routerlink'),
+              el.getAttribute('router-link'),
+              el.getAttribute('to'),
+              el.getAttribute('data-route'),
+              el.getAttribute('data-path'),
+              el.getAttribute('ng-reflect-router-link'),
+              extractOnclick(),
+            ];
+            for (const candidate of candidates) {
+              const normalized = normalize(candidate);
+              if (!normalized) continue;
+              try {
+                return new URL(normalized, window.location.href).href;
+              } catch {
+                return normalized;
+              }
+            }
+            return '';
+          }).catch(() => '');
+
           const base = {
             selector: sel,
             selectors: sels,
-            text: text.slice(0, 240),
+            text,
+            href: href || undefined,
             in_same_origin_iframe: !crossOriginIframe,
             cross_origin_iframe: crossOriginIframe,
             frame_url: frameUrl
           };
-          if (tag === 'a') {
-            const href = await h.evaluate((el) => el.href || '').catch(() => '');
-            if (href) {
+
+          const linkLike = tag === 'a' || tag === 'area' || role === 'link' || Boolean(href);
+          if (linkLike && href && analysis.links.length < linkCap) {
+            const linkKey = `${norm(href)}|${norm(sel)}|${norm(frameUrl)}`;
+            if (!linkSeen.has(linkKey)) {
+              linkSeen.add(linkKey);
               analysis.links.push({
                 href,
-                text: text.slice(0, 240),
+                text,
                 selector: sel,
                 selectors: sels,
                 in_same_origin_iframe: !crossOriginIframe,
@@ -972,22 +1056,94 @@ class WorkflowAnalyzer {
                 frame_url: frameUrl
               });
             }
-            analysis.interactive_elements.push({
-              type: 'link',
-              role: 'link',
-              href: href || undefined,
-              ...base
-            });
-          } else {
-            analysis.interactive_elements.push({
-              type: tag === 'input' ? 'input' : tag,
-              role: tag === 'button' ? 'button' : undefined,
-              ...base
-            });
+          }
+
+          if (analysis.interactive_elements.length < interactiveCap) {
+            const interactiveType = linkLike
+              ? 'link'
+              : tag === 'input'
+                ? 'input'
+                : tag;
+            const interactiveKey = `${norm(interactiveType)}|${norm(sel)}|${norm(href)}|${norm(text)}|${norm(frameUrl)}`;
+            if (!interactiveSeen.has(interactiveKey)) {
+              interactiveSeen.add(interactiveKey);
+              analysis.interactive_elements.push({
+                type: interactiveType,
+                role: role || (tag === 'button' ? 'button' : linkLike ? 'link' : undefined),
+                ...base
+              });
+            }
           }
         } catch {
           // skip element
         }
+      }
+
+      try {
+        if (analysis.non_interactive_elements.length < nonInteractiveCap) {
+          const frameTextRows = await frame.evaluate(() => {
+            const trim = (value, max = 320) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+            const cssEscape = (value) => {
+              const raw = String(value || '').trim();
+              if (!raw) return '';
+              if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(raw);
+              return raw.replace(/([ !"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1');
+            };
+            const selectorFor = (el) => {
+              if (el.id) return `#${cssEscape(el.id)}`;
+              const classes = String(el.className || '')
+                .split(/\s+/)
+                .map((c) => c.trim())
+                .filter(Boolean)
+                .slice(0, 1)
+                .map((c) => cssEscape(c));
+              const tag = el.tagName.toLowerCase();
+              if (classes.length) return `${tag}.${classes[0]}`;
+              return tag;
+            };
+            const visible = (el) => {
+              const style = window.getComputedStyle(el);
+              if (!style) return false;
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+              const rect = el.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            };
+            const rows = [];
+            const seen = new Set();
+            for (const el of document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, li, span, label, dt, dd, article, section')) {
+              if (rows.length >= 40) break;
+              if (!visible(el)) continue;
+              if (el.closest('a, button, input, select, textarea, [role="button"], [role="link"], [onclick]')) continue;
+              const text = trim(el.textContent || '', 320);
+              if (!text || text.length < 3) continue;
+              const selector = selectorFor(el);
+              const type = el.tagName.toLowerCase();
+              const key = `${selector}\0${text}\0${type}`;
+              if (!selector || seen.has(key)) continue;
+              seen.add(key);
+              rows.push({ type, text, selector });
+            }
+            return rows;
+          }).catch(() => []);
+
+          for (const row of frameTextRows) {
+            if (analysis.non_interactive_elements.length >= nonInteractiveCap) break;
+            const key = `${norm(row?.type)}|${norm(row?.selector)}|${norm(row?.text)}|${norm(frameUrl)}`;
+            if (!key || nonInteractiveSeen.has(key)) continue;
+            nonInteractiveSeen.add(key);
+            analysis.non_interactive_elements.push({
+              type: row?.type || 'text',
+              text: row?.text || '',
+              selector: row?.selector || '',
+              in_same_origin_iframe: !crossOriginIframe,
+              cross_origin_iframe: crossOriginIframe,
+              frame_url: frameUrl,
+              in_frame: true,
+            });
+          }
+        }
+      } catch {
+        // keep frame text merge best effort
       }
     }
   }
@@ -1571,15 +1727,7 @@ class WorkflowAnalyzer {
     }
 
     try {
-      const invEmpty =
-        (analysis.forms?.length || 0) +
-          (analysis.links?.length || 0) +
-          (Array.isArray(analysis.menu_items) ? analysis.menu_items.length : 0) +
-          (analysis.interactive_elements?.length || 0) ===
-        0;
-      if (invEmpty) {
-        await this.augmentAnalysisFromSameOriginFrames(page, analysis);
-      }
+      await this.augmentAnalysisFromSameOriginFrames(page, analysis);
     } catch (augErr) {
       console.warn(`[PLAYWRIGHT] Same-origin iframe inventory merge failed: ${augErr.message}`);
     }
@@ -5077,9 +5225,23 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         }
       }
       const stillEmpty = playwrightInventoryIsEmpty(analysis);
+      const reconciledScore = summarizePlaywrightInventoryScore(analysis);
+      const thinInventoryVsDom =
+        !stillEmpty &&
+        domPrim.approximateInteractiveNodes >= 18 &&
+        reconciledScore <= Math.max(4, Math.floor(domPrim.approximateInteractiveNodes * 0.18));
+      const frameDominatedDom =
+        Number(domPrim.max_frame_interactive_nodes || 0) >= 10 &&
+        Number(domPrim.main_frame_interactive_nodes || 0) <= 4;
       workflowState.extractionReconciliation = {
         playwright_score: pwScore,
         dom_primitive_nodes: domPrim.approximateInteractiveNodes,
+        dom_main_frame_nodes: domPrim.main_frame_interactive_nodes,
+        dom_max_frame_nodes: domPrim.max_frame_interactive_nodes,
+        dom_router_like_nodes: domPrim.routerLikeCount,
+        dom_shadow_roots: domPrim.shadow_root_count,
+        dom_frames_scanned: domPrim.frames_scanned,
+        dom_frames_skipped: domPrim.frames_skipped,
         vision_assessment: vision,
         html_ai_fallback_applied: Boolean(
           htmlAiResult &&
@@ -5087,19 +5249,31 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
               (Array.isArray(htmlAiResult.interactive_elements) && htmlAiResult.interactive_elements.length > 0)),
         ),
         inventory_still_empty_after_reconciliation: stillEmpty,
+        inventory_score_after_reconciliation: reconciledScore,
+        inventory_thin_vs_dom_primitives: thinInventoryVsDom,
+        frame_dominated_dom_signal: frameDominatedDom,
         screenshot_used_for_assessment: Boolean(viewportShotB64),
       };
       const payload = {
         playwright_score: pwScore,
         dom_primitive_nodes: domPrim.approximateInteractiveNodes,
+        dom_main_frame_nodes: domPrim.main_frame_interactive_nodes,
+        dom_max_frame_nodes: domPrim.max_frame_interactive_nodes,
+        dom_router_like_nodes: domPrim.routerLikeCount,
+        dom_frames_scanned: domPrim.frames_scanned,
         html_ai_fallback_applied: workflowState.extractionReconciliation.html_ai_fallback_applied,
         inventory_still_empty: stillEmpty,
+        inventory_score_after_reconciliation: reconciledScore,
+        inventory_thin_vs_dom_primitives: thinInventoryVsDom,
+        frame_dominated_dom_signal: frameDominatedDom,
         screenshot_assessed: Boolean(vision),
       };
       const msg = `[EXTRACTION_RECONCILIATION] ${JSON.stringify(payload)}`;
       const level =
         stillEmpty && (domPrim.approximateInteractiveNodes >= 12 || vision?.ui_surface_likelihood === 'high')
           ? 'warn'
+          : thinInventoryVsDom
+            ? 'warn'
           : workflowState.extractionReconciliation.html_ai_fallback_applied
             ? 'warn'
             : 'info';
@@ -5130,6 +5304,21 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           '⚠️ [EXTRACTION_RECONCILIATION] extraction_still_empty_after_reconciliation — screenshot/DOM suggest a populated UI but structured inventory remained empty; treat page analysis as degraded (not a clean success).',
           'WORKFLOW-ANALYZER',
           { action: 'extraction_still_empty', dom_primitive_nodes: domPrim.approximateInteractiveNodes },
+        );
+      }
+      if (thinInventoryVsDom && jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'warn',
+          '⚠️ [EXTRACTION_RECONCILIATION] inventory_thin_vs_dom_primitives — structured inventory remained far below DOM primitive evidence after reconciliation; treat crawl coverage as degraded and expand frame/shadow extraction.',
+          'WORKFLOW-ANALYZER',
+          {
+            action: 'extraction_inventory_thin',
+            dom_primitive_nodes: domPrim.approximateInteractiveNodes,
+            inventory_score_after_reconciliation: reconciledScore,
+            dom_main_frame_nodes: domPrim.main_frame_interactive_nodes,
+            dom_max_frame_nodes: domPrim.max_frame_interactive_nodes,
+          },
         );
       }
     } catch (recErr) {

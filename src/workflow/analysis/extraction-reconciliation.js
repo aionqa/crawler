@@ -37,36 +37,128 @@ export async function settlePageUrlAfterNavigation(page, logFn = null) {
 
 /** Cheap DOM primitive counts (cross-check vs Playwright structured extractors). */
 export async function getDomInventoryPrimitives(page) {
+  const empty = {
+    approximateInteractiveNodes: 0,
+    anchorCount: 0,
+    buttonInputCount: 0,
+    roleControlCount: 0,
+    routerLikeCount: 0,
+    frames_scanned: 0,
+    frames_skipped: 0,
+    frame_count: 0,
+    shadow_root_count: 0,
+    main_frame_interactive_nodes: 0,
+    max_frame_interactive_nodes: 0,
+  };
   if (!page || typeof page.evaluate !== 'function') {
-    return {
-      approximateInteractiveNodes: 0,
-      anchorCount: 0,
-      buttonInputCount: 0,
-      roleControlCount: 0,
-    };
+    return empty;
   }
-  try {
-    return await page.evaluate(() => {
-      const q = (sel) => document.querySelectorAll(sel).length;
-      const anchors = q('a[href]');
-      const bi = q('button') + q('input') + q('select') + q('textarea');
-      const roles = q('[role="button"]') + q('[role="link"]') + q('[role="menuitem"]');
-      const approx = anchors + bi + roles;
-      return {
-        approximateInteractiveNodes: approx,
-        anchorCount: anchors,
-        buttonInputCount: bi,
-        roleControlCount: roles,
-      };
-    });
-  } catch {
-    return {
-      approximateInteractiveNodes: 0,
-      anchorCount: 0,
-      buttonInputCount: 0,
-      roleControlCount: 0,
+
+  const collectForFrame = async (frameLike) => frameLike.evaluate(() => {
+    const collectRoots = () => {
+      const roots = [document];
+      const visited = new Set([document]);
+      const queue = [document];
+      while (queue.length > 0 && roots.length < 40) {
+        const root = queue.shift();
+        if (!root || typeof root.querySelectorAll !== 'function') continue;
+        const hosts = root.querySelectorAll('*');
+        for (const host of hosts) {
+          if (!host || !host.shadowRoot || visited.has(host.shadowRoot)) continue;
+          visited.add(host.shadowRoot);
+          roots.push(host.shadowRoot);
+          queue.push(host.shadowRoot);
+          if (roots.length >= 40) break;
+        }
+      }
+      return roots;
     };
+
+    const roots = collectRoots();
+    const interactiveNodes = new Set();
+    const anchors = new Set();
+    const buttonsInputs = new Set();
+    const roles = new Set();
+    const routerLike = new Set();
+
+    const collect = (setRef, selector) => {
+      for (const root of roots) {
+        if (!root || typeof root.querySelectorAll !== 'function') continue;
+        for (const el of root.querySelectorAll(selector)) {
+          setRef.add(el);
+          interactiveNodes.add(el);
+        }
+      }
+    };
+
+    collect(anchors, 'a[href], area[href]');
+    collect(buttonsInputs, 'button, input, select, textarea');
+    collect(roles, '[role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"]');
+    collect(
+      routerLike,
+      '[data-href], [data-url], [routerlink], [router-link], [to], [data-route], [data-path], [ng-reflect-router-link], [onclick*="location"], [onclick*="router.push"], [onclick*="history.pushState"]',
+    );
+
+    return {
+      approximateInteractiveNodes: interactiveNodes.size,
+      anchorCount: anchors.size,
+      buttonInputCount: buttonsInputs.size,
+      roleControlCount: roles.size,
+      routerLikeCount: routerLike.size,
+      shadow_root_count: Math.max(0, roots.length - 1),
+    };
+  });
+
+  const frames = typeof page.frames === 'function'
+    ? page.frames()
+    : [typeof page.mainFrame === 'function' ? page.mainFrame() : page].filter(Boolean);
+  const mainFrame = typeof page.mainFrame === 'function' ? page.mainFrame() : null;
+  const aggregate = { ...empty, frame_count: frames.length };
+
+  for (let idx = 0; idx < frames.length; idx += 1) {
+    const frame = frames[idx];
+    if (!frame) continue;
+    try {
+      const stats = await collectForFrame(frame);
+      aggregate.frames_scanned += 1;
+      aggregate.approximateInteractiveNodes += Number(stats?.approximateInteractiveNodes || 0);
+      aggregate.anchorCount += Number(stats?.anchorCount || 0);
+      aggregate.buttonInputCount += Number(stats?.buttonInputCount || 0);
+      aggregate.roleControlCount += Number(stats?.roleControlCount || 0);
+      aggregate.routerLikeCount += Number(stats?.routerLikeCount || 0);
+      aggregate.shadow_root_count += Number(stats?.shadow_root_count || 0);
+      const frameNodes = Number(stats?.approximateInteractiveNodes || 0);
+      if (frameNodes > aggregate.max_frame_interactive_nodes) {
+        aggregate.max_frame_interactive_nodes = frameNodes;
+      }
+      if ((mainFrame && frame === mainFrame) || (!mainFrame && idx === 0)) {
+        aggregate.main_frame_interactive_nodes = frameNodes;
+      }
+    } catch {
+      aggregate.frames_skipped += 1;
+    }
   }
+
+  // Fallback when frame iteration unexpectedly returned no data.
+  if (aggregate.frames_scanned === 0) {
+    try {
+      const stats = await collectForFrame(page);
+      aggregate.frames_scanned = 1;
+      aggregate.frame_count = Math.max(aggregate.frame_count, 1);
+      aggregate.approximateInteractiveNodes = Number(stats?.approximateInteractiveNodes || 0);
+      aggregate.anchorCount = Number(stats?.anchorCount || 0);
+      aggregate.buttonInputCount = Number(stats?.buttonInputCount || 0);
+      aggregate.roleControlCount = Number(stats?.roleControlCount || 0);
+      aggregate.routerLikeCount = Number(stats?.routerLikeCount || 0);
+      aggregate.shadow_root_count = Number(stats?.shadow_root_count || 0);
+      aggregate.main_frame_interactive_nodes = aggregate.approximateInteractiveNodes;
+      aggregate.max_frame_interactive_nodes = aggregate.approximateInteractiveNodes;
+    } catch {
+      return empty;
+    }
+  }
+
+  return aggregate;
 }
 
 export function summarizePlaywrightInventoryScore(analysis) {
@@ -276,7 +368,12 @@ export function shouldAttemptReconciliation({
   vision,
 }) {
   const domN = domPrimitives?.approximateInteractiveNodes ?? 0;
-  if (playwrightScore >= 8) return false;
+  const maxFrame = domPrimitives?.max_frame_interactive_nodes ?? domN;
+  const mainFrame = domPrimitives?.main_frame_interactive_nodes ?? domN;
+  const routerLike = domPrimitives?.routerLikeCount ?? 0;
+  if (playwrightScore >= 10 && domN <= 14) return false;
+  if (maxFrame >= 12 && mainFrame <= 4 && playwrightScore <= 6) return true;
+  if (routerLike >= 8 && playwrightScore <= 5) return true;
   if (domN >= 14 && playwrightScore <= 3) return true;
   if (vision && typeof vision === 'object') {
     if (vision.appears_like_raw_json_or_error_page === true) return false;

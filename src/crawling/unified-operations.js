@@ -2501,20 +2501,33 @@ const modeHandlers = {
       if (t.startsWith('http://') || t.startsWith('https://')) return t;
       return `https://${t}`;
     };
+    const normalizeHashRouteFragment = (fragmentRaw) => {
+      const fragment = String(fragmentRaw || '').replace(/^#/, '').trim();
+      if (!fragment) return '';
+      if (fragment.startsWith('/') || fragment.startsWith('!/')) return fragment;
+      if (fragment.startsWith('!') && fragment.length > 1) return fragment;
+      if (/^[a-z0-9][a-z0-9._~/-]*\/[a-z0-9._~/-]+$/i.test(fragment)) return fragment;
+      return '';
+    };
     const canonicalizeUrl = (url) => {
       const withScheme = ensureUrlHasScheme(url);
       if (!withScheme) return '';
       try {
         const u = new URL(withScheme);
+        const routeHash = normalizeHashRouteFragment(u.hash);
         u.hash = '';
         if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) {
           u.port = '';
         }
         const normalizedPath = u.pathname.replace(/\/+$/, '') || '/';
-        return `${u.protocol}//${u.host}${normalizedPath}${u.search}`;
+        const base = `${u.protocol}//${u.host}${normalizedPath}${u.search}`;
+        return routeHash ? `${base}#${routeHash}` : base;
       } catch {
-        const noHash = String(withScheme).split('#')[0];
-        return noHash.replace(/\/+$/, '') || noHash;
+        const raw = String(withScheme);
+        const noHash = raw.split('#')[0];
+        const routeHash = normalizeHashRouteFragment(raw.includes('#') ? raw.split('#').slice(1).join('#') : '');
+        const base = noHash.replace(/\/+$/, '') || noHash;
+        return routeHash ? `${base}#${routeHash}` : base;
       }
     };
     // For queue/dedup: same page by default (canonical); when treat_trailing_slash_separately, /path and /path/ are different
@@ -2525,10 +2538,15 @@ const modeHandlers = {
       if (treatTrailingSlashSeparately) {
         try {
           const u = new URL(withScheme);
+          const routeHash = normalizeHashRouteFragment(u.hash);
           u.hash = '';
-          return u.toString();
+          const base = u.toString();
+          return routeHash ? `${base}#${routeHash}` : base;
         } catch {
-          return String(withScheme).split('#')[0].trim() || withScheme;
+          const raw = String(withScheme).trim();
+          const base = raw.split('#')[0].trim() || withScheme;
+          const routeHash = normalizeHashRouteFragment(raw.includes('#') ? raw.split('#').slice(1).join('#') : '');
+          return routeHash ? `${base}#${routeHash}` : base;
         }
       }
       return canonicalizeUrl(url);
@@ -3581,6 +3599,13 @@ const modeHandlers = {
             const normalized = String(value || '').replace(/\/+$/, '');
             return normalized === '' ? '/' : normalized;
           };
+          const isHashRouteFragment = (hashValue = '') => {
+            const fragment = String(hashValue || '').replace(/^#/, '').trim();
+            if (!fragment) return false;
+            if (fragment.startsWith('/') || fragment.startsWith('!/')) return true;
+            if (fragment.startsWith('!') && fragment.length > 1) return true;
+            return /^[a-z0-9][a-z0-9._~/-]*\/[a-z0-9._~/-]+$/i.test(fragment);
+          };
 
           for (const link of allInternal) {
             const href = link?.href || '';
@@ -3590,16 +3615,22 @@ const modeHandlers = {
               const target = new URL(href, currentUrl);
               const targetCanonical = urlKeyForDedupe(target.href);
               const samePath = normalizePath(target.pathname) === normalizePath(current.pathname);
-              const isAnchor = Boolean(target.hash) && target.origin === current.origin && samePath;
+              const hashLooksRoute = isHashRouteFragment(target.hash);
+              const isAnchor = Boolean(target.hash) && !hashLooksRoute && target.origin === current.origin && samePath;
               if (isAnchor) {
                 anchors.push(link);
               } else {
                 if (targetCanonical && targetCanonical !== currentUrl) {
+                  const normalizedBase = targetCanonical.split('#')[0];
+                  const hashFragment = targetCanonical.includes('#')
+                    ? targetCanonical.split('#').slice(1).join('#')
+                    : (link?.hashFragment || null);
                   if (!uniqueCrawlableByCanonicalUrl.has(targetCanonical)) {
                     uniqueCrawlableByCanonicalUrl.set(targetCanonical, {
                       ...link,
                       href: targetCanonical,
-                      urlWithoutHash: targetCanonical
+                      urlWithoutHash: normalizedBase,
+                      hashFragment,
                     });
                   }
                 }
@@ -3607,16 +3638,22 @@ const modeHandlers = {
             } catch {
               const urlWithoutHash = (link?.urlWithoutHash || href.split('#')[0] || '').trim();
               if (!urlWithoutHash) continue;
-              if (href.includes('#') && urlWithoutHash === currentUrl.split('#')[0]) {
+              const hashFragment = href.includes('#') ? href.split('#').slice(1).join('#') : '';
+              const hashLooksRoute = isHashRouteFragment(hashFragment);
+              if (href.includes('#') && !hashLooksRoute && urlWithoutHash === currentUrl.split('#')[0]) {
                 anchors.push(link);
               } else {
-                const targetCanonical = urlKeyForDedupe(urlWithoutHash);
+                const targetCanonical = urlKeyForDedupe(hashLooksRoute ? href : urlWithoutHash);
                 if (targetCanonical && targetCanonical !== currentUrl) {
+                  const normalizedBase = targetCanonical.split('#')[0];
                   if (!uniqueCrawlableByCanonicalUrl.has(targetCanonical)) {
                     uniqueCrawlableByCanonicalUrl.set(targetCanonical, {
                       ...link,
                       href: targetCanonical,
-                      urlWithoutHash: targetCanonical
+                      urlWithoutHash: normalizedBase,
+                      hashFragment: targetCanonical.includes('#')
+                        ? targetCanonical.split('#').slice(1).join('#')
+                        : (link?.hashFragment || null),
                     });
                   }
                 }
@@ -3649,7 +3686,7 @@ const modeHandlers = {
             !isLoginPageUrl(u, loginUrls);
           if (parentJobId && crawlableInternalLinks.length > 0 && !isLoginJobForReport) {
             const linksToReport = crawlableInternalLinks
-              .map((link) => (link?.urlWithoutHash || link?.href || '').trim())
+              .map((link) => (link?.href || link?.urlWithoutHash || '').trim())
               .filter((u) => linkUrlCrawlable(u));
             if (linksToReport.length > 0) {
               try {
@@ -3691,8 +3728,8 @@ const modeHandlers = {
 
             let queuedCount = 0;
             for (const link of crawlableInternalLinks.slice(0, 50)) {
-              // Regular link - use base URL (without hash) for deduplication
-              const urlToCheck = urlKeyForDedupe((link?.urlWithoutHash || link?.href || '').split('#')[0].trim());
+              // Keep route hashes crawlable while deduping same canonical targets.
+              const urlToCheck = urlKeyForDedupe((link?.href || link?.urlWithoutHash || '').trim());
               if (!urlToCheck) continue;
               // Strict domain + session: queue URLs on seed/project hosts or hosts covered by project session cookies
               if (
@@ -4632,36 +4669,332 @@ async function performFormsCrawl(page, context, openaiClient) {
 
 // Extract interactive and non-interactive elements
 async function extractPageElements(page, jobId) {
+  const FRAME_INTERACTIVE_SELECTOR = [
+    'a[href]',
+    'area[href]',
+    'button',
+    'input:not([type="hidden"])',
+    'select',
+    'textarea',
+    '[role="button"]',
+    '[role="link"]',
+    '[role="menuitem"]',
+    '[tabindex]:not([tabindex="-1"])',
+    '[onclick]',
+    '[data-href]',
+    '[data-url]',
+    '[routerlink]',
+    '[router-link]',
+    '[to]',
+    '[data-route]',
+    '[data-path]',
+    '[ng-reflect-router-link]'
+  ].join(', ');
+  const FRAME_NON_INTERACTIVE_SELECTOR = 'h1, h2, h3, h4, h5, h6, p, li, span, label, dt, dd, article, section';
+
   try {
-    await sendLog(jobId, 'info', '🔍 Extracting page elements...');
-    
-    // Extract interactive elements
-    const interactive = await page.$$eval('button, a, input, select, textarea', elements => 
-      elements.map(el => ({
-        type: el.tagName.toLowerCase(),
-        text: el.textContent?.trim() || el.value || '',
-        href: el.href || null,
-        selector: el.id ? `#${el.id}` : el.className ? `.${el.className.split(' ')[0]}` : el.tagName.toLowerCase(),
-        name: el.name || null,
-        id: el.id || null,
-        placeholder: el.placeholder || null
-      }))
+    await sendLog(jobId, 'info', '🔍 Extracting page elements across main DOM, iframes, and open shadow roots...');
+
+    const frames = typeof page.frames === 'function'
+      ? page.frames()
+      : [typeof page.mainFrame === 'function' ? page.mainFrame() : null].filter(Boolean);
+    const interactive = [];
+    const nonInteractive = [];
+    const interactiveSeen = new Set();
+    const nonInteractiveSeen = new Set();
+    let framesScanned = 0;
+    let framesSkipped = 0;
+
+    const mergeRows = (target, seen, rows, cap, keyBuilder) => {
+      if (!Array.isArray(rows) || !rows.length) return;
+      for (const row of rows) {
+        if (!row || target.length >= cap) break;
+        const key = keyBuilder(row);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        target.push(row);
+      }
+    };
+    const normalizeKeyPart = (value) => String(value || '').trim().toLowerCase();
+
+    for (const frame of frames) {
+      if (!frame) continue;
+      let frameUrl = '';
+      try {
+        frameUrl = frame.url() || '';
+      } catch {
+        frameUrl = '';
+      }
+
+      try {
+        await frame.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+        const frameData = await frame.evaluate(
+          (interactiveSelector, nonInteractiveSelector) => {
+            const trim = (value, max = 280) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
+            const cssEscape = (value) => {
+              const raw = String(value || '').trim();
+              if (!raw) return '';
+              if (window.CSS && typeof window.CSS.escape === 'function') {
+                return window.CSS.escape(raw);
+              }
+              return raw.replace(/([ !"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1');
+            };
+            const isVisible = (el) => {
+              if (!el || !(el instanceof Element)) return false;
+              const style = window.getComputedStyle(el);
+              if (!style) return false;
+              if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+              const rect = el.getBoundingClientRect();
+              return rect.width > 0 && rect.height > 0;
+            };
+            const buildSelector = (el) => {
+              if (!el || !(el instanceof Element)) return '';
+              if (el.id) return `#${cssEscape(el.id)}`;
+              const classes = String(el.className || '')
+                .split(/\s+/)
+                .map((c) => c.trim())
+                .filter(Boolean)
+                .slice(0, 2)
+                .map((c) => cssEscape(c));
+              const tag = el.tagName.toLowerCase();
+              if (classes.length > 0) return `${tag}.${classes.join('.')}`;
+              const role = trim(el.getAttribute('role'), 40);
+              if (role) return `${tag}[role="${role}"]`;
+              const name = trim(el.getAttribute('name'), 80);
+              if (name) return `${tag}[name="${name}"]`;
+              return tag;
+            };
+            const normalizeRouteCandidate = (raw) => {
+              let candidate = String(raw || '').trim();
+              if (!candidate) return '';
+              if (
+                (candidate.startsWith('"') && candidate.endsWith('"')) ||
+                (candidate.startsWith('\'') && candidate.endsWith('\'')) ||
+                (candidate.startsWith('`') && candidate.endsWith('`'))
+              ) {
+                candidate = candidate.slice(1, -1).trim();
+              }
+              if (!candidate) return '';
+              if (/^(javascript:|mailto:|tel:|blob:|data:)/i.test(candidate)) return '';
+              if (candidate === '#' || candidate === 'null' || candidate === 'undefined' || candidate === '[object Object]') return '';
+              if (
+                (candidate.startsWith('{') && candidate.endsWith('}')) ||
+                (candidate.startsWith('[') && candidate.endsWith(']'))
+              ) {
+                return '';
+              }
+              return candidate;
+            };
+            const extractRouteFromOnclick = (onclickRaw) => {
+              const onclick = String(onclickRaw || '');
+              if (!onclick) return '';
+              const patterns = [
+                /(?:window\.)?location(?:\.href)?\s*=\s*['"`]([^'"`]+)['"`]/i,
+                /location\.(?:assign|replace)\(\s*['"`]([^'"`]+)['"`]\s*\)/i,
+                /router\.(?:push|replace)\(\s*['"`]([^'"`]+)['"`]\s*\)/i,
+                /history\.pushState\([^,]*,[^,]*,\s*['"`]([^'"`]+)['"`]\s*\)/i,
+              ];
+              for (const pattern of patterns) {
+                const match = onclick.match(pattern);
+                if (match && match[1]) {
+                  const normalized = normalizeRouteCandidate(match[1]);
+                  if (normalized) return normalized;
+                }
+              }
+              return '';
+            };
+            const resolveUrlCandidate = (el) => {
+              if (!el || !(el instanceof Element)) return '';
+              const candidates = [
+                el.href,
+                el.getAttribute('href'),
+                el.getAttribute('data-href'),
+                el.getAttribute('data-url'),
+                el.getAttribute('routerlink'),
+                el.getAttribute('router-link'),
+                el.getAttribute('to'),
+                el.getAttribute('data-route'),
+                el.getAttribute('data-path'),
+                el.getAttribute('ng-reflect-router-link'),
+                extractRouteFromOnclick(el.getAttribute('onclick')),
+              ];
+              for (const candidate of candidates) {
+                const normalized = normalizeRouteCandidate(candidate);
+                if (normalized) return normalized;
+              }
+              return '';
+            };
+            const toAbsolute = (href) => {
+              const normalized = normalizeRouteCandidate(href);
+              if (!normalized) return null;
+              try {
+                return new URL(normalized, window.location.href).href;
+              } catch {
+                return normalized;
+              }
+            };
+            const collectRoots = () => {
+              const roots = [document];
+              const visited = new Set([document]);
+              const queue = [document];
+              while (queue.length > 0 && roots.length < 40) {
+                const root = queue.shift();
+                if (!root || typeof root.querySelectorAll !== 'function') continue;
+                const hosts = root.querySelectorAll('*');
+                for (const host of hosts) {
+                  if (!host || !host.shadowRoot || visited.has(host.shadowRoot)) continue;
+                  visited.add(host.shadowRoot);
+                  roots.push(host.shadowRoot);
+                  queue.push(host.shadowRoot);
+                  if (roots.length >= 40) break;
+                }
+              }
+              return roots;
+            };
+
+            const roots = collectRoots();
+            const interactiveRows = [];
+            const nonInteractiveRows = [];
+            const seenInteractive = new Set();
+            const seenNonInteractive = new Set();
+
+            for (const root of roots) {
+              if (!root || typeof root.querySelectorAll !== 'function') continue;
+
+              const interactiveNodes = root.querySelectorAll(interactiveSelector);
+              for (const el of interactiveNodes) {
+                if (interactiveRows.length >= 320) break;
+                if (!isVisible(el)) continue;
+                const tag = el.tagName.toLowerCase();
+                const href = toAbsolute(resolveUrlCandidate(el));
+                const role = trim(el.getAttribute('role'), 50);
+                const text = trim(
+                  el.textContent ||
+                    el.getAttribute('aria-label') ||
+                    el.getAttribute('title') ||
+                    el.getAttribute('alt') ||
+                    el.value ||
+                    '',
+                  260,
+                );
+                const selector = buildSelector(el);
+                const name = trim(el.getAttribute('name'), 120) || null;
+                const id = trim(el.getAttribute('id'), 120) || null;
+                const placeholder = trim(el.getAttribute('placeholder'), 160) || null;
+                const inferredType =
+                  tag === 'a' || tag === 'area' || role === 'link'
+                    ? 'link'
+                    : tag === 'button' || role === 'button'
+                      ? 'button'
+                      : tag === 'input'
+                        ? (trim(el.getAttribute('type'), 30) || 'input')
+                        : tag;
+                const key = [selector, href || '', text, inferredType].join('\0');
+                if (!selector || seenInteractive.has(key)) continue;
+                seenInteractive.add(key);
+                interactiveRows.push({
+                  type: inferredType,
+                  text,
+                  href: href || null,
+                  selector,
+                  name,
+                  id,
+                  placeholder,
+                  role: role || null,
+                  has_onclick: el.hasAttribute('onclick'),
+                });
+              }
+
+              const textNodes = root.querySelectorAll(nonInteractiveSelector);
+              for (const el of textNodes) {
+                if (nonInteractiveRows.length >= 140) break;
+                if (!isVisible(el)) continue;
+                if (el.closest('a, button, input, select, textarea, [role="button"], [role="link"], [onclick]')) {
+                  continue;
+                }
+                const text = trim(el.textContent || '', 360);
+                if (!text || text.length < 3) continue;
+                const selector = buildSelector(el);
+                const type = el.tagName.toLowerCase();
+                const key = `${selector}\0${text}\0${type}`;
+                if (!selector || seenNonInteractive.has(key)) continue;
+                seenNonInteractive.add(key);
+                nonInteractiveRows.push({
+                  type,
+                  text,
+                  selector,
+                });
+              }
+            }
+
+            return {
+              interactive: interactiveRows,
+              nonInteractive: nonInteractiveRows,
+              open_shadow_roots_scanned: Math.max(0, roots.length - 1),
+            };
+          },
+          FRAME_INTERACTIVE_SELECTOR,
+          FRAME_NON_INTERACTIVE_SELECTOR,
+        );
+
+        const inFrame = frame !== page.mainFrame();
+        const frameInteractive = Array.isArray(frameData?.interactive)
+          ? frameData.interactive.map((row) => ({
+            ...row,
+            in_frame: inFrame,
+            frame_url: frameUrl || null,
+          }))
+          : [];
+        const frameNonInteractive = Array.isArray(frameData?.nonInteractive)
+          ? frameData.nonInteractive.map((row) => ({
+            ...row,
+            in_frame: inFrame,
+            frame_url: frameUrl || null,
+          }))
+          : [];
+
+        mergeRows(
+          interactive,
+          interactiveSeen,
+          frameInteractive,
+          1200,
+          (row) => [
+            normalizeKeyPart(row.type),
+            normalizeKeyPart(row.selector),
+            normalizeKeyPart(row.href),
+            normalizeKeyPart(row.text),
+            normalizeKeyPart(row.frame_url),
+          ].join('|'),
+        );
+        mergeRows(
+          nonInteractive,
+          nonInteractiveSeen,
+          frameNonInteractive,
+          500,
+          (row) => [
+            normalizeKeyPart(row.type),
+            normalizeKeyPart(row.selector),
+            normalizeKeyPart(row.text),
+            normalizeKeyPart(row.frame_url),
+          ].join('|'),
+        );
+        framesScanned += 1;
+      } catch (frameError) {
+        framesSkipped += 1;
+        await sendLog(
+          jobId,
+          'info',
+          `🔍 Element extraction skipped a frame (${String(frameError?.message || frameError).slice(0, 160)})`,
+        );
+      }
+    }
+
+    await sendLog(
+      jobId,
+      'info',
+      `📊 Extracted ${interactive.length} interactive and ${nonInteractive.length} non-interactive elements across ${framesScanned} frame(s)${framesSkipped ? `, ${framesSkipped} skipped` : ''}`,
     );
-    
-    // Extract non-interactive elements
-    const nonInteractive = await page.$$eval('p, h1, h2, h3, h4, h5, h6, span, div, label', elements => 
-      elements.filter(el => {
-        const text = el.textContent?.trim() || '';
-        return text.length > 0 && text.length < 500; // Filter out empty or very long text
-      }).slice(0, 50).map(el => ({ // Limit to 50 elements
-        type: el.tagName.toLowerCase(),
-        text: el.textContent?.trim() || '',
-        selector: el.id ? `#${el.id}` : el.className ? `.${el.className.split(' ')[0]}` : el.tagName.toLowerCase()
-      }))
-    );
-    
-    await sendLog(jobId, 'info', `📊 Extracted ${interactive.length} interactive and ${nonInteractive.length} non-interactive elements`);
-    
+
     return { interactive, nonInteractive };
   } catch (error) {
     await sendLog(jobId, 'error', `Failed to extract elements: ${error.message}`);
@@ -4708,10 +5041,69 @@ function _browserCollectLinksFromAnchorElements(elements, opts) {
     if (projectDomains.length > 0 && projectDomains.some((d) => hostMatchesDomain(host, d, true))) return false;
     return apiDomains.some((apiDomain) => hostMatchesDomain(host, apiDomain, true));
   };
+  const normalizeCandidateHref = (raw) => {
+    let candidate = String(raw || '').trim();
+    if (!candidate) return '';
+    if (
+      (candidate.startsWith('"') && candidate.endsWith('"')) ||
+      (candidate.startsWith('\'') && candidate.endsWith('\'')) ||
+      (candidate.startsWith('`') && candidate.endsWith('`'))
+    ) {
+      candidate = candidate.slice(1, -1).trim();
+    }
+    if (!candidate) return '';
+    if (candidate === '#' || candidate === 'null' || candidate === 'undefined' || candidate === '[object Object]') return '';
+    if (/^(javascript:|mailto:|tel:|blob:|data:)/i.test(candidate)) return '';
+    if (
+      (candidate.startsWith('{') && candidate.endsWith('}')) ||
+      (candidate.startsWith('[') && candidate.endsWith(']'))
+    ) {
+      return '';
+    }
+    return candidate;
+  };
+  const extractRouteFromOnclick = (onclickRaw) => {
+    const onclick = String(onclickRaw || '');
+    if (!onclick) return '';
+    const patterns = [
+      /(?:window\.)?location(?:\.href)?\s*=\s*['"`]([^'"`]+)['"`]/i,
+      /location\.(?:assign|replace)\(\s*['"`]([^'"`]+)['"`]\s*\)/i,
+      /router\.(?:push|replace)\(\s*['"`]([^'"`]+)['"`]\s*\)/i,
+      /history\.pushState\([^,]*,[^,]*,\s*['"`]([^'"`]+)['"`]\s*\)/i,
+    ];
+    for (const pattern of patterns) {
+      const match = onclick.match(pattern);
+      if (match && match[1]) {
+        const normalized = normalizeCandidateHref(match[1]);
+        if (normalized) return normalized;
+      }
+    }
+    return '';
+  };
+  const resolveHrefFromElement = (el) => {
+    const candidates = [
+      el.href,
+      el.getAttribute('href'),
+      el.getAttribute('data-href'),
+      el.getAttribute('data-url'),
+      el.getAttribute('routerlink'),
+      el.getAttribute('router-link'),
+      el.getAttribute('to'),
+      el.getAttribute('data-route'),
+      el.getAttribute('data-path'),
+      el.getAttribute('ng-reflect-router-link'),
+      extractRouteFromOnclick(el.getAttribute('onclick')),
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeCandidateHref(candidate);
+      if (normalized) return normalized;
+    }
+    return '';
+  };
 
   elements.forEach((el) => {
-    const href = el.href || el.getAttribute('data-href') || el.getAttribute('data-url') || '';
-    if (!href || href.startsWith('javascript:') || href.startsWith('mailto:') || href.startsWith('tel:') || href === '#') {
+    const href = resolveHrefFromElement(el);
+    if (!href) {
       return;
     }
 
@@ -4765,7 +5157,7 @@ function _browserCollectLinksFromAnchorElements(elements, opts) {
 }
 
 const LINK_EXTRACTION_SELECTOR =
-  'a[href], area[href], [role="link"][href], [data-href], [data-url]';
+  'a[href], area[href], [role="link"][href], [data-href], [data-url], [routerlink], [router-link], [to], [data-route], [data-path], [ng-reflect-router-link], [onclick*="location"], [onclick*="router.push"], [onclick*="history.pushState"]';
 
 /** Count harvestable nodes across all frames (matches LINK_EXTRACTION_SELECTOR). */
 async function countHarvestableAnchorsAllFrames(page) {
@@ -4924,28 +5316,56 @@ async function extractAllLinks(page, jobId, baseUrl, allowSubdomains = false, do
     }
     const links = Array.from(mergedByHref.values());
     
-    const normalizeUrlForDedup = (value) => {
+    const normalizeHashRouteFragment = (rawFragment) => {
+      const fragment = String(rawFragment || '').replace(/^#/, '').trim();
+      if (!fragment) return '';
+      if (fragment.startsWith('/') || fragment.startsWith('!/')) return fragment;
+      if (fragment.startsWith('!') && fragment.length > 1) return fragment;
+      if (/^[a-z0-9][a-z0-9._~/-]*\/[a-z0-9._~/-]+$/i.test(fragment)) return fragment;
+      return '';
+    };
+    const normalizeUrlForDedup = (value, preserveHashFragment = '') => {
       try {
         const u = new URL(String(value || ''));
+        const routeHash = normalizeHashRouteFragment(preserveHashFragment || u.hash);
         u.hash = '';
         const normalizedPath = u.pathname.replace(/\/+$/, '') || '/';
-        return `${u.protocol}//${u.host}${normalizedPath}${u.search}`;
+        const base = `${u.protocol}//${u.host}${normalizedPath}${u.search}`;
+        return routeHash ? `${base}#${routeHash}` : base;
       } catch {
-        const raw = String(value || '').split('#')[0];
-        return raw.replace(/\/+$/, '') || raw;
+        const raw = String(value || '');
+        const base = raw.split('#')[0];
+        const normalizedBase = base.replace(/\/+$/, '') || base;
+        const routeHash = normalizeHashRouteFragment(
+          preserveHashFragment || (raw.includes('#') ? raw.split('#').slice(1).join('#') : ''),
+        );
+        return routeHash ? `${normalizedBase}#${routeHash}` : normalizedBase;
       }
+    };
+    const buildInternalDedupeUrl = (link) => {
+      if (!link || typeof link !== 'object') return '';
+      const rawHref = String(link.href || link.urlWithoutHash || '').trim();
+      if (!rawHref) return '';
+      const rawHash = String(
+        link.hashFragment != null
+          ? link.hashFragment
+          : (rawHref.includes('#') ? rawHref.split('#').slice(1).join('#') : ''),
+      ).trim();
+      return normalizeUrlForDedup(rawHref, rawHash);
     };
     const internalLinksRaw = links.filter(l => l.isInternal);
     const apiLinksRaw = links.filter(l => l.isApi);
     const uniqueInternalMap = new Map();
     for (const link of internalLinksRaw) {
-      const dedupeKey = normalizeUrlForDedup(link?.urlWithoutHash || link?.href || '');
+      const dedupeKey = buildInternalDedupeUrl(link);
       if (!dedupeKey) continue;
       if (!uniqueInternalMap.has(dedupeKey)) {
+        const hashFragment = dedupeKey.includes('#') ? dedupeKey.split('#').slice(1).join('#') : null;
         uniqueInternalMap.set(dedupeKey, {
           ...link,
           href: dedupeKey,
-          urlWithoutHash: dedupeKey
+          urlWithoutHash: dedupeKey.split('#')[0],
+          hashFragment,
         });
       }
     }
@@ -5451,6 +5871,29 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
   const visitedUrls = new Set();
   const analyzedPages = [];
   const urlQueue = [{ url: startUrl, depth: 0 }];
+  const normalizeHashRouteFragment = (fragmentRaw) => {
+    const fragment = String(fragmentRaw || '').replace(/^#/, '').trim();
+    if (!fragment) return '';
+    if (fragment.startsWith('/') || fragment.startsWith('!/')) return fragment;
+    if (fragment.startsWith('!') && fragment.length > 1) return fragment;
+    if (/^[a-z0-9][a-z0-9._~/-]*\/[a-z0-9._~/-]+$/i.test(fragment)) return fragment;
+    return '';
+  };
+  const canonicalizeRecursiveUrl = (urlRaw) => {
+    const raw = String(urlRaw || '').trim();
+    if (!raw) return '';
+    try {
+      const parsed = new URL(raw);
+      const routeHash = normalizeHashRouteFragment(parsed.hash);
+      parsed.hash = '';
+      const base = parsed.toString();
+      return routeHash ? `${base}#${routeHash}` : base;
+    } catch {
+      const base = raw.split('#')[0];
+      const routeHash = normalizeHashRouteFragment(raw.includes('#') ? raw.split('#').slice(1).join('#') : '');
+      return routeHash ? `${base}#${routeHash}` : base;
+    }
+  };
   
   await sendLog(jobId, 'info', `🌐 STARTING RECURSIVE CRAWL`);
   await sendLog(jobId, 'info', `Start URL: ${startUrl}`);
@@ -5461,9 +5904,8 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
   while (urlQueue.length > 0 && analyzedPages.length < maxPages) {
     const { url: currentUrl, depth } = urlQueue.shift();
     
-    // Normalize URL by removing hash fragments for deduplication
-    // Hash fragments represent modal/popup actions on the same page, not separate pages
-    const normalizedUrl = currentUrl.split('#')[0];
+    // Keep SPA hash-routes crawlable while collapsing non-route hash anchors.
+    const normalizedUrl = canonicalizeRecursiveUrl(currentUrl);
     
     // Strict domain: never visit or analyze URLs outside the crawl's seed domain
     if (isApiDomain(normalizedUrl, domainScope)) {
@@ -5742,21 +6184,34 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         await sendLog(jobId, 'info', `🔍 Checking ${pageAnalysis.internal_links.length} internal links for crawling...`);
         
         for (const link of pageAnalysis.internal_links) {
-          // Check if link has hash fragment - these are modal/popup actions, not separate pages
-          const hasHashFragment = link.href.includes('#') && link.href.split('#').length > 1;
-          const baseUrlFromLink = hasHashFragment ? link.href.split('#')[0] : link.href;
-          const baseUrlFromCurrent = currentUrl.includes('#') ? currentUrl.split('#')[0] : currentUrl;
-          const isHashBasedAction = hasHashFragment && baseUrlFromLink === baseUrlFromCurrent;
+          const rawHref = String(link?.href || link?.urlWithoutHash || '').trim();
+          if (!rawHref) continue;
+          let resolvedHref = rawHref;
+          try {
+            resolvedHref = new URL(rawHref, currentUrl).toString();
+          } catch {
+            resolvedHref = rawHref;
+          }
+          const canonicalHref = canonicalizeRecursiveUrl(resolvedHref);
+          if (!canonicalHref) continue;
+
+          const hasHashFragment = canonicalHref.includes('#');
+          const baseUrlFromLink = hasHashFragment ? canonicalHref.split('#')[0] : canonicalHref;
+          const canonicalCurrent = canonicalizeRecursiveUrl(currentUrl);
+          const baseUrlFromCurrent = canonicalCurrent.includes('#') ? canonicalCurrent.split('#')[0] : canonicalCurrent;
+          const hashFragment = hasHashFragment ? canonicalHref.split('#').slice(1).join('#') : '';
+          const hashLooksRoute = Boolean(normalizeHashRouteFragment(hashFragment));
+          const isHashBasedAction = hasHashFragment && !hashLooksRoute && baseUrlFromLink === baseUrlFromCurrent;
           
           if (isHashBasedAction) {
             // Hash-based links are modal/popup actions on same page - don't crawl as separate pages
             // They should be converted to legs/actions instead (handled by workflow analyzer)
-            await sendLog(jobId, 'info', `  🔘 Hash-based link (modal/popup action, not crawling): ${link.href}`);
+            await sendLog(jobId, 'info', `  🔘 Hash-based link (modal/popup action, not crawling): ${canonicalHref}`);
             continue;
           }
           
-          // Regular link - use urlWithoutHash to avoid processing same page with different hashes
-          const urlToCheck = link.urlWithoutHash || link.href.split('#')[0];
+          // Keep hash-route URLs distinct (e.g. #/dashboard), collapse non-route hashes.
+          const urlToCheck = canonicalHref;
           // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
           if (!isWithinDomain(urlToCheck, startUrl, allowSubdomains, domainScope)) continue;
           if (isSearchEngineInfraUrl(urlToCheck)) continue;
