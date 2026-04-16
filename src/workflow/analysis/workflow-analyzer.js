@@ -2375,13 +2375,15 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         return true;
       });
 
-      const linkFilteredJourneys = dedupedJourneys.filter((journey) => {
-        if (this.shouldSkipPlainHyperlinkJourneyItem(journey, workflowState, true)) {
-          console.log(`⚠️ Skipping journey (plain navigation link — use link map, not journeys): ${journey.journey_id || journey.description || 'unknown'}`);
-          return false;
-        }
-        return true;
-      });
+      const plainNavigationJourneyCount = dedupedJourneys.reduce((count, journey) => {
+        return count + (this.shouldSkipPlainHyperlinkJourneyItem(journey, workflowState, true) ? 1 : 0);
+      }, 0);
+      if (plainNavigationJourneyCount > 0) {
+        console.log(
+          `🧭 Retaining ${plainNavigationJourneyCount} plain navigation journey(s) so menu/link flows are testable journeys (not link-map only).`
+        );
+      }
+      const linkFilteredJourneys = dedupedJourneys;
 
       const journeysWithExecutableActions = linkFilteredJourneys.filter((journey) => {
         const acts = Array.isArray(journey.actions) ? journey.actions : [];
@@ -2395,13 +2397,15 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       // Convert journeys to legs for internal processing (backwards compatibility)
       processedItems = this.convertJourneysToLegs(journeysWithExecutableActions);
     } else {
-      processedItems = rawLegs.filter((leg) => {
-        if (this.shouldSkipPlainHyperlinkJourneyItem(leg, workflowState, false)) {
-          console.log(`⚠️ Skipping leg (plain navigation link — use link map, not journeys): ${leg.leg_id || leg.description || 'unknown'}`);
-          return false;
-        }
-        return true;
-      });
+      const plainNavigationLegCount = rawLegs.reduce((count, leg) => {
+        return count + (this.shouldSkipPlainHyperlinkJourneyItem(leg, workflowState, false) ? 1 : 0);
+      }, 0);
+      if (plainNavigationLegCount > 0) {
+        console.log(
+          `🧭 Retaining ${plainNavigationLegCount} plain navigation leg(s) so internal links can be exercised as journeys.`
+        );
+      }
+      processedItems = rawLegs;
       processedItems = this.filterImpossibleLegsOnSparseSurface(processedItems, workflowState);
     }
 
