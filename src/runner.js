@@ -930,8 +930,20 @@ async function executeCrawlJob(job, streamInterval) {
   }
 
   // Extract job parameters
-  // CRITICAL: URL can be at job.url, job.start_url, or job.seed_url (from jobs collection)
-  let url = job.url || job.start_url || job.seed_url || null;
+  // CRITICAL: URL can be at job.url, job.start_url, job.seed_url, or inside context/options
+  // (MCP/API sometimes omits top-level seed_url; runner must still resolve or crawl never starts).
+  const ctxEarly = job.context || {};
+  const optsEarly = job.options || {};
+  let url =
+    job.url ||
+    job.start_url ||
+    job.seed_url ||
+    ctxEarly.url ||
+    ctxEarly.start_url ||
+    ctxEarly.seed_url ||
+    optsEarly.start_url ||
+    optsEarly.url ||
+    null;
   // Ensure URL has scheme (page.goto fails with "invalid URL" for e.g. "tests.aionqa.com")
   if (url && typeof url === 'string') {
     const t = url.trim();

@@ -569,8 +569,8 @@ class WorkflowAnalyzer {
       }
 
       // Extract links (excluding pure anchors, but preserving all hash fragments in full URLs)
-      const links = await page.$$('a[href], [role="link"][href]');
-      for (const link of links.slice(0, 50)) { // Limit to first 50 links
+      const links = await page.$$('a[href], area[href], [role="link"], [role="link"][href]');
+      for (const link of links) {
         // Use resolved href (full URL) instead of raw attribute to get complete URLs with hash fragments
         const href = await link.evaluate(el => el.href || el.getAttribute('href'));
         const text = await link.textContent();
@@ -679,7 +679,6 @@ class WorkflowAnalyzer {
             const style = window.getComputedStyle(el);
             return style && style.visibility !== 'hidden' && style.display !== 'none';
           })
-          .slice(0, 50)
           .map(el => ({
             type: el.tagName.toLowerCase(),
             text: el.textContent.trim(),
@@ -3135,7 +3134,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       : [];
 
     if (attachments.includes('interactive_elements') && workflowState.playwrightAnalysis?.interactive_elements) {
-      const interactiveElements = workflowState.playwrightAnalysis.interactive_elements.slice(0, 50);
+      const interactiveElements = workflowState.playwrightAnalysis.interactive_elements;
       descriptionPayload.interactive_elements = interactiveElements;
       descriptionPayload.interactive_elements_json = JSON.stringify(interactiveElements, null, 2);
     }
@@ -3151,7 +3150,7 @@ IMPORTANT OUTPUT REQUIREMENTS:
       console.log(`  forms count: ${formsCount}`);
       
       if (formsCount > 0) {
-        const forms = workflowState.playwrightAnalysis.forms.slice(0, 30);
+        const forms = workflowState.playwrightAnalysis.forms;
         descriptionPayload.forms = forms;
         descriptionPayload.forms_json = JSON.stringify(forms, null, 2);
         console.log(`✅ Including ${forms.length} form(s) in AI payload for page-description step`);
@@ -7447,12 +7446,69 @@ return {
     return actions;
   }
 
+  /**
+   * Strip bootstrap browser launches, guard infinite loops, and repair common LLM truncations
+   * before cleanScript markdown stripping. Aligns with analysis/workflow-analyzer.sanitizeAiPlaywrightScript
+   * (login path uses this file's cleanScript only).
+   */
+  hardenAiPlaywrightScriptFragment(script) {
+    if (!script || typeof script !== 'string') return script;
+    let s = script;
+
+    s = s
+      .split('\n')
+      .map((line) => {
+        const t = line.trimStart();
+        if (!/await\s+page\.goto\(\s*['"]https:(?!\/\/)/.test(t)) return line;
+        const trimmed = line.trim();
+        if (/\)\s*;\s*$/.test(trimmed)) return line;
+        const indent = line.match(/^\s*/)?.[0] || '';
+        return `${indent}await page.waitForTimeout(100); /* stripped truncated page.goto */`;
+      })
+      .join('\n');
+
+    s = s
+      .replace(
+        /^\s*(?:const|let|var)\s+\{\s*(?:chromium|firefox|webkit)[^}]*\}\s*=\s*require\(\s*['"]playwright['"]\s*\)\s*;?\s*$/gm,
+        ''
+      )
+      .replace(
+        /^\s*(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*require\(\s*['"]playwright['"]\s*\)\s*;?\s*$/gm,
+        ''
+      )
+      .replace(
+        /^\s*(?:const|let|var)\s+browser\s*=\s*(?:await\s+)?[^;\n]*\.(?:launch|connectOverCDP|connect)\s*\([^)]*\)\s*;?\s*$/gm,
+        ''
+      )
+      .replace(
+        /^\s*(?:const|let|var)\s+context\s*=\s*(?:await\s+)?[^;\n]*\.(?:newContext|context)\s*\([^)]*\)\s*;?\s*$/gm,
+        ''
+      )
+      .replace(
+        /^\s*(?:const|let|var)\s+page\s*=\s*(?:await\s+)?[^;\n]*\.newPage\s*\([^)]*\)\s*;?\s*$/gm,
+        ''
+      )
+      .replace(/^\s*await\s+browser\.close\s*\([^)]*\)\s*;?\s*$/gm, '');
+
+    let aiLoopGuardCounter = 0;
+    s = s.replace(/\bwhile\s*\(\s*true\s*\)\s*\{/g, () => {
+      aiLoopGuardCounter += 1;
+      return `for (let __aionqa_loop_guard_${aiLoopGuardCounter} = 0; __aionqa_loop_guard_${aiLoopGuardCounter} < 80; __aionqa_loop_guard_${aiLoopGuardCounter}++) {`;
+    });
+    s = s.replace(/\bfor\s*\(\s*;\s*;\s*\)\s*\{/g, () => {
+      aiLoopGuardCounter += 1;
+      return `for (let __aionqa_loop_guard_${aiLoopGuardCounter} = 0; __aionqa_loop_guard_${aiLoopGuardCounter} < 80; __aionqa_loop_guard_${aiLoopGuardCounter}++) {`;
+    });
+    return s.replace(/\n{3,}/g, '\n\n');
+  }
+
   cleanScript(script) {
     if (!script || typeof script !== 'string') {
       return script;
     }
     
     let cleaned = script.trim();
+    cleaned = this.hardenAiPlaywrightScriptFragment(cleaned);
     // Preserve async IIFE wrappers (return await (async () => { ... })()) to avoid breaking structure
     const asyncIifePattern = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{/;
     if (asyncIifePattern.test(cleaned)) {

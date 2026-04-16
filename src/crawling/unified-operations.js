@@ -2620,8 +2620,16 @@ const modeHandlers = {
         const { url: rawUrl, depth } = urlQueue.shift();
         const currentUrl = urlKeyForDedupe(rawUrl) || ensureUrlHasScheme(rawUrl) || rawUrl;
         
-        // Strict domain: never visit or analyze URLs outside the crawl's seed domain
-        if (!isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope)) {
+        // Same scope as storage/link-reporting: project/API hosts, or any host justified by the
+        // session cookie jar (SSO / multi-app). Strict isWithinDomain alone drops valid SSO hops.
+        let __scopeJar = [];
+        try {
+          __scopeJar = await page.context().cookies().catch(() => []);
+        } catch (_) {}
+        if (
+          !isWithinDomain(currentUrl, seedUrl, allowSubdomains, domainScope) &&
+          !isWithinDomainOrProjectSessionUrl(currentUrl, seedUrl, allowSubdomains, domainScope, __scopeJar)
+        ) {
           await sendLog(jobId, 'info', `⏭️ Skipping URL outside crawl domain: ${currentUrl} (seed: ${seedUrl})`);
           continue;
         }
@@ -3574,20 +3582,24 @@ const modeHandlers = {
           }
           const linksData = await extractAllLinks(page, jobId, seedUrl, allowSubdomains, domainScope);
           if (Array.isArray(linksData.api) && linksData.api.length > 0) {
-            await sendApiCallsToBackend(
-              jobId,
-              projectId,
-              linksData.api.slice(0, 200).map((link) => ({
-                url: link.href || link.urlWithoutHash || '',
-                method: 'GET',
-                status: null,
-                page_url: actualPageUrlCanonical || currentUrl,
-                request_headers: {},
-                response_headers: { 'x-aionqa-classification': 'api-domain-link' },
-                timestamp: Date.now()
-              })),
-              context?.runner_token || ''
-            );
+            const apiRows = linksData.api.map((link) => ({
+              url: link.href || link.urlWithoutHash || '',
+              method: 'GET',
+              status: null,
+              page_url: actualPageUrlCanonical || currentUrl,
+              request_headers: {},
+              response_headers: { 'x-aionqa-classification': 'api-domain-link' },
+              timestamp: Date.now()
+            }));
+            const API_CHUNK = Math.max(100, Math.min(2000, Number(process.env.CRAWLER_API_LINKS_CHUNK) || 800));
+            for (let off = 0; off < apiRows.length; off += API_CHUNK) {
+              await sendApiCallsToBackend(
+                jobId,
+                projectId,
+                apiRows.slice(off, off + API_CHUNK),
+                context?.runner_token || ''
+              );
+            }
             await sendLog(jobId, 'warn', `ℹ️ Classified ${linksData.api.length} link(s) as API-domain endpoints (not crawled as pages)`);
           }
           const allInternal = Array.isArray(linksData?.internal) ? linksData.internal : [];
@@ -3691,23 +3703,32 @@ const modeHandlers = {
             if (linksToReport.length > 0) {
               try {
                 const reportUrl = `${backendUrl}/jobs/${parentJobId}/domain-crawl/report-links`;
-                const headers = { 'Content-Type': 'application/json' };
                 const reportToken = context.runner_token || process.env.RUNNER_TOKEN || '';
-                if (reportToken) headers['Authorization'] = `Bearer ${reportToken}`;
-                const res = await fetch(reportUrl, {
-                  method: 'POST',
-                  headers,
-                  body: JSON.stringify({ links: linksToReport })
-                });
-                if (res.ok) {
-                  const data = await res.json().catch(() => ({}));
-                  await sendLog(jobId, 'info', `📋 Reported ${linksToReport.length} links to backend (${data.added ?? 0} queued for helpers)`);
-                  // Also log to root job so logs view shows "links collected and passed to queue"
-                  if (parentJobId && parentJobId !== jobId) {
-                    await sendLog(parentJobId, 'info', `🔗 Links collected and sent to queue: ${linksToReport.length} reported, ${data.added ?? 0} queued for helpers`, { component: 'CRAWLER-TEXT', action: 'links_reported', source_job_id: jobId });
+                const REPORT_LINKS_CHUNK = Math.max(
+                  200,
+                  Math.min(3000, Number(process.env.CRAWLER_REPORT_LINKS_CHUNK) || 1500)
+                );
+                let addedSum = 0;
+                for (let off = 0; off < linksToReport.length; off += REPORT_LINKS_CHUNK) {
+                  const chunk = linksToReport.slice(off, off + REPORT_LINKS_CHUNK);
+                  const headers = { 'Content-Type': 'application/json' };
+                  if (reportToken) headers['Authorization'] = `Bearer ${reportToken}`;
+                  const res = await fetch(reportUrl, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ links: chunk })
+                  });
+                  if (res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    addedSum += Number(data.added ?? 0);
+                  } else {
+                    await sendLog(jobId, 'warn', `⚠️ report-links failed: ${res.status} (chunk ${off}-${off + chunk.length})`);
+                    break;
                   }
-                } else {
-                  await sendLog(jobId, 'warn', `⚠️ report-links failed: ${res.status}`);
+                }
+                await sendLog(jobId, 'info', `📋 Reported ${linksToReport.length} link(s) to backend in ${Math.ceil(linksToReport.length / REPORT_LINKS_CHUNK)} chunk(s) (~${addedSum} new queue slots)`);
+                if (parentJobId && parentJobId !== jobId) {
+                  await sendLog(parentJobId, 'info', `🔗 Links collected and sent to queue: ${linksToReport.length} reported (~${addedSum} added)`, { component: 'CRAWLER-TEXT', action: 'links_reported', source_job_id: jobId });
                 }
               } catch (reportErr) {
                 await sendLog(jobId, 'warn', `⚠️ Failed to report links to backend: ${reportErr.message}`);
@@ -3727,7 +3748,7 @@ const modeHandlers = {
                               context?.preventLinkDiscovery === true;
 
             let queuedCount = 0;
-            for (const link of crawlableInternalLinks.slice(0, 50)) {
+            for (const link of crawlableInternalLinks) {
               // Keep route hashes crawlable while deduping same canonical targets.
               const urlToCheck = urlKeyForDedupe((link?.href || link?.urlWithoutHash || '').trim());
               if (!urlToCheck) continue;
@@ -5081,6 +5102,23 @@ function _browserCollectLinksFromAnchorElements(elements, opts) {
     return '';
   };
   const resolveHrefFromElement = (el) => {
+    try {
+      const nested =
+        el.querySelector &&
+        el.querySelector('a[href], area[href], [data-href], [data-url]');
+      if (nested) {
+        const fromNested = [
+          nested.getAttribute('href'),
+          nested.href,
+          nested.getAttribute('data-href'),
+          nested.getAttribute('data-url'),
+        ].filter(Boolean);
+        for (const c of fromNested) {
+          const normalized = normalizeCandidateHref(c);
+          if (normalized) return normalized;
+        }
+      }
+    } catch (_) {}
     const candidates = [
       el.href,
       el.getAttribute('href'),
@@ -5157,7 +5195,7 @@ function _browserCollectLinksFromAnchorElements(elements, opts) {
 }
 
 const LINK_EXTRACTION_SELECTOR =
-  'a[href], area[href], [role="link"][href], [data-href], [data-url], [routerlink], [router-link], [to], [data-route], [data-path], [ng-reflect-router-link], [onclick*="location"], [onclick*="router.push"], [onclick*="history.pushState"]';
+  'a[href], area[href], [role="link"], [role="link"][href], [data-href], [data-url], [routerlink], [router-link], [to], [data-route], [data-path], [ng-reflect-router-link], [onclick*="location"], [onclick*="router.push"], [onclick*="history.pushState"]';
 
 /** Count harvestable nodes across all frames (matches LINK_EXTRACTION_SELECTOR). */
 async function countHarvestableAnchorsAllFrames(page) {
@@ -5213,6 +5251,18 @@ async function waitForDomBeforeLinkHarvest(page, jobId) {
     } catch (_) {
       break;
     }
+  }
+  // Hydrated SPAs often mount nav links after first stability window; give one more bounded settle.
+  if (last >= 0 && last < 8) {
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    } catch (_) {}
+    try {
+      await page.waitForTimeout(1200);
+    } catch (_) {}
+    try {
+      last = await countHarvestableAnchorsAllFrames(page);
+    } catch (_) {}
   }
   if (jobId) {
     try {
@@ -5913,7 +5963,14 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
       await recordApiDomainClassification(jobId, options?.project_id || null, normalizedUrl, currentUrl, options?.runner_token || '');
       continue;
     }
-    if (!isWithinDomain(normalizedUrl, startUrl, allowSubdomains, domainScope)) {
+    let __recJar = [];
+    try {
+      __recJar = await page.context().cookies().catch(() => []);
+    } catch (_) {}
+    if (
+      !isWithinDomain(normalizedUrl, startUrl, allowSubdomains, domainScope) &&
+      !isWithinDomainOrProjectSessionUrl(normalizedUrl, startUrl, allowSubdomains, domainScope, __recJar)
+    ) {
       await sendLog(jobId, 'info', `⏭️ Skipping URL outside crawl domain: ${normalizedUrl} (seed: ${startUrl})`, { page_url: currentUrl, mode: approach });
       continue;
     }
