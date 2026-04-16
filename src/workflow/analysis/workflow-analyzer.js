@@ -12688,6 +12688,16 @@ return {
         return `page.click(${JSON.stringify(selector)})`;
       }
     );
+    // LLM: page.click(button.btn-run) / page.fill(input.chat-input, ...) — bare tag.class is invalid JS
+    // (ReferenceError / long default-timeout hangs). Quote before the generic unquoted-arg pass.
+    cleaned = cleaned.replace(
+      /\bpage\.(click|dblclick|hover|tap|check|uncheck)\(\s*([a-zA-Z][a-zA-Z0-9_-]*(?:\.[a-zA-Z][a-zA-Z0-9_-]*)+)\s*\)/g,
+      (m, method, sel) => `page.${method}('${String(sel).replace(/'/g, "\\'")}')`
+    );
+    cleaned = cleaned.replace(
+      /\bpage\.fill\(\s*([a-zA-Z][a-zA-Z0-9_-]*(?:\.[a-zA-Z][a-zA-Z0-9_-]*)+)\s*,/g,
+      (m, sel) => `page.fill('${String(sel).replace(/'/g, "\\'")}',`
+    );
     // Normalize unquoted selector args in common page.* calls (e.g., page.fill(input[name="x"]))
     cleaned = cleaned.replace(
       /page\.(click|fill|check|uncheck|isVisible|waitForSelector)\(\s*([a-zA-Z][^'"`)\n]*(?:\[[^\)\n]+\]|:[^)\n]+)[^)\n]*)\s*\)/g,

@@ -15,10 +15,17 @@ export function evaluateLoginSessionEvidenceOverride({
   try {
     if (!cleanExecution) return null;
 
-    const cookies =
-      (Array.isArray(workflowState?.collectedCookies) && workflowState.collectedCookies) ||
-      (Array.isArray(workflowState?.finalCookies) && workflowState.finalCookies) ||
-      [];
+    // Do not treat empty `collectedCookies: []` as authoritative — `[]` is truthy in JS and would
+    // incorrectly mask `finalCookies` / `iterationCookies` populated by earlier login steps.
+    const pickCookieArray = () => {
+      if (!workflowState || typeof workflowState !== 'object') return [];
+      const buckets = [workflowState.collectedCookies, workflowState.finalCookies, workflowState.iterationCookies];
+      for (const b of buckets) {
+        if (Array.isArray(b) && b.length > 0) return b;
+      }
+      return [];
+    };
+    const cookies = pickCookieArray();
     if (!Array.isArray(cookies) || cookies.length < 2) return null;
 
     let currentUrl = '';
