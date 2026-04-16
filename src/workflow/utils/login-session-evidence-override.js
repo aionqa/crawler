@@ -72,7 +72,8 @@ export function evaluateLoginSessionEvidenceOverride({
 
     const segments = urlObj.pathname.split('/').filter(Boolean);
     const pathDepth = segments.length;
-    if (pathDepth < 2) return null;
+    // Reject only site root (/); single-segment app routes (/stats, /settings) are common post-auth landings.
+    if (pathDepth < 1) return null;
 
     let seedHost = '';
     try {
@@ -122,7 +123,7 @@ export function evaluateLoginSessionEvidenceOverride({
       combined
     );
     const postAuthPathHint =
-      /(\/|^)(dashboard|home|portal|workspace|console|account|profile|app|main|ticksheets|calendar|documents)(\b|\/)/i.test(
+      /(\/|^)(dashboard|home|portal|workspace|console|account|profile|app|main|ticksheets|calendar|documents|stats|analytics|reports|overview|settings|billing|preferences)(\b|\/)/i.test(
         pathLower
       ) || /\/n\/[a-z0-9_-]{2,}\b/i.test(pathLower);
     const oauthAuthorizeSurface = /\/oauth\/authorize(\/|$|\?)/i.test(pathLower);
@@ -141,6 +142,21 @@ export function evaluateLoginSessionEvidenceOverride({
         confirm: true,
         reason:
           'Login inferred from runtime URL + session cookies while AI returned continue/stuck: post-auth path on seed-related host, session-shaped cookies, no credential-failure language, and last script execution was clean — treat as authenticated despite inconclusive validator.',
+      };
+    }
+
+    // SPA dashboards and single-segment app routes (/stats, etc.): validators can false-negative while the browser already holds a session.
+    if (
+      postAuthPathHint &&
+      !oauthAuthorizeSurface &&
+      !loginSurfaceMentionedInAi &&
+      (sessionishCookies.length >= 1 || cookies.length >= 3) &&
+      !explicitAuthFailure
+    ) {
+      return {
+        confirm: true,
+        reason:
+          'Login inferred from post-auth application URL pattern plus credible session cookies while AI login validation was negative: seed-related host, no credential-failure language, validators did not describe an active login surface — prefer runtime session for authenticated app areas.',
       };
     }
 
