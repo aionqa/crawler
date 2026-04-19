@@ -10,25 +10,19 @@ function normalizeHost(value) {
     .replace(/^www\./, '');
 }
 
-function getBaseDomain(hostname) {
-  const parts = normalizeHost(hostname).split('.').filter(Boolean);
-  if (parts.length < 2) return normalizeHost(hostname);
-  return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
-}
-
 function hostMatchesDomain(host, domain, allowSubs) {
   const h = normalizeHost(host);
   const d = normalizeHost(domain);
   if (!h || !d) return false;
   if (h === d) return true;
-  if (allowSubs && (h.endsWith(`.${d}`) || getBaseDomain(h) === getBaseDomain(d))) return true;
+  if (allowSubs && h.endsWith(`.${d}`)) return true;
   return false;
 }
 
 function isProjectHost(host, baseHost, allowSubdomains, projectDomains) {
   if (host === baseHost) return true;
   if (projectDomains.length === 0) {
-    return allowSubdomains && getBaseDomain(host) === getBaseDomain(baseHost);
+    return allowSubdomains && host.endsWith(`.${baseHost}`);
   }
   return projectDomains.some((domain) => hostMatchesDomain(host, domain, allowSubdomains));
 }

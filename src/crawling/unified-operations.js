@@ -233,9 +233,9 @@ function cleanLogMessage(message) {
   return message;
 }
 
-// Helper function to check if URL is within the same domain.
-// When allowSubdomains=true, treat sibling subdomains as internal as long as the
-// registrable domain (naively: last 2 labels) matches.
+// Helper function to check whether a host is in configured crawl scope.
+// When allowSubdomains=true, only child subdomains of configured hosts are allowed.
+// It must never broaden to sibling/parent registrable domains.
 function normalizeDomainHost(input) {
   if (!input || typeof input !== 'string') return '';
   const trimmed = input.trim();
@@ -248,18 +248,12 @@ function normalizeDomainHost(input) {
   }
 }
 
-function hostBaseDomain(hostname) {
-  const parts = String(hostname || '').split('.').filter(Boolean);
-  if (parts.length < 2) return String(hostname || '');
-  return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
-}
-
 function hostMatchesDomain(hostname, domain, allowSubdomains = false) {
   const h = normalizeDomainHost(hostname);
   const d = normalizeDomainHost(domain);
   if (!h || !d) return false;
   if (h === d) return true;
-  if (allowSubdomains && (h.endsWith(`.${d}`) || hostBaseDomain(h) === hostBaseDomain(d))) return true;
+  if (allowSubdomains && h.endsWith(`.${d}`)) return true;
   return false;
 }
 
@@ -314,7 +308,7 @@ function isWithinProjectDomains(pageUrl, baseUrl, allowSubdomains = false, domai
 
     if (pageHostname === baseHostname) return true;
     if (!allowSubdomains) return false;
-    return hostBaseDomain(pageHostname) === hostBaseDomain(baseHostname);
+    return pageHostname.endsWith(`.${baseHostname}`);
   } catch (error) {
     // If URL parsing fails, treat as external
     return false;
@@ -323,6 +317,44 @@ function isWithinProjectDomains(pageUrl, baseUrl, allowSubdomains = false, domai
 
 function isWithinDomain(pageUrl, baseUrl, allowSubdomains = false, domainScope = null) {
   return isWithinProjectDomains(pageUrl, baseUrl, allowSubdomains, domainScope);
+}
+
+const NON_PAGE_FILE_EXTENSIONS = new Set([
+  '.css', '.scss', '.sass', '.less',
+  '.js', '.mjs', '.cjs', '.map',
+  '.json', '.xml', '.txt', '.csv',
+  '.ico', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.avif', '.bmp', '.tif', '.tiff',
+  '.mp4', '.webm', '.mov', '.avi', '.mkv', '.mp3', '.wav', '.ogg', '.flac', '.m4a',
+  '.pdf', '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot'
+]);
+
+const HTML_PAGE_FILE_EXTENSIONS = new Set([
+  '.html', '.htm', '.xhtml', '.php', '.asp', '.aspx', '.jsp', '.jspx', '.cfm', '.shtml'
+]);
+
+function looksLikeCrawlablePageUrl(candidateUrl) {
+  const evaluatePath = (pathname) => {
+    const pathLower = String(pathname || '/').toLowerCase();
+    if (!pathLower || pathLower === '/' || pathLower.endsWith('/')) return true;
+    const lastSegment = pathLower.split('/').pop() || '';
+    if (!lastSegment || !lastSegment.includes('.')) return true;
+    const extension = lastSegment.slice(lastSegment.lastIndexOf('.'));
+    if (!extension) return true;
+    if (HTML_PAGE_FILE_EXTENSIONS.has(extension)) return true;
+    return !NON_PAGE_FILE_EXTENSIONS.has(extension);
+  };
+
+  try {
+    const parsed = new URL(ensureSchemeForParse(candidateUrl));
+    return evaluatePath(parsed.pathname);
+  } catch {
+    const raw = String(candidateUrl || '').trim();
+    if (!raw) return false;
+    const noHash = raw.split('#')[0];
+    const noQuery = noHash.split('?')[0];
+    return evaluatePath(noQuery);
+  }
 }
 
 /**
@@ -3693,6 +3725,7 @@ const modeHandlers = {
             u &&
             (u.startsWith('http://') || u.startsWith('https://')) &&
             !isSearchEngineInfraUrl(u) &&
+            looksLikeCrawlablePageUrl(u) &&
             (isWithinDomain(u, seedUrl, allowSubdomains, domainScope) ||
               isWithinDomainOrProjectSessionUrl(u, seedUrl, allowSubdomains, domainScope, __linkJar)) &&
             !isLoginPageUrl(u, loginUrls);
@@ -3762,6 +3795,7 @@ const modeHandlers = {
               // Login pages (configured) are for auth only — never queue as a page to test
               if (isLoginPageUrl(urlToCheck, loginUrls)) continue;
               if (isSearchEngineInfraUrl(urlToCheck)) continue;
+              if (!looksLikeCrawlablePageUrl(urlToCheck)) continue;
               if (!visitedUrls.has(urlToCheck) && !analyzedPageUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
                 if (!isLoginJob) {
                   urlQueue.push({ url: urlToCheck, depth: depth + 1 });
@@ -5038,23 +5072,18 @@ function _browserCollectLinksFromAnchorElements(elements, opts) {
   const links = [];
 
   const normalizeHost = (value) => String(value || '').toLowerCase().replace(/^www\./, '');
-  const getBaseDomain = (hostname) => {
-    const parts = normalizeHost(hostname).split('.').filter(Boolean);
-    if (parts.length < 2) return normalizeHost(hostname);
-    return `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
-  };
   const hostMatchesDomain = (host, domain, allowSubs) => {
     const h = normalizeHost(host);
     const d = normalizeHost(domain);
     if (!h || !d) return false;
     if (h === d) return true;
-    if (allowSubs && (h.endsWith(`.${d}`) || getBaseDomain(h) === getBaseDomain(d))) return true;
+    if (allowSubs && h.endsWith(`.${d}`)) return true;
     return false;
   };
   const isProjectHost = (host, baseHost) => {
     if (host === baseHost) return true;
     if (projectDomains.length === 0) {
-      return allowSubdomains && getBaseDomain(host) === getBaseDomain(baseHost);
+      return allowSubdomains && host.endsWith(`.${baseHost}`);
     }
     return projectDomains.some((domain) => hostMatchesDomain(host, domain, allowSubdomains));
   };
@@ -6272,6 +6301,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
           // Strict domain: only queue URLs within the crawl's seed domain (never other domains)
           if (!isWithinDomain(urlToCheck, startUrl, allowSubdomains, domainScope)) continue;
           if (isSearchEngineInfraUrl(urlToCheck)) continue;
+          if (!looksLikeCrawlablePageUrl(urlToCheck)) continue;
           if (!visitedUrls.has(urlToCheck) && !urlQueue.find(item => item.url === urlToCheck)) {
             urlQueue.push({ url: urlToCheck, depth: depth + 1 });
             newLinksAdded++;
