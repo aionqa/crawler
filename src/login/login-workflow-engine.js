@@ -420,6 +420,82 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
     console.warn(`⚠️ Login session-evidence override skipped: ${heuristicError?.message || heuristicError}`);
   }
 
+  // Final fallback: when workflow validators fail but runtime state is clearly on a post-login app page.
+  // This avoids endless login retries when AI validation stays "continue" after landing on dashboard.
+  try {
+    if (!success && page && typeof page.url === 'function') {
+      const toUrl = (value) => {
+        try {
+          const raw = String(value || '').trim();
+          if (!raw) return null;
+          return new URL(raw.includes('://') ? raw : `https://${raw}`);
+        } catch {
+          return null;
+        }
+      };
+      const normalizeHost = (value) => String(value || '').trim().toLowerCase().replace(/^www\./, '');
+      const normalizePath = (value) => {
+        const p = String(value || '/').replace(/\/+$/, '');
+        return p || '/';
+      };
+      const hostMatches = (host, domain) => {
+        const h = normalizeHost(host);
+        const d = normalizeHost(domain);
+        if (!h || !d) return false;
+        return h === d || h.endsWith(`.${d}`);
+      };
+
+      const current = toUrl(page.url());
+      if (current) {
+        const loginCandidates = [
+          ...(normalizedContext?.login_url ? [normalizedContext.login_url] : []),
+          ...(Array.isArray(normalizedContext?.login_urls) ? normalizedContext.login_urls : []),
+        ]
+          .map(toUrl)
+          .filter(Boolean);
+
+        const currentPath = normalizePath(current.pathname);
+        const currentOrigin = current.origin;
+        const currentHost = normalizeHost(current.hostname);
+        const matchesConfiguredLogin = loginCandidates.some((loginUrl) =>
+          loginUrl.origin === currentOrigin && normalizePath(loginUrl.pathname) === currentPath
+        );
+        const looksLikeLoginPath = /\/(login|sign-?in|auth)(\/|$)/i.test(current.pathname || '');
+
+        let hasVisiblePasswordField = false;
+        try {
+          const passwordField = page.locator('input[type="password"]');
+          const count = await passwordField.count();
+          if (count > 0) {
+            hasVisiblePasswordField = await passwordField.first().isVisible().catch(() => false);
+          }
+        } catch {
+          hasVisiblePasswordField = false;
+        }
+
+        const projectDomains = Array.isArray(normalizedContext?.project_domains)
+          ? normalizedContext.project_domains
+          : [];
+        const hostInProjectScope =
+          projectDomains.length === 0 || projectDomains.some((domain) => hostMatches(currentHost, domain));
+
+        if (
+          hostInProjectScope &&
+          !matchesConfiguredLogin &&
+          !looksLikeLoginPath &&
+          !hasVisiblePasswordField &&
+          cookies.length > 0
+        ) {
+          success = true;
+          loginStatus = 'success';
+          console.log(`✅ Login success inferred from post-login landing heuristic: ${current.toString()}`);
+        }
+      }
+    }
+  } catch (postLoginHeuristicError) {
+    console.warn(`⚠️ Post-login landing heuristic skipped: ${postLoginHeuristicError?.message || postLoginHeuristicError}`);
+  }
+
   return {
     success,
     loginStatus: loginStatus || (success ? 'success' : 'unknown'),
