@@ -2628,10 +2628,12 @@ const modeHandlers = {
         const origin = u.origin;
         for (const login of loginList) {
           if (!login) continue;
-          const l = new URL(ensureUrlHasScheme(login));
+          const loginRaw = String(login || '').trim();
+          const isPathOnlyLogin = loginRaw.startsWith('/');
+          const l = new URL(ensureUrlHasScheme(loginRaw));
           const loginPath = (l.pathname || '/').replace(/\/+$/, '') || '/';
           if (l.origin === origin && loginPath === pathNorm) return true;
-          if (loginPath === pathNorm) return true; // same pathname across origins (e.g. SSO subdomain)
+          if (isPathOnlyLogin && loginPath === pathNorm) return true;
         }
         return false;
       } catch {
