@@ -92,8 +92,11 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
     const configuredDomains = [
       ...(Array.isArray(context?.api_domains) ? context.api_domains : []),
       ...(Array.isArray(context?.project_domains) ? context.project_domains : []),
+      ...(Array.isArray(context?.options?.api_domains) ? context.options.api_domains : []),
+      ...(Array.isArray(context?.options?.project_domains) ? context.options.project_domains : []),
       ...configuredLoginUrls.map((u) => u.hostname),
       parseUrl(context?.start_url)?.hostname,
+      parseUrl(context?.options?.start_url)?.hostname,
     ]
       .map(normalizeHost)
       .filter(Boolean);
