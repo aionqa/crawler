@@ -2013,49 +2013,84 @@ IMPORTANT OUTPUT REQUIREMENTS:
         options: resolvedOptions
       },
       inputCredentials: (() => {
-        // CRITICAL: Credentials are only required for login jobs
-        // For crawl jobs, credentials are optional (only needed if login_enabled)
-        const isLoginJob = this.context?.jobType === 'login' || 
-                          this.context?.job_type === 'login' ||
-                          this.context?.isLoginJob === true;
-        const loginEnabled = this.context?.login_enabled === true || 
-                            this.context?.options?.login_enabled === true;
-        
-        // Only require credentials for login jobs or if login is explicitly enabled
-        if (isLoginJob || loginEnabled) {
-          if (!this.context?.credentials || !this.context.credentials.username || !this.context.credentials.password ||
-              this.context.credentials.username === 'MISSING' || this.context.credentials.username === 'missing' ||
-              this.context.credentials.password === 'MISSING' || this.context.credentials.password === 'missing') {
-            console.error(`❌ ERROR: Credentials missing or invalid in context.credentials!`);
-            console.error(`this.context.credentials:`, this.context?.credentials);
-            throw new Error('Credentials are required in context.credentials and must not contain placeholder values');
+        const normalizeCredentialValue = (value) => {
+          if (typeof value !== 'string') return '';
+          const trimmed = value.trim();
+          if (!trimmed) return '';
+          const lower = trimmed.toLowerCase();
+          if (
+            lower === 'missing' ||
+            lower === 'placeholder' ||
+            lower === 'changeme' ||
+            lower === '<username>' ||
+            lower === '<password>' ||
+            lower === 'username' ||
+            lower === 'password'
+          ) {
+            return '';
           }
-          
-          const creds = this.context.credentials;
-          console.log(`📄 VAR_DUMP: inputCredentials initialization (login job/enabled)`);
+          return trimmed;
+        };
+
+        const resolveCredentialsFromContext = () => {
+          const candidates = [
+            this.context?.credentials,
+            this.context?.options?.credentials,
+            {
+              username: this.context?.username ?? this.context?.user ?? this.context?.email,
+              password: this.context?.password ?? this.context?.pass
+            },
+            {
+              username: this.context?.options?.username ?? this.context?.options?.user ?? this.context?.options?.email,
+              password: this.context?.options?.password ?? this.context?.options?.pass
+            }
+          ];
+          for (const candidate of candidates) {
+            if (!candidate || typeof candidate !== 'object') continue;
+            const username = normalizeCredentialValue(candidate.username);
+            const password = normalizeCredentialValue(candidate.password);
+            if (username && password) {
+              return { username, password };
+            }
+          }
+          return null;
+        };
+
+        // Credentials are mandatory for login jobs (or forced-login crawls),
+        // but optional for normal crawl pages that can proceed with existing cookies/session.
+        const isLoginJob =
+          this.context?.jobType === 'login' ||
+          this.context?.job_type === 'login' ||
+          this.context?.isLoginJob === true;
+        const loginEnabled =
+          this.context?.login_enabled === true ||
+          this.context?.options?.login_enabled === true;
+        const forceLoginOnCrawl =
+          this.context?.force_login_on_crawl === true ||
+          this.context?.options?.force_login_on_crawl === true;
+        const creds = resolveCredentialsFromContext();
+
+        if ((isLoginJob || forceLoginOnCrawl) && !creds) {
+          console.error(`❌ ERROR: Credentials missing or invalid in context.credentials!`);
+          console.error(`this.context.credentials:`, this.context?.credentials);
+          throw new Error('Credentials are required in context.credentials and must not contain placeholder values');
+        }
+
+        if (creds) {
+          console.log(`📄 VAR_DUMP: inputCredentials initialization (resolved)`);
           console.log(`📄 VAR_DUMP: creds.username=${creds.username}`);
           console.log(`📄 VAR_DUMP: creds.password=***`);
           console.log(`🔑 Initialized inputCredentials: username=${creds.username}, password=***`);
           return creds;
-        } else {
-          // Crawl job without login - credentials optional
-          // Use credentials if available, otherwise return null
-          if (this.context?.credentials && 
-              this.context.credentials.username && 
-              this.context.credentials.password &&
-              this.context.credentials.username !== 'MISSING' && 
-              this.context.credentials.username !== 'missing' &&
-              this.context.credentials.password !== 'MISSING' && 
-              this.context.credentials.password !== 'missing') {
-            const creds = this.context.credentials;
-            console.log(`📄 VAR_DUMP: inputCredentials initialization (crawl job, credentials available)`);
-            console.log(`🔑 Initialized inputCredentials: username=${creds.username}, password=***`);
-            return creds;
-          } else {
-            console.log(`ℹ️ No credentials provided for crawl job (login not enabled) - proceeding without credentials`);
-            return null;
-          }
         }
+
+        if (loginEnabled && !isLoginJob && !forceLoginOnCrawl) {
+          console.warn(`⚠️ Login is enabled but no usable credentials were provided; continuing with in-session cookies`);
+          return null;
+        }
+
+        console.log(`ℹ️ No credentials provided for crawl job (login not required) - proceeding without credentials`);
+        return null;
       })(),
       // Variable Pool - organized by namespace (job, page, cycle)
       variablePool: {
