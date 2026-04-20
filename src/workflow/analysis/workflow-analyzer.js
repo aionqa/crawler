@@ -21250,6 +21250,54 @@ const sleep = safeWait;
                       determineData ||
                       {};
         }
+
+        // For login loops, use runtime session evidence to stop bounded retries early once authenticated.
+        if (isLoginLoop && condition) {
+          try {
+            const cleanExecution =
+              workflowState?.lastExecutionResult?.success !== false &&
+              workflowState?.lastExecutionResult?.execution_failed !== true &&
+              workflowState?.lastExecutionResult?.error_type !== 'execution' &&
+              workflowState?.executionErrorType !== 'execution';
+            const sessionLoopOverride = evaluateLoginSessionEvidenceOverride({
+              page,
+              workflowState,
+              validatePayload: null,
+              determineResult: stepResult,
+              cleanExecution,
+              seedUrl: this.context?.seed_url || this.context?.start_url || this.context?.page_url,
+            });
+            if (sessionLoopOverride?.confirm) {
+              const patched = {
+                status: 'success',
+                completion_status: 'success',
+                is_complete: true,
+                reason: sessionLoopOverride.reason,
+              };
+              condition = false;
+              stepResult = patched;
+              if (!workflowState.determine_completion) workflowState.determine_completion = {};
+              workflowState.determine_completion.result = patched;
+              if (!workflowState.results) workflowState.results = {};
+              workflowState.results.determine_completion = { result: patched };
+              if (workflowState.variablePool?.steps) {
+                workflowState.variablePool.steps.determine_completion = { result: patched };
+              }
+              console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Session evidence confirms login; exiting loop early`);
+              if (jobId) {
+                await this.sendLogToBackend(
+                  jobId,
+                  'info',
+                  `✅ Session evidence confirms login during while-loop; exiting retries early`,
+                  'WORKFLOW-ANALYZER',
+                  { iteration, reason: sessionLoopOverride.reason }
+                );
+              }
+            }
+          } catch (sessionLoopOverrideError) {
+            console.warn(`⚠️ Login session loop override skipped: ${sessionLoopOverrideError.message}`);
+          }
+        }
         
         // Record iteration - include step result from condition path
         const iterationState = {
