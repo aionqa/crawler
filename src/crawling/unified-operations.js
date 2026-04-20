@@ -2607,8 +2607,12 @@ const modeHandlers = {
       throw new Error('No seed URL found in context - cannot start crawl');
     }
     seedUrl = ensureUrlHasScheme(seedUrl);
-    const projectDomains = Array.isArray(context?.project_domains) ? context.project_domains : [];
-    const apiDomains = Array.isArray(context?.api_domains) ? context.api_domains : [];
+    const projectDomains = Array.isArray(context?.project_domains)
+      ? context.project_domains
+      : (Array.isArray(context?.options?.project_domains) ? context.options.project_domains : []);
+    const apiDomains = Array.isArray(context?.api_domains)
+      ? context.api_domains
+      : (Array.isArray(context?.options?.api_domains) ? context.options.api_domains : []);
     const domainScope = buildDomainScope(seedUrl, allowSubdomains, projectDomains, apiDomains);
     await sendLog(
       jobId,
