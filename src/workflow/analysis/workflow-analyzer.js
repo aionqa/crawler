@@ -3985,7 +3985,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
             }
             break;
           
-          // Deterministic, hardcoded analysis for specific domains (e.g., Practical Test Automation)
+          // Legacy deterministic analysis step (kept for template compatibility; domain-agnostic).
           case 'hardcoded-workflow-analysis':
             await this.executeHardcodedWorkflowAnalysisStep(page, step, workflowState, effectiveJobId);
             break;
@@ -4742,12 +4742,11 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
   }
 
   /**
-   * Execute hardcoded workflow analysis step
-   * Reproduces deterministic page analysis: pages → actions → elements
-   * Tailored for domains like practicaltestautomation.com to avoid heavy AI usage
+   * Execute legacy deterministic workflow analysis step.
+   * Kept for workflow-template compatibility, but intentionally domain-agnostic.
    */
   async executeHardcodedWorkflowAnalysisStep(page, step, workflowState, jobId) {
-    console.log(`🧩 Performing hardcoded workflow analysis (${step.name})`);
+    console.log(`🧩 Performing deterministic workflow analysis (${step.name})`);
     const url = workflowState.pageUrl;
 
     // Ensure Playwright analysis exists (forms, links, interactive elements)
@@ -4757,18 +4756,10 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       workflowState.playwrightAnalysis = analysis;
     }
 
-    // Domain detection (default to enabled if step.config.force === true)
-    const force = step.config?.force === true;
-    const isPracticalTestAutomation = typeof url === 'string' && /practicaltestautomation/i.test(url);
-    if (!force && !isPracticalTestAutomation) {
-      console.log(`ℹ️ Hardcoded analysis skipped (domain not matched, use config.force=true to override)`);
-      return;
-    }
-
     const legs = await this.generateLegsFromPlaywrightAnalysis(workflowState.playwrightAnalysis, url, workflowState);
 
     if (legs.length === 0) {
-      console.log(`⚠️ Hardcoded analysis produced no legs`);
+      console.log(`⚠️ Deterministic analysis produced no legs`);
       return;
     }
 
@@ -4776,7 +4767,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     workflowState.aiAnalysisResult = workflowState.aiAnalysisResult || {};
     workflowState.aiAnalysisResult.page_description = workflowState.aiAnalysisResult.page_description || workflowState.pageDescription || null;
     workflowState.aiAnalysisResult.legs = legs;
-    console.log(`✅ Hardcoded analysis completed: ${legs.length} legs identified`);
+    console.log(`✅ Deterministic analysis completed: ${legs.length} legs identified`);
   }
 
   /**
