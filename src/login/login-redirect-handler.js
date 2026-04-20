@@ -42,32 +42,89 @@ async function sendLog(jobId, level, message, data = {}) {
 
 /**
  * Detect if current page is a login page
- * Configuration-based: Only uses login_url from context if provided
- * No hardcoded patterns - relies on configuration
+ * Configuration-first with scoped heuristics for auth hosts.
  */
-export async function detectLoginPage(page, jobId, currentUrl, openaiClient, loginUrl = null) {
+export async function detectLoginPage(page, jobId, currentUrl, openaiClient, loginUrl = null, context = null) {
   try {
     const pageUrl = page.url();
-    
-    // STRICT: only check configured login_url; no heuristic fallbacks.
-    if (loginUrl) {
+    const currentUrlObj = new URL(pageUrl);
+
+    const normalizeHost = (value) => String(value || '').trim().toLowerCase().replace(/^www\./, '');
+    const normalizePath = (value) => {
+      const p = String(value || '/').replace(/\/+$/, '');
+      return p || '/';
+    };
+    const hostMatches = (host, domain) => {
+      const h = normalizeHost(host);
+      const d = normalizeHost(domain);
+      if (!h || !d) return false;
+      return h === d || h.endsWith(`.${d}`);
+    };
+    const parseUrl = (value) => {
       try {
-        const loginUrlObj = new URL(loginUrl);
-        const currentUrlObj = new URL(pageUrl);
-        
-        // Check if current URL matches configured login URL (same origin + pathname)
-        if (loginUrlObj.origin === currentUrlObj.origin && 
-            currentUrlObj.pathname === loginUrlObj.pathname) {
-          return { isLoginPage: true, confidence: 'high', reason: 'URL matches configured login URL' };
-        }
-      } catch (urlError) {
-        // Invalid URL format, skip
-        console.warn(`[LOGIN-REDIRECT] Invalid login URL format: ${loginUrl}`);
+        const raw = String(value || '').trim();
+        if (!raw) return null;
+        return new URL(raw.includes('://') ? raw : `https://${raw}`);
+      } catch {
+        return null;
       }
+    };
+
+    const configuredLoginUrls = [
+      ...(loginUrl ? [loginUrl] : []),
+      ...(Array.isArray(context?.login_urls) ? context.login_urls : []),
+    ]
+      .map(parseUrl)
+      .filter(Boolean);
+
+    const currentPath = normalizePath(currentUrlObj.pathname);
+
+    // Strict match for explicitly configured absolute login URL(s).
+    const strictConfiguredMatch = configuredLoginUrls.some((candidate) =>
+      candidate.origin === currentUrlObj.origin && normalizePath(candidate.pathname) === currentPath
+    );
+    if (strictConfiguredMatch) {
+      return { isLoginPage: true, confidence: 'high', reason: 'URL matches configured login URL' };
     }
-    
-    // No hardcoded detection - return false if configured login URL does not match.
-    return { isLoginPage: false, confidence: 'low', reason: 'No configured login URL match' };
+
+    // Scoped fallback: if redirected to a configured project/api host and the URL shape is auth-like,
+    // treat it as login so auto-retry can refresh session in the same browser context.
+    const configuredDomains = [
+      ...(Array.isArray(context?.api_domains) ? context.api_domains : []),
+      ...(Array.isArray(context?.project_domains) ? context.project_domains : []),
+      ...configuredLoginUrls.map((u) => u.hostname),
+      parseUrl(context?.start_url)?.hostname,
+    ]
+      .map(normalizeHost)
+      .filter(Boolean);
+    const currentHost = normalizeHost(currentUrlObj.hostname);
+    const hostInConfiguredSurface =
+      configuredDomains.length > 0 && configuredDomains.some((domain) => hostMatches(currentHost, domain));
+
+    const looksLikeLoginPath =
+      /(^|\/)(login|signin|sign-in|auth)(\/|$)/i.test(currentUrlObj.pathname || '') ||
+      /(?:^|[?&])(redirect|client_id|response_type)=/i.test(currentUrlObj.search || '');
+
+    let hasPasswordField = false;
+    try {
+      const passwordInput = page.locator('input[type="password"]');
+      const count = await passwordInput.count();
+      if (count > 0) {
+        hasPasswordField = await passwordInput.first().isVisible().catch(() => false);
+      }
+    } catch {
+      hasPasswordField = false;
+    }
+
+    if (hostInConfiguredSurface && (looksLikeLoginPath || hasPasswordField)) {
+      return {
+        isLoginPage: true,
+        confidence: 'medium',
+        reason: 'Auth-like redirect on configured project/api host',
+      };
+    }
+
+    return { isLoginPage: false, confidence: 'low', reason: 'No configured login surface match' };
   } catch (error) {
     console.error(`[LOGIN-REDIRECT] Error detecting login page: ${error.message}`);
     return { isLoginPage: false, confidence: 'low', reason: `Error: ${error.message}` };
@@ -112,7 +169,7 @@ export async function handleLoginRedirect(
   
   // Detect if current page is a login page
   await sendLog(jobId, 'info', `🔍 Checking if page is a login page: ${currentUrl}`);
-  const loginDetection = await detectLoginPage(page, jobId, currentUrl, openaiClient, loginUrl);
+  const loginDetection = await detectLoginPage(page, jobId, currentUrl, openaiClient, loginUrl, context);
   
   if (!loginDetection.isLoginPage) {
     return null; // Not a login page, continue normally
@@ -241,7 +298,7 @@ export async function handleLoginRedirect(
       await sendLog(jobId, 'info', `✅ Navigated to ${newUrl} with fresh cookies`);
       
       // Check if we're still on a login page
-      const recheck = await detectLoginPage(page, jobId, newUrl, openaiClient, loginUrl);
+      const recheck = await detectLoginPage(page, jobId, newUrl, openaiClient, loginUrl, context);
       if (recheck.isLoginPage) {
         await sendLog(jobId, 'error', `❌ Still on login page after re-authentication - cookies may be expired`);
         throw new Error(`Re-authentication failed - still on login page at ${newUrl}`);
