@@ -16095,8 +16095,22 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
               // Bind the function to maintain 'this' context
               const boundFn = originalValue.bind(target);
               return async function(...args) {
-                console.log(`🔍 Proxy intercepted method: ${String(prop)}`);
-                await logAction(String(prop), args);
+                const propName = String(prop);
+                console.log(`🔍 Proxy intercepted method: ${propName}`);
+                await logAction(propName, args);
+                if ((propName === 'setDefaultTimeout' || propName === 'setDefaultNavigationTimeout') && args.length > 0) {
+                  const rawTimeout =
+                    typeof args[0] === 'string' ? Number.parseInt(args[0], 10) : Number(args[0]);
+                  const clampedTimeout = Number.isFinite(rawTimeout)
+                    ? Math.min(Math.max(0, rawTimeout), 60000)
+                    : 60000;
+                  if (!Number.isFinite(rawTimeout) || rawTimeout !== clampedTimeout) {
+                    console.warn(
+                      `⚠️ Clamped ${propName}(${String(args[0])}) to ${clampedTimeout}ms to avoid long-running generated scripts`
+                    );
+                  }
+                  args[0] = clampedTimeout;
+                }
                 return await boundFn(...args);
               };
             }
