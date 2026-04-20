@@ -13128,6 +13128,60 @@ ${executableBody}`;
             }
           }
         }
+
+        // For login loops, use runtime session evidence to stop bounded retries early once authenticated.
+        if (isLoginLoop && condition) {
+          try {
+            const determineSnapshot =
+              workflowState?.determine_completion?.result ||
+              workflowState?.results?.determine_completion?.result ||
+              workflowState?.determine_completion ||
+              {};
+            const cleanExecution =
+              workflowState?.lastExecutionResult?.success !== false &&
+              workflowState?.lastExecutionResult?.execution_failed !== true &&
+              workflowState?.lastExecutionResult?.error_type !== 'execution' &&
+              workflowState?.executionErrorType !== 'execution';
+            const sessionLoopOverride = evaluateLoginSessionEvidenceOverride({
+              page,
+              workflowState,
+              validatePayload: null,
+              determineResult: determineSnapshot,
+              cleanExecution,
+              seedUrl: this.context?.seed_url || this.context?.start_url || this.context?.page_url,
+            });
+            if (sessionLoopOverride?.confirm) {
+              const patched = {
+                status: 'success',
+                completion_status: 'success',
+                is_complete: true,
+                reason: sessionLoopOverride.reason,
+              };
+              condition = false; // Force loop exit once session evidence is strong enough.
+              if (!workflowState.determine_completion || typeof workflowState.determine_completion !== 'object') {
+                workflowState.determine_completion = {};
+              }
+              workflowState.determine_completion.result = patched;
+              if (!workflowState.results) workflowState.results = {};
+              workflowState.results.determine_completion = { result: patched };
+              if (workflowState.variablePool?.steps) {
+                workflowState.variablePool.steps.determine_completion = { result: patched };
+              }
+              console.log(`✅ [WHILE-LOOP-ITERATION-${iteration}] Session evidence confirms login; exiting loop early`);
+              if (jobId) {
+                await this.sendLogToBackend(
+                  jobId,
+                  'info',
+                  `✅ Session evidence confirms login during while-loop; exiting retries early`,
+                  'WORKFLOW-ANALYZER',
+                  { iteration, reason: sessionLoopOverride.reason }
+                );
+              }
+            }
+          } catch (sessionLoopOverrideError) {
+            console.warn(`⚠️ Login session loop override skipped: ${sessionLoopOverrideError.message}`);
+          }
+        }
         
         // Record iteration - include determine_completion from workflowState
         const iterationState = {
