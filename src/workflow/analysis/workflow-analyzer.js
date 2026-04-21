@@ -13569,6 +13569,18 @@ return {
       if (/type\s*===?\s*['"]submit['"]/i.test(t)) return true;
       if (/\[\s*type\s*=\s*['"]submit['"]\s*\]/i.test(t)) return true;
       // LLM-named primary actions (placeOrderBtn, submitBtn, …) — not domain-specific literals.
+      // Include `.first()/.last()/.nth(n)` chains — models often emit `await submitBtn.first().click()`
+      // which must count as submit; otherwise stripTrailingRedundantPageFillsAfterSubmit misses the
+      // anchor and redundant page.locator fills after reset hang until action timeout.
+      const awaitVarChainedClick = t.match(
+        /^await\s+([A-Za-z_$][\w$]*)(?:\s*\.\s*(?:first|last|nth)\s*(?:\([^)]*\))?)*\s*\.\s*click\s*\(/i
+      );
+      if (awaitVarChainedClick) {
+        const vn = String(awaitVarChainedClick[1] || '').toLowerCase();
+        if (/(submit|order|place|confirm|checkout|purchase|save|send|continue|finish|pay)/.test(vn)) {
+          return true;
+        }
+      }
       const awaitVarClick = t.match(/^await\s+([A-Za-z_$][\w$]*)\s*\.\s*click\s*\(/i);
       if (awaitVarClick) {
         const vn = String(awaitVarClick[1] || '').toLowerCase();
