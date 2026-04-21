@@ -100,7 +100,8 @@ class WorkflowAnalyzer {
   /**
    * Get timeout for a workflow step (in milliseconds)
    * Returns step-specific timeout or default based on step type.
-   * For workflow-analysis and page-discovery uses context.max_job_duration_ms (from project "Max time per subjob") when available.
+   * For workflow-analysis, page-discovery, playwright-analysis, and hardcoded-workflow-analysis uses
+   * context.max_job_duration_ms (from project "Max time per subjob") when available.
    * Range: 1 minute (60000ms) to 15 minutes (900000ms)
    */
   getStepTimeout(step) {
@@ -119,7 +120,7 @@ class WorkflowAnalyzer {
         'ai-prompt': 900000,           // 15 minutes - AI calls can take time
         'workflow-analysis': maxFromSettings,   // From project "Max time per subjob" (context.max_job_duration_ms)
         'page-description': 120000,    // 2 minutes - Page analysis
-        'playwright-analysis': 120000, // 2 minutes - Playwright analysis
+        'playwright-analysis': maxFromSettings,
         'execute-code': 120000,        // 2 minutes - Code execution
         'execute-code-from-variable': 120000, // 2 minutes
         'while-loop': 60000,           // 1 minute - Loops timeout quickly
@@ -135,7 +136,7 @@ class WorkflowAnalyzer {
         'unlighthouse': 300000,       // 5 minutes - Performance audit
         'save-data': 120000,          // 2 minutes - Data saving
         'update-workflow': 120000,    // 2 minutes
-        'hardcoded-workflow-analysis': 120000, // 2 minutes
+        'hardcoded-workflow-analysis': maxFromSettings,
       };
 
       const stepType = normalizeWorkflowStepType(step.type) || 'ai-prompt';

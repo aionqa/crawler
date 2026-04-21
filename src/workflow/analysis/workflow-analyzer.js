@@ -636,7 +636,8 @@ class WorkflowAnalyzer {
   /**
    * Get timeout for a workflow step (in milliseconds)
    * Returns step-specific timeout or default based on step type.
-   * For workflow-analysis and page-discovery uses context.max_job_duration_ms (from project "Max time per subjob") when available.
+   * For workflow-analysis, page-discovery, playwright-analysis, and hardcoded-workflow-analysis uses
+   * context.max_job_duration_ms (from project "Max time per subjob") when available.
    * Range: 1 minute (60000ms) up to STEP_TIMEOUT_SETTINGS_CEILING_MS for most steps; journey/legs
    * for-each batches may use JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS (see end of method).
    */
@@ -657,7 +658,9 @@ class WorkflowAnalyzer {
         'ai-prompt': 900000,           // 15 minutes - AI calls can take time
         'workflow-analysis': maxFromSettings,   // From project "Max time per subjob" (context.max_job_duration_ms)
         'page-description': 120000,    // 2 minutes - Page analysis
-        'playwright-analysis': 120000, // 2 minutes - Playwright analysis
+        // Playwright inventory + SPA settle + optional reload/seed recovery + extraction reconciliation/AI —
+        // fixed 2m outer races caused terminal failures on heavy SPA/modal surfaces while inner ops allow 90s reloads.
+        'playwright-analysis': maxFromSettings,
         'execute-code': 120000,        // 2 minutes - Code execution
         'execute-code-from-variable': 120000, // 2 minutes
         // Journey batches: must scale with job/subjob budget — fixed 10m caused outer Promise.race to abort
@@ -675,7 +678,7 @@ class WorkflowAnalyzer {
         'unlighthouse': 300000,       // 5 minutes - Performance audit
         'save-data': 120000,          // 2 minutes - Data saving
         'update-workflow': 120000,    // 2 minutes
-        'hardcoded-workflow-analysis': 120000, // 2 minutes
+        'hardcoded-workflow-analysis': maxFromSettings,
       };
 
       const stepType = normalizeWorkflowStepType(step.type) || 'ai-prompt';
