@@ -43,6 +43,12 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
       console.warn('Page DOM not fully loaded after 30s, continuing with Lighthouse analysis');
     });
 
+    // Bounded evaluate: journey scripts may raise page defaultTimeout; avoid unbounded hangs here.
+    const evaluateTimeoutMs = Math.min(
+      60000,
+      Math.max(15000, Number(process.env.PERF_ANALYZE_EVALUATE_TIMEOUT_MS) || 45000)
+    );
+
     // Get performance metrics using Playwright's evaluate
     const performanceMetrics = await page.evaluate(() => {
       const perfData = window.performance.timing;
@@ -97,7 +103,7 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
         domSize: document.querySelectorAll('*').length,
         resourceCount: performance.getEntriesByType('resource').length
       };
-    });
+    }, undefined, { timeout: evaluateTimeoutMs });
 
     const analysisDuration = Date.now() - startTime;
     
