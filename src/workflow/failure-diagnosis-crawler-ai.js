@@ -18,6 +18,56 @@ function safeJson(value, maxLen = 24000) {
   }
 }
 
+/**
+ * Extract text from any of the supported AI response shapes:
+ *  - Chat Completions: { choices: [{ message: { content } }] }
+ *  - Responses API:    { output_text } or { output: [{ text }] } or { output: [{ content: [{ text }] }] }
+ *  - Aionqa AI service: { content } or { response }
+ *  - Bare string
+ */
+function extractAiText(resp) {
+  if (resp == null) return '';
+  if (typeof resp === 'string') return resp.trim();
+
+  // Chat Completions
+  const chatContent = resp?.choices?.[0]?.message?.content;
+  if (typeof chatContent === 'string' && chatContent.length > 0) return chatContent.trim();
+  if (Array.isArray(chatContent)) {
+    const joined = chatContent
+      .map((p) => (typeof p === 'string' ? p : (p?.text ?? '')))
+      .filter(Boolean)
+      .join('');
+    if (joined.length > 0) return joined.trim();
+  }
+
+  // Responses API top-level convenience
+  if (typeof resp.output_text === 'string' && resp.output_text.length > 0) {
+    return resp.output_text.trim();
+  }
+
+  // Responses API output[].text or output[].content[].text
+  if (Array.isArray(resp.output)) {
+    const parts = [];
+    for (const item of resp.output) {
+      if (!item) continue;
+      if (typeof item.text === 'string') parts.push(item.text);
+      if (Array.isArray(item.content)) {
+        for (const c of item.content) {
+          if (c && typeof c.text === 'string') parts.push(c.text);
+        }
+      }
+    }
+    const joined = parts.join('').trim();
+    if (joined.length > 0) return joined;
+  }
+
+  // Aionqa AI service shorthand fields
+  if (typeof resp.content === 'string' && resp.content.length > 0) return resp.content.trim();
+  if (typeof resp.response === 'string' && resp.response.length > 0) return resp.response.trim();
+
+  return '';
+}
+
 const SYSTEM_PROMPT = [
   'You are a senior QA automation engineer. A diagnostic crawl just executed workflow legs on a page after a prior failure.',
   '',
@@ -104,7 +154,7 @@ export async function runFailureDiagnosisCrawlerAi(deps, jobId, workflowId, legR
       response_format: { type: 'json_object' },
       max_tokens: 2000,
     });
-    rawText = (resp?.choices?.[0]?.message?.content || '').trim();
+    rawText = extractAiText(resp);
   } catch (e) {
     const errMsg = e?.message || String(e);
     console.error('[failure-diagnosis-crawler-ai] AI call failed:', errMsg);
