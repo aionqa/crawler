@@ -3222,6 +3222,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     const r = lastExecutionResult && typeof lastExecutionResult === 'object' ? lastExecutionResult : {};
     const err = typeof r.error === 'string' ? r.error : (r.error ? String(r.error) : '');
     return {
+      success: r.success === true,
       execution_failed: r.execution_failed === true,
       error_type: r.error_type ? String(r.error_type) : null,
       error: err ? err.substring(0, maxErrorLen) : null,
