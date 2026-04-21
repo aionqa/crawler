@@ -165,6 +165,13 @@ export async function detectLoginPage(
     };
     pushPath(fromExplicit);
     pushPath(fromPage);
+    // Include the URL we intended to navigate to (seed / queue URL). `page.url()` can lag or
+    // omit path detail during early post-navigation probes; registration seeds must still classify
+    // as registration-like even when the rendered surface URL object is incomplete.
+    const intendedObj = parseHttpUrl(
+      intendedNavUrl ?? context?.login_redirect_intended_url ?? context?.start_url ?? context?.options?.start_url
+    );
+    pushPath(intendedObj);
     if (pathCandidates.size === 0) pushPath(surfaceUrlObj);
 
     const pathLooksLikeRegistration = (pathLower) => {
@@ -230,17 +237,33 @@ export async function detectLoginPage(
     const registrationLikeSurface = looksLikeRegistrationPath || registrationLikeDom;
 
     const skipIntendedComparison = Boolean(detectionOptions?.skipIntendedUrlComparison);
+    /**
+     * Treat near-identical HTTP surfaces as the same navigation target so password fields on
+     * the requested page do not imply a redirect gate when only trivial URL serialization differs.
+     */
+    const comparableUrlKey = (u) => {
+      if (!u) return null;
+      try {
+        const h = normalizeHost(u.hostname);
+        const path = normalizePath(u.pathname).replace(/\/+$/, '') || '/';
+        const search = String(u.search || '');
+        return `${h}|${path}|${search}`;
+      } catch {
+        return null;
+      }
+    };
     const urlsDifferFromIntended = (() => {
       if (skipIntendedComparison) return true;
-      const rawIntended = intendedNavUrl ?? context?.login_redirect_intended_url ?? null;
+      const rawIntended =
+        intendedNavUrl ?? context?.login_redirect_intended_url ?? context?.start_url ?? context?.options?.start_url ?? null;
       if (!rawIntended) return false;
       try {
-        const intendedObj = parseHttpUrl(rawIntended);
-        if (!intendedObj || !surfaceUrlObj) return false;
-        const sameHost = normalizeHost(intendedObj.hostname) === normalizeHost(surfaceUrlObj.hostname);
-        const samePath = normalizePath(intendedObj.pathname) === normalizePath(surfaceUrlObj.pathname);
-        const sameSearch = String(intendedObj.search || '') === String(surfaceUrlObj.search || '');
-        return !(sameHost && samePath && sameSearch);
+        const intendedForCompare = parseHttpUrl(rawIntended);
+        if (!intendedForCompare || !surfaceUrlObj) return false;
+        const a = comparableUrlKey(intendedForCompare);
+        const b = comparableUrlKey(surfaceUrlObj);
+        if (!a || !b) return false;
+        return a !== b;
       } catch {
         return false;
       }
