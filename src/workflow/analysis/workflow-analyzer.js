@@ -13336,6 +13336,13 @@ return {
       }
     );
 
+    // Models often guess `input[name="email"]` while the DOM uses array-style names (`emails[]`, etc.).
+    // Broaden to a union with `type=email` so the first visible email control matches — no per-domain literals.
+    s = s.replace(
+      /\bpage\.fill\s*\(\s*(['"])input\[name=["']email["']]\1\s*,/gi,
+      `page.fill($1input[type=\\"email\\"], input[name=\\"email\\"]$1,`
+    );
+
     return s;
   }
 
@@ -13595,6 +13602,12 @@ return {
       if (/^await\s+page\.setDefault(?:Navigation)?Timeout\s*\(/i.test(t)) return true;
       if (/^await\s+page\.waitForLoadState\s*\(/i.test(t)) return true;
       if (/^await\s+page\.waitForTimeout\s*\(/i.test(t)) return true;
+      // SPAs often keep the same document after "submit"; models append waitForNavigation/URL
+      // that resolve immediately or never fire. Treating them as noise lets post-submit tail
+      // stripping remove redundant page.fill/page.locator lines that would otherwise wait until
+      // action timeout on selectors that do not exist (e.g. guessed name="email" vs name="emails[]").
+      if (/^await\s+page\.waitForNavigation\s*\(/i.test(t)) return true;
+      if (/^await\s+page\.waitForURL\s*\(/i.test(t)) return true;
       return false;
     };
 
