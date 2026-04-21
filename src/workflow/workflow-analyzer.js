@@ -9149,7 +9149,8 @@ return {
                   headers: this.getAuthHeaders(),
                   timeout: 5000 // 5 second timeout
                 });
-                if (response.status === 200 || response.status === 201) {
+                // Backend may return 202 when logs.jobs.append is queued to SQS (still successful).
+                if (response.status >= 200 && response.status < 300) {
                   loggedCount++;
                 } else {
                   failedCount++;

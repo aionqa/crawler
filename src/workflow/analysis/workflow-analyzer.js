@@ -15629,7 +15629,8 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
                   headers: this.getAuthHeaders(),
                   timeout: 15000
                 });
-                if (response.status === 200 || response.status === 201) {
+                // Backend may return 202 when logs.jobs.append is queued to SQS (still successful).
+                if (response.status >= 200 && response.status < 300) {
                   loggedCount++;
                 } else {
                   failedCount++;
