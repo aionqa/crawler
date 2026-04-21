@@ -17033,10 +17033,25 @@ const sleep = safeWait;
         }
       }
 
+      // Same-document journeys (toggle groups, partial fills) often leave other controls :invalid or
+      // expose static "required" copy unrelated to the leg under test — the scan above is meant to
+      // catch incomplete submits, not to fail every checkbox journey on a dense settings page.
+      let scriptReportedSuccess =
+        result == null
+        || (typeof result === 'object'
+          && result.success !== false
+          && result.execution_failed !== true);
+      if (isJourneyScriptExecutionStep && hasBlockingValidation && !pageChanged && scriptReportedSuccess) {
+        hasBlockingValidation = false;
+        console.log(
+          'ℹ️ [JOURNEY] Same-page script success: not applying whole-page validation veto (unrelated invalid controls may remain on multi-control surfaces).'
+        );
+      }
+
       const executionResult = {
         ...result,
         // success means: script completed without throw AND the page shows no surfaced validation/error chrome.
-        success: !hasBlockingValidation,
+        success: scriptReportedSuccess && !hasBlockingValidation,
         urlBeforeAction,
         urlAfterAction,
         pageChanged,
