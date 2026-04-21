@@ -119,7 +119,58 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
       hasPasswordField = false;
     }
 
-    if (hostInConfiguredSurface && (looksLikeLoginPath || hasPasswordField)) {
+    // Public registration / sign-up flows commonly include a password field on the same
+    // project host as the app login surface. Treating them as "login pages" triggers
+    // unnecessary in-session login workflows (often 4xx) and noisy self-monitor signals.
+    const pathLower = (currentUrlObj.pathname || '').toLowerCase();
+    const looksLikeRegistrationPath =
+      /\b(register|registration|signup|sign[\s_-]?up|create[\s_-]?account)\b/i.test(pathLower) ||
+      /\/account\/(?:create|new|register)(?:\/|$)/i.test(pathLower);
+
+    let registrationLikeDom = false;
+    try {
+      registrationLikeDom = await page.evaluate(() => {
+        try {
+          if (document.querySelectorAll('input[type="password"]').length >= 2) {
+            return true;
+          }
+          const heading = `${document.querySelector('h1')?.textContent || ''} ${
+            document.querySelector('h2')?.textContent || ''
+          }`.toLowerCase();
+          if (
+            /\bregistration\b/.test(heading) ||
+            /\bsign\s*up\b/.test(heading) ||
+            /\bcreate\s+(an?\s+)?account\b/.test(heading)
+          ) {
+            return true;
+          }
+          const controls = Array.from(
+            document.querySelectorAll('button[type="submit"], input[type="submit"], button:not([type])')
+          );
+          for (const el of controls) {
+            const label = `${el.innerText || ''} ${el.value || ''}`.toLowerCase();
+            if (
+              /\b(register|sign\s*up|create\s*account|join\s+now|submit\s+registration)\b/.test(label)
+            ) {
+              return true;
+            }
+          }
+        } catch (_) {
+          /* ignore */
+        }
+        return false;
+      });
+    } catch {
+      registrationLikeDom = false;
+    }
+
+    const registrationLikeSurface = looksLikeRegistrationPath || registrationLikeDom;
+
+    if (
+      hostInConfiguredSurface &&
+      !registrationLikeSurface &&
+      (looksLikeLoginPath || hasPasswordField)
+    ) {
       return {
         isLoginPage: true,
         confidence: 'medium',
