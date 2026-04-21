@@ -7484,7 +7484,22 @@ return {
         }
       }
     }
-    
+
+    // Match analysis/workflow-analyzer: single-line async IIFE skips inner lines via `continue`.
+    if (actions.length === 0 && script && typeof script === 'string') {
+      const compact = script.replace(/\s+/g, ' ').trim();
+      if (/\bpage\.(click|dblclick|fill|type|press|selectOption|check|uncheck)\s*\(/i.test(compact)) {
+        const rawSegs = compact.split(';').map((s) => s.trim()).filter(Boolean);
+        for (const seg of rawSegs) {
+          if (/waitFor(LoadState|Timeout|Navigation)\s*\(/i.test(seg)) continue;
+          if (/setDefault(Navigation)?Timeout\s*\(/i.test(seg)) continue;
+          if (/\bpage\.(click|dblclick|fill|type|press|selectOption)\s*\(/i.test(seg)) {
+            actions.push(seg.length > 150 ? `${seg.substring(0, 147)}...` : seg);
+          }
+        }
+      }
+    }
+
     return actions;
   }
 
@@ -8743,18 +8758,30 @@ return {
       } catch (logError) {
         console.error(`❌ Failed to log parsing result: ${logError.message}`);
       }
-    } else if (jobId && actionLines.length === 0) {
+    } else if (jobId && actionLines.length === 0 && code && code.trim().length > 0) {
       try {
+        const hasAsyncFunction = /async\s*\(\)\s*=>|async\s+function|\(async\s*\(\)/.test(code);
+        const hasPageReference =
+          /page\.|await\s+page|page\.locator|page\.getBy|page\.frameLocator|\.frameLocator\(/.test(code);
+        const hasReturn = /return\s+/.test(code);
+        const warningLevel = hasAsyncFunction || hasPageReference || hasReturn ? 'debug' : 'warn';
+        const warningMessage =
+          hasAsyncFunction || hasPageReference || hasReturn
+            ? `ℹ️ No action lines parsed from script for logging (script length: ${code.length} chars) - script appears valid but may use patterns not recognized by parser`
+            : `⚠️ No action lines parsed from script (script length: ${code.length} chars) - script may be empty or in unexpected format`;
         await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
           jobId: jobId,
-          level: 'warn',
-          message: `⚠️ No action lines parsed from script (script length: ${code.length} chars) - script may be empty or in unexpected format`,
+          level: warningLevel,
+          message: warningMessage,
           component: 'WORKFLOW-ANALYZER',
           metadata: {
             step_id: step.id,
             step_name: step.name,
             script_length: code.length,
-            script_preview: code.substring(0, 300)
+            script_preview: code.substring(0, 300),
+            has_async: hasAsyncFunction,
+            has_page_ref: hasPageReference,
+            has_return: hasReturn
           }
         }, {
           headers: this.getAuthHeaders()

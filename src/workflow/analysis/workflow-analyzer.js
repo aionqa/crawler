@@ -12572,6 +12572,28 @@ return {
       filteredActions.push(actionLine);
     }
 
+    // Single-line async IIFE wrappers match the opening pattern then `continue`, skipping inner
+    // `await page.*` segments — recover semicolon-split actions for logging/metrics parity.
+    if (filteredActions.length === 0 && script && typeof script === 'string') {
+      const compact = script.replace(/\s+/g, ' ').trim();
+      if (
+        /\bpage\.(click|dblclick|fill|type|press|selectOption|check|uncheck)\s*\(/i.test(compact) ||
+        heuristicMatchesPlaywrightUserAction(compact)
+      ) {
+        const rawSegs = compact.split(';').map((s) => s.trim()).filter(Boolean);
+        for (const seg of rawSegs) {
+          if (/waitFor(LoadState|Timeout|Navigation|Selector|Function)\s*\(/i.test(seg)) continue;
+          if (/setDefault(Navigation)?Timeout\s*\(/i.test(seg)) continue;
+          if (
+            heuristicMatchesPlaywrightUserAction(seg) ||
+            /\bpage\.(click|dblclick|fill|type|press|selectOption)\s*\(/i.test(seg)
+          ) {
+            filteredActions.push(seg.length > 150 ? `${seg.substring(0, 147)}...` : seg);
+          }
+        }
+      }
+    }
+
     return filteredActions;
   }
 
