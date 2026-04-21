@@ -6,7 +6,10 @@ import { isSearchEngineInfraUrl } from '../../utils/search-engine-infra-url.js';
 import { resolveScreenshotFullPage } from '../utils/resolve-screenshot-full-page.js';
 import { StaticNodeExecutor } from '../execution/static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../../step-requirements.js';
-import { replaceNetworkIdleWithDomContentLoadedForAutomation } from '../utils/normalize-playwright-network-idle.js';
+import {
+  replaceNetworkIdleWithDomContentLoadedForAutomation,
+  capPlaywrightAutomationTimeouts,
+} from '../utils/normalize-playwright-network-idle.js';
 import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
 import { evaluateLoginSessionEvidenceOverride } from '../utils/login-session-evidence-override.js';
 import {
@@ -12599,7 +12602,10 @@ return {
     const actions = workflowState?.currentJourney?.actions;
     if (!Array.isArray(actions) || actions.length === 0) return null;
 
-    const lines = ['await page.waitForLoadState(\'domcontentloaded\').catch(() => {});', 'await page.waitForTimeout(500);'];
+    const lines = [
+      "await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});",
+      'await page.waitForTimeout(500);',
+    ];
     for (const action of actions) {
       let selector =
         action?.selector || action?.element_info?.selector || action?.element_info?.primary_selector;
@@ -12646,7 +12652,7 @@ return {
     if (!built || typeof built !== 'string' || !built.trim()) return null;
     let s = this.finalizeAiGeneratedPlaywrightScript(built);
     if (!s || !String(s).trim()) return null;
-    const spaLead = `await page.waitForLoadState('domcontentloaded').catch(() => {});\nawait page.waitForTimeout(350);\n`;
+    const spaLead = `await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});\nawait page.waitForTimeout(350);\n`;
     if (!/\bwaitForLoadState\s*\(\s*['"]domcontentloaded['"]/i.test(s)) {
       s = spaLead + s;
     }
@@ -13769,6 +13775,8 @@ return {
       return t;
     };
     s = stripTrailingTimeoutTuning(s.trimEnd());
+    s = replaceNetworkIdleWithDomContentLoadedForAutomation(s);
+    s = capPlaywrightAutomationTimeouts(s);
 
     // LLMs sometimes truncate inside the first argument to waitForSelector, producing a syntax error
     // (e.g. await page.waitForSelector('sel). Replace those lines with a short bounded wait so the
@@ -15247,7 +15255,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     const journeyRawScriptLen = code && typeof code === 'string' ? code.trim().length : 0;
     code = this.finalizeAiGeneratedPlaywrightScript(code);
     if (isJourneyScriptExecutionStep && code && typeof code === 'string') {
-      const spaLead = `await page.waitForLoadState('domcontentloaded').catch(() => {});\nawait page.waitForTimeout(350);\n`;
+      const spaLead = `await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});\nawait page.waitForTimeout(350);\n`;
       if (!/\bwaitForLoadState\s*\(\s*['"]domcontentloaded['"]/i.test(code)) {
         code = spaLead + code;
       }
@@ -15609,7 +15617,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
                   }
                 }, {
                   headers: this.getAuthHeaders(),
-                  timeout: 5000 // 5 second timeout
+                  timeout: 15000
                 });
                 if (response.status === 200 || response.status === 201) {
                   loggedCount++;
@@ -16245,11 +16253,12 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         console.log(`🔍 Testing wrapper: wrappedPage.locator is function? ${typeof wrappedPage.locator === 'function'}`);
         console.log(`🔍 Testing wrapper: wrappedPage type=${typeof wrappedPage}, isProxy=${wrappedPage !== pageObj}`);
 
-        const scriptForExecution = replaceNetworkIdleWithDomContentLoadedForAutomation(
+        let scriptForExecution = replaceNetworkIdleWithDomContentLoadedForAutomation(
           typeof scriptCode === 'string' ? scriptCode : String(scriptCode || '')
         );
+        scriptForExecution = capPlaywrightAutomationTimeouts(scriptForExecution);
         if (scriptForExecution !== scriptCode) {
-          console.log('ℹ️ Normalized playwright script: networkidle → domcontentloaded (SPA/WebSocket/OAuth-safe)');
+          console.log('ℹ️ Normalized playwright script: networkidle → domcontentloaded + timeout caps');
         }
         
         // Use string concatenation (not template literals) to avoid escaping issues
