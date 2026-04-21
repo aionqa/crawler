@@ -15478,13 +15478,20 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       // Take screenshot before action
       let screenshotBeforeKey = null;
       try {
-        const screenshotBefore = await page.screenshot({ fullPage: true, type: 'png' });
+        // Journey Playwright legs: avoid fullPage here — reactive/SPA pages can produce huge
+        // scrollable layout work and stall the job for many minutes before script execution logs,
+        // which then trips the outer job timeout while journeys stay pending.
+        const beforeShotOpts = isJourneyScriptExecutionStep
+          ? { fullPage: false, type: 'png', timeout: 45000, animations: 'disabled' }
+          : { fullPage: true, type: 'png', timeout: 120000, animations: 'disabled' };
+        const screenshotBefore = await page.screenshot(beforeShotOpts);
         const presignedBefore = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
           type: 'screenshot',
           jobId: jobId,
           contentType: 'image/png'
         }, {
-          headers: this.getAuthHeaders()
+          headers: this.getAuthHeaders(),
+          timeout: 15000
         });
         
         if (presignedBefore.data.key && presignedBefore.data.url) {
@@ -15493,7 +15500,8 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
               axios.put(presignedBefore.data.url, screenshotBefore, {
                 headers: { 'Content-Type': 'image/png' },
                 maxBodyLength: Infinity,
-                maxContentLength: Infinity
+                maxContentLength: Infinity,
+                timeout: 60000
               }),
             { maxRetries: 8 }
           );
