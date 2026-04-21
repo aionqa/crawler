@@ -16,8 +16,13 @@ export function replaceNetworkIdleWithDomContentLoadedForAutomation(source) {
   return s;
 }
 
-/** Upper bound for page.setDefaultTimeout / setDefaultNavigationTimeout in AI journey scripts (ms). */
-const MAX_DEFAULT_PLAYWRIGHT_MS = 120000;
+/**
+ * Upper bound for page.setDefaultTimeout / setDefaultNavigationTimeout in AI journey scripts (ms).
+ * 120s allowed multi-minute stalls on overlay/stacked-modal clicks (each locator can consume a full
+ * default timeout). 45s matches journey screenshot / executor tightening elsewhere and reduces
+ * whole-job timeout risk on SPA surfaces without site-specific tuning.
+ */
+const MAX_DEFAULT_PLAYWRIGHT_MS = 45000;
 
 /** Upper bound for waitForLoadState('domcontentloaded', …) — long values consume whole crawl budgets. */
 const MAX_DOMCONTENTLOADED_WAIT_MS = 30000;
