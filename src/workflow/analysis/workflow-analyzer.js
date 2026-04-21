@@ -13848,6 +13848,17 @@ return {
     s = this.repairQuotedActPseudocodeInFillAndType(s);
     s = this.repairLocatorBracketIndexChains(s);
     s = this.repairLocatorQuotedSelectorParenBalance(s);
+    // Quote unquoted #id / .class inside .locator(...) BEFORE replaceEmptyJourneyFillValues: that pass
+    // inspects preceding .locator("...") to infer values for empty .fill(); unquoted page.locator(#x)
+    // is invalid JS and also prevents those heuristics from matching.
+    s = s.replace(
+      /\.locator\(\s*(#[A-Za-z_][\w-]*)\s*\)/g,
+      (_m, idSel) => `.locator(${JSON.stringify(String(idSel || ''))})`
+    );
+    s = s.replace(
+      /\.locator\(\s*(\.[A-Za-z_][\w-]*)\s*\)/g,
+      (_m, clsSel) => `.locator(${JSON.stringify(String(clsSel || ''))})`
+    );
     // Redundant with fixInner but catches union typos outside quoted-arg regex coverage (concat / odd escaping).
     s = s.replace(
       /(button\[type=(?:['"]submit['"]|\\"submit\\")\]\s*,\s*button)\)/gi,
@@ -14069,8 +14080,8 @@ return {
       (_m, selectorExpr) => `page.waitForSelector(${JSON.stringify(String(selectorExpr || ''))},`
     );
 
-    // Unquoted selectors inside .locator(...): LLMs often emit page.locator(#FirstName) which is a syntax error.
-    // #id and .class tokens are unambiguous as CSS fragments (not JS variables).
+    // Unquoted #id / .class inside .locator(...) are repaired at the start of sanitizeAiPlaywrightScript
+    // (before replaceEmptyJourneyFillValues). Idempotent second pass here for any later transforms.
     s = s.replace(
       /\.locator\(\s*(#[A-Za-z_][\w-]*)\s*\)/g,
       (_m, idSel) => `.locator(${JSON.stringify(String(idSel || ''))})`
