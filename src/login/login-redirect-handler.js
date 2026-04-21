@@ -43,8 +43,22 @@ async function sendLog(jobId, level, message, data = {}) {
 /**
  * Detect if current page is a login page
  * Configuration-first with scoped heuristics for auth hosts.
+ *
+ * @param {string|null} intendedNavUrl - URL we navigated from / intended before redirects.
+ *   When set, a visible password field alone does not imply a session gate if the rendered
+ *   URL still matches the intended URL (e.g. crawling a static login-form demo page).
+ * @param {{ skipIntendedUrlComparison?: boolean }} [detectionOptions]
  */
-export async function detectLoginPage(page, jobId, currentUrl, openaiClient, loginUrl = null, context = null) {
+export async function detectLoginPage(
+  page,
+  jobId,
+  currentUrl,
+  openaiClient,
+  loginUrl = null,
+  context = null,
+  intendedNavUrl = null,
+  detectionOptions = null
+) {
   try {
     /** Prefer explicit crawl `finalUrl` when valid; `page.url()` can lag or differ during navigation. */
     const parseHttpUrl = (raw) => {
@@ -215,11 +229,31 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
 
     const registrationLikeSurface = looksLikeRegistrationPath || registrationLikeDom;
 
-    if (
-      hostInConfiguredSurface &&
-      !registrationLikeSurface &&
-      (looksLikeLoginPath || hasPasswordField)
-    ) {
+    const skipIntendedComparison = Boolean(detectionOptions?.skipIntendedUrlComparison);
+    const urlsDifferFromIntended = (() => {
+      if (skipIntendedComparison) return true;
+      const rawIntended = intendedNavUrl ?? context?.login_redirect_intended_url ?? null;
+      if (!rawIntended) return false;
+      try {
+        const intendedObj = parseHttpUrl(rawIntended);
+        if (!intendedObj || !surfaceUrlObj) return false;
+        const sameHost = normalizeHost(intendedObj.hostname) === normalizeHost(surfaceUrlObj.hostname);
+        const samePath = normalizePath(intendedObj.pathname) === normalizePath(surfaceUrlObj.pathname);
+        const sameSearch = String(intendedObj.search || '') === String(surfaceUrlObj.search || '');
+        return !(sameHost && samePath && sameSearch);
+      } catch {
+        return false;
+      }
+    })();
+
+    // Password fields are common on registration pages (handled), demo HTML fixtures, and
+    // in-flow forms. Only pair password detection with the scoped host heuristic when the
+    // navigation actually changed to this surface (typical post-redirect auth gate), or
+    // when the path/query already looks like a dedicated login route (looksLikeLoginPath
+    // includes OAuth-style query keys).
+    const scopedAuthSurface = looksLikeLoginPath || (hasPasswordField && urlsDifferFromIntended);
+
+    if (hostInConfiguredSurface && !registrationLikeSurface && scopedAuthSurface) {
       return {
         isLoginPage: true,
         confidence: 'medium',
@@ -272,7 +306,7 @@ export async function handleLoginRedirect(
   
   // Detect if current page is a login page
   await sendLog(jobId, 'info', `🔍 Checking if page is a login page: ${currentUrl}`);
-  const loginDetection = await detectLoginPage(page, jobId, currentUrl, openaiClient, loginUrl, context);
+  const loginDetection = await detectLoginPage(page, jobId, currentUrl, openaiClient, loginUrl, context, intendedUrl);
   
   if (!loginDetection.isLoginPage) {
     return null; // Not a login page, continue normally
@@ -401,7 +435,9 @@ export async function handleLoginRedirect(
       await sendLog(jobId, 'info', `✅ Navigated to ${newUrl} with fresh cookies`);
       
       // Check if we're still on a login page
-      const recheck = await detectLoginPage(page, jobId, newUrl, openaiClient, loginUrl, context);
+      const recheck = await detectLoginPage(page, jobId, newUrl, openaiClient, loginUrl, context, newUrl, {
+        skipIntendedUrlComparison: true,
+      });
       if (recheck.isLoginPage) {
         await sendLog(jobId, 'error', `❌ Still on login page after re-authentication - cookies may be expired`);
         throw new Error(`Re-authentication failed - still on login page at ${newUrl}`);
