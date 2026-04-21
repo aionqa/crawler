@@ -3936,16 +3936,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         
         // Execute step with timeout
         let stepCompleted = false;
-        let pageLoadedSuccessfully = false;
-        
-        // Check if page is loaded before starting (for timeout handling)
-        try {
-          const currentUrl = page.url();
-          pageLoadedSuccessfully = !!currentUrl && currentUrl !== 'about:blank';
-        } catch (e) {
-          // Page check failed, but continue
-        }
-        
+
         await Promise.race([
           (async () => {
             const stepTypeKey = normalizeWorkflowStepType(step.type);
@@ -4129,17 +4120,13 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         }
             stepCompleted = true;
           })(),
-          new Promise((resolve, reject) => 
+          new Promise((_resolve, reject) =>
             setTimeout(() => {
               if (!stepCompleted) {
-                // For for-each steps, check if page loaded successfully before failing
-                if (normalizeWorkflowStepType(step.type) === 'for-each' && pageLoadedSuccessfully) {
-                  console.log(`⚠️ Step "${step.name || step.id}" timed out but page loaded successfully - allowing to continue`);
-                  // Resolve instead of reject to allow step to continue
-                  resolve();
-                } else {
-                  reject(new Error(`Step "${step.name || step.id}" timed out after ${Math.round(stepTimeout / 1000)}s`));
-                }
+                // Never resolve early on outer timeout: the step async IIFE keeps running and would
+                // interleave following workflow steps (e.g. Lighthouse) with nested for-each journeys,
+                // corrupting browser state and leaving journeys non-terminal.
+                reject(new Error(`Step "${step.name || step.id}" timed out after ${Math.round(stepTimeout / 1000)}s`));
               }
             }, stepTimeout)
           )
