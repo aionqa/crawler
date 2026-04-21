@@ -49,8 +49,9 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
       Math.max(15000, Number(process.env.PERF_ANALYZE_EVALUATE_TIMEOUT_MS) || 45000)
     );
 
-    // Get performance metrics using Playwright's evaluate
-    const performanceMetrics = await page.evaluate(() => {
+    // Use Node-side race instead of page.evaluate(..., arg, { timeout }): some Playwright builds
+    // treat (undefined, options) as multiple serialized arguments and throw "Too many arguments".
+    const evaluateMetricsInPage = () => page.evaluate(() => {
       const perfData = window.performance.timing;
       const paintEntries = performance.getEntriesByType('paint');
       const navStart = perfData.navigationStart || 0;
@@ -103,7 +104,20 @@ export async function analyzePageWithLighthouse(page, jobId, pageUrl, options = 
         domSize: document.querySelectorAll('*').length,
         resourceCount: performance.getEntriesByType('resource').length
       };
-    }, undefined, { timeout: evaluateTimeoutMs });
+    });
+
+    const performanceMetrics = await Promise.race([
+      evaluateMetricsInPage(),
+      new Promise((_resolve, reject) => {
+        setTimeout(
+          () =>
+            reject(
+              new Error(`Performance metrics evaluate exceeded ${evaluateTimeoutMs}ms`)
+            ),
+          evaluateTimeoutMs
+        );
+      }),
+    ]);
 
     const analysisDuration = Date.now() - startTime;
     

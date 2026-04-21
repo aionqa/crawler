@@ -524,6 +524,11 @@ const DEFAULT_MAX_STEP_TIMEOUT_MS = 10 * 60 * 1000;
  * page jobs are not cut off at 15m while the job document still allows a longer execution window.
  */
 const STEP_TIMEOUT_SETTINGS_CEILING_MS = 60 * 60 * 1000;
+/**
+ * "Execute Workflow Journeys" for-each chains nested while-loops + AI per journey; wall-clock often
+ * exceeds a single project max_job_duration slice. Allow a higher cap only for journey/legs batches.
+ */
+const JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS = 2 * 60 * 60 * 1000;
 /** Floor for generated journey Playwright scripts (forms, modals, nested SPAs); nested races use this minimum. */
 /** 15m floor — Vue/SPA journeys often need full window inside nested while-loop races. */
 const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 15 * 60 * 1000;
@@ -632,7 +637,8 @@ class WorkflowAnalyzer {
    * Get timeout for a workflow step (in milliseconds)
    * Returns step-specific timeout or default based on step type.
    * For workflow-analysis and page-discovery uses context.max_job_duration_ms (from project "Max time per subjob") when available.
-   * Range: 1 minute (60000ms) up to STEP_TIMEOUT_SETTINGS_CEILING_MS for settings-driven and loop steps.
+   * Range: 1 minute (60000ms) up to STEP_TIMEOUT_SETTINGS_CEILING_MS for most steps; journey/legs
+   * for-each batches may use JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS (see end of method).
    */
   getStepTimeout(step) {
     let timeout;
@@ -693,7 +699,20 @@ class WorkflowAnalyzer {
       timeout = Math.max(timeout, AI_PROMPT_FLOOR_MS);
     }
 
-    return Math.min(timeout, STEP_TIMEOUT_SETTINGS_CEILING_MS);
+    const stepTypeFinal = normalizeWorkflowStepType(step.type);
+    const itemsPathForJourneyBatch = String(step.config?.itemsPath || '');
+    let stepTimeoutCeiling = STEP_TIMEOUT_SETTINGS_CEILING_MS;
+    if (
+      stepTypeFinal === 'for-each'
+      && (itemsPathForJourneyBatch === 'journeysToExecute' || itemsPathForJourneyBatch === 'legsToExecute')
+    ) {
+      stepTimeoutCeiling = JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS;
+      const mult = Number(process.env.WORKFLOW_JOURNEY_FOR_EACH_TIMEOUT_MULT);
+      const journeyMult = Number.isFinite(mult) && mult > 1 ? mult : 1.5;
+      timeout = Math.round(Math.max(Number(timeout) || 0, 60000) * journeyMult);
+    }
+
+    return Math.min(timeout, stepTimeoutCeiling);
   }
 
   detectCapabilities(steps = []) {
