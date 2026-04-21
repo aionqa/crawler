@@ -528,9 +528,9 @@ const STEP_TIMEOUT_SETTINGS_CEILING_MS = 60 * 60 * 1000;
  * "Execute Workflow Journeys" for-each chains nested while-loops + AI per journey; wall-clock often
  * exceeds a single project max_job_duration slice. Allow a higher cap only for journey/legs batches.
  * Ceiling must cover maxFromSettings (up to STEP_TIMEOUT_SETTINGS_CEILING_MS) * default journey multiplier
- * so advanced templates do not clip at 2h when project subjob budget is 60m.
+ * so advanced templates do not clip when subjob budget is 60m and multiplier is ~2.75.
  */
-const JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS = Math.round(2.5 * 60 * 60 * 1000);
+const JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS = Math.round(3.0 * 60 * 60 * 1000);
 /** Floor for generated journey Playwright scripts (forms, modals, nested SPAs); nested races use this minimum. */
 /** 15m floor — Vue/SPA journeys often need full window inside nested while-loop races. */
 const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 15 * 60 * 1000;
@@ -713,10 +713,9 @@ class WorkflowAnalyzer {
     ) {
       stepTimeoutCeiling = JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS;
       const mult = Number(process.env.WORKFLOW_JOURNEY_FOR_EACH_TIMEOUT_MULT);
-      // Default 2.5: nested screenshots + justify-journey AI + Playwright per leg stack with
-      // orchestrator jitter; 2.25 * typical ~33m subjob budget still clipped at ~75m (4500s) on
-      // advanced templates with 3× while-loop iterations — insufficient wall time before terminal timeout.
-      const journeyMult = Number.isFinite(mult) && mult > 1 ? mult : 2.5;
+      // Default 2.75: nested screenshots + justify-journey AI + Playwright per leg stack with
+      // orchestrator jitter; prior 2.5× still clipped long journey batches on advanced templates.
+      const journeyMult = Number.isFinite(mult) && mult > 1 ? mult : 2.75;
       timeout = Math.round(Math.max(Number(timeout) || 0, 60000) * journeyMult);
     }
 
