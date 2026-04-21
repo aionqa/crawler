@@ -12726,55 +12726,83 @@ return {
       /page\.waitForSelector\(\s*(['"])([a-zA-Z_$][\w$]*)\s*,\s*(\{[\s\S]*?\})\1\s*\)/g,
       'page.waitForSelector($2, $3)'
     );
-    // Ensure direct page actions are awaited when generated without await.
-    cleaned = cleaned.replace(/(^|\n)\s*(page\.(?:click|fill|check|uncheck|selectOption|type|press)\s*\()/g, '$1await $2');
     // Quote bare #id tokens before fill/selectOption repairs (LLM: page.fill(#email) is a syntax error).
+    // Match optional leading await so repairs apply after models emit `await page.fill(#id)`.
     cleaned = cleaned.replace(
-      /page\.fill\(\s*(#[A-Za-z0-9_-]+)\s*\)/g,
-      (_m, id) => `page.fill(${JSON.stringify(String(id || ''))})`
+      /(^|\n)(\s*)((?:await\s+)?page\.fill\(\s*)(#[A-Za-z0-9_-]+)\s*\)/g,
+      (m, lineStart, indent, lead, id) => {
+        const hadAwait = /^await\s+/i.test(lead);
+        const inner = `page.fill(${JSON.stringify(String(id || ''))})`;
+        return `${lineStart}${indent}${hadAwait ? `await ${inner}` : inner}`;
+      }
     );
     cleaned = cleaned.replace(
-      /page\.fill\(\s*(#[A-Za-z0-9_-]+)\s*,/g,
-      (_m, id) => `page.fill(${JSON.stringify(String(id || ''))},`
+      /(^|\n)(\s*)((?:await\s+)?page\.fill\(\s*)(#[A-Za-z0-9_-]+)\s*,/g,
+      (m, lineStart, indent, lead, id) => {
+        const hadAwait = /^await\s+/i.test(lead);
+        const inner = `page.fill(${JSON.stringify(String(id || ''))},`;
+        return `${lineStart}${indent}${hadAwait ? `await ${inner}` : inner}`;
+      }
     );
     cleaned = cleaned.replace(
-      /page\.selectOption\(\s*(#[A-Za-z0-9_-]+)\s*,/g,
-      (_m, id) => `page.selectOption(${JSON.stringify(String(id || ''))},`
+      /(^|\n)(\s*)((?:await\s+)?page\.selectOption\(\s*)(#[A-Za-z0-9_-]+)\s*,/g,
+      (m, lineStart, indent, lead, id) => {
+        const hadAwait = /^await\s+/i.test(lead);
+        const inner = `page.selectOption(${JSON.stringify(String(id || ''))},`;
+        return `${lineStart}${indent}${hadAwait ? `await ${inner}` : inner}`;
+      }
     );
     // LLM: page.click(button[type="submit"], .fallback) with no string wrapper — `button` is parsed as JS (ReferenceError).
     // Quote well-formed single-call selector lists before the generic unquoted-arg pass (which may miss comma unions).
     cleaned = cleaned.replace(
-      /\bpage\.click\(\s*(button\s*\[\s*type\s*=\s*["']submit["']\s*\]\s*(?:,\s*[^)]+?)?)\s*\)/gi,
-      (_m, inner) => {
+      /\b((?:await\s+)?page\.click\(\s*)(button\s*\[\s*type\s*=\s*["']submit["']\s*\]\s*(?:,\s*[^)]+?)?)\s*\)/gi,
+      (m, lead, inner) => {
+        const hadAwait = /^await\s+/i.test(lead);
         const selector = String(inner || '').trim();
-        return `page.click(${JSON.stringify(selector)})`;
+        const call = `page.click(${JSON.stringify(selector)})`;
+        return `${hadAwait ? 'await ' : ''}${call}`;
       }
     );
     cleaned = cleaned.replace(
-      /\bpage\.click\(\s*(input\s*\[\s*type\s*=\s*["']submit["']\s*\]\s*(?:,\s*[^)]+?)?)\s*\)/gi,
-      (_m, inner) => {
+      /\b((?:await\s+)?page\.click\(\s*)(input\s*\[\s*type\s*=\s*["']submit["']\s*\]\s*(?:,\s*[^)]+?)?)\s*\)/gi,
+      (m, lead, inner) => {
+        const hadAwait = /^await\s+/i.test(lead);
         const selector = String(inner || '').trim();
-        return `page.click(${JSON.stringify(selector)})`;
+        const call = `page.click(${JSON.stringify(selector)})`;
+        return `${hadAwait ? 'await ' : ''}${call}`;
       }
     );
     // LLM: page.click(button.btn-run) / page.fill(input.chat-input, ...) — bare tag.class is invalid JS
     // (ReferenceError / long default-timeout hangs). Quote before the generic unquoted-arg pass.
     cleaned = cleaned.replace(
-      /\bpage\.(click|dblclick|hover|tap|check|uncheck)\(\s*([a-zA-Z][a-zA-Z0-9_-]*(?:\.[a-zA-Z][a-zA-Z0-9_-]*)+)\s*\)/g,
-      (m, method, sel) => `page.${method}('${String(sel).replace(/'/g, "\\'")}')`
-    );
-    cleaned = cleaned.replace(
-      /\bpage\.fill\(\s*([a-zA-Z][a-zA-Z0-9_-]*(?:\.[a-zA-Z][a-zA-Z0-9_-]*)+)\s*,/g,
-      (m, sel) => `page.fill('${String(sel).replace(/'/g, "\\'")}',`
-    );
-    // Normalize unquoted selector args in common page.* calls (e.g., page.fill(input[name="x"]))
-    cleaned = cleaned.replace(
-      /page\.(click|fill|check|uncheck|isVisible|waitForSelector)\(\s*([a-zA-Z][^'"`)\n]*(?:\[[^\)\n]+\]|:[^)\n]+)[^)\n]*)\s*\)/g,
-      (m, method, sel) => {
-        const selector = String(sel || '').trim();
-        return `page.${method}('${selector.replace(/'/g, "\\'")}')`;
+      /\b((?:await\s+)?page\.(click|dblclick|hover|tap|check|uncheck)\(\s*)([a-zA-Z][a-zA-Z0-9_-]*(?:\.[a-zA-Z][a-zA-Z0-9_-]*)+)\s*\)/g,
+      (m, lead, method, sel) => {
+        const hadAwait = /^await\s+/i.test(lead);
+        const call = `page.${method}('${String(sel).replace(/'/g, "\\'")}')`;
+        return `${hadAwait ? 'await ' : ''}${call}`;
       }
     );
+    cleaned = cleaned.replace(
+      /\b((?:await\s+)?page\.fill\(\s*)([a-zA-Z][a-zA-Z0-9_-]*(?:\.[a-zA-Z][a-zA-Z0-9_-]*)+)\s*,/g,
+      (m, lead, sel) => {
+        const hadAwait = /^await\s+/i.test(lead);
+        const call = `page.fill('${String(sel).replace(/'/g, "\\'")}',`;
+        return `${hadAwait ? 'await ' : ''}${call}`;
+      }
+    );
+    // Normalize unquoted selector args in common page.* calls (e.g., page.fill(input[name="x"])).
+    // Must match `await page.click(...)` as well: await-injection used to run before this pass and blocked repairs.
+    cleaned = cleaned.replace(
+      /(^|\n)(\s*)((?:await\s+)?page\.(click|fill|check|uncheck|isVisible|waitForSelector)\(\s*)([a-zA-Z][^'"`)\n]*(?:\[[^\)\n]+\]|:[^)\n]+)[^)\n]*)\s*\)/g,
+      (m, lineStart, indent, lead, method, sel) => {
+        const hadAwait = /^await\s+/i.test(lead);
+        const selector = String(sel || '').trim();
+        const call = `page.${method}('${selector.replace(/'/g, "\\'")}')`;
+        return `${lineStart}${indent}${hadAwait ? `await ${call}` : call}`;
+      }
+    );
+    // Ensure direct page actions are awaited when generated without await (runs after quoting fixes above).
+    cleaned = cleaned.replace(/(^|\n)\s*(page\.(?:click|fill|check|uncheck|selectOption|type|press)\s*\()/g, '$1await $2');
 
     // Repair missing value argument in page.fill(...) calls.
     // LLMs sometimes emit `page.fill('input[name=\"x\"]')` (1 arg) or even `page.fill(input[name=\"x\"])`.
