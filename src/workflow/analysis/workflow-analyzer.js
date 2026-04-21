@@ -527,8 +527,10 @@ const STEP_TIMEOUT_SETTINGS_CEILING_MS = 60 * 60 * 1000;
 /**
  * "Execute Workflow Journeys" for-each chains nested while-loops + AI per journey; wall-clock often
  * exceeds a single project max_job_duration slice. Allow a higher cap only for journey/legs batches.
+ * Ceiling must cover maxFromSettings (up to STEP_TIMEOUT_SETTINGS_CEILING_MS) * default journey multiplier
+ * so advanced templates do not clip at 2h when project subjob budget is 60m.
  */
-const JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS = 2 * 60 * 60 * 1000;
+const JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS = Math.round(2.5 * 60 * 60 * 1000);
 /** Floor for generated journey Playwright scripts (forms, modals, nested SPAs); nested races use this minimum. */
 /** 15m floor — Vue/SPA journeys often need full window inside nested while-loop races. */
 const JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS = 15 * 60 * 1000;
@@ -711,7 +713,9 @@ class WorkflowAnalyzer {
     ) {
       stepTimeoutCeiling = JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS;
       const mult = Number(process.env.WORKFLOW_JOURNEY_FOR_EACH_TIMEOUT_MULT);
-      const journeyMult = Number.isFinite(mult) && mult > 1 ? mult : 1.5;
+      // Default 2.25: nested screenshots + justify-journey AI + Playwright per leg stack with
+      // orchestrator restart recovery; 1.5 * ~50m subjob budget produced terminal 4500s timeouts.
+      const journeyMult = Number.isFinite(mult) && mult > 1 ? mult : 2.25;
       timeout = Math.round(Math.max(Number(timeout) || 0, 60000) * journeyMult);
     }
 
