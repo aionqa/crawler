@@ -713,9 +713,10 @@ class WorkflowAnalyzer {
     ) {
       stepTimeoutCeiling = JOURNEY_FOR_EACH_STEP_TIMEOUT_CEILING_MS;
       const mult = Number(process.env.WORKFLOW_JOURNEY_FOR_EACH_TIMEOUT_MULT);
-      // Default 2.25: nested screenshots + justify-journey AI + Playwright per leg stack with
-      // orchestrator restart recovery; 1.5 * ~50m subjob budget produced terminal 4500s timeouts.
-      const journeyMult = Number.isFinite(mult) && mult > 1 ? mult : 2.25;
+      // Default 2.5: nested screenshots + justify-journey AI + Playwright per leg stack with
+      // orchestrator jitter; 2.25 * typical ~33m subjob budget still clipped at ~75m (4500s) on
+      // advanced templates with 3× while-loop iterations — insufficient wall time before terminal timeout.
+      const journeyMult = Number.isFinite(mult) && mult > 1 ? mult : 2.5;
       timeout = Math.round(Math.max(Number(timeout) || 0, 60000) * journeyMult);
     }
 
