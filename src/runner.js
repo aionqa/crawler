@@ -269,6 +269,8 @@ function getAuthHeaders() {
 const BACKEND_RETRY_DELAYS_MS = [10 * 1000, 30 * 1000, 3 * 60 * 1000];
 const BACKEND_RETRY_ATTEMPTS = 1 + BACKEND_RETRY_DELAYS_MS.length;
 
+const BACKEND_RETRY_AFTER_CAP_MS = 3 * 60 * 1000; // never honor a Retry-After larger than 3 minutes
+
 function isRetryableBackendError(error) {
   if (!error) return false;
   const code = error.code || '';
@@ -277,12 +279,40 @@ function isRetryableBackendError(error) {
   if (['ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND', 'ENETUNREACH', 'ECONNABORTED'].includes(code)) return true;
   const msg = String(error.message || '');
   if (/timeout/i.test(msg) && !status) return true;
-  if (status >= 500 || status === 408) return true;
+  if (status >= 500 || status === 408 || status === 429) return true;
   return false;
 }
 
 /**
- * Run a backend request with retries: 10s, 30s, 3min. Log after all attempts if still failing.
+ * Parse a Retry-After header (seconds OR HTTP-date) into milliseconds.
+ * Returns null when absent/unparseable. Capped at BACKEND_RETRY_AFTER_CAP_MS
+ * so a misconfigured backend cannot stall the runner indefinitely.
+ */
+function parseRetryAfterMs(error) {
+  const headers = error?.response?.headers;
+  if (!headers) return null;
+  const raw = headers['retry-after'] ?? headers['Retry-After'];
+  if (raw == null) return null;
+  const str = String(raw).trim();
+  if (!str) return null;
+  const asInt = Number(str);
+  let ms;
+  if (Number.isFinite(asInt)) {
+    ms = Math.max(0, asInt) * 1000;
+  } else {
+    const dateMs = Date.parse(str);
+    if (!Number.isFinite(dateMs)) return null;
+    ms = Math.max(0, dateMs - Date.now());
+  }
+  return Math.min(ms, BACKEND_RETRY_AFTER_CAP_MS);
+}
+
+/**
+ * Run a backend request with retries: 10s, 30s, 3min by default.
+ *
+ * If the backend returns 503/429 with a `Retry-After` header (used by the
+ * crawler-write backpressure middleware on the backend), that value is
+ * honored instead of the default ladder, capped at 3 minutes.
  */
 async function withBackendRetry(fn, label) {
   let lastError;
@@ -292,8 +322,11 @@ async function withBackendRetry(fn, label) {
     } catch (error) {
       lastError = error;
       if (!isRetryableBackendError(error) || attempt === BACKEND_RETRY_ATTEMPTS) break;
-      const delayMs = BACKEND_RETRY_DELAYS_MS[attempt - 1];
-      console.warn(`⚠️ [BACKEND-RETRY] ${label} attempt ${attempt}/${BACKEND_RETRY_ATTEMPTS} failed: ${error.message}. Retrying in ${delayMs / 1000}s...`);
+      const retryAfterMs = parseRetryAfterMs(error);
+      const defaultDelayMs = BACKEND_RETRY_DELAYS_MS[attempt - 1];
+      const delayMs = retryAfterMs != null ? retryAfterMs : defaultDelayMs;
+      const reason = retryAfterMs != null ? `(Retry-After: ${Math.round(retryAfterMs / 1000)}s)` : '';
+      console.warn(`⚠️ [BACKEND-RETRY] ${label} attempt ${attempt}/${BACKEND_RETRY_ATTEMPTS} failed: ${error.message} ${reason}. Retrying in ${Math.round(delayMs / 1000)}s...`);
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }
