@@ -1382,6 +1382,19 @@ class WorkflowAnalyzer {
               const name = await input.getAttribute('name');
               const id = await input.getAttribute('id');
               const placeholder = await input.getAttribute('placeholder');
+              const value = await input.getAttribute('value');
+              const labelText = await input
+                .evaluate((el) => {
+                  const fid = el.getAttribute('id');
+                  if (!fid || typeof CSS === 'undefined' || typeof CSS.escape !== 'function') return null;
+                  try {
+                    const lab = el.ownerDocument.querySelector(`label[for="${CSS.escape(fid)}"]`);
+                    return lab ? String(lab.textContent || '').trim() : null;
+                  } catch {
+                    return null;
+                  }
+                })
+                .catch(() => null);
               
               const inputSelectors = await this.getElementSelector(input);
               formData.fields.push({
@@ -1389,6 +1402,8 @@ class WorkflowAnalyzer {
                 name,
                 id,
                 placeholder,
+                value: value || '',
+                label_text: labelText || '',
                 selector: inputSelectors[0]?.selector,
                 selectors: inputSelectors
               });
@@ -1417,6 +1432,8 @@ class WorkflowAnalyzer {
                   name: field.name || '',
                   id: field.id || '',
                   placeholder: field.placeholder || '',
+                  value: field.value || '',
+                  label_text: field.label_text || '',
                   selector: fieldSelectors[0]?.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
                   selectors: fieldSelectors.length > 0 ? fieldSelectors : []
                 });
@@ -1670,14 +1687,17 @@ class WorkflowAnalyzer {
             for (const field of formData.fields) {
               // Check if this field is already in interactive_elements (to avoid duplicates)
               // Match by id, selector, or name+type combination
-              const alreadyExists = analysis.interactive_elements.some(
-                el => {
-                  if (field.id && el.id === field.id) return true;
-                  if (field.selector && el.selector === field.selector) return true;
-                  if (field.name && el.name === field.name && field.type === el.type) return true;
-                  return false;
+              const alreadyExists = analysis.interactive_elements.some((el) => {
+                if (field.id && el.id === field.id) return true;
+                if (field.selector && el.selector === field.selector) return true;
+                const ft = String(field.type || '').toLowerCase();
+                const et = String(el.type || '').toLowerCase();
+                if (field.name && el.name === field.name && ft === et) {
+                  if (ft === 'radio' || ft === 'checkbox') return false;
+                  return true;
                 }
-              );
+                return false;
+              });
               
               if (!alreadyExists) {
                 const newElement = {
@@ -1685,6 +1705,8 @@ class WorkflowAnalyzer {
                   name: field.name || '',
                   id: field.id || '',
                   placeholder: field.placeholder || '',
+                  value: field.value || '',
+                  label_text: field.label_text || '',
                   selector: field.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
                   selectors: field.selectors || []
                 };
@@ -6628,6 +6650,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- Never return success while required fields remain empty or browser validation messages are visible.\n'
           + '- NEVER emit .fill(..., "") or .fill(..., \'\') for inputs the journey must complete; use realistic synthetic values appropriate to the field type (valid email shape for email fields, multi-word text for messages/textarea, non-empty strings for names).\n'
           + '- NEVER put pseudocode or expressions inside string literals for .fill()/.type() second arguments (e.g. .fill("act.value || \'\'") types the literal characters a-c-t-.-v-a-l-u-e). Use a real JavaScript expression (variable you declared) or a concrete quoted string literal for the value.\n'
+          + '- RADIO/CHECKBOX SELECTORS: the HTML `value` attribute (often slug-style: hyphens, lowercase) is what `[value="..."]` and `.check()` must target. Visible caption text next to the control (Title Case, spaces) is NOT the same as `value` — never copy label text into `[value="..."]` unless it exactly matches the attribute from the inventory/forms list. Prefer `#id`, `getByLabel`, or `locator(\'input[name="group"][value="<exact value from DOM>"]\')` using the provided `value` / `label_text` fields.\n'
           + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
           + '- Use page.$/page.$$ with CSS-only selectors; for text use getByRole/getByText/locator("text=...") as standalone selectors only.\n'
           + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n'

@@ -3,7 +3,10 @@ import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
 import { resolveScreenshotFullPage } from './utils/resolve-screenshot-full-page.js';
 import { StaticNodeExecutor } from './static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../step-requirements.js';
-import { replaceNetworkIdleWithDomContentLoadedForAutomation } from './utils/normalize-playwright-network-idle.js';
+import {
+  replaceNetworkIdleWithDomContentLoadedForAutomation,
+  capPlaywrightAutomationTimeouts,
+} from './utils/normalize-playwright-network-idle.js';
 import { evaluateLoginSessionEvidenceOverride } from './utils/login-session-evidence-override.js';
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 
@@ -473,6 +476,19 @@ class WorkflowAnalyzer {
               const name = await input.getAttribute('name');
               const id = await input.getAttribute('id');
               const placeholder = await input.getAttribute('placeholder');
+              const value = await input.getAttribute('value');
+              const labelText = await input
+                .evaluate((el) => {
+                  const fid = el.getAttribute('id');
+                  if (!fid || typeof CSS === 'undefined' || typeof CSS.escape !== 'function') return null;
+                  try {
+                    const lab = el.ownerDocument.querySelector(`label[for="${CSS.escape(fid)}"]`);
+                    return lab ? String(lab.textContent || '').trim() : null;
+                  } catch {
+                    return null;
+                  }
+                })
+                .catch(() => null);
               
               const inputSelectors = await this.getElementSelector(input);
               formData.fields.push({
@@ -480,6 +496,8 @@ class WorkflowAnalyzer {
                 name,
                 id,
                 placeholder,
+                value: value || '',
+                label_text: labelText || '',
                 selector: inputSelectors[0]?.selector,
                 selectors: inputSelectors
               });
@@ -508,6 +526,8 @@ class WorkflowAnalyzer {
                   name: field.name || '',
                   id: field.id || '',
                   placeholder: field.placeholder || '',
+                  value: field.value || '',
+                  label_text: field.label_text || '',
                   selector: fieldSelectors[0]?.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
                   selectors: fieldSelectors.length > 0 ? fieldSelectors : []
                 });
@@ -622,14 +642,17 @@ class WorkflowAnalyzer {
         for (const formData of analysis.forms) {
           if (formData.fields && formData.fields.length > 0) {
             for (const field of formData.fields) {
-              const alreadyExists = analysis.interactive_elements.some(
-                el => {
-                  if (field.id && el.id === field.id) return true;
-                  if (field.selector && el.selector === field.selector) return true;
-                  if (field.name && el.name === field.name && field.type === el.type) return true;
-                  return false;
+              const alreadyExists = analysis.interactive_elements.some((el) => {
+                if (field.id && el.id === field.id) return true;
+                if (field.selector && el.selector === field.selector) return true;
+                const ft = String(field.type || '').toLowerCase();
+                const et = String(el.type || '').toLowerCase();
+                if (field.name && el.name === field.name && ft === et) {
+                  if (ft === 'radio' || ft === 'checkbox') return false;
+                  return true;
                 }
-              );
+                return false;
+              });
               
               if (!alreadyExists) {
                 analysis.interactive_elements.push({
@@ -637,6 +660,8 @@ class WorkflowAnalyzer {
                   name: field.name || '',
                   id: field.id || '',
                   placeholder: field.placeholder || '',
+                  value: field.value || '',
+                  label_text: field.label_text || '',
                   selector: field.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
                   selectors: field.selectors || []
                 });
@@ -703,14 +728,17 @@ class WorkflowAnalyzer {
           if (formData.fields && formData.fields.length > 0) {
             for (const field of formData.fields) {
               // Check if this field is already in interactive_elements (to avoid duplicates)
-              const alreadyExists = analysis.interactive_elements.some(
-                el => {
-                  if (field.id && el.id === field.id) return true;
-                  if (field.selector && el.selector === field.selector) return true;
-                  if (field.name && el.name === field.name && field.type === el.type) return true;
-                  return false;
+              const alreadyExists = analysis.interactive_elements.some((el) => {
+                if (field.id && el.id === field.id) return true;
+                if (field.selector && el.selector === field.selector) return true;
+                const ft = String(field.type || '').toLowerCase();
+                const et = String(el.type || '').toLowerCase();
+                if (field.name && el.name === field.name && ft === et) {
+                  if (ft === 'radio' || ft === 'checkbox') return false;
+                  return true;
                 }
-              );
+                return false;
+              });
               
               if (!alreadyExists) {
                 const newElement = {
@@ -718,6 +746,8 @@ class WorkflowAnalyzer {
                   name: field.name || '',
                   id: field.id || '',
                   placeholder: field.placeholder || '',
+                  value: field.value || '',
+                  label_text: field.label_text || '',
                   selector: field.selector || (field.id ? `#${field.id}` : (field.name ? `[name="${field.name}"]` : null)),
                   selectors: field.selectors || []
                 };
@@ -9817,14 +9847,17 @@ return {
 
         const beforeNetworkIdleNormalize = finalScriptCode;
         finalScriptCode = replaceNetworkIdleWithDomContentLoadedForAutomation(finalScriptCode);
+        finalScriptCode = capPlaywrightAutomationTimeouts(finalScriptCode);
         if (finalScriptCode !== beforeNetworkIdleNormalize) {
-          console.log('ℹ️ Normalized playwright script: networkidle → domcontentloaded (SPA/WebSocket/OAuth-safe)');
+          console.log(
+            'ℹ️ Normalized playwright script: networkidle → domcontentloaded + capped default timeouts (SPA/WebSocket/OAuth-safe)'
+          );
           if (jobId && this.backendLogger) {
             try {
               await this.backendLogger.appendJobLog(
                 jobId,
                 'info',
-                'ℹ️ Normalized generated playwright script: replaced networkidle waits with domcontentloaded for SPA/WebSocket/OAuth compatibility',
+                'ℹ️ Normalized generated playwright script: networkidle→domcontentloaded and capped page default timeouts for journey execution',
                 'WORKFLOW-ANALYZER',
                 { step_id: step?.id, step_name: step?.name }
               );
