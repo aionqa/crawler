@@ -46,8 +46,26 @@ async function sendLog(jobId, level, message, data = {}) {
  */
 export async function detectLoginPage(page, jobId, currentUrl, openaiClient, loginUrl = null, context = null) {
   try {
-    const pageUrl = page.url();
-    const currentUrlObj = new URL(pageUrl);
+    /** Prefer explicit crawl `finalUrl` when valid; `page.url()` can lag or differ during navigation. */
+    const parseHttpUrl = (raw) => {
+      try {
+        const rawStr = String(raw || '').trim();
+        if (!rawStr) return null;
+        const u = new URL(rawStr.includes('://') ? rawStr : `https://${rawStr}`);
+        if (u.protocol === 'http:' || u.protocol === 'https:') return u;
+      } catch {
+        /* ignore */
+      }
+      return null;
+    };
+
+    const fromPage = parseHttpUrl(page.url());
+    const fromExplicit = parseHttpUrl(currentUrl);
+    /** Rendered surface for strict login URL + host/path heuristics (what the user actually sees). */
+    const surfaceUrlObj = fromPage || fromExplicit;
+    if (!surfaceUrlObj) {
+      return { isLoginPage: false, confidence: 'low', reason: 'No navigable URL for login detection' };
+    }
 
     const normalizeHost = (value) => String(value || '').trim().toLowerCase().replace(/^www\./, '');
     const normalizePath = (value) => {
@@ -77,11 +95,11 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
       .map(parseUrl)
       .filter(Boolean);
 
-    const currentPath = normalizePath(currentUrlObj.pathname);
+    const currentPath = normalizePath(surfaceUrlObj.pathname);
 
     // Strict match for explicitly configured absolute login URL(s).
     const strictConfiguredMatch = configuredLoginUrls.some((candidate) =>
-      candidate.origin === currentUrlObj.origin && normalizePath(candidate.pathname) === currentPath
+      candidate.origin === surfaceUrlObj.origin && normalizePath(candidate.pathname) === currentPath
     );
     if (strictConfiguredMatch) {
       return { isLoginPage: true, confidence: 'high', reason: 'URL matches configured login URL' };
@@ -100,13 +118,13 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
     ]
       .map(normalizeHost)
       .filter(Boolean);
-    const currentHost = normalizeHost(currentUrlObj.hostname);
+    const currentHost = normalizeHost(surfaceUrlObj.hostname);
     const hostInConfiguredSurface =
       configuredDomains.length > 0 && configuredDomains.some((domain) => hostMatches(currentHost, domain));
 
     const looksLikeLoginPath =
-      /(^|\/)(login|signin|sign-in|auth)(\/|$)/i.test(currentUrlObj.pathname || '') ||
-      /(?:^|[?&])(redirect|client_id|response_type)=/i.test(currentUrlObj.search || '');
+      /(^|\/)(login|signin|sign-in|auth)(\/|$)/i.test(surfaceUrlObj.pathname || '') ||
+      /(?:^|[?&])(redirect|client_id|response_type)=/i.test(surfaceUrlObj.search || '');
 
     let hasPasswordField = false;
     try {
@@ -122,16 +140,47 @@ export async function detectLoginPage(page, jobId, currentUrl, openaiClient, log
     // Public registration / sign-up flows commonly include a password field on the same
     // project host as the app login surface. Treating them as "login pages" triggers
     // unnecessary in-session login workflows (often 4xx) and noisy self-monitor signals.
-    const pathLower = (currentUrlObj.pathname || '').toLowerCase();
-    const looksLikeRegistrationPath =
-      /\b(register|registration|signup|sign[\s_-]?up|create[\s_-]?account)\b/i.test(pathLower) ||
-      /\/account\/(?:create|new|register)(?:\/|$)/i.test(pathLower);
+    const pathCandidates = new Set();
+    const pushPath = (u) => {
+      if (!u) return;
+      try {
+        pathCandidates.add(normalizePath(u.pathname).toLowerCase());
+      } catch {
+        /* ignore */
+      }
+    };
+    pushPath(fromExplicit);
+    pushPath(fromPage);
+    if (pathCandidates.size === 0) pushPath(surfaceUrlObj);
+
+    const pathLooksLikeRegistration = (pathLower) => {
+      if (!pathLower) return false;
+      return (
+        /\b(register|registration|signup|sign[\s_-]?up|create[\s_-]?account)\b/i.test(pathLower) ||
+        /\/account\/(?:create|new|register)(?:\/|$)/i.test(pathLower) ||
+        // Filenames / segments: registration-form.html, register-form, sign-up-page (hyphens break \b-only patterns)
+        /(^|\/)(register|registration|signup|sign-up|sign_up)([-._/]|\.[a-z]+$|$)/i.test(pathLower) ||
+        /(register|signup|registration)[-_]form/i.test(pathLower)
+      );
+    };
+    const looksLikeRegistrationPath = [...pathCandidates].some(pathLooksLikeRegistration);
 
     let registrationLikeDom = false;
     try {
       registrationLikeDom = await page.evaluate(() => {
         try {
-          if (document.querySelectorAll('input[type="password"]').length >= 2) {
+          const pwdInputs = document.querySelectorAll('input[type="password"]');
+          if (pwdInputs.length >= 2) {
+            return true;
+          }
+          const newPwd = document.querySelector('input[type="password"][autocomplete="new-password"]');
+          if (newPwd) {
+            return true;
+          }
+          const confirmPwd = document.querySelector(
+            'input[type="password"][name="confirm_password"], input[type="password"][name="password_confirmation"], #confirm_password'
+          );
+          if (confirmPwd) {
             return true;
           }
           const heading = `${document.querySelector('h1')?.textContent || ''} ${
