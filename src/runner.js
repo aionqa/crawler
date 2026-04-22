@@ -1061,6 +1061,11 @@ async function executeCrawlJob(job, streamInterval) {
     ...jobOptions,
     ...(rawContext?.options || {})
   };
+  const configurationTimeout =
+    job.configuration && Number(job.configuration.timeout) > 0 ? Number(job.configuration.timeout) : null;
+  if (mergedOptions.timeout == null && configurationTimeout != null) {
+    mergedOptions.timeout = configurationTimeout;
+  }
 
   // CRITICAL: Ensure credentials are in rawContext before building normalizedContext
   if (extractedCreds && extractedCreds.username && extractedCreds.password &&

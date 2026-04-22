@@ -7421,6 +7421,23 @@ async function executeApproachSequence(page, jobId, context, openaiClient, pageI
 
 // Main exported functions
 
+/**
+ * Workflow seed navigations often run while GraphQL/websocket clients bootstrap.
+ * Project `options.timeout` is reused as a generic crawl ceiling and may be as low as 30s,
+ * which is frequently too tight for `page.goto(..., waitUntil: 'domcontentloaded')` on
+ * heavy SPAs — without tying behavior to any specific domain or URL shape.
+ */
+function resolveWorkflowInitialNavigationTimeoutMs(context) {
+  const MAX_NAV_MS = 300000;
+  const MIN_SEED_NAV_MS = 60000;
+  const raw = Number(
+    context?.options?.timeout ??
+    context?.configuration?.timeout
+  );
+  const configured = Number.isFinite(raw) && raw > 0 ? raw : 60000;
+  return Math.min(Math.max(configured, MIN_SEED_NAV_MS), MAX_NAV_MS);
+}
+
 export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   const startTime = Date.now();
   const jobId = context.job_id || 'unknown';
@@ -7480,6 +7497,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
   try {
     // Use configured endpoint if available, otherwise fall back to direct OpenAI
     const openaiClient = createOpenAIClient(context, openaiApiKey);
+    const initialNavTimeoutMs = resolveWorkflowInitialNavigationTimeoutMs(context);
 
     // Crawl scope must follow the project flag. Do NOT auto-enable subdomains because login_url
     // sits on a sibling host (e.g. auth.example.com) — that caused full-site subdomain crawls and
@@ -7549,6 +7567,13 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     };
     const result = await withBrowser(async ({ page, context: browserContext }) => {
       await sendLog(jobId, 'info', 'Browser session started', { mode, allowSubdomains });
+
+      try {
+        page.setDefaultNavigationTimeout(initialNavTimeoutMs);
+        page.setDefaultTimeout(Math.max(initialNavTimeoutMs, 60000));
+      } catch (_) {
+        // non-fatal if page does not support defaults in an unusual embed context
+      }
 
       const scopeSeedUrl = ensureSchemeForParse(urlList[0] || url);
       const domainScope = buildDomainScope(
@@ -8029,7 +8054,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         // Workflow-mode navigation: be resilient to transient CDN/origin 5xx (common on dev envs).
         let navResponse = await page.goto(currentUrl, {
           waitUntil: 'domcontentloaded',
-          timeout: 30000
+          timeout: initialNavTimeoutMs
         });
         let navStatus = navResponse ? navResponse.status() : null;
         if (navStatus && navStatus >= 500) {
@@ -8042,7 +8067,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
           const delays = [3000, 7000];
           for (const d of delays) {
             await page.waitForTimeout(d);
-            navResponse = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            navResponse = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: initialNavTimeoutMs });
             navStatus = navResponse ? navResponse.status() : null;
             if (!navStatus || navStatus < 500) break;
           }
@@ -8101,14 +8126,14 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
             { component: 'CRAWLER-TEXT', action: 'startcrawl_nav_retry_strip_query', prior_final_url: finalUrl }
           );
           try {
-            let stripResp = await page.goto(strippedStart, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            let stripResp = await page.goto(strippedStart, { waitUntil: 'domcontentloaded', timeout: initialNavTimeoutMs });
             let stripStatus = stripResp ? stripResp.status() : null;
             if (stripStatus && stripStatus >= 500) {
               await page.waitForTimeout(3000);
-              stripResp = await page.goto(strippedStart, { waitUntil: 'domcontentloaded', timeout: 30000 });
+              stripResp = await page.goto(strippedStart, { waitUntil: 'domcontentloaded', timeout: initialNavTimeoutMs });
               stripStatus = stripResp ? stripResp.status() : null;
             }
-            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+            await page.waitForLoadState('domcontentloaded', { timeout: initialNavTimeoutMs }).catch(() => {});
             await page.waitForTimeout(1000);
             finalUrl = page.url();
             const resolvedStripNav = await resolveHttpStatusAfterNavigation(page, stripResp, finalUrl);
@@ -8147,10 +8172,10 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         }
         
         try {
-          await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
+          await page.waitForLoadState('domcontentloaded', { timeout: initialNavTimeoutMs });
           await sendLog(jobId, 'info', '✅ Page DOM loaded', { mode });
         } catch (error) {
-          await sendLog(jobId, 'warn', '⚠️ Page DOM not fully loaded after 30s, proceeding with analysis');
+          await sendLog(jobId, 'warn', `⚠️ Page DOM not fully loaded after ${initialNavTimeoutMs}ms, proceeding with analysis`);
           await sendLog(jobId, 'info', '🔍 Analyzing page state with AI...', { mode });
         }
 
