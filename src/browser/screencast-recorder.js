@@ -193,7 +193,10 @@ class ScreencastRecorder {
       stage.startDispose = await job.page.screencast.start({
         path: filePath,
         size: job.viewport,
-        quality: envInt('SCREENCAST_JPEG_QUALITY', 70)
+        // Bumped from 70 to 92: at 70 the per-frame JPEG compression produces visible blocking on
+        // text-heavy SPA tables (FMClarity dashboard), and that gets carried into the final WebM
+        // because mpdecimate drops duplicates without re-encoding the kept frames.
+        quality: envInt('SCREENCAST_JPEG_QUALITY', 92)
       });
     } catch (err) {
       console.error(`[SCREENCAST] page.screencast.start failed for job ${jobId} stage "${label}": ${err.message}`);
@@ -642,8 +645,10 @@ class ScreencastRecorder {
     if (!DECIMATE_ENABLED) return null;
     if (!inputPath || !fs.existsSync(inputPath)) return null;
 
-    // Skip very short clips — overhead isn't worth it.
-    if (Number.isFinite(rawDuration) && rawDuration < 1.5) return null;
+    // Skip very short clips — overhead isn't worth it. Raised from 1.5s to 5s so the
+    // common "click failed pre-flight in <2s" / "click timed out fast in 8s" clips keep their
+    // original frame stream and don't get crunched into a blocky 1s of duplicates.
+    if (Number.isFinite(rawDuration) && rawDuration < 5) return null;
 
     const outputPath = inputPath.replace(/\.webm$/i, '') + '-compact.webm';
     // mpdecimate parameters tuned for browser captures:
@@ -661,10 +666,16 @@ class ScreencastRecorder {
         '-i', inputPath,
         '-vf', filter,
         '-an',
-        '-c:v', 'libvpx',
+        // libvpx-vp9 produces noticeably cleaner text/UI than libvpx (VP8) at the same bitrate.
+        '-c:v', 'libvpx-vp9',
+        '-row-mt', '1',
+        '-tile-columns', '2',
+        '-frame-parallel', '1',
         '-quality', 'good',
-        '-cpu-used', '2',
-        '-b:v', '1M',
+        // Slower encode but much sharper text/buttons — the previous cpu-used 2 + 1M VP8 was the
+        // direct cause of the "video itself is in squares" blockiness on the dashboard tables.
+        '-cpu-used', '1',
+        '-b:v', '4M',
         '-deadline', 'good',
         '-r', '25',
         outputPath

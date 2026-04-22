@@ -9,6 +9,7 @@ import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../.
 import {
   replaceNetworkIdleWithDomContentLoadedForAutomation,
   capPlaywrightAutomationTimeouts,
+  injectJourneyClickExistencePreflight,
 } from '../utils/normalize-playwright-network-idle.js';
 import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
 import { evaluateLoginSessionEvidenceOverride } from '../utils/login-session-evidence-override.js';
@@ -16808,6 +16809,16 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           typeof scriptCode === 'string' ? scriptCode : String(scriptCode || '')
         );
         scriptForExecution = capPlaywrightAutomationTimeouts(scriptForExecution);
+        // Journey scripts only: wrap every literal-selector page.click('…') with a fast pre-flight
+        // existence check so a missing/invented selector returns in <1s instead of stalling the
+        // full per-action timeout. Keeps clip duration tied to the actual user-visible activity.
+        if (isJourneyScriptExecutionStep) {
+          const beforePreflight = scriptForExecution;
+          scriptForExecution = injectJourneyClickExistencePreflight(scriptForExecution);
+          if (scriptForExecution !== beforePreflight) {
+            console.log('ℹ️ Normalized journey script: injected page.click pre-flight existence checks');
+          }
+        }
         if (scriptForExecution !== scriptCode) {
           console.log('ℹ️ Normalized playwright script: networkidle → domcontentloaded + timeout caps');
         }

@@ -73,3 +73,47 @@ export function capPlaywrightAutomationTimeouts(source) {
 
   return s;
 }
+
+/**
+ * Wrap every literal-selector `await page.click("…")` / `await page.fill("…", …)` (and the
+ * locator() variant `page.locator("…").click()`) with a fast pre-flight existence check so AI
+ * scripts that target hallucinated selectors fail in <1s instead of stalling for the full
+ * per-action default timeout. The screencast otherwise burns 5-30s of duplicate frames per
+ * missing selector, mpdecimate trims them down, and the player shows the same screenshot
+ * end-to-end ("nothing happens"). When the locator returns 0 elements we log a clear marker
+ * (`__pre_flight_skip__`) and return early so the iteration loop can pick another selector.
+ *
+ * Only literal string selectors are wrapped — variable references / template literals /
+ * computed expressions pass through unchanged because we cannot statically count them. Calls
+ * that already include an explicit `{ timeout: N }` option pass through unchanged so the
+ * author's intent is preserved.
+ */
+export function injectJourneyClickExistencePreflight(source) {
+  if (typeof source !== 'string' || !source) return source;
+  const PRE_FLIGHT_HELPER = `const __jrn_preflightSelector = async (sel, label) => {
+  try {
+    const cnt = await page.locator(sel).count();
+    if (!cnt) {
+      try { console.log('[journey-preflight] selector ' + JSON.stringify(sel) + ' not present in DOM (' + label + ')'); } catch (_) {}
+      return false;
+    }
+  } catch (_) { return true; }
+  return true;
+};
+`;
+  let s = source;
+  let injected = false;
+
+  // page.click("…")  /  page.click('…')  with no options object
+  s = s.replace(
+    /\bawait\s+page\.click\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1\s*\)\s*;?/g,
+    (_full, q, sel) => {
+      injected = true;
+      const literal = `${q}${sel}${q}`;
+      return `if (await __jrn_preflightSelector(${literal}, 'click')) { await page.click(${literal}, { timeout: 8000 }).catch((__e) => ({ click_error: String(__e && __e.message || __e) })); }`;
+    }
+  );
+
+  if (!injected) return source;
+  return PRE_FLIGHT_HELPER + s;
+}
