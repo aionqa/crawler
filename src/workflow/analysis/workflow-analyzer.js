@@ -13114,6 +13114,98 @@ return {
   }
 
   /**
+   * HTML tag names that often appear as unquoted CSS attribute selectors in `.locator(tag[attr])`
+   * (invalid JS until wrapped in a string). Longer tokens first so alternation is unambiguous.
+   */
+  htmlTagAttrLocatorAlternation() {
+    return [
+      'textarea',
+      'fieldset',
+      'caption',
+      'section',
+      'article',
+      'header',
+      'footer',
+      'iframe',
+      'option',
+      'legend',
+      'tbody',
+      'thead',
+      'tfoot',
+      'button',
+      'select',
+      'label',
+      'input',
+      'table',
+      'path',
+      'svg',
+      'main',
+      'nav',
+      'span',
+      'form',
+      'div',
+      'img',
+      'tr',
+      'td',
+      'th',
+      'ul',
+      'ol',
+      'li',
+      'h1',
+      'h2',
+      'h3',
+      'h4',
+      'h5',
+      'h6',
+      'p',
+      'a',
+    ].join('|');
+  }
+
+  /**
+   * Models emit `.fill(Alex)` meaning a literal name; without quotes it is a ReferenceError and can
+   * stall journey execution until outer timeouts. Quote PascalCase tokens only when not bound in script.
+   */
+  repairUndeclaredPascalCaseFillLiterals(script) {
+    if (!script || typeof script !== 'string') return script;
+    const globals = new Set([
+      'String',
+      'Number',
+      'Boolean',
+      'BigInt',
+      'Object',
+      'Array',
+      'Date',
+      'RegExp',
+      'Map',
+      'Set',
+      'JSON',
+      'Math',
+      'Promise',
+      'Intl',
+      'Proxy',
+      'Reflect',
+      'Buffer',
+      'Error',
+      'Symbol',
+    ]);
+    return script.replace(/\.fill\(\s*([A-Z][a-z][a-zA-Z]{0,22})\s*\)/g, (full, ident) => {
+      const name = String(ident || '');
+      if (!/^[A-Z][a-z][a-zA-Z]{0,22}$/.test(name)) return full;
+      if (globals.has(name)) return full;
+      const decl = new RegExp(`(?:^|[\\n{])\\s*(?:const|let|var)\\s+${name}\\b`);
+      if (decl.test(script)) return full;
+      const destruct = new RegExp(`(?:const|let|var)\\s*\\{[^}]*\\b${name}\\b[^}]*\\}`);
+      if (destruct.test(script)) return full;
+      const fnParam = new RegExp(`\\bfunction\\s*[^(]*\\([^)]*\\b${name}\\b[^)]*\\)`);
+      if (fnParam.test(script)) return full;
+      const arrowParam = new RegExp(`\\([^)]*\\b${name}\\b[^)]*\\)\\s*=>`);
+      if (arrowParam.test(script)) return full;
+      return `.fill(${JSON.stringify(name)})`;
+    });
+  }
+
+  /**
    * LLMs often treat Playwright Locator objects like arrays: `rows[0]()` or `rows[0].fill(...)`.
    * Locator has no `[]`/`[]()` API; use `.nth(i)` or `.first()`. Without this, Node throws
    * TypeError / strict parse issues and journeys retry until exhaustion.
@@ -14162,9 +14254,14 @@ return {
       '$1'
     );
 
+    const tagAttrAlt = this.htmlTagAttrLocatorAlternation();
+
     // Corrupted chain: locator(input[name="x"] -> first()) — LLM uses "->" instead of .first().
     s = s.replace(
-      /\.locator\(\s*((?:input|textarea|select|button)(?:\[[^\]]*(?:\\.[^\]]*)*\])+)\s*->\s*first\(\s*\)\s*\)/gi,
+      new RegExp(
+        `\\.locator\\(\\s*((?:${tagAttrAlt})(?:\\[[^\\]]*(?:\\\\.[^\\]]*)*\\])+)\\s*->\\s*first\\(\\s*\\)\\s*\\)`,
+        'gi',
+      ),
       (_m, rawSel) => {
         const normalized = String(rawSel || '')
           .replace(/\\"/g, '"')
@@ -14176,7 +14273,10 @@ return {
     // Unquoted tag[attr] selectors inside .locator(...): LLMs emit page.locator(input[name="x"])
     // without string quotes — `input` parses as an identifier and the script throws before Playwright runs.
     s = s.replace(
-      /\.locator\(\s*((?:input|textarea|select|button)(?:\[[^\]]*(?:\\.[^\]]*)*\])+)\s*\)/gi,
+      new RegExp(
+        `\\.locator\\(\\s*((?:${tagAttrAlt})(?:\\[[^\\]]*(?:\\\\.[^\\]]*)*\\])+)\\s*\\)`,
+        'gi',
+      ),
       (_m, rawSel) => {
         const normalized = String(rawSel || '')
           .replace(/\\"/g, '"')
@@ -14194,15 +14294,24 @@ return {
           .trim()
       );
     s = s.replace(
-      /\bpage\.locator\(\s*((?:form\s+)?(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])+(?:\s*,\s*(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])?)*)\s*\)\s*->\s*first\(\s*\)\s*\)/gi,
+      new RegExp(
+        `\\bpage\\.locator\\(\\s*((?:form\\s+)?(?:${tagAttrAlt})(?:\\[[^\\]]*(?:\\.[^\\]]*)*\\])+(?:\\s*,\\s*(?:${tagAttrAlt})(?:\\[[^\\]]*(?:\\.[^\\]]*)*\\])?)*)\\s*\\)\\s*->\\s*first\\(\\s*\\)\\s*\\)`,
+        'gi',
+      ),
       (_m, rawSel) => `page.locator(${quotePageLocatorUnionBody(rawSel)}).first()`
     );
     s = s.replace(
-      /\bpage\.locator\(\s*((?:form\s+)?(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])+(?:\s*,\s*(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])?)*)\s*\)\s*\)\s*;?\s*\.(click|dblclick|fill|tap)\b/gi,
+      new RegExp(
+        `\\bpage\\.locator\\(\\s*((?:form\\s+)?(?:${tagAttrAlt})(?:\\[[^\\]]*(?:\\.[^\\]]*)*\\])+(?:\\s*,\\s*(?:${tagAttrAlt})(?:\\[[^\\]]*(?:\\.[^\\]]*)*\\])?)*)\\s*\\)\\s*\\)\\s*;?\\s*\\.(click|dblclick|fill|tap)\\b`,
+        'gi',
+      ),
       (_m, rawSel, method) => `page.locator(${quotePageLocatorUnionBody(rawSel)}).${method}`
     );
     s = s.replace(
-      /\bpage\.locator\(\s*((?:form\s+)?(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])+(?:\s*,\s*(?:button|input|textarea|select|a)(?:\[[^\]]*(?:\\.[^\]]*)*\])?)*)\s*\)\s*;?\s*\.(click|dblclick|fill|tap)\b/gi,
+      new RegExp(
+        `\\bpage\\.locator\\(\\s*((?:form\\s+)?(?:${tagAttrAlt})(?:\\[[^\\]]*(?:\\.[^\\]]*)*\\])+(?:\\s*,\\s*(?:${tagAttrAlt})(?:\\[[^\\]]*(?:\\.[^\\]]*)*\\])?)*)\\s*\\)\\s*;?\\s*\\.(click|dblclick|fill|tap)\\b`,
+        'gi',
+      ),
       (_m, rawSel, method) => `page.locator(${quotePageLocatorUnionBody(rawSel)}).${method}`
     );
 
@@ -14229,6 +14338,7 @@ return {
       if (t.includes(',')) return full;
       return `.fill(${JSON.stringify(t)})`;
     });
+    s = this.repairUndeclaredPascalCaseFillLiterals(s);
 
     // Empty .fill() after a quoted .locator(...) / .first() chain (common when the model truncates).
     s = s.replace(
