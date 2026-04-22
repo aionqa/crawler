@@ -244,17 +244,38 @@ function inventorySelectorMatches(candidate, inventory) {
   const n = normalizeSelectorTokenForInventory(t);
   if (inventory.normalized.has(n)) return true;
   if (!inventorySelectorMeaningful(n)) return false;
-  // data-testid selectors are highly specific; the LLM frequently invents them
-  // (e.g. button[data-testid="filter-facilities"]) and the substring fallback
-  // below otherwise lets them through whenever any inventory row mentions
-  // data-testid at all. Require an exact data-testid value match for these.
-  const candTestIdMatch = t.match(/data-testid\s*=\s*["']([^"']+)["']/i);
-  if (candTestIdMatch) {
-    const candTestId = String(candTestIdMatch[1] || '').trim().toLowerCase();
-    if (!candTestId) return false;
+
+  // Highly-specific selectors — `data-testid="…"`, `id="…"`, `name="…"`, `#id`, role=…[name="…"]
+  // — are usually invented by the LLM when no exact inventory match exists. The substring
+  // fallback at the bottom otherwise lets them through whenever any inventory row mentions the
+  // same attribute name, producing journeys whose page.click() hangs against a missing element.
+  // For each such anchor we extract the attribute value and require an exact case-insensitive
+  // match against an inventory row that uses the same anchor with the same value.
+  const anchorPatterns = [
+    { name: 'data-testid', re: /data-testid\s*=\s*["']([^"']+)["']/i },
+    { name: 'id-attr', re: /\bid\s*=\s*["']([^"']+)["']/i },
+    { name: 'name-attr', re: /\bname\s*=\s*["']([^"']+)["']/i },
+    { name: 'aria-label', re: /aria-label\s*=\s*["']([^"']+)["']/i },
+  ];
+  for (const { re } of anchorPatterns) {
+    const m = t.match(re);
+    if (!m) continue;
+    const value = String(m[1] || '').trim().toLowerCase();
+    if (!value) return false;
     for (const r of inventory.raw) {
-      const m = String(r || '').match(/data-testid\s*=\s*["']([^"']+)["']/i);
-      if (m && String(m[1] || '').trim().toLowerCase() === candTestId) return true;
+      const im = String(r || '').match(re);
+      if (im && String(im[1] || '').trim().toLowerCase() === value) return true;
+    }
+    return false;
+  }
+  // Bare `#id` shorthand (e.g. `button#new-request`, `#new-request`) — not in attribute form.
+  const candHashId = t.match(/#([A-Za-z][A-Za-z0-9_-]*)\b/);
+  if (candHashId) {
+    const idVal = String(candHashId[1] || '').trim().toLowerCase();
+    if (!idVal) return false;
+    const idAnchorRe = new RegExp(`(?:#|\\bid\\s*=\\s*["'])${idVal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\b|["'])`, 'i');
+    for (const r of inventory.raw) {
+      if (idAnchorRe.test(String(r || ''))) return true;
     }
     return false;
   }
@@ -12769,6 +12790,11 @@ return {
       }
 
       const safeSelector = JSON.stringify(selector);
+      // Pre-flight existence check: if the selector matches zero elements, skip the action and
+      // return failure immediately. Otherwise page.click()/page.fill() block on the per-action
+      // default timeout (now 8s for journey scripts) and the resulting clip is mostly idle, which
+      // mpdecimate trims down to ~1s of nothing visible. Failing fast lets the journey iteration
+      // loop pick a different selector / journey instead of burning the recording on dead time.
       if (actionType === 'input') {
         const value =
           action?.value ||
@@ -12776,11 +12802,17 @@ return {
           action?.text ||
           action?.element_info?.text ||
           'test';
+        lines.push(
+          `if ((await page.locator(${safeSelector}).count().catch(() => 0)) === 0) { return { success: false, message: 'Selector ' + ${safeSelector} + ' not present in DOM (pre-flight)' }; }`
+        );
         lines.push(`await page.fill(${safeSelector}, ${JSON.stringify(String(value))});`);
       } else if (actionType === 'verify' || actionType === 'check') {
-        lines.push(`await page.waitForSelector(${safeSelector}, { timeout: 5000 });`);
+        lines.push(`await page.waitForSelector(${safeSelector}, { timeout: 5000 }).catch(() => null);`);
       } else {
-        lines.push(`await page.click(${safeSelector});`);
+        lines.push(
+          `if ((await page.locator(${safeSelector}).count().catch(() => 0)) === 0) { return { success: false, message: 'Selector ' + ${safeSelector} + ' not present in DOM (pre-flight)' }; }`
+        );
+        lines.push(`await page.click(${safeSelector}, { timeout: 8000 }).catch((err) => ({ click_error: String(err && err.message || err) }));`);
         lines.push('await page.waitForTimeout(800);');
       }
     }
@@ -16581,14 +16613,16 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           console.log(`🔧 About to create page wrapper...`);
           // Pass step info for logging context
           const stepInfo = step ? { id: step.id, name: step.name } : null;
-          // For journey scripts the per-action upper bound stays at 30s so that any AI-injected
+          // For journey scripts the per-action upper bound is 8s so that any AI-injected
           // `page.setDefaultTimeout(900000)` (after capPlaywrightAutomationTimeouts trims it to 45s)
           // is further clamped down by the wrapper interceptor — missing/invented selectors must
-          // fail in seconds, not minutes, otherwise the screencast watchdog ends the stage with
-          // pure idle frames and the UI shows "nothing happening". The overall script budget is
-          // still governed by the outer Promise.race / step timeout (15m for journey legs).
+          // fail in single-digit seconds, not 30s. Otherwise mpdecimate trims the 30s of idle
+          // frames down to ~1s of nothing and the UI shows "videos contain nothing happening".
+          // 8s is enough for SPA hydration after a click but short enough that a wrong selector
+          // burns at most 8 seconds of stage recording. The overall script budget is still
+          // governed by the outer Promise.race / step timeout (15m for journey legs).
           // Non-journey generated code keeps the original 60s ceiling.
-          const generatedTimeoutClampMs = isJourneyScriptExecutionStep ? 30000 : 60000;
+          const generatedTimeoutClampMs = isJourneyScriptExecutionStep ? 8000 : 60000;
           wrappedPage = createPageWrapperWithScreenshot(
             pageObj,
             jobId,
@@ -16606,13 +16640,13 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         }
 
         // Per-action Playwright default — kept SHORT for journey scripts so missing AI-invented selectors
-        // fail fast (~30s) instead of inheriting the 15-minute script-level budget. Otherwise a single
-        // bad `page.click('button[data-testid="invented"]')` hangs the entire journey iteration until the
-        // screencast watchdog auto-ends the stage at 45s, producing 1-second compacted clips with no real
-        // motion (root cause of "videos contain nothing happening" on dev3 dashboard).
-        // For non-journey execute-code steps (cookies, helpers) we keep the original logic.
-        const PER_ACTION_TIMEOUT_CEILING_MS_JOURNEY = 30000;
-        const stepTimeoutFloor = isJourneyScriptExecutionStep ? 10000 : 60000;
+        // fail fast (~8s) instead of inheriting the 15-minute script-level budget. Otherwise a single
+        // bad `page.click('button#new-request')` (which the AI loves to invent) hangs the entire journey
+        // iteration until the screencast watchdog auto-ends the stage at 45s, producing 1-second compacted
+        // clips with no real motion. For non-journey execute-code steps (cookies, helpers) we keep the
+        // original logic.
+        const PER_ACTION_TIMEOUT_CEILING_MS_JOURNEY = 8000;
+        const stepTimeoutFloor = isJourneyScriptExecutionStep ? 5000 : 60000;
         const stepTimeoutCeiling = isJourneyScriptExecutionStep
           ? PER_ACTION_TIMEOUT_CEILING_MS_JOURNEY
           : Number.POSITIVE_INFINITY;
