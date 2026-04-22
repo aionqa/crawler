@@ -640,8 +640,10 @@ function isHttpOrHttpsUrl(urlString) {
 /**
  * Chromium exposes Navigation Timing responseStatus for the last document navigation.
  * Used when Playwright's goto Response is missing or reports 0.
+ * Returns the raw numeric responseStatus (including 0) so callers can apply the same 0→200
+ * fallback as for Playwright when the document URL is a normal http(s) origin load.
  */
-async function readNavigationResponseStatusFromPerformance(page) {
+async function readRawNavigationResponseStatusFromPerformance(page) {
   try {
     return await page.evaluate(() => {
       const nav = performance.getEntriesByType?.('navigation')?.[0];
@@ -656,6 +658,8 @@ async function readNavigationResponseStatusFromPerformance(page) {
 /**
  * Resolve a storable HTTP status after navigation. Playwright may return status() === 0 when no
  * Response object is attached despite a successful http(s) load; Performance API often has the code.
+ * When goto() is skipped (already on the page), response is null but navigation timing can still
+ * report responseStatus 0 for a successful load — treat 0 like Playwright 0 and persist 200.
  */
 async function resolveHttpStatusAfterNavigation(page, response, finalUrl) {
   let raw = null;
@@ -666,9 +670,13 @@ async function resolveHttpStatusAfterNavigation(page, response, finalUrl) {
   }
   const direct = normalizeHttpStatusCode(raw);
   if (direct != null) return direct;
-  const fromPerf = normalizeHttpStatusCode(await readNavigationResponseStatusFromPerformance(page));
-  if (fromPerf != null) return fromPerf;
   if (raw === 0 && isHttpOrHttpsUrl(finalUrl)) return 200;
+
+  const perfRaw = await readRawNavigationResponseStatusFromPerformance(page);
+  const fromPerf = normalizeHttpStatusCode(perfRaw);
+  if (fromPerf != null) return fromPerf;
+  if (perfRaw === 0 && isHttpOrHttpsUrl(finalUrl)) return 200;
+
   return null;
 }
 
