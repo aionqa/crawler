@@ -5,6 +5,73 @@ import { evaluateLoginSessionEvidenceOverride } from '../workflow/utils/login-se
 import { getRunnerBackendUrl } from '../utils/runner-service-urls.js';
 
 /**
+ * Detect obvious upstream / gateway error pages without always reloading.
+ * When the DOM already looks like a 5xx gateway page, confirm with one navigation
+ * so we obtain a real HTTP status from Playwright (general — any origin).
+ */
+async function detectUpstreamHttpUnavailable(page, canonicalUrl) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+    return { blocked: false, status: null, source: 'no_page' };
+  }
+  const title = await page.title().catch(() => '');
+  let bodyHead = '';
+  try {
+    bodyHead = ((await page.innerText('body').catch(() => '')) || '').slice(0, 800);
+  } catch (_) {
+    bodyHead = '';
+  }
+  const blob = `${String(title || '')}\n${bodyHead}`;
+  const looksLikeGateway =
+    /\b50[234]\b/.test(blob) ||
+    /service\s+temporarily\s+unavailable|bad\s+gateway|gateway\s+time-?out|internal\s+server\s+error/i.test(
+      blob
+    ) ||
+    (/\b503\b/.test(blob) && /nginx|cloudflare|maintenance|unavailable/i.test(blob));
+
+  if (!looksLikeGateway) {
+    return { blocked: false, status: null, source: 'precheck_negative' };
+  }
+
+  const tryNav = async (action, navFn) => {
+    try {
+      const resp = await navFn();
+      const status =
+        resp && typeof resp.status === 'function' ? resp.status() : Number(resp && resp.status);
+      if (Number.isFinite(status) && status >= 500) {
+        return { blocked: true, status, source: action };
+      }
+      if (Number.isFinite(status) && status >= 400) {
+        return { blocked: false, status, source: action };
+      }
+    } catch (_) {
+      /* navigation can throw while the document is still an error shell */
+    }
+    return null;
+  };
+
+  let confirmed = await tryNav('reload', () =>
+    page.reload({ waitUntil: 'domcontentloaded', timeout: 25000 })
+  );
+  if (!confirmed || !confirmed.blocked) {
+    const target = typeof canonicalUrl === 'string' && canonicalUrl.trim() ? canonicalUrl.trim() : page.url();
+    confirmed = await tryNav('goto', () =>
+      page.goto(target, { waitUntil: 'domcontentloaded', timeout: 25000 })
+    );
+  }
+
+  if (confirmed && confirmed.blocked) {
+    return confirmed;
+  }
+
+  // Heuristic matched but HTTP not confirmed — still treat as blocked when title is a classic 503 line.
+  if (/^503\b/i.test(String(title || '').trim()) || /\b503\s+service\s+temporarily\s+unavailable\b/i.test(blob)) {
+    return { blocked: true, status: 503, source: 'title_confirmed' };
+  }
+
+  return { blocked: false, status: confirmed?.status ?? null, source: 'heuristic_inconclusive' };
+}
+
+/**
  * Login Workflow Engine
  *
  * Purpose:
@@ -204,6 +271,43 @@ export async function executeLoginWithWorkflow(page, jobId, pageUrl, openaiApiKe
   // Pass normalized job context so AI logger can resolve ai_services/llm endpoint
   // for helper-driven login jobs without relying on implicit globals.
   const aiLogger = new AIConversationLogger(backendUrl, normalizedContext.runner_token, normalizedContext);
+
+  const upstreamBlock = await detectUpstreamHttpUnavailable(page, pageUrl);
+  if (upstreamBlock.blocked) {
+    const status = upstreamBlock.status;
+    const msg = `Login workflow skipped: target document returned HTTP ${status} (${upstreamBlock.source}); AI login loop not started.`;
+    try {
+      await backendLogger.appendJobLog(jobId, 'warn', msg, 'LOGIN-WORKFLOW', {
+        upstream_http_status: status,
+        probe_source: upstreamBlock.source
+      });
+    } catch (_) {}
+
+    return {
+      success: false,
+      loginStatus: 'failure',
+      determineResult: {
+        status: 'failure',
+        completion_status: 'failure',
+        is_complete: true,
+        reason: 'upstream_http_unavailable',
+        upstream_http_status: status,
+        what_happened: `The login URL returned HTTP ${status} (or an equivalent gateway error page). Login cannot succeed until the origin is healthy.`
+      },
+      workflowResult: {
+        skippedDueToUpstreamHttp: true,
+        upstream_http_status: status,
+        probe_source: upstreamBlock.source
+      },
+      cookies: [],
+      cookiesCollected: 0,
+      error: {
+        code: 'upstream_http_unavailable',
+        http_status: status,
+        message: msg
+      }
+    };
+  }
 
   const analyzer = new WorkflowAnalyzer(backendUrl, aiLogger, normalizedContext);
   const analysisResult = await analyzer.analyzePage(page, jobId, null, projectId);
