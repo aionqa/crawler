@@ -7931,6 +7931,47 @@ return {
               console.warn(`⚠️ Failed to upsert script to collection: ${upsertError.message}`);
               // Don't throw - script is still stored in workflowState
             }
+
+            // Degenerate scripts are intentionally not persisted (cache poisoning). Mirror execute-time
+            // fallback here so legScriptToExecute never enters execute-code-from-variable as AI junk that
+            // parses to zero actions while the page clearly has controls — avoids brittle hangs and keeps
+            // multi-journey for-each legs aligned with inventory-backed deterministic paths.
+            const isGenerateJourneyScriptStepPostUpsert =
+              step.id === 'generate_journey_script' ||
+              String(step.id || '').toLowerCase().includes('generate_journey_script') ||
+              (typeof step.name === 'string' && step.name.includes('Generate Journey Action Script'));
+            if (
+              isGenerateJourneyScriptStepPostUpsert &&
+              cleanedScript &&
+              cleanedScript.trim().length > 0 &&
+              this.isDegenerateJourneyScriptForActionablePage(cleanedScript, workflowState)
+            ) {
+              const det = this.prepareDeterministicJourneyExecutionScript(workflowState);
+              if (det && typeof det === 'string' && det.trim().length > 0) {
+                workflowState.legScriptToExecute = det;
+                if (!workflowState.context) workflowState.context = {};
+                workflowState.context.legScriptToExecute = det;
+                this.initializeVariablePool(workflowState);
+                this.saveVariable(workflowState, 'legScriptToExecute', det, 'page', step);
+                console.log(
+                  `✅ Replaced degenerate AI journey script with deterministic inventory script (${det.length} chars) before execute step`
+                );
+                if (jobId && this.backendLogger) {
+                  await this.backendLogger.appendJobLog(
+                    jobId,
+                    'info',
+                    'Replaced degenerate generate_journey_script output with deterministic inventory script (matches non-cache upsert skip).',
+                    'WORKFLOW-ANALYZER',
+                    {
+                      step_id: step.id,
+                      step_name: step.name,
+                      journey_id: workflowState.currentJourney?.journey_id || null,
+                      substituted_script_length: det.length
+                    }
+                  );
+                }
+              }
+            }
           } else {
             console.warn(`⚠️ Cleaned script is empty after cleaning`);
           }
@@ -19354,6 +19395,20 @@ const sleep = safeWait;
       // This ensures while-loop can find the journey in journeysToExecute
       if (itemVariable === 'currentJourney' || item.journey_id) {
         workflowState.currentJourney = item;
+      }
+      // Each journey leg must not inherit the previous leg's Playwright script (variable pool + context
+      // can outlive a single generate_journey_script when templates/steps differ or after restarts).
+      if (itemsPath === 'journeysToExecute' || itemsPath === 'legsToExecute') {
+        delete workflowState.legScriptToExecute;
+        delete workflowState.journeyScriptToExecute;
+        if (workflowState.context && typeof workflowState.context === 'object') {
+          delete workflowState.context.legScriptToExecute;
+          delete workflowState.context.journeyScriptToExecute;
+        }
+        if (workflowState.variablePool?.page) {
+          delete workflowState.variablePool.page.legScriptToExecute;
+          delete workflowState.variablePool.page.journeyScriptToExecute;
+        }
       }
       if (itemsPath === 'journeysToExecute' && jobId) {
         await this.ensureAnalyzedPageContextForJourneys(page, workflowState, jobId, {
