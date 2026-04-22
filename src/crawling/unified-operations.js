@@ -8265,6 +8265,12 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       browserServiceUrl: context.browserServiceUrl,
       onPageReady: context.onPageReady, // Pass callback for browser streaming
       onContextReady: context.onContextReady, // Pass callback for video recording
+      // CRITICAL: forward beforeBrowserClose so the runner can finalize the
+      // Playwright 1.59 screencast (call screencast.stop()) BEFORE the
+      // context is torn down by `await browser.close()`. Without this the
+      // WebM artifact is never copied to the requested path because the
+      // page channel is dead by the time we try to save it.
+      beforeBrowserClose: context.beforeBrowserClose,
       viewport: browserOptions.viewport
     });
 
