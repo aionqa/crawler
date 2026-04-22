@@ -6,7 +6,7 @@
 import * as backendLogger from '../backend-logger.js';
 import { executeLoginWithWorkflow } from './login-workflow-engine.js';
 import { getRunnerBackendUrl } from '../utils/runner-service-urls.js';
-import { navigationTargetKey } from '../utils/url-navigation-target-key.js';
+import { navigationPathKey, navigationTargetKey } from '../utils/url-navigation-target-key.js';
 
 /**
  * Send log to backend (wrapper for backendLogger)
@@ -76,8 +76,12 @@ export async function detectLoginPage(
 
     const fromPage = parseHttpUrl(page.url());
     const fromExplicit = parseHttpUrl(currentUrl);
-    /** Rendered surface for strict login URL + host/path heuristics (what the user actually sees). */
-    const surfaceUrlObj = fromPage || fromExplicit;
+    /**
+     * Prefer caller-supplied URL (workflow `finalUrl` / queue canonical URL) over `page.url()`,
+     * which can lag or differ trivially during navigation — otherwise strict_stop mis-fires on
+     * intentional login-form fixtures that are valid crawl targets.
+     */
+    const surfaceUrlObj = fromExplicit || fromPage;
     if (!surfaceUrlObj) {
       return { isLoginPage: false, confidence: 'low', reason: 'No navigable URL for login detection' };
     }
@@ -253,7 +257,7 @@ export async function detectLoginPage(
      * must not hide a matching `seed_url` / `start_url`, or we falsely conclude the surface "diverged"
      * and flag strict `handle_login_redirect: fail` on intentional login-form fixtures.
      */
-    const crawlAnchorCandidates = [
+    const crawlAnchorRaw = [
       intendedNavUrl,
       // Explicit rendered URL from caller (workflow `finalUrl`) — anchors when queue vs page.url() differ trivially
       currentUrl,
@@ -266,13 +270,15 @@ export async function detectLoginPage(
       context?.start_url,
       context?.options?.start_url,
       context?.options?.seed_url,
-    ]
-      .filter((u) => u != null && String(u).trim())
-      .map((u) => navigationTargetKey(u))
-      .filter(Boolean);
+    ].filter((u) => u != null && String(u).trim());
+    const crawlAnchorCandidates = crawlAnchorRaw.map((u) => navigationTargetKey(u)).filter(Boolean);
+    const crawlAnchorPathKeys = crawlAnchorRaw.map((u) => navigationPathKey(u)).filter(Boolean);
     const crawlAnchorKeySet = new Set(crawlAnchorCandidates);
+    const crawlAnchorPathKeySet = new Set(crawlAnchorPathKeys);
+    const surfacePathKey = navigationPathKey(surfaceUrlObj.href);
     const surfaceMatchesDeclaredCrawlAnchor =
-      Boolean(surfaceNavKey) && crawlAnchorKeySet.has(surfaceNavKey);
+      (Boolean(surfaceNavKey) && crawlAnchorKeySet.has(surfaceNavKey)) ||
+      (Boolean(surfacePathKey) && crawlAnchorPathKeySet.has(surfacePathKey));
 
     /**
      * True when the visible URL is not one of the declared crawl anchors (unexpected redirect / drift).
@@ -299,7 +305,10 @@ export async function detectLoginPage(
       try {
         const intendedKey = navigationTargetKey(rawIntended);
         if (!intendedKey) return false;
-        return intendedKey !== surfaceNavKey;
+        if (intendedKey === surfaceNavKey) return false;
+        const intendedPathKey = navigationPathKey(rawIntended);
+        if (intendedPathKey && surfacePathKey && intendedPathKey === surfacePathKey) return false;
+        return true;
       } catch {
         return false;
       }

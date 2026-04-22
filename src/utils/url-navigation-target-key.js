@@ -23,6 +23,28 @@ function normalizeHashRouteFragment(fragmentRaw) {
  * @param {string|null|undefined} url
  * @returns {string} stable key, or '' if not a normalizable http(s) URL
  */
+/**
+ * Origin + pathname only (no query/hash). Used to match declared crawl targets when the browser
+ * adds volatile query params (e.g. post-login success pages) while staying on the same resource path.
+ */
+export function navigationPathKey(url) {
+  const withScheme = ensureUrlHasScheme(url);
+  if (!withScheme) return '';
+  try {
+    const u = new URL(withScheme);
+    if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) {
+      u.port = '';
+    }
+    const normalizedPath = u.pathname.replace(/\/+$/, '') || '/';
+    return `${u.protocol}//${u.host}${normalizedPath}`;
+  } catch {
+    const raw = String(withScheme);
+    const noHash = raw.split('#')[0];
+    const noQuery = noHash.split('?')[0];
+    return noQuery.replace(/\/+$/, '') || noQuery;
+  }
+}
+
 export function navigationTargetKey(url) {
   const withScheme = ensureUrlHasScheme(url);
   if (!withScheme) return '';
