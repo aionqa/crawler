@@ -1174,398 +1174,36 @@ async function uploadVideoAsync(jobId, videoBuffer) {
   }
 }
 
-// Per-page video recording using CDP Page.startScreencast + ffmpeg
+// Lightweight per-page chapter wrapper (Playwright 1.59 screencast).
+//
+// The legacy implementation used CDP Page.startScreencast + ffmpeg to produce
+// a separate MP4 per crawled page. With the unified `page.screencast` API the
+// whole context (including popups) is already being recorded by
+// ScreencastRecorder, so all we need to do here is emit a chapter overlay so
+// the user can scrub to each page boundary in the recording. The function
+// keeps the same `(page, jobId, pageUrl, action)` signature and returns
+// `{ result, videoKey: null }` so the rest of the crawl loop is unchanged.
 async function recordPageVideo(page, jobId, pageUrl, action) {
-  let videoKey = null;
-  let cdpSession = null;
-  const frames = [];
-  const framesDir = `/tmp/aionqa_videos/${jobId}_${Date.now()}`;
-  
   try {
-    // Ensure directory exists
-    if (!fs.existsSync(framesDir)) {
-      fs.mkdirSync(framesDir, { recursive: true });
-    }
-    
-    // Create CDP session
-    cdpSession = await page.context().newCDPSession(page);
-    
-    // Track start time for frame timing
-    const recordingStartTime = Date.now();
-    let frameWidth = null;
-    let frameHeight = null;
-    
-    // Frame comparison for intelligent skipping (Requirement 6: skip 90% of frames with no changes)
-    let lastFrameHash = null;
-    let skippedFramesCount = 0;
-    let lastKeptFrameIndex = -1;
-    const frameHashes = new Map(); // Store hashes for comparison
-    
-    // Simple hash function for frame comparison (using first/last bytes and size)
-    const getFrameHash = (buffer) => {
-      if (buffer.length < 100) return null;
-      // Use first 100 bytes, last 100 bytes, and size as hash
-      const start = buffer.slice(0, 100).toString('hex');
-      const end = buffer.slice(-100).toString('hex');
-      return `${buffer.length}_${start.substring(0, 20)}_${end.substring(0, 20)}`;
-    };
-    
-    // Listen for screencast frames
-    cdpSession.on('Page.screencastFrame', async ({ data, metadata, sessionId }) => {
+    const screencastRecorder = (typeof globalThis !== 'undefined' && globalThis.__aionqa_screencast_recorder) || null;
+    if (screencastRecorder && typeof screencastRecorder.showChapter === 'function') {
       try {
-        const frameBuffer = Buffer.from(data, 'base64');
-        const frameHash = getFrameHash(frameBuffer);
-        const frameTimestamp = Date.now() - recordingStartTime;
-        
-        // Capture actual frame dimensions from first frame
-        if (frames.length === 0 && metadata) {
-          frameWidth = metadata.deviceWidth || metadata.pageScaleFactor * metadata.viewportWidth || 1920;
-          frameHeight = metadata.deviceHeight || metadata.pageScaleFactor * metadata.viewportHeight || 1080;
-          await sendLog(jobId, 'debug', `📐 Video dimensions: ${frameWidth}x${frameHeight}`, { page_url: pageUrl });
-        }
-        
-        // Compare with last frame (Requirement 6: skip 90% of frames with no changes)
-        const isSimilar = lastFrameHash && frameHash === lastFrameHash;
-        const shouldSkip = isSimilar && (frames.length - lastKeptFrameIndex) < 10; // Keep 1 every 10 similar frames
-        
-        if (shouldSkip) {
-          skippedFramesCount++;
-          // Acknowledge frame but don't save it
-          await cdpSession.send('Page.screencastFrameAck', { sessionId });
-          return;
-        }
-        
-        // Frame has changed or we need to keep this one - save it
-        const frameIndex = frames.length;
-        const framePath = path.join(framesDir, `frame_${String(frameIndex).padStart(6, '0')}.jpg`);
-        
-        // If we skipped frames, mark this frame as having skipped frames before it
-        if (skippedFramesCount > 0) {
-          // We'll add text overlay during encoding
-        }
-        
-        fs.writeFileSync(framePath, frameBuffer);
-        
-        frames.push({ 
-          path: framePath, 
-          metadata, 
-          sessionId,
-          timestamp: frameTimestamp,
-          skippedBefore: skippedFramesCount, // Track how many frames were skipped before this one
-          isSimilar: isSimilar
-        });
-        
-        lastFrameHash = frameHash;
-        lastKeptFrameIndex = frameIndex;
-        skippedFramesCount = 0; // Reset counter
-        
-        // Acknowledge frame receipt
-        await cdpSession.send('Page.screencastFrameAck', { sessionId });
-      } catch (e) {
-        console.error(`Error saving frame: ${e.message}`);
-      }
-    });
-    
-    // Start screencast with higher frame capture rate
-    // Note: everyNthFrame doesn't guarantee actual FPS, just reduces frame skipping
-    await cdpSession.send('Page.startScreencast', {
-      format: 'jpeg',
-      quality: 80,
-      maxWidth: 1920,
-      maxHeight: 1080,
-      everyNthFrame: 1 // Capture every frame (don't skip any)
-    });
-    
-    await sendLog(jobId, 'info', '🎥 Video recording started for page', { page_url: pageUrl });
-    
-    // Execute the action (navigate, analyze, etc.)
+        let title = 'Page';
+        try {
+          const u = new URL(pageUrl);
+          title = (u.hostname + (u.pathname || '')).slice(0, 80);
+        } catch (_) { title = String(pageUrl || 'Page').slice(0, 80); }
+        await screencastRecorder.showChapter(jobId, title, pageUrl, 2200);
+      } catch (_) { /* never fail the crawl on chapter errors */ }
+    }
+    await sendLog(jobId, 'info', `📍 Page chapter: ${pageUrl}`, { page_url: pageUrl });
     const result = await action();
-    
-    // Stop screencast
-    await sendLog(jobId, 'info', '🎥 Stopping video recording...', { page_url: pageUrl });
-    await cdpSession.send('Page.stopScreencast');
-    
-    // Give time for final frames to arrive
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
-    // Convert frames to video using ffmpeg
-    if (frames.length > 0) {
-      const recordingDuration = (Date.now() - recordingStartTime) / 1000;
-      const actualFPS = frames.length / recordingDuration;
-      
-      await sendLog(jobId, 'info', `📹 Captured ${frames.length} frames in ${recordingDuration.toFixed(1)}s (${actualFPS.toFixed(2)} FPS avg), encoding to video...`, { 
-        page_url: pageUrl,
-        frames_captured: frames.length,
-        duration_seconds: recordingDuration.toFixed(1),
-        avg_fps: actualFPS.toFixed(2)
-      });
-      
-      const videoPath = path.join('/tmp/aionqa_videos', `${jobId}_${Date.now()}.mp4`);
-      
-      // Create a concat file with proper timing for each frame
-      const concatFile = path.join(framesDir, 'concat.txt');
-      const concatContent = [];
-      
-      for (let i = 0; i < frames.length; i++) {
-        const frame = frames[i];
-        const nextFrame = frames[i + 1];
-        
-        // Calculate how long this frame should be shown (in seconds)
-        // If frames were skipped before this one, extend duration to represent skipped time
-        let duration;
-        if (nextFrame) {
-          duration = (nextFrame.timestamp - frame.timestamp) / 1000;
-        } else {
-          // Last frame - show for 1 second
-          duration = 1.0;
-        }
-        
-        // If frames were skipped, add time to represent the skipped period
-        if (frame.skippedBefore > 0) {
-          // Estimate skipped time (assuming ~30fps, each skipped frame is ~0.033s)
-          const estimatedSkippedTime = (frame.skippedBefore * 0.033);
-          duration += estimatedSkippedTime;
-        }
-        
-        // Minimum frame duration of 0.5 seconds for visibility
-        duration = Math.max(duration, 0.5);
-        
-        concatContent.push(`file '${path.basename(frame.path)}'`);
-        concatContent.push(`duration ${duration.toFixed(3)}`);
-      }
-      
-      // Add last frame again (concat demuxer requirement)
-      if (frames.length > 0) {
-        concatContent.push(`file '${path.basename(frames[frames.length - 1].path)}'`);
-      }
-      
-      fs.writeFileSync(concatFile, concatContent.join('\n'));
-      
-      // Use ffmpeg concat demuxer to preserve timing
-        // Add text overlay for frames with skipped content (Requirement 6: informative video)
-        // Create a subtitle file for frames that had skipped content
-        const totalSkipped = frames.reduce((sum, f) => sum + (f.skippedBefore || 0), 0);
-        let subtitleFile = null;
-        
-        if (totalSkipped > 0) {
-          // Create SRT subtitle file for frames with skipped content
-          subtitleFile = path.join(framesDir, 'skipped_frames.srt');
-          const subtitleLines = [];
-          let subtitleIndex = 1;
-          let currentTime = 0;
-          
-          for (let i = 0; i < frames.length; i++) {
-            const frame = frames[i];
-            const nextFrame = frames[i + 1];
-            
-            if (frame.skippedBefore > 0) {
-              // Calculate timing for this frame
-              const startTime = currentTime;
-              const duration = nextFrame 
-                ? ((nextFrame.timestamp - frame.timestamp) / 1000) + (frame.skippedBefore * 0.033)
-                : 1.0;
-              const endTime = startTime + duration;
-              
-              // Format time for SRT (HH:MM:SS,mmm)
-              const formatTime = (seconds) => {
-                const hours = Math.floor(seconds / 3600);
-                const minutes = Math.floor((seconds % 3600) / 60);
-                const secs = Math.floor(seconds % 60);
-                const millis = Math.floor((seconds % 60 - secs) * 1000);
-                return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(millis).padStart(3, '0')}`;
-              };
-              
-              subtitleLines.push(`${subtitleIndex}`);
-              subtitleLines.push(`${formatTime(startTime)} --> ${formatTime(endTime)}`);
-              subtitleLines.push(`No visible changes detected (${frame.skippedBefore} frames skipped)`);
-              subtitleLines.push('');
-              subtitleIndex++;
-            }
-            
-            // Update current time
-            if (nextFrame) {
-              currentTime += ((nextFrame.timestamp - frame.timestamp) / 1000) + ((frame.skippedBefore || 0) * 0.033);
-            } else {
-              currentTime += 1.0;
-            }
-          }
-          
-          fs.writeFileSync(subtitleFile, subtitleLines.join('\n'));
-        }
-        
-        await new Promise((resolve, reject) => {
-          const ffmpegCmd = ffmpeg()
-            .input(concatFile)
-            .inputOptions(['-f concat', '-safe 0'])
-            .videoCodec('libx264')
-            .outputOptions([
-              '-pix_fmt yuv420p',
-              '-crf 28',
-              '-preset faster',
-              '-vsync vfr' // Variable framerate to preserve timing
-            ]);
-          
-          // If we detected frame dimensions, scale video to match
-          if (frameWidth && frameHeight) {
-            // Ensure dimensions are even (required for h264)
-            const evenWidth = Math.floor(frameWidth / 2) * 2;
-            const evenHeight = Math.floor(frameHeight / 2) * 2;
-            ffmpegCmd.size(`${evenWidth}x${evenHeight}`);
-          }
-          
-          // Burn subtitles into video if we have skipped frames (Requirement 6)
-          if (subtitleFile && fs.existsSync(subtitleFile)) {
-            ffmpegCmd
-              .input(subtitleFile)
-              .inputOptions(['-f srt'])
-              .videoFilters([
-                {
-                  filter: 'subtitles',
-                  options: {
-                    filename: subtitleFile,
-                    force_style: 'FontSize=24,PrimaryColour=&H00FFFF,OutlineColour=&H000000,Outline=2'
-                  }
-                }
-              ]);
-          }
-          
-          ffmpegCmd
-            .output(videoPath)
-            .on('end', () => resolve())
-            .on('error', (err) => reject(err))
-            .run();
-        });
-      
-      // Check if video file was created
-      if (fs.existsSync(videoPath)) {
-        const stats = fs.statSync(videoPath);
-        const videoSize = stats.size;
-        
-        if (videoSize > 0) {
-          await sendLog(jobId, 'info', `✅ Video encoded (${(videoSize / 1024 / 1024).toFixed(2)} MB)`, { page_url: pageUrl });
-        
-        // Read video file
-        const videoBuffer = fs.readFileSync(videoPath);
-        
-        // Upload to MinIO
-        const prepareResult = await backendLogger.prepareVideoUpload(jobId, {
-          size: videoSize,
-          format: 'mp4',
-          source: 'per_page_recording',
-          pageUrl: pageUrl
-        });
-        
-        if (prepareResult.ok && prepareResult.uploadUrl) {
-          const { key, uploadUrl, publicUrl } = prepareResult;
-          
-          const uploadSuccess = await backendLogger.uploadVideoToPresignedUrl(uploadUrl, videoBuffer);
-          
-          if (uploadSuccess) {
-            videoKey = key;
-            
-            // Track video media with backend
-            try {
-              await backendLogger.trackMediaUpload(
-                jobId,
-                'video',
-                {
-                  videoId: key,
-                  videoKey: key,
-                  objectName: key,
-                  url: publicUrl,
-                  size: videoSize,
-                  format: 'mp4',
-                  pageUrl: pageUrl
-                }
-              );
-            } catch (trackError) {
-              console.error(`Failed to track video media: ${trackError.message}`);
-            }
-            
-            // Log to JOB logs (without page_url) - matches screenshot pattern
-            await sendLog(jobId, 'info', `🎥 Video captured for page: ${pageUrl}`, {
-              videoKey: key,
-              videoId: key,
-              action: 'video',
-              isVideo: true,
-              video_url: publicUrl,
-              video_size_mb: (videoSize / 1024 / 1024).toFixed(2),
-              pageUrl: pageUrl,
-              frames_captured: frames.length,
-              duration_seconds: recordingDuration.toFixed(1),
-              avg_fps: actualFPS.toFixed(2),
-              frameWidth: frameWidth,
-              frameHeight: frameHeight,
-              format: 'mp4'
-            });
-            
-            // Also log to PAGE logs (with page_url) for page-specific context
-            await sendLog(jobId, 'info', `🎥 Video recorded successfully`, {
-              page_url: pageUrl,
-              videoKey: key,
-              videoId: key,
-              video_url: publicUrl,
-              video_size_mb: (videoSize / 1024 / 1024).toFixed(2),
-              action: 'video',
-              isVideo: true
-            });
-          } else {
-            await sendLog(jobId, 'error', '❌ Video upload failed', { page_url: pageUrl });
-          }
-        }
-        
-          // Clean up temp files
-          try {
-            fs.unlinkSync(videoPath);
-            fs.rmSync(framesDir, { recursive: true, force: true });
-          } catch (e) {
-            // Ignore cleanup errors
-          }
-        } else {
-          await sendLog(jobId, 'warn', '⚠️ Video file is empty', { page_url: pageUrl });
-        }
-      } else {
-        await sendLog(jobId, 'warn', '⚠️ Video file was not created', { page_url: pageUrl });
-      }
-    } else {
-      await sendLog(jobId, 'info', '⚠️ No frames captured - video not created', { page_url: pageUrl });
-    }
-    
-    return { result, videoKey };
-    
+    return { result, videoKey: null };
   } catch (error) {
-    await sendLog(jobId, 'warn', `⚠️ Video recording failed: ${error.message}`, { 
-      page_url: pageUrl,
-      errorStack: error.stack
-    });
-    
-    // Clean up temp files on error
-    try {
-      if (fs.existsSync(framesDir)) {
-        fs.rmSync(framesDir, { recursive: true, force: true });
-      }
-    } catch (e) {
-      // Ignore cleanup errors
-    }
-    
-    // Execute action anyway even if recording fails
-    try {
-      const result = await action();
-      return { result, videoKey: null };
-    } catch (actionError) {
-      throw actionError;
-    }
-  } finally {
-    // Cleanup CDP session
-    if (cdpSession) {
-      try {
-        await cdpSession.detach();
-      } catch (e) {
-        // Ignore detach errors
-      }
-    }
+    throw error;
   }
 }
+
 
 // Detect captcha on page
 async function detectCaptcha(page, jobId) {
@@ -2262,19 +1900,19 @@ async function withBrowser(action, options = {}) {
     throw new Error(`Embedded browser launch failed: ${error.message}`);
   }
   
-  // Configure browser context with stealth options and video recording support
+  // Configure browser context with stealth options. NOTE: video recording is no
+  // longer wired here. With Playwright 1.59+ the runner attaches a per-page
+  // `page.screencast.start({ path, onFrame })` via `screencastRecorder` (see
+  // onContextReady / onPageReady callbacks). Mixing both would make Playwright
+  // ignore our screencast options.
   const enableRecording = options.enable_video_recording !== false;
   const contextOptions = getStealthContextOptions({
     viewport,
-    userAgent: options.userAgent, // Allow override if provided
-    recordVideo: enableRecording ? {
-      dir: '/tmp/aionqa_videos',
-      size: viewport
-    } : undefined
+    userAgent: options.userAgent
   });
-  
+
   if (enableRecording) {
-    await sendLog(options.jobId || 'server', 'info', `🎥 Video recording enabled for session`);
+    await sendLog(options.jobId || 'server', 'info', `🎥 Screencast recording enabled for session (Playwright 1.59 page.screencast)`);
   }
   
   const context = await browser.newContext(contextOptions);

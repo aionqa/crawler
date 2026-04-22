@@ -60,8 +60,12 @@ export function getStealthContextOptions(options = {}) {
     // Do not force global extra headers.
     // They can alter CORS/preflight behavior on third-party assets (e.g. reCAPTCHA/fonts)
     // and break login pages. Let Chromium generate request headers naturally.
-    // Record video if needed
-    ...(options.recordVideo ? { recordVideo: options.recordVideo } : {}),
+    //
+    // NOTE: Video recording is NOT configured here anymore. Since Playwright 1.59
+    // we use `page.screencast.start({ path, onFrame })` instead of
+    // `context.recordVideo`. If both were active simultaneously, the existing
+    // recording would take precedence and our screencast `size`/`onFrame`
+    // options would be ignored. See ScreencastRecorder for the new entry point.
     ignoreHTTPSErrors: true,
   };
 

@@ -17,8 +17,9 @@ import { promises as dnsPromises } from 'dns';
 import { randomUUID } from 'crypto';
 import { hostname } from 'os';
 import express from 'express';
-import VideoStreamManager from './browser/video-stream-manager.js';
-import VideoRecorder from './browser/video-recorder.js';
+// Unified Playwright 1.59 screencast: replaces both legacy VideoStreamManager
+// (JPEG screenshot loop) and VideoRecorder (context.recordVideo).
+import ScreencastRecorder from './browser/screencast-recorder.js';
 // Minimal HTTP server for ECS health checks only (not for workflow endpoints - rule 51-runner-architecture.mdc)
 
 import { getRunnerBackendUrl } from './utils/runner-service-urls.js';
@@ -58,11 +59,16 @@ const CRAWLER_BUILD_DATE = process.env.BUILD_DATE || new Date().toISOString();
 console.log(`🏷️  Crawler Version: ${CRAWLER_VERSION}`);
 console.log(`📅 Crawler Build Date: ${CRAWLER_BUILD_DATE}`);
 
-// Initialize video stream manager for real-time streaming
-const videoStreamManager = new VideoStreamManager(BACKEND_URL, RUNNER_ID, RUNNER_TOKEN);
-
-// Initialize video recorder for full recording
-const videoRecorder = new VideoRecorder(BACKEND_URL, RUNNER_ID, RUNNER_TOKEN);
+// Single screencast recorder handles BOTH the full session video and the
+// real-time frame stream via `page.screencast.start({ path, onFrame })`.
+const screencastRecorder = new ScreencastRecorder(BACKEND_URL, RUNNER_ID, RUNNER_TOKEN);
+// Backwards-compat alias so existing code (workflow-executor segment hooks etc.)
+// keeps working without changes — ScreencastRecorder exposes startSegment/endSegment.
+const videoRecorder = screencastRecorder;
+// Expose the recorder via globalThis so deeply-nested helpers (e.g. the page
+// chapter wrapper inside crawling/unified-operations.js) can emit chapters
+// without threading the recorder through every signature.
+globalThis.__aionqa_screencast_recorder = screencastRecorder;
 
 console.log(`🚀 Starting runner ${RUNNER_ID}`);
 console.log(`🔗 Backend URL: ${BACKEND_URL}`);
@@ -455,22 +461,33 @@ async function pollForJob() {
 }
 
 /**
- * Start real-time video streaming for a job
- * Uses VideoStreamManager for continuous streaming with buffer
+ * Start real-time video streaming for a job.
+ *
+ * With Playwright 1.59 screencast there is no separate "stream" — the same
+ * `page.screencast.start({ onFrame })` pipeline that records the WebM also
+ * delivers JPEG frames to the backend frame buffer. We just attach any newly
+ * opened page (popup, second tab) so its screencast is recorded too.
  */
 function startVideoStream(page, jobId) {
-  console.log(`📹 Starting real-time video stream for job ${jobId}`);
-  videoStreamManager.startStream(jobId, page, {
-    interval: 200 // 5 FPS for smooth streaming
+  if (!page || !jobId) return;
+  // The recorder is started in onContextReady (see executeCrawlJob/executeLoginJob).
+  // If the page belongs to the same context but wasn't yet attached (e.g. popup),
+  // make sure we attach a screencast to it.
+  screencastRecorder.attachPage(jobId, page).catch((err) => {
+    console.warn(`⚠️ Could not attach screencast to page for job ${jobId}: ${err.message}`);
   });
 }
 
 /**
- * Stop video streaming for a job
+ * Stop video streaming for a job. With the unified screencast model the stream
+ * lives inside the recorder, so stopping it is the same as stopping recording.
+ * We expose a no-op here because callers stop recording explicitly elsewhere
+ * (we don't want to stop the WebM mid-run).
  */
 function stopVideoStream(jobId) {
-  console.log(`⏹️  Stopping video stream for job ${jobId}`);
-  videoStreamManager.stopStream(jobId);
+  // Intentionally a no-op. The screencast (which provides both the file and
+  // the live frames) is stopped together via screencastRecorder.stopRecording.
+  void jobId;
 }
 
 /**
@@ -821,13 +838,7 @@ async function executeLoginJob(job, streamInterval) {
   });
 
   const context = await browser.newContext(
-    getStealthContextOptions({
-      viewport,
-      recordVideo: {
-        dir: '/tmp/aionqa_videos',
-        size: viewport
-      }
-    })
+    getStealthContextOptions({ viewport })
   );
 
   const page = await context.newPage();
@@ -844,11 +855,11 @@ async function executeLoginJob(job, streamInterval) {
     await page.waitForTimeout(1000);
     console.log(`[DEBUG] Navigated to login URL: ${page.url()}`);
 
-    // Start video recording (full video for playback) - AFTER page navigation
-    videoRecorder.startRecording(job.id, context, page);
-    
-    // Start real-time video streaming (live frames)
-    startVideoStream(page, job.id);
+    // Start unified screencast recording: records WebM, streams live JPEG
+    // frames via onFrame, highlights every action and shows action titles
+    // baked into the video.
+    await screencastRecorder.startRecording(job.id, context, page, { viewport });
+    await screencastRecorder.showChapter(job.id, 'Login started', `Navigating to ${url}`, 2500);
 
     console.log(
       `[DEBUG] About to execute login workflow with context:`,
@@ -928,14 +939,14 @@ async function executeLoginJob(job, streamInterval) {
 
     return finalResult;
   } finally {
-    // Stop video streaming
-    stopVideoStream(job.id);
-    
-    // Stop video recording and upload
-    console.log(`Finalizing video recording for job ${job.id}...`);
-    const videoInfo = await videoRecorder.stopRecording(job.id);
+    // Stop screencast (this also flushes pending frames + uploads the WebM).
+    console.log(`Finalizing screencast for job ${job.id}...`);
+    try {
+      await screencastRecorder.showChapter(job.id, 'Login finished', null, 2000);
+    } catch (_) { /* ignore */ }
+    const videoInfo = await screencastRecorder.stopRecording(job.id);
     if (videoInfo) {
-      console.log(`✅ Video uploaded: ${videoInfo.videoKey} (${videoInfo.sizeMB} MB, ${videoInfo.duration}s)`);
+      console.log(`✅ Video uploaded: ${videoInfo.videoKey} (${videoInfo.sizeMB} MB, ${videoInfo.duration}s, chapters=${videoInfo.chapters?.length || 0})`);
     }
     
     // Clean up
@@ -1142,22 +1153,27 @@ async function executeCrawlJob(job, streamInterval) {
     useRemoteBrowser: false, // Use local browser (embedded)
     runnerId: RUNNER_ID,
     runner_token: RUNNER_TOKEN, // Add runner token for API calls
-    videoRecorder,
+    videoRecorder, // Alias of screencastRecorder; workflow-executor uses startSegment/endSegment
+    screencastRecorder,
     onPageReady: (page) => {
-      // Start real-time video streaming when page is ready
+      // Attach screencast to additional pages (popups, second tabs).
       currentPage = page;
       startVideoStream(page, job.id);
     },
-    onContextReady: (context, page) => {
-      // Start video recording when context is ready
-      videoRecorder.startRecording(job.id, context, page);
-      console.log(`Video recording and streaming started for crawl job ${job.id}`);
+    onContextReady: async (context, page) => {
+      // Start unified Playwright 1.59 screencast: records WebM + streams frames.
+      await screencastRecorder.startRecording(job.id, context, page);
+      await screencastRecorder.showChapter(job.id, 'Crawl started', `Navigating to ${url}`, 2500);
+      console.log(`Screencast started for crawl job ${job.id}`);
     },
     beforeBrowserClose: async () => {
       try {
-        recordedVideoInfo = recordedVideoInfo || await videoRecorder.stopRecording(job.id);
+        if (!recordedVideoInfo) {
+          try { await screencastRecorder.showChapter(job.id, 'Crawl finished', null, 2000); } catch (_) { /* ignore */ }
+          recordedVideoInfo = await screencastRecorder.stopRecording(job.id);
+        }
       } catch (error) {
-        console.error(`Failed to finalize video before browser close for job ${job.id}:`, error.message);
+        console.error(`Failed to finalize screencast before browser close for job ${job.id}:`, error.message);
       }
     }
   };
@@ -1167,22 +1183,20 @@ async function executeCrawlJob(job, streamInterval) {
     const result = await startCrawl(url, cookies, executionContext, openaiApiKey);
     return result;
   } finally {
-    // Stop video streaming
-    stopVideoStream(job.id);
-    
-    // Stop video recording and upload
+    // Stop screencast and upload (it covers both WebM and the live frame stream).
     try {
       if (!recordedVideoInfo) {
-        console.log(`Finalizing video recording for crawl job ${job.id}...`);
-        recordedVideoInfo = await videoRecorder.stopRecording(job.id);
+        console.log(`Finalizing screencast for crawl job ${job.id}...`);
+        try { await screencastRecorder.showChapter(job.id, 'Crawl finished', null, 2000); } catch (_) { /* ignore */ }
+        recordedVideoInfo = await screencastRecorder.stopRecording(job.id);
       }
       if (recordedVideoInfo) {
-        console.log(`✅ Video uploaded: ${recordedVideoInfo.videoKey} (${recordedVideoInfo.sizeMB} MB, ${recordedVideoInfo.duration}s)`);
+        console.log(`✅ Video uploaded: ${recordedVideoInfo.videoKey} (${recordedVideoInfo.sizeMB} MB, ${recordedVideoInfo.duration}s, chapters=${recordedVideoInfo.chapters?.length || 0})`);
       } else {
         console.warn(`No video recorded for crawl job ${job.id}`);
       }
     } catch (videoError) {
-      console.error(`Error finalizing video recording for crawl job ${job.id}:`, videoError.message);
+      console.error(`Error finalizing screencast for crawl job ${job.id}:`, videoError.message);
     }
   }
 }

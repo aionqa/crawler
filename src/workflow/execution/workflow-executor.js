@@ -698,7 +698,7 @@ class WorkflowExecutor {
    * @param {string} actionId - Action ID to mark as started
    * @param {string} jobId - Job ID that started this action
    */
-  async markActionStarted(actionId, jobId) {
+  async markActionStarted(actionId, jobId, actionMeta = null) {
     try {
       await axios.post(`${this.backendUrl}/actions/${actionId}/start`, {
         job_id: jobId
@@ -706,6 +706,15 @@ class WorkflowExecutor {
         timeout: 5000
       });
       console.log(`[WorkflowExecutor] Marked action ${actionId} as started for job ${jobId}`);
+
+      // Bake an action-title overlay into the screencast (Playwright 1.59).
+      try {
+        if (this.videoRecorder && typeof this.videoRecorder.showAction === 'function') {
+          const title = (actionMeta && (actionMeta.title || actionMeta.label || actionMeta.description))
+            || `Action ${actionId}`;
+          this.videoRecorder.showAction(jobId, title, 'action_started').catch(() => {});
+        }
+      } catch (_) { /* never fail an action because of an overlay */ }
     } catch (error) {
       console.error(`[WorkflowExecutor] Error marking action as started:`, error.message);
     }
@@ -717,7 +726,7 @@ class WorkflowExecutor {
    * @param {boolean} success - Whether the action was successful
    * @param {string} error - Error message if action failed
    */
-  async markActionCompleted(actionId, success = true, error = null) {
+  async markActionCompleted(actionId, success = true, error = null, jobId = null, actionMeta = null) {
     try {
       await axios.post(`${this.backendUrl}/actions/${actionId}/complete`, {
         success,
@@ -726,6 +735,15 @@ class WorkflowExecutor {
         timeout: 5000
       });
       console.log(`[WorkflowExecutor] Marked action ${actionId} as ${success ? 'completed' : 'failed'}`);
+
+      try {
+        if (jobId && this.videoRecorder && typeof this.videoRecorder.showAction === 'function') {
+          const baseTitle = (actionMeta && (actionMeta.title || actionMeta.label || actionMeta.description))
+            || `Action ${actionId}`;
+          const prefix = success ? '✓' : '✗';
+          this.videoRecorder.showAction(jobId, `${prefix} ${baseTitle}`, success ? 'action_completed' : 'action_failed').catch(() => {});
+        }
+      } catch (_) { /* swallow */ }
     } catch (error) {
       console.error(`[WorkflowExecutor] Error marking action as completed:`, error.message);
     }
