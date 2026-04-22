@@ -23,6 +23,7 @@ import ScreencastRecorder from './browser/screencast-recorder.js';
 // Minimal HTTP server for ECS health checks only (not for workflow endpoints - rule 51-runner-architecture.mdc)
 
 import { getRunnerBackendUrl } from './utils/runner-service-urls.js';
+import { appendJobLog as backendAppendJobLog, flushAllBufferedLogs } from './backend-logger.js';
 
 const BACKEND_URL = getRunnerBackendUrl();
 const POLL_INTERVAL = parseInt(process.env.POLL_INTERVAL || '3000'); // 3 seconds default
@@ -351,15 +352,7 @@ async function withBackendRetry(fn, label) {
 
 async function appendJobLog(jobId, level, message, metadata = {}) {
   try {
-    await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-      jobId,
-      level,
-      message,
-      component: 'sitemap-runner',
-      metadata
-    }, {
-      timeout: 10000
-    });
+    await backendAppendJobLog(jobId, level, message, 'sitemap-runner', metadata);
   } catch (error) {
     console.error(`Failed to append log for job ${jobId}:`, error.message);
   }
@@ -623,7 +616,13 @@ async function executeJob(job) {
     } catch (logError) {
       console.error(`❌ Error handling container logs: ${logError.message}`);
     }
-    
+
+    try {
+      await flushAllBufferedLogs();
+    } catch (e) {
+      console.warn(`⚠️  Log buffer flush after job: ${e.message}`);
+    }
+
     currentJobId = null;
     currentPage = null;
   }
@@ -2720,10 +2719,15 @@ function sleep(ms) {
 /**
  * Graceful shutdown
  */
-function shutdown() {
+async function shutdown() {
   console.log(`\n⏹️  Shutting down gracefully...`);
   if (currentJobId) {
     console.log(`⚠️  Job ${currentJobId} still running, waiting for completion...`);
+  }
+  try {
+    await flushAllBufferedLogs();
+  } catch (e) {
+    console.warn(`⚠️  Log buffer flush on shutdown: ${e.message}`);
   }
   healthServer.close(() => {
     console.log(`✅ Health check server closed`);
@@ -2731,8 +2735,8 @@ function shutdown() {
   });
 }
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+process.on('SIGINT', () => { void shutdown(); });
+process.on('SIGTERM', () => { void shutdown(); });
 
 /**
  * Execute a single job and exit (for ECS task-per-job mode)
@@ -2797,7 +2801,13 @@ async function executeSingleJob() {
     
     // Execute the job
     const success = await executeJob(job);
-    
+
+    try {
+      await flushAllBufferedLogs();
+    } catch (flushErr) {
+      console.warn(`⚠️  Log buffer flush before exit: ${flushErr.message}`);
+    }
+
     if (success) {
       console.log(`✅ Job ${JOB_ID} completed successfully`);
       process.exit(0);
@@ -2851,26 +2861,18 @@ async function executeSingleJob() {
     
     // Try to report the error to backend before exiting
     try {
-      await axios.post(`${BACKEND_URL}/api/logs/jobs/append`, {
-        jobId: JOB_ID,
-        level: 'error',
-        message: `❌ Failed to fetch job data from API: ${error.message}`,
-        component: 'RUNNER',
-        metadata: {
-          error_type: error.response ? 'http_error' : 'network_error',
-          status_code: error.response?.status,
-          backend_url: BACKEND_URL,
-          has_runner_token: !!RUNNER_TOKEN
-        }
-      }, {
-        headers: getAuthHeaders(),
-        timeout: 5000
+      await backendAppendJobLog(JOB_ID, 'error', `❌ Failed to fetch job data from API: ${error.message}`, 'RUNNER', {
+        error_type: error.response ? 'http_error' : 'network_error',
+        status_code: error.response?.status,
+        backend_url: BACKEND_URL,
+        has_runner_token: !!RUNNER_TOKEN,
       });
+      await flushAllBufferedLogs();
     } catch (logError) {
       // Silent fail - backend might not be reachable
       console.warn(`   ⚠️  Could not log error to backend: ${logError.message}`);
     }
-    
+
     process.exit(1);
   }
 }

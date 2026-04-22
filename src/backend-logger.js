@@ -20,6 +20,10 @@
  *    backend can never stall the crawl indefinitely;
  *  - on terminal failure returns `null`, NEVER throws (logs are best-effort —
  *    crawl progress must not be blocked by log delivery).
+ *
+ * Job and page lines are **batched** in memory and sent as `entries[]` every
+ * `LOG_CHUNK_FLUSH_INTERVAL_SEC` seconds (clamped 10–300, default 30). Call
+ * {@link flushAllBufferedLogs} on shutdown. AI chat logs stay unbuffered.
  */
 
 import { getRunnerBackendUrl } from './utils/runner-service-urls.js';
@@ -30,6 +34,39 @@ const BACKEND_URL = getRunnerBackendUrl();
 const BACKEND_MAX_ATTEMPTS = Number(process.env.BACKEND_MAX_ATTEMPTS || 4);
 const BACKEND_RETRY_AFTER_CAP_MS = Number(process.env.BACKEND_RETRY_AFTER_CAP_MS || 60_000);
 const BACKEND_BASE_BACKOFF_MS = Number(process.env.BACKEND_BASE_BACKOFF_MS || 1000);
+
+const LOG_CHUNK_FLUSH_INTERVAL_SEC = Math.min(
+  300,
+  Math.max(10, Number(process.env.LOG_CHUNK_FLUSH_INTERVAL_SEC || 30) || 30)
+);
+const MAX_BUFFERED_LINES_PER_POST = 200;
+
+const _jobLogBuffers = new Map();
+/** @type {Map<string, { jobId: string, pageUrl: string, pageLogId: string|null, entries: object[] }>} */
+const _pageLogBuffers = new Map();
+let _logFlushTimer = null;
+
+function _pageBufferKey(jobId, pageUrl, pageLogId) {
+  const pl = pageLogId != null ? String(pageLogId) : '';
+  return `${jobId}\u0000${pageUrl}\u0000${pl}`;
+}
+
+function _ensureLogFlushTimer() {
+  if (_logFlushTimer != null) return;
+  const ms = LOG_CHUNK_FLUSH_INTERVAL_SEC * 1000;
+  _logFlushTimer = setInterval(() => {
+    flushAllBufferedLogs().catch((err) => console.warn(`[LOG-BUFFER] ${err.message}`));
+  }, ms);
+  if (typeof _logFlushTimer.unref === 'function') _logFlushTimer.unref();
+}
+
+function _splitIntoBatches(arr, maxPer) {
+  const batches = [];
+  for (let i = 0; i < arr.length; i += maxPer) {
+    batches.push(arr.slice(i, i + maxPer));
+  }
+  return batches.length ? batches : [[]];
+}
 
 /**
  * Parse a `Retry-After` HTTP header (seconds OR HTTP-date) into milliseconds.
@@ -126,6 +163,54 @@ export async function postBackend(pathOrUrl, body, opts = {}) {
 }
 
 /**
+ * Flush all buffered job/page log lines to the backend (awaitable).
+ */
+export async function flushAllBufferedLogs() {
+  for (const [jobId, lines] of [..._jobLogBuffers.entries()]) {
+    if (!lines.length) {
+      _jobLogBuffers.delete(jobId);
+      continue;
+    }
+    const chunk = lines.splice(0, lines.length);
+    if (!chunk.length) {
+      _jobLogBuffers.delete(jobId);
+      continue;
+    }
+    for (const batch of _splitIntoBatches(chunk, MAX_BUFFERED_LINES_PER_POST)) {
+      if (!batch.length) continue;
+      await postBackend(
+        '/api/logs/jobs/append',
+        { jobId, entries: batch },
+        { label: 'appendJobLogChunk' }
+      );
+    }
+    if (!lines.length) _jobLogBuffers.delete(jobId);
+  }
+
+  for (const [key, bundle] of [..._pageLogBuffers.entries()]) {
+    if (!bundle.entries.length) {
+      _pageLogBuffers.delete(key);
+      continue;
+    }
+    const chunk = bundle.entries.splice(0, bundle.entries.length);
+    if (!chunk.length) {
+      _pageLogBuffers.delete(key);
+      continue;
+    }
+    const { jobId, pageUrl, pageLogId } = bundle;
+    for (const batch of _splitIntoBatches(chunk, MAX_BUFFERED_LINES_PER_POST)) {
+      if (!batch.length) continue;
+      await postBackend(
+        '/api/logs/pages/append',
+        { jobId, pageUrl, pageLogId, entries: batch },
+        { label: 'appendPageLogChunk' }
+      );
+    }
+    if (!bundle.entries.length) _pageLogBuffers.delete(key);
+  }
+}
+
+/**
  * Create a job log context
  */
 export async function createJobLogContext(jobId, metadata = {}) {
@@ -134,17 +219,21 @@ export async function createJobLogContext(jobId, metadata = {}) {
 }
 
 /**
- * Append a log entry to a job
+ * Append a log entry to a job (buffered; see flushAllBufferedLogs).
  */
 export async function appendJobLog(jobId, level, message, component = 'unified-crawler', metadata = {}) {
   const jobIdStr = jobId != null ? String(jobId) : null;
   if (!jobIdStr) return { ok: false };
-  const data = await postBackend(
-    '/api/logs/jobs/append',
-    { jobId: jobIdStr, level, message, component, metadata },
-    { label: 'appendJobLog' }
-  );
-  return data ?? { ok: false };
+  _ensureLogFlushTimer();
+  if (!_jobLogBuffers.has(jobIdStr)) _jobLogBuffers.set(jobIdStr, []);
+  _jobLogBuffers.get(jobIdStr).push({
+    level,
+    message,
+    component,
+    metadata: metadata || {},
+    timestamp: new Date(),
+  });
+  return { ok: true, buffered: true };
 }
 
 /**
@@ -160,15 +249,29 @@ export async function createPageLogContext(jobId, pageUrl, pageTitle = null, pag
 }
 
 /**
- * Append a log entry to a page
+ * Append a log entry to a page (buffered; see flushAllBufferedLogs).
  */
 export async function appendPageLog(jobId, pageUrl, level, message, pageLogId = null, component = 'unified-crawler', metadata = {}) {
-  const data = await postBackend(
-    '/api/logs/pages/append',
-    { jobId, pageUrl, pageLogId, level, message, component, metadata },
-    { label: 'appendPageLog' }
-  );
-  return data ?? { ok: false };
+  const jobIdStr = jobId != null ? String(jobId) : null;
+  if (!jobIdStr || !pageUrl) return { ok: false };
+  _ensureLogFlushTimer();
+  const key = _pageBufferKey(jobIdStr, String(pageUrl), pageLogId != null ? String(pageLogId) : null);
+  if (!_pageLogBuffers.has(key)) {
+    _pageLogBuffers.set(key, {
+      jobId: jobIdStr,
+      pageUrl: String(pageUrl),
+      pageLogId: pageLogId != null ? String(pageLogId) : null,
+      entries: [],
+    });
+  }
+  _pageLogBuffers.get(key).entries.push({
+    level,
+    message,
+    component,
+    metadata: metadata || {},
+    timestamp: new Date(),
+  });
+  return { ok: true, buffered: true };
 }
 
 /**
