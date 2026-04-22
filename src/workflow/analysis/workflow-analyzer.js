@@ -12826,6 +12826,8 @@ return {
     if (/<\s*inventory_selector\b/i.test(s)) return true;
     if (/<\s*[a-z][a-z0-9_]*_for_action\d+\s*>/i.test(s)) return true;
     if (/<\s*journey_[a-z0-9_]+\s*>/i.test(s)) return true;
+    if (/(['"])action\d+\.selector\1/i.test(s)) return true;
+    if (/\bpage\.(?:click|fill|dblclick|check|uncheck)\(\s*action\d+\.selector\b/i.test(s)) return true;
     return false;
   }
 
@@ -12906,6 +12908,75 @@ return {
     const hasUnlogged = this.journeyScriptHasUnloggedPlaywrightInteractions(s);
     if (parsed.length === 0 && !hasUnlogged) return null;
     return s;
+  }
+
+  /**
+   * Models sometimes echo prompt scaffolding like action1.selector / "action2.selector" instead of
+   * real CSS. Map actionN to currentJourney.actions[N-1] with the same inventory alignment used for
+   * deterministic fallbacks (general repair, not per-domain literals).
+   */
+  repairJourneyActionPlaceholderSelectors(script, workflowState) {
+    if (!script || typeof script !== 'string') return script;
+    const journey = workflowState?.currentJourney || workflowState?.currentItem || workflowState?.currentLeg;
+    const actions = Array.isArray(journey?.actions) ? journey.actions : [];
+    if (actions.length === 0) return script;
+
+    const resolveSelectorForActionIndex = (idx1) => {
+      const i = Number(idx1) - 1;
+      if (!Number.isFinite(i) || i < 0 || i >= actions.length) return null;
+      const action = actions[i];
+      let selector =
+        action?.selector || action?.locator || action?.element_info?.selector || action?.element_info?.primary_selector;
+      if (!selector || typeof selector !== 'string') return null;
+      const actionType = String(action?.type || action?.action_type || '').toLowerCase();
+      if (['click', 'navigate', 'open', 'press', 'tap', 'hover'].includes(actionType)) {
+        const inv = inferInventorySemanticForJourneyAction(action, workflowState);
+        if (inv?.inventory_semantic === 'link' && inv.inventory_selector) {
+          selector = inv.inventory_selector;
+        }
+      }
+      return selector;
+    };
+
+    let s = script;
+    s = s.replace(/(['"])action(\d+)\.selector\1/g, (full, _q, num) => {
+      const sel = resolveSelectorForActionIndex(num);
+      return sel ? JSON.stringify(sel) : full;
+    });
+    s = s.replace(
+      /\b((?:await\s+)?page\.(click|dblclick|check|uncheck|hover|tap)\(\s*)action(\d+)\.selector\s*\)/gi,
+      (full, lead, method, num) => {
+        const sel = resolveSelectorForActionIndex(num);
+        if (!sel) return full;
+        const hadAwait = /^await\s+/i.test(lead);
+        const inner = `page.${method}(${JSON.stringify(sel)})`;
+        return `${hadAwait ? 'await ' : ''}${inner}`;
+      }
+    );
+    s = s.replace(
+      /\b((?:await\s+)?page\.fill\(\s*)action(\d+)\.selector(\s*,)/gi,
+      (full, lead, num, comma) => {
+        const sel = resolveSelectorForActionIndex(num);
+        if (!sel) return full;
+        const hadAwait = /^await\s+/i.test(lead);
+        const inner = `page.fill(${JSON.stringify(sel)}${comma}`;
+        return `${hadAwait ? 'await ' : ''}${inner}`;
+      }
+    );
+    s = s.replace(/\.locator\(\s*(['"])action(\d+)\.selector\1\s*\)/gi, (full, _q, num) => {
+      const sel = resolveSelectorForActionIndex(num);
+      return sel ? `.locator(${JSON.stringify(sel)})` : full;
+    });
+    return s;
+  }
+
+  /** True when journey script still contains unreplaced actionN.selector scaffolding after repairs. */
+  journeyScriptHasActionPlaceholderArtifacts(script) {
+    if (!script || typeof script !== 'string') return false;
+    if (/(['"])action\d+\.selector\1/.test(script)) return true;
+    if (/\bpage\.(?:click|dblclick|fill|check|uncheck|hover|tap)\(\s*action\d+\.selector\b/i.test(script)) return true;
+    if (/\.locator\(\s*(['"])action\d+\.selector\1\s*\)/i.test(script)) return true;
+    return false;
   }
 
   cleanScript(script) {
@@ -15667,6 +15738,29 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     const journeyRawScriptLen = code && typeof code === 'string' ? code.trim().length : 0;
     code = this.finalizeAiGeneratedPlaywrightScript(code);
     if (isJourneyScriptExecutionStep && code && typeof code === 'string') {
+      code = this.repairJourneyActionPlaceholderSelectors(code, workflowState);
+      if (this.journeyScriptHasActionPlaceholderArtifacts(code)) {
+        const detPh2 = this.prepareDeterministicJourneyExecutionScript(workflowState);
+        if (detPh2 && typeof detPh2 === 'string' && detPh2.trim().length > 0) {
+          code = detPh2;
+          workflowState.legScriptToExecute = detPh2;
+          if (!workflowState.context) workflowState.context = {};
+          workflowState.context.legScriptToExecute = detPh2;
+          this.initializeVariablePool(workflowState);
+          this.saveVariable(workflowState, 'legScriptToExecute', detPh2, 'page', step);
+          if (jobId && this.backendLogger) {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'info',
+              'Using deterministic inventory journey script: actionN.selector placeholders could not be mapped to currentJourney.actions.',
+              'WORKFLOW-ANALYZER',
+              { step_id: step.id, step_name: step.name, source_field: sourceField, fallback_script_length: detPh2.length }
+            );
+          }
+        }
+      }
+    }
+    if (isJourneyScriptExecutionStep && code && typeof code === 'string') {
       const spaLead = `await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});\nawait page.waitForTimeout(350);\n`;
       if (!/\bwaitForLoadState\s*\(\s*['"]domcontentloaded['"]/i.test(code)) {
         code = spaLead + code;
@@ -15829,10 +15923,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     }
 
     // Re-parse after cleaning/sanitization so execution logging and guards reflect the actual script we run.
-    const cleanedActionLines = this.parseScriptActions(code);
-    if (cleanedActionLines.length > 0 || actionLines.length === 0) {
-      actionLines = cleanedActionLines;
-    }
+    actionLines = this.parseScriptActions(code);
 
     let hasUnloggedPlaywright = this.journeyScriptHasUnloggedPlaywrightInteractions(code);
 
@@ -17242,6 +17333,14 @@ const sleep = safeWait;
         }
       };
       page.on('dialog', dialogHandler);
+
+      if (isJourneyScriptExecutionStep) {
+        try {
+          await this.waitForSpaInteractiveReady(page);
+        } catch (_) {
+          /* best-effort settle before scripted interactions */
+        }
+      }
 
       // Wrap script execution with timeout
       const executionStartTime = Date.now();
@@ -19341,10 +19440,15 @@ const sleep = safeWait;
     const needsLoad = !current || current === 'about:blank' || !tKey || !cKey || tKey !== cKey;
     const whileIter = Number(meta.while_loop_iteration);
     const isJourneyWhileRetry = Number.isFinite(whileIter) && whileIter > 1;
+    const interactiveCount = Array.isArray(workflowState?.playwrightAnalysis?.interactive_elements)
+      ? workflowState.playwrightAnalysis.interactive_elements.length
+      : 0;
+    const heavyInventorySpa = interactiveCount >= 48;
     const settleMs = () => {
       const settle = Number(workflowState.options?.spa_settle_ms);
       if (Number.isFinite(settle) && settle > 0) return Math.min(settle, 5000);
-      return isJourneyWhileRetry ? 1500 : 800;
+      if (isJourneyWhileRetry) return heavyInventorySpa ? 2200 : 1500;
+      return heavyInventorySpa ? 1100 : 800;
     };
     // After job-orchestrator re-queue the browser can still sit on the seed URL with a half-mutated
     // DOM while Node resumes; iteration 1 previously only waited for SPA readiness, which is
