@@ -244,6 +244,20 @@ function inventorySelectorMatches(candidate, inventory) {
   const n = normalizeSelectorTokenForInventory(t);
   if (inventory.normalized.has(n)) return true;
   if (!inventorySelectorMeaningful(n)) return false;
+  // data-testid selectors are highly specific; the LLM frequently invents them
+  // (e.g. button[data-testid="filter-facilities"]) and the substring fallback
+  // below otherwise lets them through whenever any inventory row mentions
+  // data-testid at all. Require an exact data-testid value match for these.
+  const candTestIdMatch = t.match(/data-testid\s*=\s*["']([^"']+)["']/i);
+  if (candTestIdMatch) {
+    const candTestId = String(candTestIdMatch[1] || '').trim().toLowerCase();
+    if (!candTestId) return false;
+    for (const r of inventory.raw) {
+      const m = String(r || '').match(/data-testid\s*=\s*["']([^"']+)["']/i);
+      if (m && String(m[1] || '').trim().toLowerCase() === candTestId) return true;
+    }
+    return false;
+  }
   for (const r of inventory.raw) {
     const rn = normalizeSelectorTokenForInventory(r);
     if (!rn || !inventorySelectorMeaningful(rn)) continue;
@@ -16567,12 +16581,14 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           console.log(`🔧 About to create page wrapper...`);
           // Pass step info for logging context
           const stepInfo = step ? { id: step.id, name: step.name } : null;
-          const generatedTimeoutClampMs = isJourneyScriptExecutionStep
-            ? Math.min(
-                STEP_TIMEOUT_SETTINGS_CEILING_MS,
-                Math.max(Number(timeout) || 0, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS)
-              )
-            : 60000;
+          // For journey scripts the per-action upper bound stays at 30s so that any AI-injected
+          // `page.setDefaultTimeout(900000)` (after capPlaywrightAutomationTimeouts trims it to 45s)
+          // is further clamped down by the wrapper interceptor — missing/invented selectors must
+          // fail in seconds, not minutes, otherwise the screencast watchdog ends the stage with
+          // pure idle frames and the UI shows "nothing happening". The overall script budget is
+          // still governed by the outer Promise.race / step timeout (15m for journey legs).
+          // Non-journey generated code keeps the original 60s ceiling.
+          const generatedTimeoutClampMs = isJourneyScriptExecutionStep ? 30000 : 60000;
           wrappedPage = createPageWrapperWithScreenshot(
             pageObj,
             jobId,
@@ -16589,7 +16605,21 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           wrappedPage = pageObj;
         }
 
-        const playwrightTimeoutMs = Math.max(Number(timeout) || 30000, 60000);
+        // Per-action Playwright default — kept SHORT for journey scripts so missing AI-invented selectors
+        // fail fast (~30s) instead of inheriting the 15-minute script-level budget. Otherwise a single
+        // bad `page.click('button[data-testid="invented"]')` hangs the entire journey iteration until the
+        // screencast watchdog auto-ends the stage at 45s, producing 1-second compacted clips with no real
+        // motion (root cause of "videos contain nothing happening" on dev3 dashboard).
+        // For non-journey execute-code steps (cookies, helpers) we keep the original logic.
+        const PER_ACTION_TIMEOUT_CEILING_MS_JOURNEY = 30000;
+        const stepTimeoutFloor = isJourneyScriptExecutionStep ? 10000 : 60000;
+        const stepTimeoutCeiling = isJourneyScriptExecutionStep
+          ? PER_ACTION_TIMEOUT_CEILING_MS_JOURNEY
+          : Number.POSITIVE_INFINITY;
+        const playwrightTimeoutMs = Math.min(
+          stepTimeoutCeiling,
+          Math.max(Number(timeout) || 30000, stepTimeoutFloor)
+        );
         try {
           if (wrappedPage && typeof wrappedPage.setDefaultTimeout === 'function') {
             wrappedPage.setDefaultTimeout(playwrightTimeoutMs);
