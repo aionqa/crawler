@@ -108,6 +108,12 @@ export function injectJourneyClickExistencePreflight(source) {
   s = s.replace(
     /\bawait\s+page\.click\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1\s*\)\s*;?/g,
     (_full, q, sel) => {
+      // Selectors like button:has-text("X") contain `)` inside the string. The naive `(?:\\.|(?!\\1).)*`
+      // + `\s*\)` terminator can match the `)` that closes :has-text(...) instead of page.click(...),
+      // producing invalid JS ("missing ) after argument list") and bogus preflight literals.
+      if (sel.includes('(') || sel.includes(')')) {
+        return _full;
+      }
       injected = true;
       const literal = `${q}${sel}${q}`;
       return `if (await __jrn_preflightSelector(${literal}, 'click')) { await page.click(${literal}, { timeout: 8000 }).catch((__e) => ({ click_error: String(__e && __e.message || __e) })); }`;
