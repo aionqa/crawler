@@ -10,7 +10,7 @@ import OpenAI from 'openai';
 import { chromium } from 'playwright';
 import axios from 'axios';
 import { createOpenAIClient, isNetworkUnreachableError, isTransientGatewayError } from '../src/openai-client-factory.js';
-import { prepareScreenshotUpload, uploadScreenshotToPresignedUrl } from '../src/backend-logger.js';
+import { appendJobLog, prepareScreenshotUpload, uploadScreenshotToPresignedUrl } from '../src/backend-logger.js';
 import { getRunnerBackendUrl } from '../src/utils/runner-service-urls.js';
 
 /**
@@ -1115,12 +1115,12 @@ export class AIConversationLogger {
           const requestedBy = stepLabel ? ` — Requested by: ${stepLabel}` : '';
           const pageInfo = pageUrl ? ` - Page: ${new URL(pageUrl).pathname}` : '';
           
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: effectiveJobId,
-            level: 'info',
-            message: `🤖 AI Request:${requestedBy}${pageInfo} - Model: ${model}${paramsText}`,
-            component: 'AI-CALL',
-            metadata: {
+          await appendJobLog(
+            effectiveJobId,
+            'info',
+            `🤖 AI Request:${requestedBy}${pageInfo} - Model: ${model}${paramsText}`,
+            'AI-CALL',
+            {
               prompt_slug: promptSlug,
               step_name: stepName,
               step_id: stepId,
@@ -1141,9 +1141,7 @@ export class AIConversationLogger {
               aiConversationId: pendingConversationId, // Link to conversation
               attempt_number: attemptNumber
             }
-          }, {
-            headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}
-          }).catch(() => {}); // Silent fail - don't block execution
+          ).catch(() => {}); // Silent fail - don't block execution
         } catch (e) {
           // Silent fail - don't block execution
         }
@@ -1262,19 +1260,17 @@ export class AIConversationLogger {
               console.warn(`[AI-CALL] ⚠️ OpenAI response was truncated (finish_reason: length). This may indicate incomplete content.`);
               if (effectiveJobId && this.backendUrl) {
                 try {
-                  await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-                    jobId: effectiveJobId,
-                    level: 'warn',
-                    message: `⚠️ OpenAI response was truncated (finish_reason: length). Response may be incomplete.`,
-                    component: 'AI-CALL',
-                    metadata: {
+                  await appendJobLog(
+                    effectiveJobId,
+                    'warn',
+                    `⚠️ OpenAI response was truncated (finish_reason: length). Response may be incomplete.`,
+                    'AI-CALL',
+                    {
                       finish_reason: finishReason,
                       prompt_slug: promptSlug,
                       truncated: true
                     }
-                  }, {
-                    headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}
-                  }).catch(() => {});
+                  ).catch(() => {});
                 } catch (e) {}
               }
             }
@@ -1404,12 +1400,12 @@ export class AIConversationLogger {
             : null;
           const completedStepSuffix = stepLabelDone ? ` (${stepLabelDone})` : '';
           
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: effectiveJobId,
-            level: 'info',
-            message: `✅ AI call completed in ${durationSeconds}s${completedStepSuffix} - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, ${costText}`,
-            component: 'AI-CALL',
-            metadata: {
+          await appendJobLog(
+            effectiveJobId,
+            'info',
+            `✅ AI call completed in ${durationSeconds}s${completedStepSuffix} - Input: ${inputTokens} tokens, Output: ${outputTokens} tokens, Total: ${totalTokens} tokens, ${costText}`,
+            'AI-CALL',
+            {
               prompt_slug: promptSlug,
               step_name: stepNameDone,
               step_id: sourcePayload?.step_id || sourcePayload?.stepId || null,
@@ -1437,9 +1433,7 @@ export class AIConversationLogger {
               }, null, 2), // Response as JSON tree
               aiConversationId: pendingConversationId // Link to conversation
             }
-          }, {
-            headers: this.runnerToken ? { 'Authorization': `Bearer ${this.runnerToken}` } : {}
-          }).catch(() => {}); // Silent fail - don't block execution
+          ).catch(() => {}); // Silent fail - don't block execution
         } catch (e) {
           // Silent fail - don't block execution
         }

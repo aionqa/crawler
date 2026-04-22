@@ -6,6 +6,7 @@
  * Endpoints:
  * - POST /api/logs/jobs/create
  * - POST /api/logs/jobs/append
+ * - POST /api/logs/jobs/append-ai (components AI-CALL / AI-SERVICE; separate SQS type logs.jobs.append.ai)
  * - POST /api/logs/pages/create
  * - POST /api/logs/pages/append
  * - POST /api/logs/aichats/create
@@ -24,6 +25,10 @@
  * Job and page lines are **batched** in memory and sent as `entries[]` every
  * `LOG_CHUNK_FLUSH_INTERVAL_SEC` seconds (clamped 10–300, default 30). Call
  * {@link flushAllBufferedLogs} on shutdown. AI chat logs stay unbuffered.
+ *
+ * Lines with component **AI-CALL** or **AI-SERVICE** use a separate in-memory
+ * buffer and `POST /api/logs/jobs/append-ai` on flush, every
+ * `AI_LOG_CHUNK_FLUSH_INTERVAL_SEC` (10–300, default 30).
  */
 
 import { getRunnerBackendUrl } from './utils/runner-service-urls.js';
@@ -39,25 +44,46 @@ const LOG_CHUNK_FLUSH_INTERVAL_SEC = Math.min(
   300,
   Math.max(10, Number(process.env.LOG_CHUNK_FLUSH_INTERVAL_SEC || 30) || 30)
 );
+const AI_LOG_CHUNK_FLUSH_INTERVAL_SEC = Math.min(
+  300,
+  Math.max(10, Number(process.env.AI_LOG_CHUNK_FLUSH_INTERVAL_SEC || 30) || 30)
+);
 const MAX_BUFFERED_LINES_PER_POST = 200;
 
 const _jobLogBuffers = new Map();
+/** AI-CALL / AI-SERVICE lines → separate firehose type on the backend. */
+const _aiJobLogBuffers = new Map();
 /** @type {Map<string, { jobId: string, pageUrl: string, pageLogId: string|null, entries: object[] }>} */
 const _pageLogBuffers = new Map();
 let _logFlushTimer = null;
+let _aiLogFlushTimer = null;
 
 function _pageBufferKey(jobId, pageUrl, pageLogId) {
   const pl = pageLogId != null ? String(pageLogId) : '';
   return `${jobId}\u0000${pageUrl}\u0000${pl}`;
 }
 
+function _isAiJobLogComponent(component) {
+  const c = String(component || '').trim();
+  return c === 'AI-CALL' || c === 'AI-SERVICE';
+}
+
 function _ensureLogFlushTimer() {
   if (_logFlushTimer != null) return;
   const ms = LOG_CHUNK_FLUSH_INTERVAL_SEC * 1000;
   _logFlushTimer = setInterval(() => {
-    flushAllBufferedLogs().catch((err) => console.warn(`[LOG-BUFFER] ${err.message}`));
+    _flushStandardJobAndPageBuffers().catch((err) => console.warn(`[LOG-BUFFER] ${err.message}`));
   }, ms);
   if (typeof _logFlushTimer.unref === 'function') _logFlushTimer.unref();
+}
+
+function _ensureAiLogFlushTimer() {
+  if (_aiLogFlushTimer != null) return;
+  const ms = AI_LOG_CHUNK_FLUSH_INTERVAL_SEC * 1000;
+  _aiLogFlushTimer = setInterval(() => {
+    _flushAiJobLogBuffers().catch((err) => console.warn(`[AI-LOG-BUFFER] ${err.message}`));
+  }, ms);
+  if (typeof _aiLogFlushTimer.unref === 'function') _aiLogFlushTimer.unref();
 }
 
 function _splitIntoBatches(arr, maxPer) {
@@ -162,10 +188,7 @@ export async function postBackend(pathOrUrl, body, opts = {}) {
   return null;
 }
 
-/**
- * Flush all buffered job/page log lines to the backend (awaitable).
- */
-export async function flushAllBufferedLogs() {
+async function _flushStandardJobAndPageBuffers() {
   for (const [jobId, lines] of [..._jobLogBuffers.entries()]) {
     if (!lines.length) {
       _jobLogBuffers.delete(jobId);
@@ -210,6 +233,37 @@ export async function flushAllBufferedLogs() {
   }
 }
 
+async function _flushAiJobLogBuffers() {
+  for (const [jobId, lines] of [..._aiJobLogBuffers.entries()]) {
+    if (!lines.length) {
+      _aiJobLogBuffers.delete(jobId);
+      continue;
+    }
+    const chunk = lines.splice(0, lines.length);
+    if (!chunk.length) {
+      _aiJobLogBuffers.delete(jobId);
+      continue;
+    }
+    for (const batch of _splitIntoBatches(chunk, MAX_BUFFERED_LINES_PER_POST)) {
+      if (!batch.length) continue;
+      await postBackend(
+        '/api/logs/jobs/append-ai',
+        { jobId, entries: batch },
+        { label: 'appendAiJobLogChunk' }
+      );
+    }
+    if (!lines.length) _aiJobLogBuffers.delete(jobId);
+  }
+}
+
+/**
+ * Flush all buffered job/page/AI job log lines to the backend (awaitable).
+ */
+export async function flushAllBufferedLogs() {
+  await _flushStandardJobAndPageBuffers();
+  await _flushAiJobLogBuffers();
+}
+
 /**
  * Create a job log context
  */
@@ -232,8 +286,6 @@ export async function appendJobLog(
 ) {
   const jobIdStr = jobId != null ? String(jobId) : null;
   if (!jobIdStr) return { ok: false };
-  _ensureLogFlushTimer();
-  if (!_jobLogBuffers.has(jobIdStr)) _jobLogBuffers.set(jobIdStr, []);
   const entry = {
     level,
     message,
@@ -244,7 +296,15 @@ export async function appendJobLog(
   if (Array.isArray(attachments) && attachments.length > 0) {
     entry.attachments = attachments;
   }
-  _jobLogBuffers.get(jobIdStr).push(entry);
+  if (_isAiJobLogComponent(component)) {
+    _ensureAiLogFlushTimer();
+    if (!_aiJobLogBuffers.has(jobIdStr)) _aiJobLogBuffers.set(jobIdStr, []);
+    _aiJobLogBuffers.get(jobIdStr).push(entry);
+  } else {
+    _ensureLogFlushTimer();
+    if (!_jobLogBuffers.has(jobIdStr)) _jobLogBuffers.set(jobIdStr, []);
+    _jobLogBuffers.get(jobIdStr).push(entry);
+  }
   return { ok: true, buffered: true };
 }
 
