@@ -2760,6 +2760,9 @@ class WorkflowExecutor {
       const { humanClick } = await import('../../browser/human-behavior-wrapper.js');
       const { humanType } = await import('../../browser/human-typing.js');
       const { humanDelay } = await import('../../browser/stealth-config.js');
+      // Centralized human-like primitives for click/press/hover/select used
+      // by the page wrapper below. Importing once per leg keeps overhead low.
+      const humanActions = await import('../../browser/human-actions.js');
       
       // Create a wrapper page object that intercepts ALL Playwright methods to log execution
       const createPageWrapper = (pageObj, jobId, backendLogger) => {
@@ -3403,10 +3406,21 @@ class WorkflowExecutor {
             await target.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
             const selectFallback = await trySelectOptionFallback(pageObj.locator(selector), normalizedText);
             if (selectFallback.handled) return;
-            return await target.type(String(normalizedText), options);
+            // Use the human-like type so per-key delays show up in the recording.
+            return await humanActions.humanType(target, String(normalizedText), { timeout: options?.timeout });
           };
         }
-        if (typeof pageObj.press === 'function') wrapper.press = wrapMethod('press', pageObj.press.bind(pageObj));
+        if (typeof pageObj.press === 'function') {
+          wrapper.press = async function(selector, key, options = {}) {
+            await logAction('press', [selector, key]);
+            try {
+              const target = await pickVisibleCandidate(pageObj.locator(selector));
+              await target.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
+              await target.focus({ timeout: options?.timeout }).catch(() => {});
+            } catch (_) { /* fall through to page-level press */ }
+            return await humanActions.humanPress(pageObj, key, options);
+          };
+        }
         if (typeof pageObj.goto === 'function') wrapper.goto = wrapMethod('goto', pageObj.goto.bind(pageObj));
         if (typeof pageObj.waitForTimeout === 'function') {
           wrapper.waitForTimeout = wrapMethod('waitForTimeout', pageObj.waitForTimeout.bind(pageObj));
@@ -3421,10 +3435,24 @@ class WorkflowExecutor {
             return await pageObj.waitForSelector(selector, options);
           };
         }
-        if (typeof pageObj.selectOption === 'function') wrapper.selectOption = wrapMethod('selectOption', pageObj.selectOption.bind(pageObj));
+        if (typeof pageObj.selectOption === 'function') {
+          wrapper.selectOption = async function(selector, value, options = {}) {
+            await logAction('selectOption', [selector, value]);
+            const target = await pickVisibleCandidate(pageObj.locator(selector));
+            await target.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
+            return await humanActions.humanSelect(target, value, { timeout: options?.timeout });
+          };
+        }
         if (typeof pageObj.check === 'function') wrapper.check = wrapMethod('check', pageObj.check.bind(pageObj));
         if (typeof pageObj.uncheck === 'function') wrapper.uncheck = wrapMethod('uncheck', pageObj.uncheck.bind(pageObj));
-        if (typeof pageObj.hover === 'function') wrapper.hover = wrapMethod('hover', pageObj.hover.bind(pageObj));
+        if (typeof pageObj.hover === 'function') {
+          wrapper.hover = async function(selector, options = {}) {
+            await logAction('hover', [selector]);
+            const target = await pickVisibleCandidate(pageObj.locator(selector));
+            await target.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
+            return await humanActions.humanHover(target, { timeout: options?.timeout });
+          };
+        }
         if (typeof pageObj.focus === 'function') wrapper.focus = wrapMethod('focus', pageObj.focus.bind(pageObj));
         if (typeof pageObj.blur === 'function') wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
         
@@ -3452,9 +3480,10 @@ class WorkflowExecutor {
               if (prop === 'click') {
                 return async (...args) => {
                   await logAction(`locator(${typeof selectorHint === 'string' ? selectorHint.substring(0, 50) : '...'}).click`, args);
+                  const [clickOptions] = args;
                   try {
                     const visible = await pickVisibleCandidate(target);
-                    return await visible.click(...args);
+                    return await humanActions.humanClick(visible, clickOptions || {});
                   } catch (clickError) {
                     if (shouldUseDomFallback(clickError) && typeof selectorHint === 'string' && selectorHint.trim()) {
                       const fallbackResult = await domClickFallback(selectorHint);
@@ -3477,7 +3506,8 @@ class WorkflowExecutor {
                     await visible.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
                     const selectFallback = await trySelectOptionFallback(target, normalizedValue);
                     if (selectFallback.handled) return;
-                    return await visible.fill(normalizedValue, options);
+                    // Per-key humanized typing (visible in the recording).
+                    return await humanActions.humanType(visible, normalizedValue, { timeout: options?.timeout });
                   } catch (fillError) {
                     if (shouldUseDomFallback(fillError) && typeof selectorHint === 'string' && selectorHint.trim()) {
                       const fallbackResult = await domFillFallback(selectorHint, normalizedValue);
@@ -3500,7 +3530,21 @@ class WorkflowExecutor {
                   await visible.waitFor({ state: 'attached', timeout: options?.timeout || 60000 });
                   const selectFallback = await trySelectOptionFallback(target, normalizedValue);
                   if (selectFallback.handled) return;
-                  return await visible.type(String(normalizedValue), options);
+                  return await humanActions.humanType(visible, normalizedValue, { timeout: options?.timeout });
+                };
+              }
+              if (prop === 'hover') {
+                return async (...args) => {
+                  await logAction(`locator(${typeof selectorHint === 'string' ? selectorHint.substring(0, 50) : '...'}).hover`, args);
+                  const visible = await pickVisibleCandidate(target);
+                  return await humanActions.humanHover(visible, args[0] || {});
+                };
+              }
+              if (prop === 'selectOption') {
+                return async (...args) => {
+                  await logAction(`locator(${typeof selectorHint === 'string' ? selectorHint.substring(0, 50) : '...'}).selectOption`, args);
+                  const visible = await pickVisibleCandidate(target);
+                  return await humanActions.humanSelect(visible, args[0], args[1] || {});
                 };
               }
               return async (...args) => {

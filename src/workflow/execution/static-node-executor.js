@@ -359,8 +359,9 @@ export class StaticNodeExecutor {
     // Step announcement already done in executeNode
     try {
       await this.page.waitForSelector(selector, { timeout: 10000 });
-      await this.page.click(selector);
-      
+      const { humanClick } = await import('../../browser/human-actions.js');
+      await humanClick(this.page.locator(selector));
+
       // Wait for any navigation or state changes
       await this.page.waitForTimeout(1000);
 
@@ -394,7 +395,8 @@ export class StaticNodeExecutor {
     // Step announcement already done in executeNode
     try {
       await this.page.waitForSelector(selector, { timeout: 10000 });
-      await this.page.fill(selector, String(value));
+      const { humanType } = await import('../../browser/human-actions.js');
+      await humanType(this.page.locator(selector), String(value));
 
       return {
         success: true,

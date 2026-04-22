@@ -6486,31 +6486,32 @@ async function executeLoginFromAnalysis(page, analysis, context) {
       analysis_confidence: analysis.confidence
     });
     
-    // Fill login form
+    // Fill login form (humanized: per-key delay, mouse moves, recordable).
+    const { humanType: humanFill, humanClick: humanClickHelper, humanPress: humanPressHelper } = await import('../browser/human-actions.js');
     await sendLog(jobId, 'info', '✏️ Filling username field', { ...pageContext, action: 'form_fill' });
-    await usernameField.fill(context.credentials.username);
-    
+    await humanFill(usernameField, context.credentials.username);
+
     const usernameScreenshot = await takeScreenshot(page, jobId, 'after_username', {
       step: 'after_username',
       form_type: 'login',
       field_filled: 'username'
     });
-    
+
     await sendLog(jobId, 'info', '✏️ Filling password field', { ...pageContext, action: 'form_fill' });
-    await passwordField.fill(context.credentials.password);
-    
+    await humanFill(passwordField, context.credentials.password);
+
     const passwordScreenshot = await takeScreenshot(page, jobId, 'after_password', {
       step: 'after_password',
       form_type: 'login',
       field_filled: 'password'
     });
-    
+
     // Submit form
     await sendLog(jobId, 'info', '🖱️ Submitting login form', { ...pageContext, action: 'login_execution' });
     if (submitButton) {
-      await submitButton.click();
+      await humanClickHelper(submitButton);
     } else {
-      await passwordField.press('Enter');
+      await humanPressHelper(page, 'Enter');
     }
     
     // Wait for navigation or response

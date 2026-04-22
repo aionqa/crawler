@@ -1,48 +1,44 @@
 /**
- * Screencast Recorder (Playwright 1.59 page.screencast)
+ * Screencast Recorder (Playwright 1.59 page.screencast) — per-stage playlist mode.
  *
- * Replaces the legacy `context.recordVideo` + JPEG screenshot streaming + CDP
- * Page.startScreencast paths with a single unified API built on top of
- * `page.screencast.start({ path, onFrame, ... })`.
+ * Each browser run produces a *playlist* of WebM clips (one per workflow leg /
+ * journey stage). We do NOT record a single session-wide video, and we do NOT
+ * stream live frames — both of those proved too heavy.
  *
- * What it captures for every run:
- *   1. The page video itself (one .webm per page, primary uploaded as the
- *      session video, additional pages uploaded as segments).
- *   2. Real-time frames via the `onFrame` callback, throttled and pushed to
- *      the backend frame buffer for live UI playback.
- *   3. Highlighted user actions via `screencast.showActions()` (drawn on top
- *      of the recording by Playwright itself).
- *   4. Action titles via `screencast.showOverlay(...)` (also baked into the
- *      video, plus tracked in metadata so the UI can render them on the
- *      timeline).
- *   5. Chapter overlays via `screencast.showChapter(title, { description })`,
- *      typically driven by workflow leg / journey boundaries.
+ * Lifecycle:
+ *   1. `attachJob(jobId, page, viewport)` — remembers the primary page for
+ *      this job. Cheap; no recording yet.
+ *   2. `startStage(jobId, stageId, label, metadata)` — opens a fresh
+ *      `page.screencast.start({ path })` on the primary page, calls
+ *      `screencast.showActions()` so user actions are highlighted, and shows a
+ *      chapter overlay with the stage label.
+ *   3. `endStage(jobId, stageId, extra)` — calls `screencast.stop()`, waits
+ *      for the WebM to flush, uploads it as a `video_segments` entry on the
+ *      job, and returns the segment metadata.
+ *   4. `finalize(jobId)` — sends a final `POST /api/jobs/:id/video` carrying
+ *      playlist metadata only (no `full_video_url` because the playlist IS
+ *      the video).
  *
- * The recorder also keeps the legacy "video segment" cutting (per-leg WebM
- * clips) so existing UI features and `video_segments` storage keep working.
+ * Idle time between stages — typically waiting for the LLM to decide what to
+ * do next — is NOT recorded, so storage stays small and the UI playlist only
+ * contains real interactions.
  */
 
 import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import ActivityDetector from './activity-detector.js';
 
 const execFileAsync = promisify(execFile);
 
 const VIDEO_TMP_DIR = process.env.SCREENCAST_TMP_DIR || '/tmp/aionqa_videos';
 const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
+const RECORDER_TAG = 'playwright-screencast-1.59-playlist';
 
 function envInt(name, fallback) {
   const raw = Number.parseInt(process.env[name] || '', 10);
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
-}
-
-function envFloat(name, fallback) {
-  const raw = Number.parseFloat(process.env[name] || '');
-  return Number.isFinite(raw) ? raw : fallback;
 }
 
 function nowMs() {
@@ -54,16 +50,7 @@ function safeFilename(value) {
     .toLowerCase()
     .replace(/[^a-z0-9\-]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .substring(0, 60) || 'item';
-}
-
-function escapeHtml(value) {
-  return String(value == null ? '' : value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .substring(0, 60) || 'stage';
 }
 
 class ScreencastRecorder {
@@ -71,15 +58,8 @@ class ScreencastRecorder {
     this.backendUrl = backendUrl;
     this.runnerId = runnerId;
     this.runnerToken = runnerToken || process.env.RUNNER_TOKEN || null;
-    this.activeRecordings = new Map(); // jobId -> recording info
-
-    // Live-frame plumbing (carried over from legacy VideoStreamManager so we
-    // can keep the existing presigned-URL pool + batched notify endpoints).
-    this.presignedPools = new Map(); // jobId -> Array<{ url, key, publicUrl }>
-    this.pendingNotify = new Map(); // jobId -> Array<row>
-    this.notifyFlushTimers = new Map(); // jobId -> Timeout
-
-    this._warnedNoRunnerToken = false;
+    /** jobId -> { page, context, viewport, jobStartTime, segments[], chapters[], actions[], activeStage } */
+    this.jobs = new Map();
 
     try {
       if (!fs.existsSync(VIDEO_TMP_DIR)) {
@@ -91,511 +71,438 @@ class ScreencastRecorder {
   }
 
   // ---------------------------------------------------------------------------
-  // Public API used by runner.js / workflow-executor.js
+  // Job lifecycle
   // ---------------------------------------------------------------------------
 
   /**
-   * Start recording for a job. Attaches a screencast to every existing page
-   * in the context and to any future page opened in the same context.
-   *
-   * @param {string} jobId
-   * @param {import('playwright').BrowserContext} context
-   * @param {import('playwright').Page} page  Primary page (the one users see)
-   * @param {Object} [options]
-   * @param {{width:number,height:number}} [options.viewport]
-   * @param {number} [options.quality]
-   * @param {number} [options.frameIntervalMs]  Throttle for `onFrame` uploads.
+   * Bind a job to its primary page. No recording happens here — recording only
+   * starts when `startStage(...)` is called. Safe to call multiple times.
    */
-  async startRecording(jobId, context, page, options = {}) {
-    if (this.activeRecordings.has(jobId)) {
-      console.log(`[SCREENCAST] Recording already active for job ${jobId}`);
-      return false;
-    }
-
+  attachJob(jobId, context, page, options = {}) {
+    if (!jobId || !page) return false;
     const viewport = (options.viewport && options.viewport.width && options.viewport.height)
       ? { width: options.viewport.width, height: options.viewport.height }
       : DEFAULT_VIEWPORT;
-    const quality = Number.isFinite(Number(options.quality))
-      ? Math.max(10, Math.min(100, Number(options.quality)))
-      : envInt('SCREENCAST_JPEG_QUALITY', 70);
-    const frameIntervalMs = Number.isFinite(Number(options.frameIntervalMs))
-      ? Math.max(50, Number(options.frameIntervalMs))
-      : envInt('SCREENCAST_FRAME_INTERVAL_MS', 200);
-
-    console.log(`🎬 [SCREENCAST] Starting screencast recording for job ${jobId} (viewport=${viewport.width}x${viewport.height}, frameInterval=${frameIntervalMs}ms, quality=${quality})`);
-
-    const startTime = nowMs();
-    const recording = {
+    const existing = this.jobs.get(jobId);
+    if (existing) {
+      existing.context = context || existing.context;
+      existing.page = page;
+      existing.viewport = viewport;
+      return true;
+    }
+    this.jobs.set(jobId, {
       jobId,
       context,
-      primaryPage: page,
-      startTime,
-      startedAt: new Date(startTime),
+      page,
       viewport,
-      quality,
-      frameIntervalMs,
-      pages: new Map(), // page -> { id, path, started, lastFrameAt, frameCount, dispose, actionsDispose }
-      pageCounter: 0,
-      chapters: [], // [{ time_offset, title, description, kind }]
-      overlays: [], // [{ time_offset, duration, title, kind }]
-      actions: [],  // [{ time_offset, title, status }]
-      segments: [], // legacy per-leg cuts: [{ id, label, metadata, startTimestamp, endTimestamp }]
-      activityDetector: null,
-      onContextPage: null,
-      stopped: false,
-      frameSeq: 0,
-      lastFrameUploadAt: 0
-    };
-
-    // Attach screencast to every existing page in the context.
-    try {
-      const pages = (context && typeof context.pages === 'function') ? context.pages() : [page];
-      const seen = new Set();
-      const attachTargets = [page, ...pages].filter((p) => {
-        if (!p || seen.has(p)) return false;
-        seen.add(p);
-        return true;
-      });
-      for (const target of attachTargets) {
-        await this._attachPage(recording, target).catch((err) => {
-          console.warn(`[SCREENCAST] Failed to attach screencast to existing page: ${err.message}`);
-        });
-      }
-    } catch (err) {
-      console.warn(`[SCREENCAST] Failed to enumerate existing pages for job ${jobId}: ${err.message}`);
-    }
-
-    // Attach future pages opened in the same context.
-    if (context && typeof context.on === 'function') {
-      const onPage = (newPage) => {
-        this._attachPage(recording, newPage).catch((err) => {
-          console.warn(`[SCREENCAST] Failed to attach screencast to new page: ${err.message}`);
-        });
-      };
-      context.on('page', onPage);
-      recording.onContextPage = onPage;
-    }
-
-    // Activity detection (powers inactive-period compression at stop time).
-    try {
-      const activityDetector = new ActivityDetector(page, startTime);
-      await activityDetector.start();
-      recording.activityDetector = activityDetector;
-    } catch (err) {
-      console.warn(`[SCREENCAST] ActivityDetector failed to start for job ${jobId}: ${err.message}`);
-    }
-
-    this.activeRecordings.set(jobId, recording);
+      jobStartTime: nowMs(),
+      segments: [], // [{ segment_id, label, metadata, start_offset, end_offset, duration, video_url, video_key, size_bytes, frame_count }]
+      chapters: [], // [{ time_offset, title, description, kind, stage_id }]
+      actions: [],  // [{ time_offset, title, kind, stage_id }]
+      activeStage: null
+    });
     return true;
   }
 
   /**
-   * Attach a screencast to a single page. Public so callers can manually wire
-   * a popup that escaped the context.on('page') flow.
+   * Tell the recorder a new primary page is in use (e.g. after a redirect that
+   * spawned a different page object). Updates the binding without restarting
+   * any active recording.
    */
-  async attachPage(jobId, page) {
-    const recording = this.activeRecordings.get(jobId);
-    if (!recording) return false;
-    return this._attachPage(recording, page);
+  setPrimaryPage(jobId, page) {
+    const job = this.jobs.get(jobId);
+    if (!job || !page) return;
+    job.page = page;
   }
 
   /**
-   * Show a chapter overlay (centered on the primary page, baked into the
-   * recording) and record it in metadata.
+   * Returns true if a stage is currently being recorded for this job.
    */
-  async showChapter(jobId, title, description = null, durationMs = 2000) {
-    const recording = this.activeRecordings.get(jobId);
-    if (!recording || recording.stopped) return;
-    const time_offset = Math.max(0, (nowMs() - recording.startTime) / 1000);
+  isStageActive(jobId) {
+    const job = this.jobs.get(jobId);
+    return Boolean(job && job.activeStage && !job.activeStage.stopped);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stage lifecycle (one stage = one WebM clip in the playlist)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Start a new stage recording. The stage runs on the job's currently-bound
+   * primary page. Call `endStage(...)` when the stage finishes (success or
+   * failure). It is safe to call this even if no `attachJob` happened first
+   * — in that case it returns null without recording.
+   */
+  async startStage(jobId, stageId, label, metadata = {}) {
+    const job = this.jobs.get(jobId);
+    if (!job) {
+      console.warn(`[SCREENCAST] startStage("${label}") for job ${jobId}: no attached page yet, skipping recording.`);
+      return null;
+    }
+    if (job.activeStage && !job.activeStage.stopped) {
+      console.warn(`[SCREENCAST] startStage("${label}") for job ${jobId}: another stage "${job.activeStage.label}" is already active, ending it first.`);
+      try { await this.endStage(jobId, job.activeStage.id, { reason: 'preempted' }); } catch (_) { /* ignore */ }
+    }
+    if (!this._isPageUsable(job.page)) {
+      console.warn(`[SCREENCAST] startStage("${label}") for job ${jobId}: primary page is not usable, skipping.`);
+      return null;
+    }
+    if (!job.page.screencast || typeof job.page.screencast.start !== 'function') {
+      console.warn(`[SCREENCAST] startStage("${label}") for job ${jobId}: page.screencast.start is unavailable. Make sure Playwright >= 1.59 is installed.`);
+      return null;
+    }
+
+    const id = stageId || `stage-${nowMs()}`;
+    const stageStart = nowMs();
+    const filename = `${jobId}-${safeFilename(label || id)}-${stageStart}.webm`;
+    const filePath = path.join(VIDEO_TMP_DIR, filename);
+
+    const stage = {
+      id,
+      label: String(label || id).slice(0, 200),
+      metadata: metadata || {},
+      page: job.page,
+      filePath,
+      startTime: stageStart,
+      stopped: false,
+      startDispose: null,
+      actionsDispose: null,
+      // Per-stage in-video metadata (chapters/actions/overlays).
+      stageChapters: [],
+      stageActions: []
+    };
+
+    try {
+      stage.startDispose = await job.page.screencast.start({
+        path: filePath,
+        size: job.viewport,
+        quality: envInt('SCREENCAST_JPEG_QUALITY', 70)
+      });
+    } catch (err) {
+      console.error(`[SCREENCAST] page.screencast.start failed for job ${jobId} stage "${label}": ${err.message}`);
+      return null;
+    }
+
+    try {
+      stage.actionsDispose = await job.page.screencast.showActions({
+        duration: envInt('SCREENCAST_ACTION_HIGHLIGHT_MS', 1500),
+        fontSize: envInt('SCREENCAST_ACTION_FONT_PX', 22),
+        position: process.env.SCREENCAST_ACTION_POSITION || 'top-right'
+      });
+    } catch (err) {
+      console.warn(`[SCREENCAST] showActions failed for job ${jobId} stage "${label}": ${err.message}`);
+    }
+
+    // Bake a chapter overlay into the start of the stage so it's visible in
+    // the playlist thumbnail / first second of the clip.
+    try {
+      const description = metadata?.description
+        ? String(metadata.description).slice(0, 300)
+        : (metadata?.journey_id ? `Journey ${metadata.journey_id}` : null);
+      if (job.page.screencast && typeof job.page.screencast.showChapter === 'function') {
+        await job.page.screencast.showChapter(stage.label, {
+          ...(description ? { description } : {}),
+          duration: envInt('SCREENCAST_STAGE_CHAPTER_MS', 1800)
+        });
+      }
+    } catch (err) {
+      console.warn(`[SCREENCAST] showChapter failed for stage "${label}": ${err.message}`);
+    }
+
+    stage.stageChapters.push({
+      time_offset: 0,
+      title: stage.label,
+      description: metadata?.description || null,
+      kind: 'stage_start',
+      stage_id: id
+    });
+    job.chapters.push({
+      time_offset: Math.max(0, (stageStart - job.jobStartTime) / 1000),
+      title: stage.label,
+      description: metadata?.description || null,
+      kind: 'stage_start',
+      stage_id: id
+    });
+
+    job.activeStage = stage;
+    console.log(`🎬 [SCREENCAST] Stage "${stage.label}" started for job ${jobId} -> ${filename}`);
+    return id;
+  }
+
+  /**
+   * Stop the active stage. Returns the uploaded segment metadata (or null on
+   * failure / if no stage was active).
+   */
+  async endStage(jobId, stageId, extra = {}) {
+    const job = this.jobs.get(jobId);
+    if (!job || !job.activeStage) return null;
+    if (stageId && job.activeStage.id !== stageId) {
+      // Stale callers; ignore quietly.
+      return null;
+    }
+    const stage = job.activeStage;
+    if (stage.stopped) return null;
+    stage.stopped = true;
+    job.activeStage = null;
+
+    // Stop showActions disposer (best-effort).
+    try {
+      if (stage.actionsDispose && typeof stage.actionsDispose.dispose === 'function') {
+        await stage.actionsDispose.dispose();
+      } else if (typeof stage.actionsDispose === 'function') {
+        await stage.actionsDispose();
+      }
+    } catch (_) { /* ignore */ }
+
+    // Stop the screencast and dispose the start handle to flush the WebM.
+    if (this._isPageUsable(stage.page)) {
+      try {
+        const sc = stage.page.screencast;
+        if (sc && typeof sc.stop === 'function') {
+          await sc.stop();
+        }
+      } catch (err) {
+        console.warn(`[SCREENCAST] stop() failed for stage "${stage.label}": ${err.message}`);
+      }
+    }
+    try {
+      if (stage.startDispose && typeof stage.startDispose.dispose === 'function') {
+        await stage.startDispose.dispose();
+      } else if (typeof stage.startDispose === 'function') {
+        await stage.startDispose();
+      }
+    } catch (_) { /* ignore */ }
+
+    // Wait briefly for the WebM file to finish writing.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    // Stat / measure / upload.
+    let stats = null;
+    try { stats = await fs.promises.stat(stage.filePath); } catch (_) { stats = null; }
+    if (!stats || stats.size <= 0) {
+      console.warn(`[SCREENCAST] Stage "${stage.label}" produced no WebM file at ${stage.filePath}; skipping upload.`);
+      return null;
+    }
+    const duration = await this._probeDurationSeconds(stage.filePath);
+    const sizeBytes = stats.size;
+    const startOffset = Math.max(0, (stage.startTime - job.jobStartTime) / 1000);
+    const endOffset = startOffset + (Number.isFinite(duration) ? duration : 0);
+
+    let uploadInfo = null;
+    try {
+      uploadInfo = await this._uploadSegmentFile(jobId, stage, sizeBytes);
+    } catch (err) {
+      console.error(`[SCREENCAST] Failed to upload stage "${stage.label}" for job ${jobId}: ${err.message}`);
+    }
+
+    // Cleanup the local file.
+    try { await fs.promises.unlink(stage.filePath); } catch (_) { /* ignore */ }
+
+    if (!uploadInfo) return null;
+
+    const segment = {
+      segment_id: stage.id,
+      label: stage.label,
+      type: stage.metadata?.type || 'workflow_leg',
+      leg_id: stage.metadata?.leg_id || null,
+      journey_id: stage.metadata?.journey_id || null,
+      start_offset: startOffset,
+      end_offset: endOffset,
+      padded_start: startOffset,
+      padded_end: endOffset,
+      duration: Number.isFinite(duration) ? duration : 0,
+      video_url: uploadInfo.videoUrl,
+      video_key: uploadInfo.key,
+      video_size_bytes: sizeBytes,
+      metadata: {
+        ...(stage.metadata || {}),
+        end_metadata: extra || {},
+        chapters: stage.stageChapters,
+        actions: stage.stageActions,
+        recorder: RECORDER_TAG
+      }
+    };
+
+    job.segments.push(segment);
+    console.log(`✅ [SCREENCAST] Stage "${stage.label}" uploaded: ${(sizeBytes / 1024).toFixed(0)} KB, ${segment.duration.toFixed(2)}s -> ${uploadInfo.videoUrl}`);
+
+    // Register with backend so the UI's playlist updates immediately.
+    try {
+      await this._registerSegment(jobId, segment);
+    } catch (err) {
+      console.warn(`[SCREENCAST] Could not register segment with backend: ${err.message}`);
+    }
+
+    return segment;
+  }
+
+  // ---------------------------------------------------------------------------
+  // In-video annotations (only meaningful while a stage is active)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Bake a chapter overlay into the active stage video. No-op if no stage is
+   * recording (so it can be called from anywhere safely).
+   */
+  async showChapter(jobId, title, description = null, durationMs = 1800) {
+    const job = this.jobs.get(jobId);
+    if (!job || !job.activeStage || job.activeStage.stopped) return;
+    const stage = job.activeStage;
+    if (!this._isPageUsable(stage.page)) return;
     const safeTitle = String(title || '').slice(0, 200);
-    const safeDescription = description ? String(description).slice(0, 500) : null;
-
-    recording.chapters.push({
-      time_offset,
-      title: safeTitle,
-      description: safeDescription,
-      duration: Number(durationMs) / 1000,
-      kind: 'chapter'
-    });
-
-    const target = recording.primaryPage;
-    if (this._isPageUsable(target)) {
-      try {
-        const screencast = target.screencast;
-        if (screencast && typeof screencast.showChapter === 'function') {
-          await screencast.showChapter(safeTitle, {
-            ...(safeDescription ? { description: safeDescription } : {}),
-            duration: Math.max(500, Number(durationMs) || 2000)
-          });
-        }
-      } catch (err) {
-        // Don't let overlay errors fail the run.
-        console.warn(`[SCREENCAST] showChapter failed for job ${jobId}: ${err.message}`);
+    const safeDescription = description ? String(description).slice(0, 300) : null;
+    const time_offset_stage = Math.max(0, (nowMs() - stage.startTime) / 1000);
+    const time_offset_job = Math.max(0, (nowMs() - job.jobStartTime) / 1000);
+    stage.stageChapters.push({ time_offset: time_offset_stage, title: safeTitle, description: safeDescription, kind: 'chapter', stage_id: stage.id });
+    job.chapters.push({ time_offset: time_offset_job, title: safeTitle, description: safeDescription, kind: 'chapter', stage_id: stage.id });
+    try {
+      const sc = stage.page.screencast;
+      if (sc && typeof sc.showChapter === 'function') {
+        await sc.showChapter(safeTitle, {
+          ...(safeDescription ? { description: safeDescription } : {}),
+          duration: Math.max(500, Number(durationMs) || 1800)
+        });
       }
+    } catch (err) {
+      // Don't fail anything because of an overlay.
     }
   }
 
   /**
-   * Show a custom HTML overlay (baked into the recording) and record it in
-   * metadata. Returns the textual title used so callers can correlate.
-   */
-  async showOverlay(jobId, htmlOrTitle, options = {}) {
-    const recording = this.activeRecordings.get(jobId);
-    if (!recording || recording.stopped) return null;
-    const time_offset = Math.max(0, (nowMs() - recording.startTime) / 1000);
-    const durationMs = Number.isFinite(Number(options.durationMs)) ? Number(options.durationMs) : 2500;
-
-    const isHtml = /<[a-z][\s\S]*>/i.test(String(htmlOrTitle || ''));
-    const title = String(options.title || (isHtml ? '' : (htmlOrTitle || ''))).slice(0, 200);
-    const html = isHtml
-      ? String(htmlOrTitle)
-      : `<div style="padding:10px 16px;background:rgba(15,23,42,0.85);color:#fff;border-radius:8px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:16px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.35);">${escapeHtml(title)}</div>`;
-
-    recording.overlays.push({
-      time_offset,
-      duration: durationMs / 1000,
-      title,
-      kind: options.kind || 'overlay'
-    });
-
-    const target = recording.primaryPage;
-    if (this._isPageUsable(target)) {
-      try {
-        const screencast = target.screencast;
-        if (screencast && typeof screencast.showOverlay === 'function') {
-          await screencast.showOverlay(html, { duration: Math.max(500, durationMs) });
-        }
-      } catch (err) {
-        console.warn(`[SCREENCAST] showOverlay failed for job ${jobId}: ${err.message}`);
-      }
-    }
-    return title || null;
-  }
-
-  /**
-   * Convenience: announce that a workflow action is starting. Records as both
-   * an overlay (visible in video) and an action timeline entry (metadata).
+   * Bake an action-title overlay into the active stage video. No-op if no
+   * stage is recording.
    */
   async showAction(jobId, title, kind = 'action_started') {
-    if (!title) return;
-    const recording = this.activeRecordings.get(jobId);
-    if (!recording || recording.stopped) return;
-    recording.actions.push({
-      time_offset: Math.max(0, (nowMs() - recording.startTime) / 1000),
-      title: String(title).slice(0, 200),
-      kind
-    });
-    await this.showOverlay(jobId, title, { kind, durationMs: 2000 });
+    const job = this.jobs.get(jobId);
+    if (!job || !job.activeStage || job.activeStage.stopped) return;
+    const stage = job.activeStage;
+    if (!this._isPageUsable(stage.page)) return;
+    const safeTitle = String(title || '').slice(0, 200);
+    const time_offset_stage = Math.max(0, (nowMs() - stage.startTime) / 1000);
+    const time_offset_job = Math.max(0, (nowMs() - job.jobStartTime) / 1000);
+    stage.stageActions.push({ time_offset: time_offset_stage, title: safeTitle, kind, stage_id: stage.id });
+    job.actions.push({ time_offset: time_offset_job, title: safeTitle, kind, stage_id: stage.id });
+    try {
+      const sc = stage.page.screencast;
+      if (sc && typeof sc.showOverlay === 'function') {
+        const html = `<div style="padding:8px 14px;background:rgba(15,23,42,0.85);color:#fff;border-radius:8px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.35);">${escapeHtml(safeTitle)}</div>`;
+        await sc.showOverlay(html, { duration: 1800 });
+      }
+    } catch (_) { /* ignore */ }
   }
 
-  // -- Legacy segment API kept stable for workflow-executor.js -----------------
+  // ---------------------------------------------------------------------------
+  // Legacy alias kept so existing callers (workflow-executor) continue to work.
+  // ---------------------------------------------------------------------------
 
   startSegment(jobId, segmentId, label, metadata = {}) {
-    const recording = this.activeRecordings.get(jobId);
-    if (!recording || recording.stopped) return null;
+    // Fire-and-forget so the executor's existing sync call site works.
     const id = segmentId || `segment-${nowMs()}`;
-    recording.segments.push({
-      id,
-      label: label || id,
-      metadata,
-      startTimestamp: nowMs(),
-      endTimestamp: null
+    this.startStage(jobId, id, label, metadata).catch((err) => {
+      console.warn(`[SCREENCAST] startSegment("${label}") failed: ${err.message}`);
     });
-    // Also visualize as a chapter so users see the leg boundary in the video.
-    this.showChapter(jobId, label || id, metadata?.description || null, 2200).catch(() => {});
     return id;
   }
 
   endSegment(jobId, segmentId, extra = {}) {
-    const recording = this.activeRecordings.get(jobId);
-    if (!recording || !recording.segments) return;
-    const segment = recording.segments.find((s) => s.id === segmentId);
-    if (!segment || segment.endTimestamp) return;
-    segment.endTimestamp = nowMs();
-    segment.endMetadata = extra || {};
+    this.endStage(jobId, segmentId, extra).catch((err) => {
+      console.warn(`[SCREENCAST] endSegment("${segmentId}") failed: ${err.message}`);
+    });
   }
 
   // ---------------------------------------------------------------------------
-  // Stop + upload
+  // Finalize
   // ---------------------------------------------------------------------------
 
   /**
-   * Stop the screencast for every page, finalize the WebM files, upload the
-   * primary one as the session video, additional ones as segments, and write
-   * metadata (chapters/overlays/actions/inactive markers) to the backend.
+   * Finish the job: end any active stage and publish the playlist manifest to
+   * the backend. Safe to call multiple times.
    */
-  async stopRecording(jobId) {
-    const recording = this.activeRecordings.get(jobId);
-    if (!recording) {
-      console.log(`[SCREENCAST] No active recording for job ${jobId}`);
-      return null;
-    }
-    if (recording.stopped) {
-      return null;
-    }
-    recording.stopped = true;
-
-    console.log(`⏹️  [SCREENCAST] Stopping screencast for job ${jobId} (${recording.pages.size} page(s))`);
-
-    // Detach context page listener.
-    try {
-      if (recording.context && recording.onContextPage && typeof recording.context.off === 'function') {
-        recording.context.off('page', recording.onContextPage);
-      }
-    } catch (_) { /* ignore */ }
-
-    // Stop showActions disposers.
-    for (const entry of recording.pages.values()) {
+  async finalize(jobId) {
+    const job = this.jobs.get(jobId);
+    if (!job) return null;
+    if (job.activeStage && !job.activeStage.stopped) {
       try {
-        if (entry.actionsDispose && typeof entry.actionsDispose.dispose === 'function') {
-          await entry.actionsDispose.dispose();
-        } else if (typeof entry.actionsDispose === 'function') {
-          await entry.actionsDispose();
-        }
+        await this.endStage(jobId, job.activeStage.id, { reason: 'finalize' });
       } catch (_) { /* ignore */ }
     }
 
-    // Stop screencast on every still-attached page AND dispose the start
-    // handle. Disposing the start handle is what tells Playwright "I am done
-    // with the screencast"; without it Playwright may keep the WebM container
-    // open and never finalize the file on disk for short captures.
-    const pageEntries = Array.from(recording.pages.entries());
-    for (const [page, entry] of pageEntries) {
-      if (this._isPageUsable(page)) {
-        try {
-          const screencast = page.screencast;
-          if (screencast && typeof screencast.stop === 'function') {
-            await screencast.stop();
-          }
-        } catch (err) {
-          console.warn(`[SCREENCAST] Failed to stop screencast on a page for job ${jobId}: ${err.message}`);
-        }
-      }
-      try {
-        if (entry.dispose && typeof entry.dispose.dispose === 'function') {
-          await entry.dispose.dispose();
-        } else if (typeof entry.dispose === 'function') {
-          await entry.dispose();
-        }
-      } catch (_) { /* ignore */ }
-    }
+    const totalDuration = job.segments.reduce((sum, seg) => sum + (seg.duration || 0), 0);
+    const totalSize = job.segments.reduce((sum, seg) => sum + (seg.video_size_bytes || 0), 0);
+    const playlist = job.segments.map((seg) => ({
+      segment_id: seg.segment_id,
+      label: seg.label,
+      type: seg.type,
+      leg_id: seg.leg_id,
+      journey_id: seg.journey_id,
+      duration: seg.duration,
+      size_bytes: seg.video_size_bytes,
+      video_url: seg.video_url,
+      video_key: seg.video_key
+    }));
 
-    // Stop activity detector.
     try {
-      if (recording.activityDetector) {
-        await recording.activityDetector.stop();
-      }
-    } catch (_) { /* ignore */ }
-
-    // Flush remaining frame notifies.
-    try { await this._flushNotifyBatch(jobId); } catch (_) { /* ignore */ }
-
-    // Force Playwright to finalize all WebM containers by closing the context.
-    // `screencast.stop()` alone has been observed to leave 0-byte files for
-    // short captures in 1.59.x; closing the context guarantees all buffers
-    // get flushed before we stat the files.
-    if (recording.context && typeof recording.context.close === 'function') {
-      try {
-        await recording.context.close();
-      } catch (err) {
-        console.warn(`[SCREENCAST] context.close() during stopRecording failed for job ${jobId}: ${err.message}`);
-      }
-    }
-
-    // Wait briefly for files to flush to disk (filesystem sync, even after
-    // context.close()).
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    // Collect all video files actually present on disk.
-    const candidates = [];
-    for (const entry of recording.pages.values()) {
-      try {
-        if (!entry.path) continue;
-        const stats = await fs.promises.stat(entry.path).catch(() => null);
-        if (!stats || stats.size <= 0) continue;
-        const durationSeconds = await this._probeDurationSeconds(entry.path);
-        candidates.push({
-          page_id: entry.id,
-          path: entry.path,
-          size: stats.size,
-          durationSeconds: Number.isFinite(durationSeconds) ? durationSeconds : 0,
-          isPrimary: entry.isPrimary === true,
-          frameCount: entry.frameCount || 0
-        });
-      } catch (err) {
-        console.warn(`[SCREENCAST] Failed to stat page video file: ${err.message}`);
-      }
-    }
-
-    if (candidates.length === 0) {
-      // Diagnostic: list what's in the tmp dir so we can see what Playwright
-      // actually wrote (filename mismatches, 0-byte files, missing dir, etc.).
-      try {
-        const dirContents = await fs.promises.readdir(VIDEO_TMP_DIR).catch(() => []);
-        const matching = dirContents.filter((name) => name.includes(String(jobId)));
-        const expected = Array.from(recording.pages.values()).map((e) => e.path);
-        console.error(`[SCREENCAST] No screencast files for job ${jobId}. Expected paths: ${JSON.stringify(expected)}. Files in ${VIDEO_TMP_DIR} matching job: ${JSON.stringify(matching)}. Total entries in dir: ${dirContents.length}`);
-      } catch (_) { /* ignore */ }
-      this.activeRecordings.delete(jobId);
-      return null;
-    }
-
-    // Choose primary: first marked primary, else longest, else largest.
-    const primary = candidates
-      .slice()
-      .sort((a, b) => {
-        if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
-        const dDelta = (b.durationSeconds || 0) - (a.durationSeconds || 0);
-        if (Math.abs(dDelta) > 0.05) return dDelta;
-        return (b.size || 0) - (a.size || 0);
-      })[0];
-    const additional = candidates.filter((c) => c.path !== primary.path);
-
-    const startedAt = recording.startedAt instanceof Date ? recording.startedAt : new Date(recording.startedAt || recording.startTime);
-    const primaryDuration = primary.durationSeconds > 0
-      ? primary.durationSeconds
-      : Math.max(0.1, (nowMs() - recording.startTime) / 1000);
-    const inactiveMarkers = recording.activityDetector
-      ? (recording.activityDetector.getInactiveMarkers({ useCompressedTimeline: false }) || [])
-      : [];
-
-    let uploadResult = null;
-    try {
-      uploadResult = await this._uploadVideo(jobId, primary.path, primary.size, primaryDuration, startedAt, {
-        inactiveMarkers,
-        chapters: recording.chapters,
-        overlays: recording.overlays,
-        actions: recording.actions,
-        screencastPages: candidates.map((c) => ({
-          page_id: c.page_id,
-          duration: c.durationSeconds,
-          size_bytes: c.size,
-          is_primary: c.path === primary.path,
-          frame_count: c.frameCount
-        }))
-      });
+      const headers = {};
+      if (this.runnerToken) headers['Authorization'] = `Bearer ${this.runnerToken}`;
+      const startedAt = new Date(job.jobStartTime).toISOString();
+      await axios.post(`${this.backendUrl}/api/jobs/${jobId}/video`, {
+        // No `video_key` — backend allows playlist-only finalize when
+        // `playlist: true` is sent and segment count > 0.
+        playlist: true,
+        playlist_segments: playlist.length,
+        screencast_chapters: job.chapters,
+        screencast_actions: job.actions,
+        screencast_pages: [], // unused in playlist mode
+        recorder: RECORDER_TAG,
+        duration: totalDuration,
+        size_bytes: totalSize,
+        format: 'webm',
+        codec: 'vp8',
+        resolution: `${job.viewport.width}x${job.viewport.height}`,
+        fps: 25,
+        started_at: startedAt
+      }, { headers, timeout: 15000 });
+      console.log(`✅ [SCREENCAST] Playlist published for job ${jobId}: ${playlist.length} clip(s), ${totalDuration.toFixed(2)}s, ${(totalSize / 1024).toFixed(0)} KB`);
     } catch (err) {
-      console.error(`[SCREENCAST] Upload failed for job ${jobId}: ${err.message}`);
+      console.warn(`[SCREENCAST] Could not publish playlist manifest for job ${jobId}: ${err.message}`);
     }
 
-    // Upload additional pages (popups, secondary tabs) as page-scoped segments.
-    for (const extra of additional) {
-      try {
-        await this._uploadPageVideoAsSegment(jobId, extra, recording);
-      } catch (err) {
-        console.warn(`[SCREENCAST] Failed to upload extra page video: ${err.message}`);
-      }
-    }
-
-    // Upload per-leg segment clips (cut from the primary file with ffmpeg).
-    try {
-      await this._processLegSegments(jobId, recording, primary.path, primaryDuration);
-    } catch (err) {
-      console.warn(`[SCREENCAST] Failed to process leg segments: ${err.message}`);
-    }
-
-    // Cleanup local files (best-effort).
-    for (const c of candidates) {
-      try { await fs.promises.unlink(c.path); } catch (_) { /* ignore */ }
-    }
-
-    this.activeRecordings.delete(jobId);
-
-    if (!uploadResult) return null;
-
-    return {
+    const summary = {
       success: true,
-      videoUrl: uploadResult.url,
-      videoKey: uploadResult.key,
-      duration: primaryDuration,
-      sizeBytes: primary.size,
-      sizeMB: (primary.size / (1024 * 1024)).toFixed(2),
-      startedAt: startedAt.toISOString(),
-      chapters: recording.chapters,
-      overlays: recording.overlays,
-      actions: recording.actions,
-      inactiveMarkers,
-      pages: candidates.length
+      playlist,
+      segmentCount: playlist.length,
+      duration: totalDuration,
+      sizeBytes: totalSize,
+      chapters: job.chapters,
+      actions: job.actions
     };
+
+    this.jobs.delete(jobId);
+    return summary;
+  }
+
+  /**
+   * Abandon any in-flight recordings for a job (e.g. on container shutdown).
+   */
+  async abort(jobId) {
+    const job = this.jobs.get(jobId);
+    if (!job) return;
+    if (job.activeStage && !job.activeStage.stopped) {
+      try { await this.endStage(jobId, job.activeStage.id, { reason: 'aborted' }); } catch (_) { /* ignore */ }
+    }
+    this.jobs.delete(jobId);
   }
 
   async stopAllRecordings() {
-    const jobs = Array.from(this.activeRecordings.keys());
-    for (const jobId of jobs) {
-      try { await this.stopRecording(jobId); } catch (_) { /* ignore */ }
+    const ids = Array.from(this.jobs.keys());
+    for (const id of ids) {
+      try { await this.finalize(id); } catch (_) { /* ignore */ }
     }
-  }
-
-  getRecording(jobId) {
-    return this.activeRecordings.get(jobId);
   }
 
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
-
-  async _attachPage(recording, page) {
-    if (!page || !recording || recording.stopped) return false;
-    if (recording.pages.has(page)) return false;
-    if (typeof page.screencast === 'undefined' || !page.screencast || typeof page.screencast.start !== 'function') {
-      console.warn('[SCREENCAST] page.screencast.start is unavailable. Make sure Playwright >= 1.59.0 is installed.');
-      return false;
-    }
-
-    const pageId = ++recording.pageCounter;
-    const isPrimary = pageId === 1 || page === recording.primaryPage;
-    const filePath = path.join(VIDEO_TMP_DIR, `${recording.jobId}-page${pageId}-${nowMs()}.webm`);
-    const entry = {
-      id: pageId,
-      path: filePath,
-      started: false,
-      isPrimary,
-      lastFrameAt: 0,
-      frameCount: 0,
-      dispose: null,
-      actionsDispose: null
-    };
-    recording.pages.set(page, entry);
-
-    try {
-      const dispose = await page.screencast.start({
-        path: filePath,
-        size: recording.viewport,
-        quality: recording.quality,
-        onFrame: ({ data }) => this._handleFrame(recording, entry, data)
-      });
-      entry.dispose = dispose;
-      entry.started = true;
-    } catch (err) {
-      console.error(`[SCREENCAST] page.screencast.start failed for job ${recording.jobId} page ${pageId}: ${err.message}`);
-      recording.pages.delete(page);
-      return false;
-    }
-
-    // Highlight every clicked / typed / hovered element + show the action title.
-    try {
-      const actionsDispose = await page.screencast.showActions({
-        duration: envInt('SCREENCAST_ACTION_HIGHLIGHT_MS', 1500),
-        fontSize: envInt('SCREENCAST_ACTION_FONT_PX', 22),
-        position: process.env.SCREENCAST_ACTION_POSITION || 'top-right'
-      });
-      entry.actionsDispose = actionsDispose;
-    } catch (err) {
-      console.warn(`[SCREENCAST] showActions failed for job ${recording.jobId} page ${pageId}: ${err.message}`);
-    }
-
-    page.once('close', () => {
-      // Don't try to call .stop() here -- the file is already finalized when
-      // the page is destroyed by the browser.
-      const e = recording.pages.get(page);
-      if (e) {
-        e.started = false;
-      }
-    });
-
-    console.log(`[SCREENCAST] Attached page #${pageId} for job ${recording.jobId} -> ${filePath}${isPrimary ? ' (primary)' : ''}`);
-    return true;
-  }
 
   _isPageUsable(page) {
     if (!page) return false;
@@ -605,179 +512,6 @@ class ScreencastRecorder {
       return false;
     }
   }
-
-  _handleFrame(recording, entry, data) {
-    if (!recording || recording.stopped) return;
-    if (!data || data.length === 0) return;
-
-    // Only stream frames from the primary page; others would just spam the UI.
-    if (!entry.isPrimary) return;
-
-    const now = nowMs();
-    if (now - recording.lastFrameUploadAt < recording.frameIntervalMs) {
-      return;
-    }
-    recording.lastFrameUploadAt = now;
-    entry.lastFrameAt = now;
-    entry.frameCount += 1;
-
-    const frameNumber = recording.frameSeq++;
-    const jobId = recording.jobId;
-
-    let currentUrl = '';
-    try {
-      const targetPage = recording.primaryPage;
-      if (this._isPageUsable(targetPage)) {
-        currentUrl = targetPage.url();
-      }
-    } catch (_) { /* ignore */ }
-
-    // Mark activity for the activity-detector so inactive periods detect frame changes.
-    try {
-      if (recording.activityDetector && typeof recording.activityDetector.markFrameChange === 'function') {
-        recording.activityDetector.markFrameChange();
-      }
-    } catch (_) { /* ignore */ }
-
-    // data is a Buffer-like (Uint8Array). Send to backend asynchronously.
-    this._sendFrame(jobId, data, frameNumber, currentUrl).catch((err) => {
-      if (frameNumber % 50 === 0) {
-        console.warn(`[SCREENCAST] frame ${frameNumber} send failed: ${err.message}`);
-      }
-    });
-  }
-
-  // -- Frame upload (presigned PUT + batched notify) ---------------------------
-
-  async _sendFrame(jobId, frameBuffer, frameNumber, currentUrl) {
-    if (!this.runnerToken) {
-      if (!this._warnedNoRunnerToken) {
-        this._warnedNoRunnerToken = true;
-        console.warn('[SCREENCAST] RUNNER_TOKEN is required for live frame streaming; skipping frame uploads.');
-      }
-      return;
-    }
-    const slot = await this._takePresignedFrameSlot(jobId);
-    if (!slot || !slot.url) return;
-    const buffer = Buffer.isBuffer(frameBuffer) ? frameBuffer : Buffer.from(frameBuffer);
-    try {
-      await axios.put(slot.url, buffer, {
-        headers: { 'Content-Type': 'image/jpeg' },
-        maxBodyLength: Infinity,
-        timeout: 10000
-      });
-    } catch (err) {
-      // Drop the frame; do not retry to avoid backpressure.
-      return;
-    }
-    this._queueStreamNotify(jobId, {
-      jobId,
-      key: slot.key,
-      publicUrl: slot.publicUrl,
-      timestamp: new Date().toISOString(),
-      frameNumber,
-      url: currentUrl
-    });
-  }
-
-  async _takePresignedFrameSlot(jobId) {
-    const jid = String(jobId || '');
-    let pool = this.presignedPools.get(jid) || [];
-    const refillAt = Math.max(0, envInt('SCREENCAST_PRESIGNED_REFILL_AT', 4));
-    const batchSize = Math.max(4, Math.min(48, envInt('SCREENCAST_PRESIGNED_BATCH', 16)));
-    if (pool.length <= refillAt) {
-      try {
-        const res = await axios.post(
-          `${this.backendUrl}/api/upload/presigned-url-batch`,
-          { type: 'frame', jobId: jid, count: batchSize },
-          { timeout: 20000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
-        );
-        const items = Array.isArray(res.data?.items) ? res.data.items : [];
-        pool = pool.concat(items);
-      } catch (_) {
-        try {
-          const presignedRes = await axios.post(
-            `${this.backendUrl}/api/upload/presigned-url`,
-            { type: 'frame', jobId: jid },
-            { timeout: 5000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
-          );
-          pool = pool.concat([presignedRes.data]);
-        } catch (_) { /* swallow */ }
-      }
-    }
-    const slot = pool.shift();
-    this.presignedPools.set(jid, pool);
-    return slot;
-  }
-
-  _notifyBatchSize() {
-    return Math.max(1, Math.min(32, envInt('SCREENCAST_NOTIFY_BATCH', 8)));
-  }
-
-  _queueStreamNotify(jobId, row) {
-    const jid = String(jobId);
-    const list = this.pendingNotify.get(jid) || [];
-    list.push(row);
-    this.pendingNotify.set(jid, list);
-    const maxBatch = this._notifyBatchSize();
-    if (list.length >= maxBatch) {
-      this._flushNotifyBatch(jid).catch(() => {});
-      return;
-    }
-    if (this.notifyFlushTimers.get(jid)) {
-      clearTimeout(this.notifyFlushTimers.get(jid));
-    }
-    const debounce = envInt('SCREENCAST_NOTIFY_DEBOUNCE_MS', 120);
-    const t = setTimeout(() => {
-      this.notifyFlushTimers.delete(jid);
-      this._flushNotifyBatch(jid).catch(() => {});
-    }, debounce);
-    this.notifyFlushTimers.set(jid, t);
-  }
-
-  async _flushNotifyBatch(jobId) {
-    const jid = String(jobId);
-    if (this.notifyFlushTimers.has(jid)) {
-      clearTimeout(this.notifyFlushTimers.get(jid));
-      this.notifyFlushTimers.delete(jid);
-    }
-    const list = this.pendingNotify.get(jid);
-    if (!list || list.length === 0) return;
-    const chunk = list.splice(0, this._notifyBatchSize());
-    if (list.length === 0) {
-      this.pendingNotify.delete(jid);
-    }
-    const items = chunk.map((row) => ({
-      jobId: row.jobId,
-      key: row.key,
-      publicUrl: row.publicUrl,
-      timestamp: row.timestamp,
-      frameNumber: row.frameNumber,
-      url: row.url
-    }));
-    try {
-      await axios.post(
-        `${this.backendUrl}/api/runners/${this.runnerId}/stream-frame-batch`,
-        { items },
-        { timeout: 15000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
-      );
-    } catch (_) {
-      for (const row of chunk) {
-        try {
-          await axios.post(
-            `${this.backendUrl}/api/runners/${this.runnerId}/stream-frame`,
-            row,
-            { timeout: 5000, headers: { Authorization: `Bearer ${this.runnerToken}` } }
-          );
-        } catch (_) { /* swallow */ }
-      }
-    }
-    if ((this.pendingNotify.get(jid) || []).length > 0) {
-      await this._flushNotifyBatch(jid);
-    }
-  }
-
-  // -- File / metadata upload --------------------------------------------------
 
   async _probeDurationSeconds(filePath) {
     if (!filePath) return null;
@@ -790,9 +524,53 @@ class ScreencastRecorder {
       ], { timeout: 30000 });
       const parsed = Number(String(stdout || '').trim());
       return Number.isFinite(parsed) ? parsed : null;
-    } catch (err) {
+    } catch (_) {
       return null;
     }
+  }
+
+  async _uploadSegmentFile(jobId, stage, sizeBytes) {
+    const headers = {};
+    if (this.runnerToken) headers['Authorization'] = `Bearer ${this.runnerToken}`;
+
+    // Get a presigned URL scoped as a "segment" so the file lands in the
+    // segments/ subdirectory under the job's video bucket prefix.
+    const presignRes = await axios.post(`${this.backendUrl}/api/files/prepare-video`, {
+      type: 'video',
+      jobId,
+      segment: true,
+      metadata: {
+        ...(stage.metadata || {}),
+        stage_id: stage.id,
+        kind: 'screencast_stage',
+        recorder: RECORDER_TAG
+      }
+    }, { headers, timeout: 15000 });
+
+    const { uploadUrl, key, publicUrl } = presignRes.data || {};
+    if (!uploadUrl || !key) {
+      throw new Error('prepare-video did not return uploadUrl/key');
+    }
+
+    const stream = fs.createReadStream(stage.filePath);
+    await axios.put(uploadUrl, stream, {
+      headers: { 'Content-Type': 'video/webm', 'Content-Length': sizeBytes },
+      maxBodyLength: Infinity,
+      maxContentLength: Infinity,
+      timeout: 600000
+    });
+
+    const publicBackend = this.resolvePublicBackendUrl();
+    const playableUrl = publicUrl || `${publicBackend}/stream-video?key=${encodeURIComponent(key)}`;
+    return { videoUrl: playableUrl, key };
+  }
+
+  async _registerSegment(jobId, segment) {
+    const headers = {};
+    if (this.runnerToken) headers['Authorization'] = `Bearer ${this.runnerToken}`;
+    await axios.post(`${this.backendUrl}/api/jobs/${jobId}/video-segment`, segment, {
+      headers, timeout: 15000
+    });
   }
 
   resolvePublicBackendUrl() {
@@ -834,173 +612,15 @@ class ScreencastRecorder {
     }
     return 'http://localhost:4000';
   }
+}
 
-  async _uploadVideo(jobId, videoPath, fileSize, duration, startedAt, extras = {}) {
-    const headers = {};
-    if (this.runnerToken) {
-      headers['Authorization'] = `Bearer ${this.runnerToken}`;
-    }
-
-    const presignRes = await axios.post(`${this.backendUrl}/api/upload/presigned-url`, {
-      type: 'video',
-      jobId,
-      contentType: 'video/webm'
-    }, { headers, timeout: 15000 });
-
-    const { url: presignedUrl, key, publicUrl } = presignRes.data;
-
-    console.log(`[SCREENCAST] Uploading primary video for job ${jobId} (${(fileSize / (1024 * 1024)).toFixed(2)} MB)...`);
-    const stream = fs.createReadStream(videoPath);
-    await axios.put(presignedUrl, stream, {
-      headers: { 'Content-Type': 'video/webm', 'Content-Length': fileSize },
-      maxBodyLength: Infinity,
-      maxContentLength: Infinity,
-      timeout: 600000
-    });
-
-    const publicBackendUrl = this.resolvePublicBackendUrl();
-    const backendVideoUrl = `${publicBackendUrl}/stream-video?key=${encodeURIComponent(key)}`;
-
-    await axios.post(`${this.backendUrl}/api/jobs/${jobId}/video`, {
-      video_key: key,
-      video_url: backendVideoUrl,
-      duration,
-      size_bytes: fileSize,
-      format: 'webm',
-      codec: 'vp8',
-      resolution: `${DEFAULT_VIEWPORT.width}x${DEFAULT_VIEWPORT.height}`,
-      fps: envInt('SCREENCAST_FPS_HINT', 30),
-      started_at: startedAt instanceof Date ? startedAt.toISOString() : startedAt,
-      inactive_markers: Array.isArray(extras.inactiveMarkers) ? extras.inactiveMarkers : [],
-      // New fields for Playwright 1.59 screencast.
-      screencast_chapters: Array.isArray(extras.chapters) ? extras.chapters : [],
-      screencast_overlays: Array.isArray(extras.overlays) ? extras.overlays : [],
-      screencast_actions: Array.isArray(extras.actions) ? extras.actions : [],
-      screencast_pages: Array.isArray(extras.screencastPages) ? extras.screencastPages : [],
-      recorder: 'playwright-screencast-1.59'
-    }, { headers, timeout: 15000 });
-
-    console.log(`✅ [SCREENCAST] Video metadata saved for job ${jobId} (chapters=${extras.chapters?.length || 0}, overlays=${extras.overlays?.length || 0}, actions=${extras.actions?.length || 0}, pages=${extras.screencastPages?.length || 0})`);
-    return { url: publicUrl || presignedUrl.split('?')[0], key };
-  }
-
-  async _uploadPageVideoAsSegment(jobId, candidate, recording) {
-    if (!candidate || !candidate.path) return;
-    try {
-      const stats = await fs.promises.stat(candidate.path);
-      if (!stats || stats.size <= 0) return;
-      const segmentId = `page-${candidate.page_id}-${nowMs()}`;
-      const headers = {};
-      if (this.runnerToken) {
-        headers['Authorization'] = `Bearer ${this.runnerToken}`;
-      }
-      const presignRes = await axios.post(`${this.backendUrl}/api/files/prepare-video`, {
-        type: 'video',
-        jobId,
-        segment: true,
-        metadata: { page_id: candidate.page_id, kind: 'screencast_page' }
-      }, { headers, timeout: 10000 });
-      const { uploadUrl, key, publicUrl } = presignRes.data;
-      const stream = fs.createReadStream(candidate.path);
-      await axios.put(uploadUrl, stream, {
-        headers: { 'Content-Type': 'video/webm', 'Content-Length': stats.size },
-        maxBodyLength: Infinity,
-        maxContentLength: Infinity,
-        timeout: 300000
-      });
-      const finalUrl = publicUrl || uploadUrl.split('?')[0];
-      const start_offset = Math.max(0, ((recording.startTime || nowMs()) - recording.startTime) / 1000);
-      await axios.post(`${this.backendUrl}/api/jobs/${jobId}/video-segment`, {
-        segment_id: segmentId,
-        label: `Popup page ${candidate.page_id}`,
-        type: 'screencast_page',
-        leg_id: null,
-        journey_id: null,
-        start_offset,
-        end_offset: start_offset + (candidate.durationSeconds || 0),
-        padded_start: start_offset,
-        padded_end: start_offset + (candidate.durationSeconds || 0),
-        duration: candidate.durationSeconds || 0,
-        video_url: finalUrl,
-        video_key: key,
-        video_size_bytes: stats.size,
-        metadata: { page_id: candidate.page_id, kind: 'screencast_page', frame_count: candidate.frameCount || 0 }
-      }, { headers, timeout: 10000 });
-    } catch (err) {
-      console.warn(`[SCREENCAST] Could not upload extra page video as segment: ${err.message}`);
-    }
-  }
-
-  async _processLegSegments(jobId, recording, fullVideoPath, fullDurationSeconds) {
-    if (!recording?.segments || recording.segments.length === 0) return;
-    const segmentsToProcess = recording.segments.filter((s) => s.endTimestamp && s.endTimestamp > s.startTimestamp);
-    if (segmentsToProcess.length === 0) return;
-
-    const headers = {};
-    if (this.runnerToken) {
-      headers['Authorization'] = `Bearer ${this.runnerToken}`;
-    }
-    const workDir = path.dirname(fullVideoPath);
-
-    for (const segment of segmentsToProcess) {
-      try {
-        const startOffset = Math.max(0, (segment.startTimestamp - recording.startTime) / 1000);
-        const endOffset = Math.max(startOffset, (segment.endTimestamp - recording.startTime) / 1000);
-        const paddedStart = Math.max(0, startOffset - 0.35);
-        const paddedEnd = Math.min(fullDurationSeconds, endOffset + 0.65);
-        const clipDuration = Math.max(0.5, paddedEnd - paddedStart);
-        if (!Number.isFinite(clipDuration) || clipDuration <= 0) continue;
-
-        const segmentFilename = `${jobId}-${safeFilename(segment.label)}-${nowMs()}.webm`;
-        const segmentPath = path.join(workDir, segmentFilename);
-        await execFileAsync('ffmpeg', [
-          '-y',
-          '-i', fullVideoPath,
-          '-ss', paddedStart.toFixed(3),
-          '-t', clipDuration.toFixed(3),
-          '-c', 'copy',
-          segmentPath
-        ], { timeout: 600000 });
-
-        const stats = await fs.promises.stat(segmentPath);
-        const presignRes = await axios.post(`${this.backendUrl}/api/files/prepare-video`, {
-          type: 'video',
-          jobId,
-          segment: true,
-          metadata: segment.metadata || {}
-        }, { headers, timeout: 10000 });
-        const { uploadUrl, key, publicUrl } = presignRes.data;
-        const stream = fs.createReadStream(segmentPath);
-        await axios.put(uploadUrl, stream, {
-          headers: { 'Content-Type': 'video/webm', 'Content-Length': stats.size },
-          maxBodyLength: Infinity,
-          maxContentLength: Infinity,
-          timeout: 300000
-        });
-        const finalUrl = publicUrl || uploadUrl.split('?')[0];
-        await axios.post(`${this.backendUrl}/api/jobs/${jobId}/video-segment`, {
-          segment_id: segment.id,
-          label: segment.label,
-          type: segment.metadata?.type || 'workflow_leg',
-          leg_id: segment.metadata?.leg_id || null,
-          journey_id: segment.metadata?.journey_id || null,
-          start_offset: startOffset,
-          end_offset: endOffset,
-          padded_start: paddedStart,
-          padded_end: paddedEnd,
-          duration: clipDuration,
-          video_url: finalUrl,
-          video_key: key,
-          video_size_bytes: stats.size,
-          metadata: { ...(segment.metadata || {}), end_metadata: segment.endMetadata || {} }
-        }, { headers, timeout: 10000 });
-
-        try { await fs.promises.unlink(segmentPath); } catch (_) { /* ignore */ }
-      } catch (err) {
-        console.warn(`[SCREENCAST] Failed to process leg segment "${segment.label}": ${err.message}`);
-      }
-    }
-  }
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 export default ScreencastRecorder;
