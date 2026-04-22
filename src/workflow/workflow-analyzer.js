@@ -6,6 +6,7 @@ import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../s
 import {
   replaceNetworkIdleWithDomContentLoadedForAutomation,
   capPlaywrightAutomationTimeouts,
+  stripCommonAiTypeScriptCasts,
 } from './utils/normalize-playwright-network-idle.js';
 import { evaluateLoginSessionEvidenceOverride } from './utils/login-session-evidence-override.js';
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
@@ -9588,15 +9589,20 @@ return {
         // CRITICAL: Apply variable replacement AGAIN right before execution
         // This ensures any variables that weren't replaced earlier are caught
         let finalScriptCode = scriptCode;
+        const escVarRe = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const varWord = (v) => new RegExp(`\\b${escVarRe(v)}\\b`, 'gi');
+        const VARS_RESOLVE_TEXT = ['resolvedVisibleText', 'visibleText', 'visible_text'];
+        const hasAnyVarWord = (s) => VARS_RESOLVE_TEXT.some((vn) => varWord(vn).test(s));
         console.log(`🔧 executeInNodeContext: Starting replacement on ${finalScriptCode.length} char script`);
         
         // CRITICAL: Check for unresolved variables BEFORE replacement
-        const hasUnresolvedBeforeFinal = /resolvedVisibleText|visibleText|visible_text/i.test(finalScriptCode);
+        const hasUnresolvedBeforeFinal = hasAnyVarWord(finalScriptCode);
         if (hasUnresolvedBeforeFinal) {
-          const unresolvedMatches = finalScriptCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+          const unresolvedMatches = VARS_RESOLVE_TEXT.flatMap((vn) => finalScriptCode.match(varWord(vn)) || []);
           console.error(`❌ CRITICAL: Found ${unresolvedMatches?.length || 0} unresolved variable(s) BEFORE final replacement: ${unresolvedMatches?.slice(0, 10).join(', ') || 'none'}`);
           // Log context around first occurrence
-          const firstIndex = finalScriptCode.search(/resolvedVisibleText|visibleText|visible_text/i);
+          const firstVn0 = VARS_RESOLVE_TEXT.find((vn) => varWord(vn).test(finalScriptCode));
+          const firstIndex = firstVn0 ? finalScriptCode.search(varWord(firstVn0)) : -1;
           if (firstIndex >= 0) {
             const context = finalScriptCode.substring(Math.max(0, firstIndex - 200), Math.min(finalScriptCode.length, firstIndex + 300));
             console.error(`❌ Context around first occurrence (position ${firstIndex}): ...${context}...`);
@@ -9628,29 +9634,34 @@ return {
           }
         }
         
-        // CRITICAL: Final aggressive pass - replace ANY remaining instances (case-insensitive, no word boundaries)
-        // This is the LAST chance to fix before execution
+        // CRITICAL: Final aggressive pass — use word boundaries so "visibleText" is not replaced inside
+        // identifiers like "invisibleText" (which breaks scripts and confuses the JS parser).
         const beforeFinalAggressive = finalScriptCode;
-        finalScriptCode = finalScriptCode.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
-        finalScriptCode = finalScriptCode.replace(/visibleText/gi, "(await page.textContent('body') || '')");
-        finalScriptCode = finalScriptCode.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+        for (const vn of VARS_RESOLVE_TEXT) {
+          finalScriptCode = finalScriptCode.replace(varWord(vn), "(await page.textContent('body') || '')");
+        }
         if (finalScriptCode !== beforeFinalAggressive) {
-          const aggressiveCount = (beforeFinalAggressive.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+          const aggressiveCount = VARS_RESOLVE_TEXT.reduce(
+            (n, vn) => n + (beforeFinalAggressive.match(varWord(vn)) || []).length,
+            0
+          );
           finalReplacementCount += aggressiveCount;
           console.log(`🔧 Final aggressive replacement: ${aggressiveCount} occurrence(s) removed`);
         }
         
         // CRITICAL: Final check - if still present, this is a critical error
-        if (/resolvedVisibleText|visibleText|visible_text/i.test(finalScriptCode)) {
+        if (hasAnyVarWord(finalScriptCode)) {
           console.error(`❌ CRITICAL ERROR: Code STILL contains unresolved variable after ALL replacement attempts!`);
-          const stillPresent = finalScriptCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+          const stillPresent = VARS_RESOLVE_TEXT.flatMap((vn) => finalScriptCode.match(varWord(vn)) || []);
           console.error(`❌ Still present: ${stillPresent?.length || 0} occurrence(s): ${stillPresent?.slice(0, 10).join(', ') || 'none'}`);
-          const firstIndex = finalScriptCode.search(/resolvedVisibleText|visibleText|visible_text/i);
+          const firstVn = VARS_RESOLVE_TEXT.find((vn) => varWord(vn).test(finalScriptCode));
+          const firstIndex = firstVn ? finalScriptCode.search(varWord(firstVn)) : -1;
           if (firstIndex >= 0) {
             console.error(`❌ Code snippet around error: ${finalScriptCode.substring(Math.max(0, firstIndex - 100), Math.min(finalScriptCode.length, firstIndex + 200))}`);
           }
-          // Emergency replacement - replace everything
-          finalScriptCode = finalScriptCode.replace(/resolvedVisibleText|visibleText|visible_text/gi, "(await page.textContent('body') || '')");
+          for (const vn of VARS_RESOLVE_TEXT) {
+            finalScriptCode = finalScriptCode.replace(varWord(vn), "(await page.textContent('body') || '')");
+          }
           console.warn(`⚠️ Applied emergency replacement - script execution may fail`);
         }
         
@@ -9670,46 +9681,46 @@ return {
         finalScriptCode = finalScriptCode.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
         finalScriptCode = finalScriptCode.replace(/\$\{visible_text\}/gi, "${await page.textContent('body') || ''}");
         if (finalScriptCode !== beforeFunctionCreation) {
-          const lastPassCount = (beforeFunctionCreation.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+          const lastPassCount = VARS_RESOLVE_TEXT.reduce(
+            (n, vn) => n + (beforeFunctionCreation.match(varWord(vn)) || []).length,
+            0
+          );
           console.log(`🔧 Last-pass replacement before function creation: ${lastPassCount} occurrence(s) fixed`);
         }
         
         // Final verification - if still present, log the exact location
-        if (/resolvedVisibleText|visibleText|visible_text/i.test(finalScriptCode)) {
-          const matches = finalScriptCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+        if (hasAnyVarWord(finalScriptCode)) {
+          const matches = VARS_RESOLVE_TEXT.flatMap((vn) => finalScriptCode.match(varWord(vn)) || []);
           console.error(`❌ CRITICAL: Variable STILL present after all replacements! Found ${matches?.length || 0} occurrence(s)`);
           matches?.forEach((match, idx) => {
             const index = finalScriptCode.indexOf(match);
             const context = finalScriptCode.substring(Math.max(0, index - 50), Math.min(finalScriptCode.length, index + 50));
             console.error(`❌ Occurrence ${idx + 1}: "${match}" at position ${index}, context: ...${context}...`);
           });
-          // Force replace one more time
-          finalScriptCode = finalScriptCode.replace(/resolvedVisibleText|visibleText|visible_text/gi, "(await page.textContent('body') || '')");
+          for (const vn of VARS_RESOLVE_TEXT) {
+            finalScriptCode = finalScriptCode.replace(varWord(vn), "(await page.textContent('body') || '')");
+          }
           console.warn(`⚠️ Applied forced replacement - proceeding with execution`);
         }
         
-        // CRITICAL: Final check - search for variable in ANY form (including non-standard)
-        // This is the absolute last check before execution
-        const variablePatterns = [
-          /resolvedVisibleText/gi,
-          /visibleText/gi,
-          /visible_text/gi,
-          /resolved.*visible.*text/gi,
-          /visible.*text/gi
-        ];
+        // Only well-known whole identifiers (word-bounded). Do NOT use /visible.*text/ — "visible" matches
+        // inside .isVisible() and "text" can match :has-text / getByText on the same line, destroying "=>" etc.
         let foundAny = false;
-        for (const pattern of variablePatterns) {
-          if (pattern.test(finalScriptCode)) {
+        for (const vn of VARS_RESOLVE_TEXT) {
+          const w = varWord(vn);
+          if (w.test(finalScriptCode)) {
             foundAny = true;
-            const matches = finalScriptCode.match(pattern);
-            console.error(`❌ CRITICAL: Found variable pattern ${pattern.source} in final script! ${matches?.length || 0} occurrence(s)`);
-            matches?.forEach((match, idx) => {
-              const index = finalScriptCode.indexOf(match);
-              const context = finalScriptCode.substring(Math.max(0, index - 100), Math.min(finalScriptCode.length, index + 100));
-              console.error(`❌ Match ${idx + 1}: "${match}" at position ${index}, context: ...${context}...`);
-            });
-            // Force replace
-            finalScriptCode = finalScriptCode.replace(pattern, "(await page.textContent('body') || '')");
+            const matches = finalScriptCode.match(new RegExp(w.source, w.flags)) || [];
+            console.error(`❌ CRITICAL: Found ${vn} in final script! ${matches.length} occurrence(s)`);
+            let scan = 0;
+            for (const match of matches) {
+              const at = finalScriptCode.indexOf(match, scan);
+              if (at < 0) break;
+              const context = finalScriptCode.substring(Math.max(0, at - 100), Math.min(finalScriptCode.length, at + 100));
+              console.error(`❌ Match: "${match}" at position ${at}, context: ...${context}...`);
+              scan = at + 1;
+            }
+            finalScriptCode = finalScriptCode.replace(w, "(await page.textContent('body') || '')");
           }
         }
         if (foundAny) {
@@ -9722,12 +9733,12 @@ return {
         const entireCheckVariableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
         let foundVariables = [];
         for (const varName of entireCheckVariableNames) {
-          // Check in all possible forms: direct, in template literals, in strings, etc.
+          // Word-bound / template / quoted only — a bare new RegExp(varName,'gi') would match
+          // inside compound identifiers (e.g. visibleText inside invisibleText) and break scripts.
           const patterns = [
             new RegExp(`\\b${varName}\\b`, 'gi'),
             new RegExp(`\\$\\{${varName}\\}`, 'gi'),
-            new RegExp(`['"]${varName}['"]`, 'gi'),
-            new RegExp(varName, 'gi') // Catch any form
+            new RegExp(`['"]${varName}['"]`, 'gi')
           ];
           for (const pattern of patterns) {
             const matches = entireScriptCheck.match(pattern);
@@ -9758,6 +9769,7 @@ return {
         }
 
         const beforeNetworkIdleNormalize = finalScriptCode;
+        finalScriptCode = stripCommonAiTypeScriptCasts(finalScriptCode);
         finalScriptCode = replaceNetworkIdleWithDomContentLoadedForAutomation(finalScriptCode);
         finalScriptCode = capPlaywrightAutomationTimeouts(finalScriptCode);
         if (finalScriptCode !== beforeNetworkIdleNormalize) {
@@ -9790,16 +9802,16 @@ return {
         const bodyCheckPatterns = ['resolvedVisibleText', 'visibleText', 'visible_text'];
         let bodyReplacements = 0;
         for (const varName of bodyCheckPatterns) {
-          const regex = new RegExp(varName, 'gi');
+          const regex = varWord(varName);
           const matches = functionBody.match(regex);
           if (matches && matches.length > 0) {
             console.error(`❌ CRITICAL: Found '${varName}' in functionBody ${matches.length} time(s)!`);
             // Find all positions
             const positions = [];
-            let pos = 0;
-            while ((pos = functionBody.indexOf(varName, pos)) !== -1) {
-              positions.push(pos);
-              pos += varName.length;
+            let m;
+            const reG = new RegExp(varWord(varName).source, 'gi');
+            while ((m = reG.exec(functionBody)) !== null) {
+              positions.push(m.index);
             }
             // Log first 3 occurrences with context
             positions.slice(0, 3).forEach((idx, i) => {
@@ -9823,35 +9835,22 @@ return {
         let foundInFunctionBody = false;
         
         for (const varName of finalCheckVariableNames) {
-          // Method 1: Simple indexOf (catches any form, even if split or encoded)
-          if (functionBody.includes(varName)) {
+          const regexW = varWord(varName);
+          if (regexW.test(functionBody)) {
             foundInFunctionBody = true;
+            const matches = functionBody.match(new RegExp(regexW.source, 'gi')) || [];
             const positions = [];
-            let pos = 0;
-            while ((pos = functionBody.indexOf(varName, pos)) !== -1) {
-              positions.push(pos);
-              pos += varName.length;
+            let m;
+            const rePos = new RegExp(regexW.source, 'gi');
+            while ((m = rePos.exec(functionBody)) !== null) {
+              positions.push(m.index);
             }
             console.error(`❌ CRITICAL: Found '${varName}' in functionBody RIGHT BEFORE new Function()! ${positions.length} occurrence(s)`);
             positions.slice(0, 3).forEach((idx, i) => {
               const context = functionBody.substring(Math.max(0, idx - 300), Math.min(functionBody.length, idx + 300));
               console.error(`❌ Occurrence ${i + 1} (position ${idx}): ...${context}...`);
             });
-            // Replace using while loop to catch all instances
-            while (functionBody.includes(varName)) {
-              functionBody = functionBody.replace(varName, "(await page.textContent('body') || '')");
-            }
-          }
-          
-          // Method 2: Case-insensitive regex
-          const regex = new RegExp(varName, 'gi');
-          if (regex.test(functionBody)) {
-            if (!foundInFunctionBody) {
-              foundInFunctionBody = true;
-              const matches = functionBody.match(regex);
-              console.error(`❌ CRITICAL: Found '${varName}' via regex in functionBody! ${matches?.length || 0} occurrence(s)`);
-            }
-            functionBody = functionBody.replace(regex, "(await page.textContent('body') || '')");
+            functionBody = functionBody.replace(regexW, "(await page.textContent('body') || '')");
           }
         }
         
@@ -9859,7 +9858,7 @@ return {
           console.warn(`⚠️ Applied final emergency replacement in functionBody before new Function()`);
           
           // Final verification - check again
-          const stillPresent = finalCheckVariableNames.some(v => functionBody.includes(v));
+          const stillPresent = finalCheckVariableNames.some((v) => varWord(v).test(functionBody));
           if (stillPresent) {
             console.error(`❌ CRITICAL: Variable STILL present after emergency replacement! This is a critical bug!`);
             // Last resort: replace character by character
@@ -9873,23 +9872,23 @@ return {
         }
         
         // CRITICAL: Log the actual script content to see if variable is present
-        const scriptCheck = finalScriptCode.toLowerCase();
-        if (scriptCheck.includes('resolvedvisibletext') || scriptCheck.includes('visibletext') || scriptCheck.includes('visible_text')) {
+        if (hasAnyVarWord(finalScriptCode)) {
           console.error(`❌ CRITICAL: Variable found in finalScriptCode BEFORE function creation!`);
           const positions = [];
-          ['resolvedVisibleText', 'visibleText', 'visible_text'].forEach(varName => {
-            let pos = 0;
-            while ((pos = finalScriptCode.indexOf(varName, pos)) !== -1) {
-              positions.push({ varName, pos });
-              pos += varName.length;
+          for (const varName of VARS_RESOLVE_TEXT) {
+            const reG = new RegExp(varWord(varName).source, 'gi');
+            let m;
+            while ((m = reG.exec(finalScriptCode)) !== null) {
+              positions.push({ varName, pos: m.index });
             }
-          });
+          }
           positions.slice(0, 5).forEach(({ varName, pos }, i) => {
             const context = finalScriptCode.substring(Math.max(0, pos - 300), Math.min(finalScriptCode.length, pos + 300));
             console.error(`❌ Variable ${i + 1}: "${varName}" at position ${pos}, context: ...${context}...`);
           });
-          // Force replace one more time
-          finalScriptCode = finalScriptCode.replace(/resolvedVisibleText|visibleText|visible_text/gi, "(await page.textContent('body') || '')");
+          for (const vn of VARS_RESOLVE_TEXT) {
+            finalScriptCode = finalScriptCode.replace(varWord(vn), "(await page.textContent('body') || '')");
+          }
           functionBody = 'return (async function() {\n' + finalScriptCode + '\n})();';
           console.warn(`⚠️ Applied emergency replacement and rebuilt functionBody`);
         }
@@ -9901,24 +9900,21 @@ return {
         const finalCheckVars = ['resolvedVisibleText', 'visibleText', 'visible_text'];
         let finalCheckFound = false;
         for (const varName of finalCheckVars) {
-          if (functionBody.includes(varName)) {
+          if (varWord(varName).test(functionBody)) {
             finalCheckFound = true;
-            console.error(`❌ CRITICAL: Found '${varName}' in functionBody using indexOf!`);
+            console.error(`❌ CRITICAL: Found '${varName}' in functionBody (word-bounded) before new Function!`);
             const positions = [];
-            let pos = 0;
-            while ((pos = functionBody.indexOf(varName, pos)) !== -1) {
-              positions.push(pos);
-              pos += varName.length;
+            const reG = new RegExp(varWord(varName).source, 'gi');
+            let m;
+            while ((m = reG.exec(functionBody)) !== null) {
+              positions.push(m.index);
             }
             positions.slice(0, 3).forEach((idx, i) => {
               const context = functionBody.substring(Math.max(0, idx - 400), Math.min(functionBody.length, idx + 400));
               console.error(`❌ Position ${idx}: ...${context}...`);
             });
-            // Replace using while loop
-            while (functionBody.includes(varName)) {
-              functionBody = functionBody.replace(varName, "(await page.textContent('body') || '')");
-            }
-            console.warn(`⚠️ Applied indexOf-based replacement for '${varName}'`);
+            functionBody = functionBody.replace(varWord(varName), "(await page.textContent('body') || '')");
+            console.warn(`⚠️ Applied word-bounded replacement for '${varName}'`);
           }
         }
         if (finalCheckFound) {

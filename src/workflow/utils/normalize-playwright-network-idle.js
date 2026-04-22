@@ -75,6 +75,23 @@ export function capPlaywrightAutomationTimeouts(source) {
 }
 
 /**
+ * Remove simple TypeScript `as` casts that `new Function` cannot parse ("Unexpected identifier 'as'").
+ * Intentionally narrow: only `) as <identifier>` and `) as const` (common in AI output).
+ * Broader "as" stripping risks corrupting natural-language strings or valid JS.
+ */
+export function stripCommonAiTypeScriptCasts(source) {
+  if (typeof source !== 'string' || !source) return source;
+  let s = source;
+  s = s.replace(/\)\s+as\s+const\b/g, ')');
+  for (let i = 0; i < 50; i++) {
+    const next = s.replace(/\)\s+as\s+[A-Za-z_][A-Za-z0-9_]*\b/g, ')');
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+
+/**
  * Wrap every literal-selector `await page.click("…")` / `await page.fill("…", …)` (and the
  * locator() variant `page.locator("…").click()`) with a fast pre-flight existence check so AI
  * scripts that target hallucinated selectors fail in <1s instead of stalling for the full
