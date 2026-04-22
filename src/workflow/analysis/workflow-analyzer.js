@@ -6840,9 +6840,16 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 journeyGenStep && this.isDegenerateJourneyScriptForActionablePage(cached.script_code, workflowState);
               const cacheLooksThinInventory =
                 journeyGenStep && this.isThinAiJourneyScriptPreferInventory(cached.script_code, workflowState);
-              if (cacheLooksDegenerate || cacheLooksThinInventory) {
+              const cacheHasPromptPlaceholders =
+                journeyGenStep && this.aiJourneyScriptHasUnresolvedPromptPlaceholders(cached.script_code);
+              if (cacheLooksDegenerate || cacheLooksThinInventory || cacheHasPromptPlaceholders) {
+                const cacheSkipReason = cacheHasPromptPlaceholders
+                  ? 'unresolved-prompt-placeholders'
+                  : cacheLooksDegenerate
+                    ? 'degenerate'
+                    : 'thin-on-rich-page';
                 console.log(
-                  `⚠️ [SCRIPTS-CACHE] Cache HIT ignored for ${step.id}: journey script unsuitable for cache reuse (${cacheLooksDegenerate ? 'degenerate' : 'thin-on-rich-page'}) — regenerating`
+                  `⚠️ [SCRIPTS-CACHE] Cache HIT ignored for ${step.id}: journey script unsuitable for cache reuse (${cacheSkipReason}) — regenerating`
                 );
                 if (jobId) {
                   try {
@@ -8001,7 +8008,8 @@ return {
               cleanedScript &&
               cleanedScript.trim().length > 0 &&
               (this.isDegenerateJourneyScriptForActionablePage(cleanedScript, workflowState) ||
-                this.isThinAiJourneyScriptPreferInventory(cleanedScript, workflowState))
+                this.isThinAiJourneyScriptPreferInventory(cleanedScript, workflowState) ||
+                this.aiJourneyScriptHasUnresolvedPromptPlaceholders(cleanedScript))
             ) {
               const det = this.prepareDeterministicJourneyExecutionScript(workflowState);
               if (det && typeof det === 'string' && det.trim().length > 0) {
@@ -8017,7 +8025,7 @@ return {
                   await this.backendLogger.appendJobLog(
                     jobId,
                     'info',
-                    'Replaced degenerate generate_journey_script output with deterministic inventory script (matches non-cache upsert skip).',
+                    'Replaced generate_journey_script output with deterministic inventory script (degenerate, thin-on-rich-page, or unresolved prompt placeholders).',
                     'WORKFLOW-ANALYZER',
                     {
                       step_id: step.id,
@@ -12808,6 +12816,19 @@ return {
   }
 
   /**
+   * Journey prompts may include angle-bracket template slots; when the model echoes them literally,
+   * the snippet is invalid JS / invalid locators. Detect generically (no per-site literals).
+   */
+  aiJourneyScriptHasUnresolvedPromptPlaceholders(script) {
+    if (!script || typeof script !== 'string') return false;
+    const s = String(script);
+    if (/<\s*inventory_selector\b/i.test(s)) return true;
+    if (/<\s*[a-z][a-z0-9_]*_for_action\d+\s*>/i.test(s)) return true;
+    if (/<\s*journey_[a-z0-9_]+\s*>/i.test(s)) return true;
+    return false;
+  }
+
+  /**
    * Deterministic Playwright steps from currentJourney.actions (inventory selectors).
    * Used when AI-generated scripts fail syntax/runtime ReferenceErrors.
    */
@@ -15644,6 +15665,36 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       const spaLead = `await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});\nawait page.waitForTimeout(350);\n`;
       if (!/\bwaitForLoadState\s*\(\s*['"]domcontentloaded['"]/i.test(code)) {
         code = spaLead + code;
+      }
+    }
+    if (
+      isJourneyScriptExecutionStep &&
+      code &&
+      typeof code === 'string' &&
+      this.aiJourneyScriptHasUnresolvedPromptPlaceholders(code)
+    ) {
+      const detPh = this.prepareDeterministicJourneyExecutionScript(workflowState);
+      if (detPh && typeof detPh === 'string' && detPh.trim().length > 0) {
+        code = detPh;
+        workflowState.legScriptToExecute = detPh;
+        if (!workflowState.context) workflowState.context = {};
+        workflowState.context.legScriptToExecute = detPh;
+        this.initializeVariablePool(workflowState);
+        this.saveVariable(workflowState, 'legScriptToExecute', detPh, 'page', step);
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            'Using deterministic inventory journey script: AI output contained unresolved prompt placeholders (angle-bracket template slots).',
+            'WORKFLOW-ANALYZER',
+            {
+              step_id: step.id,
+              step_name: step.name,
+              source_field: sourceField,
+              fallback_script_length: detPh.length,
+            }
+          );
+        }
       }
     }
     console.log(`🧾 Code preview (${step.name}): ${code.substring(0, 200)}${code.length > 200 ? '…' : ''}`);
@@ -21092,7 +21143,9 @@ const sleep = safeWait;
             execErrLower.includes('shouldbechecked is not defined') ||
             execErrLower.includes('journey script syntax error') ||
             execErrLower.includes('missing ) after argument list') ||
-            execErrLower.includes('unexpected end of input');
+            execErrLower.includes('unexpected end of input') ||
+            execErrLower.includes('invalid selector') ||
+            execErrLower.includes('inventory_selector');
 
           if (
             hasExecFailureSignal &&
@@ -25015,17 +25068,20 @@ const sleep = safeWait;
       const skipJourneyGenAsLowSignal =
         isJourneyGenUpsert &&
         (this.isDegenerateJourneyScriptForActionablePage(scriptCode, workflowState) ||
-          this.isThinAiJourneyScriptPreferInventory(scriptCode, workflowState));
+          this.isThinAiJourneyScriptPreferInventory(scriptCode, workflowState) ||
+          this.aiJourneyScriptHasUnresolvedPromptPlaceholders(scriptCode));
       if (skipJourneyGenAsLowSignal) {
         const thin = this.isThinAiJourneyScriptPreferInventory(scriptCode, workflowState);
-        console.warn(
-          `⚠️ [SCRIPTS] Skipping upsert: ${thin ? 'thin single-action' : 'degenerate'} journey script on rich/actionable page`
-        );
+        const ph = this.aiJourneyScriptHasUnresolvedPromptPlaceholders(scriptCode);
+        const skipLabel = ph ? 'unresolved prompt placeholders' : thin ? 'thin single-action' : 'degenerate';
+        console.warn(`⚠️ [SCRIPTS] Skipping upsert: ${skipLabel} journey script on rich/actionable page`);
         await appendJobLog(
           'warn',
-          thin
-            ? '⚠️ [SCRIPTS] Skipped persisting thin generate_journey_script (single parseable action on rich page; would poison script cache)'
-            : '⚠️ [SCRIPTS] Skipped persisting degenerate generate_journey_script (would poison script cache)',
+          ph
+            ? '⚠️ [SCRIPTS] Skipped persisting generate_journey_script with unresolved <...> template slots (would poison script cache)'
+            : thin
+              ? '⚠️ [SCRIPTS] Skipped persisting thin generate_journey_script (single parseable action on rich page; would poison script cache)'
+              : '⚠️ [SCRIPTS] Skipped persisting degenerate generate_journey_script (would poison script cache)',
           {
             step_id: step?.id || null,
             step_name: step?.name || null,
