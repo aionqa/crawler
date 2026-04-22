@@ -12783,7 +12783,10 @@ return {
     if (/<\s*[a-z][a-z0-9_]*_for_action\d+\s*>/i.test(s)) return true;
     if (/<\s*journey_[a-z0-9_]+\s*>/i.test(s)) return true;
     if (/(['"])action\d+\.selector\1/i.test(s)) return true;
-    if (/\bpage\.(?:click|fill|dblclick|check|uncheck)\(\s*action\d+\.selector\b/i.test(s)) return true;
+    if (/(['"])action\.selector\1/i.test(s)) return true;
+    if (/(['"])hasSubmit\.selector\1/i.test(s)) return true;
+    if (/\bpage\.(?:click|fill|dblclick|check|uncheck|waitForSelector)\(\s*action\d+\.selector\b/i.test(s)) return true;
+    if (/\bpage\.(?:click|fill|dblclick|check|uncheck|waitForSelector)\(\s*action\.selector\b/i.test(s)) return true;
     return false;
   }
 
@@ -12923,6 +12926,44 @@ return {
       const sel = resolveSelectorForActionIndex(num);
       return sel ? `.locator(${JSON.stringify(sel)})` : full;
     });
+
+    // Singular placeholders: models paste JS property paths as string literals ('action.selector', hasSubmit.selector).
+    let walkIdx = 1;
+    s = s.replace(
+      /\bpage\.(click|fill|dblclick|check|uncheck|hover|tap|waitForSelector)\(\s*action\.selector\s*\)/gi,
+      (full, method) => {
+        const sel = resolveSelectorForActionIndex(String(walkIdx));
+        walkIdx += 1;
+        return sel ? `page.${method}(${JSON.stringify(sel)})` : full;
+      }
+    );
+    s = s.replace(/\.locator\(\s*(['"])(?:action|currentAction)\.selector\1\s*\)/gi, () => {
+      const sel = resolveSelectorForActionIndex(String(walkIdx));
+      walkIdx += 1;
+      return sel ? `.locator(${JSON.stringify(sel)})` : full;
+    });
+    s = s.replace(/(['"])(?:action|currentAction)\.selector\1/g, (full) => {
+      const sel = resolveSelectorForActionIndex(String(walkIdx));
+      walkIdx += 1;
+      return sel ? JSON.stringify(sel) : full;
+    });
+
+    const resolveSubmitSelector = () => {
+      for (let i = actions.length; i >= 1; i -= 1) {
+        const a = actions[i - 1];
+        const t = String(a?.type || a?.action_type || '').toLowerCase();
+        const d = String(a?.description || a?.text || '').toLowerCase();
+        if (t.includes('submit') || /\bsubmit\b/.test(d)) {
+          return resolveSelectorForActionIndex(String(i));
+        }
+      }
+      return actions.length > 0 ? resolveSelectorForActionIndex(String(actions.length)) : null;
+    };
+    const submitSelResolved = resolveSubmitSelector();
+    if (submitSelResolved) {
+      s = s.replace(/(['"])hasSubmit\.selector\1/g, JSON.stringify(submitSelResolved));
+    }
+
     return s;
   }
 
@@ -12930,7 +12971,10 @@ return {
   journeyScriptHasActionPlaceholderArtifacts(script) {
     if (!script || typeof script !== 'string') return false;
     if (/(['"])action\d+\.selector\1/.test(script)) return true;
-    if (/\bpage\.(?:click|dblclick|fill|check|uncheck|hover|tap)\(\s*action\d+\.selector\b/i.test(script)) return true;
+    if (/(['"])(?:action|currentAction)\.selector\1/.test(script)) return true;
+    if (/(['"])hasSubmit\.selector\1/.test(script)) return true;
+    if (/\bpage\.(?:click|dblclick|fill|check|uncheck|hover|tap|waitForSelector)\(\s*action\d+\.selector\b/i.test(script)) return true;
+    if (/\bpage\.(?:click|dblclick|fill|check|uncheck|hover|tap|waitForSelector)\(\s*action\.selector\b/i.test(script)) return true;
     if (/\.locator\(\s*(['"])action\d+\.selector\1\s*\)/i.test(script)) return true;
     return false;
   }
