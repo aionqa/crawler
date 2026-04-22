@@ -16168,11 +16168,33 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           };
         };
         
-        // Wrap common page methods
-        wrapper.click = wrapMethod('click', pageObj.click.bind(pageObj));
-        wrapper.fill = wrapMethod('fill', pageObj.fill.bind(pageObj));
-        wrapper.type = wrapMethod('type', pageObj.type.bind(pageObj));
-        wrapper.press = wrapMethod('press', pageObj.press.bind(pageObj));
+        // Wrap common page methods. The interaction methods (click / fill /
+        // type / press / hover / selectOption) route through human-actions so
+        // the recordings show visible mouse moves, per-key typing delays,
+        // and click hesitation. Other methods stay as plain log wrappers.
+        wrapper.click = async function(selector, options = {}) {
+          await logAction('click', [selector]);
+          const ha = await import('../../browser/human-actions.js');
+          return await ha.humanClick(pageObj.locator(selector), options || {});
+        };
+        wrapper.fill = async function(selector, value, options = {}) {
+          await logAction('fill', [selector, value]);
+          const ha = await import('../../browser/human-actions.js');
+          return await ha.humanType(pageObj.locator(selector), value, { timeout: options?.timeout });
+        };
+        wrapper.type = async function(selector, value, options = {}) {
+          await logAction('type', [selector, value]);
+          const ha = await import('../../browser/human-actions.js');
+          return await ha.humanType(pageObj.locator(selector), value, { timeout: options?.timeout });
+        };
+        wrapper.press = async function(selector, key, options = {}) {
+          await logAction('press', [selector, key]);
+          const ha = await import('../../browser/human-actions.js');
+          try {
+            await pageObj.locator(selector).focus({ timeout: options?.timeout }).catch(() => {});
+          } catch (_) { /* ignore */ }
+          return await ha.humanPress(pageObj, key, options || {});
+        };
         wrapper.goto = wrapMethod('goto', pageObj.goto.bind(pageObj));
         wrapper.waitForTimeout = wrapMethod('waitForTimeout', pageObj.waitForTimeout.bind(pageObj));
         if (pageObj.waitFor) {
@@ -16180,10 +16202,18 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         }
         wrapper.waitForLoadState = wrapMethod('waitForLoadState', pageObj.waitForLoadState.bind(pageObj));
         wrapper.waitForSelector = wrapMethod('waitForSelector', pageObj.waitForSelector.bind(pageObj));
-        wrapper.selectOption = wrapMethod('selectOption', pageObj.selectOption.bind(pageObj));
+        wrapper.selectOption = async function(selector, value, options = {}) {
+          await logAction('selectOption', [selector, value]);
+          const ha = await import('../../browser/human-actions.js');
+          return await ha.humanSelect(pageObj.locator(selector), value, { timeout: options?.timeout });
+        };
         wrapper.check = wrapMethod('check', pageObj.check.bind(pageObj));
         wrapper.uncheck = wrapMethod('uncheck', pageObj.uncheck.bind(pageObj));
-        wrapper.hover = wrapMethod('hover', pageObj.hover.bind(pageObj));
+        wrapper.hover = async function(selector, options = {}) {
+          await logAction('hover', [selector]);
+          const ha = await import('../../browser/human-actions.js');
+          return await ha.humanHover(pageObj.locator(selector), options || {});
+        };
         wrapper.focus = wrapMethod('focus', pageObj.focus.bind(pageObj));
         if (pageObj.blur) {
           wrapper.blur = wrapMethod('blur', pageObj.blur.bind(pageObj));
@@ -16777,6 +16807,50 @@ const sleep = safeWait;
 
         console.log(`🚀 Executing script with wrapped page object...`);
         let rawResult;
+
+        // ----- Per-stage screencast clip ---------------------------------------
+        // The new playlist-mode recorder produces one WebM per journey step.
+        // We wrap the AI/journey script execution with start/end so the clip
+        // covers exactly the user-visible interaction (and not the LLM wait
+        // before/after). Only enabled for journey scripts; non-journey
+        // execute-code steps (e.g. cookie helpers) stay un-recorded.
+        const __scRecorder = (typeof globalThis !== 'undefined' && globalThis.__aionqa_screencast_recorder) || null;
+        const __isJourneyClip = isJourneyScriptExecutionStep && __scRecorder && jobId;
+        let __scStageId = null;
+        if (__isJourneyClip) {
+          try {
+            // Make sure the recorder is bound to the live page (handles
+            // navigations that swapped the primary page).
+            if (typeof __scRecorder.attachJob === 'function') {
+              const ctx = (typeof page?.context === 'function' ? page.context() : null);
+              __scRecorder.attachJob(jobId, ctx, page);
+            } else if (typeof __scRecorder.setPrimaryPage === 'function') {
+              __scRecorder.setPrimaryPage(jobId, page);
+            }
+            const leg = workflowState?.currentLeg || null;
+            const journey = workflowState?.currentJourney || workflowState?.currentItem || null;
+            const labelParts = [];
+            if (journey?.journey_id || leg?.journey_id) labelParts.push(`Journey ${journey?.journey_id || leg?.journey_id}`);
+            if (leg?.description) labelParts.push(leg.description);
+            else if (journey?.description) labelParts.push(journey.description);
+            else if (leg?.leg_id) labelParts.push(`Leg ${leg.leg_id}`);
+            const label = labelParts.join(' · ') || (step?.name ? `Stage: ${step.name}` : 'Workflow stage');
+            const stageId = `stage-${leg?.leg_id || journey?.journey_id || step?.id || Date.now()}-${Date.now()}`;
+            const startResult = __scRecorder.startStage(jobId, stageId, label, {
+              type: 'workflow_leg',
+              leg_id: leg?.leg_id || null,
+              journey_id: journey?.journey_id || leg?.journey_id || null,
+              description: leg?.description || journey?.description || null
+            });
+            __scStageId = await Promise.resolve(startResult).catch(() => null);
+            __scStageId = __scStageId || stageId;
+          } catch (stageStartErr) {
+            console.warn(`[Screencast] Could not start stage for journey script: ${stageStartErr.message}`);
+            __scStageId = null;
+          }
+        }
+        // -----------------------------------------------------------------------
+
         try {
           rawResult = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText, execContext, testHelper);
         } catch (runErr) {
@@ -16831,6 +16905,24 @@ const sleep = safeWait;
             testHelper
           );
         }
+
+        // ----- End the per-stage clip ------------------------------------------
+        // We end the stage immediately after the script returns (success or
+        // recovered fallback) so the WebM uploads while the runner is busy
+        // with post-processing. If the script threw and we never reached
+        // here, ScreencastRecorder.finalize() at job end will mop up any
+        // orphaned active stage.
+        if (__isJourneyClip && __scStageId) {
+          try {
+            await __scRecorder.endStage(jobId, __scStageId, {
+              reason: 'journey_script_completed'
+            });
+          } catch (stageEndErr) {
+            console.warn(`[Screencast] Could not end stage ${__scStageId}: ${stageEndErr.message}`);
+          }
+        }
+        // -----------------------------------------------------------------------
+
         const result = (rawResult === undefined || rawResult === null)
           ? { success: true, message: 'Script executed without explicit return value' }
           : rawResult;
