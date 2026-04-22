@@ -239,12 +239,40 @@ export async function detectLoginPage(
 
     const skipIntendedComparison = Boolean(detectionOptions?.skipIntendedUrlComparison);
     /**
-     * Use the same canonical shape as workflow queue keys (`urlKeyForDedupe` / `canonicalizeUrl`)
+     * Canonical surface key (same shape as workflow queue keys) for all redirect / anchor checks.
+     */
+    const surfaceNavKey = navigationTargetKey(surfaceUrlObj.href);
+    /**
+     * Every URL the job explicitly treats as a crawl entry or per-hop navigation target.
+     * Important: do not coalesce to a single "first truthy" value — a stale `login_redirect_intended_url`
+     * must not hide a matching `seed_url` / `start_url`, or we falsely conclude the surface "diverged"
+     * and flag strict `handle_login_redirect: fail` on intentional login-form fixtures.
+     */
+    const crawlAnchorCandidates = [
+      intendedNavUrl,
+      context?.login_redirect_intended_url,
+      context?.seed_url,
+      context?.start_url,
+      context?.options?.start_url,
+      context?.options?.seed_url,
+    ]
+      .filter((u) => u != null && String(u).trim())
+      .map((u) => navigationTargetKey(u))
+      .filter(Boolean);
+    const crawlAnchorKeySet = new Set(crawlAnchorCandidates);
+    const surfaceMatchesDeclaredCrawlAnchor =
+      Boolean(surfaceNavKey) && crawlAnchorKeySet.has(surfaceNavKey);
+
+    /**
+     * True when the visible URL is not one of the declared crawl anchors (unexpected redirect / drift).
+     * Uses the same canonical shape as workflow queue keys (`urlKeyForDedupe` / `canonicalizeUrl`)
      * so trivial serialization differences between `page.url()` and the queued crawl URL never
      * look like an auth redirect when the browser surface is still the requested page.
      */
     const urlsDifferFromIntended = (() => {
       if (skipIntendedComparison) return true;
+      if (!surfaceNavKey) return false;
+      if (surfaceMatchesDeclaredCrawlAnchor) return false;
       const rawIntended =
         intendedNavUrl ??
         context?.login_redirect_intended_url ??
@@ -255,9 +283,8 @@ export async function detectLoginPage(
       if (!rawIntended) return false;
       try {
         const intendedKey = navigationTargetKey(rawIntended);
-        const surfaceKey = navigationTargetKey(surfaceUrlObj.href);
-        if (!intendedKey || !surfaceKey) return false;
-        return intendedKey !== surfaceKey;
+        if (!intendedKey) return false;
+        return intendedKey !== surfaceNavKey;
       } catch {
         return false;
       }
