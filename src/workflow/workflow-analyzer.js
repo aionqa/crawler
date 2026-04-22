@@ -9,6 +9,7 @@ import {
 } from './utils/normalize-playwright-network-idle.js';
 import { evaluateLoginSessionEvidenceOverride } from './utils/login-session-evidence-override.js';
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
+import * as backendLoggerModule from '../backend-logger.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -46,6 +47,7 @@ class WorkflowAnalyzer {
     this.backendUrl = backendUrl;
     this.aiLogger = aiLogger;
     this.context = context;
+    this.backendLogger = context?.backendLogger ?? backendLoggerModule;
     this.workflowTemplate = null;
     this.workflowCapabilities = this.detectCapabilities([]);
     this._runnerTokenSnapshot = String(context?.runner_token || process.env.RUNNER_TOKEN || '').trim();
@@ -1594,17 +1596,17 @@ IMPORTANT OUTPUT REQUIREMENTS:
       // Use backend logger to append job log with attachments
       console.log(`Sending ${attachments.length} attachments:`, attachments.map(a => `${a.type} (${a.size} bytes)`));
       
-      const response = await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: 'info',
-        message: message,
-        component: 'PAGE-ANALYZER',
-        metadata: logMetadata,
-        attachments: attachments
-      });
-      
+      const response = await this.backendLogger.appendJobLog(
+        jobId,
+        'info',
+        message,
+        'PAGE-ANALYZER',
+        logMetadata,
+        attachments
+      );
+
       console.log(`Page description logged to job history with ${attachments.length} attachments`);
-      return response.data;
+      return response;
     } catch (error) {
       console.error('Error logging page description:', error.message);
       // Don't throw - this is not critical
@@ -1822,19 +1824,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
       const jobId = this.context.job_id;
       if (!jobId) return;
       
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: 'info',
-        message: `🔄 WORKFLOW: ${decision}`,
-        component: 'WORKFLOW-ANALYZER',
-        metadata: {
-          workflow_decision: true,
-          workflow_id: this.context.workflow_template_id,
-          workflow_name: this.workflowTemplate?.name,
-          details: details,
-          prompts_count: this.workflowTemplate?.prompts?.length || 0,
-          timestamp: new Date().toISOString()
-        }
+      await this.backendLogger.appendJobLog(jobId, 'info', `🔄 WORKFLOW: ${decision}`, 'WORKFLOW-ANALYZER', {
+        workflow_decision: true,
+        workflow_id: this.context.workflow_template_id,
+        workflow_name: this.workflowTemplate?.name,
+        details: details,
+        prompts_count: this.workflowTemplate?.prompts?.length || 0,
+        timestamp: new Date().toISOString()
       });
       
       console.log(`📝 Logged workflow: ${decision}`);
@@ -1869,25 +1865,19 @@ IMPORTANT OUTPUT REQUIREMENTS:
         message += ` from ${source}`;
       }
       
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: 'info',
-        message: message,
-        component: 'WORKFLOW-ANALYZER',
-        metadata: {
-          prompt_usage: true,
-          prompt_name: promptName,
-          prompt_source: source, // 'workflow-template' or 'database'
-          prompt_text_preview: promptText ? promptText.substring(0, 200) : 'N/A',
-          workflow_template_id: this.context.workflow_template_id || null,
-          workflow_template_name: this.workflowTemplate?.name || null,
-          payload_keys: Object.keys(payload || {}),
-          step_name: stepInfo?.step?.name || null,
-          step_type: stepInfo?.step?.type || null,
-          step_number: stepInfo?.stepIndex !== undefined ? stepInfo.stepIndex + 1 : null,
-          total_steps: stepInfo?.totalSteps || this.workflowTemplate?.steps?.length || null,
-          timestamp: new Date().toISOString()
-        }
+      await this.backendLogger.appendJobLog(jobId, 'info', message, 'WORKFLOW-ANALYZER', {
+        prompt_usage: true,
+        prompt_name: promptName,
+        prompt_source: source, // 'workflow-template' or 'database'
+        prompt_text_preview: promptText ? promptText.substring(0, 200) : 'N/A',
+        workflow_template_id: this.context.workflow_template_id || null,
+        workflow_template_name: this.workflowTemplate?.name || null,
+        payload_keys: Object.keys(payload || {}),
+        step_name: stepInfo?.step?.name || null,
+        step_type: stepInfo?.step?.type || null,
+        step_number: stepInfo?.stepIndex !== undefined ? stepInfo.stepIndex + 1 : null,
+        total_steps: stepInfo?.totalSteps || this.workflowTemplate?.steps?.length || null,
+        timestamp: new Date().toISOString()
       });
       
       console.log(`📝 Logged prompt usage: ${promptName}${stepInfo && stepInfo.step ? ` (Step ${stepInfo.stepIndex + 1}: ${stepInfo.step.name || stepInfo.step.type})` : ''}`);
@@ -1910,15 +1900,13 @@ IMPORTANT OUTPUT REQUIREMENTS:
         timestamp: new Date().toISOString()
       };
 
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: 'info',
-        message: `🔧 [${step.type.toUpperCase()}] Executing step: "${step.name || step.type}"`,
-        component: 'WORKFLOW-STEP',
-        metadata: logData
-      }, {
-        headers: this.getAuthHeaders()
-      });
+      await this.backendLogger.appendJobLog(
+        jobId,
+        'info',
+        `🔧 [${step.type.toUpperCase()}] Executing step: "${step.name || step.type}"`,
+        'WORKFLOW-STEP',
+        logData
+      );
 
       console.log(`📋 STEP PARAMS: ${JSON.stringify(stepConfig, null, 2)}`);
     } catch (error) {
@@ -1936,22 +1924,21 @@ IMPORTANT OUTPUT REQUIREMENTS:
 
     try {
       const slug = step.slug || this.generateSlug(step.name || step.type);
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: level,
-        message: message,
-        component: 'WORKFLOW-STEP',
-        metadata: {
+      const attach = Array.isArray(attachments) && attachments.length > 0 ? attachments : null;
+      await this.backendLogger.appendJobLog(
+        jobId,
+        level,
+        message,
+        'WORKFLOW-STEP',
+        {
           step_type: step.type,
           step_name: step.name || step.type,
           step_slug: slug,
           ...metadata,
           timestamp: new Date().toISOString()
         },
-        attachments: attachments.length > 0 ? attachments : undefined
-      }, {
-        headers: this.getAuthHeaders()
-      });
+        attach
+      );
     } catch (error) {
       console.error(`⚠️ Failed to log step outcome: ${error.message}`);
     }
@@ -1966,17 +1953,9 @@ IMPORTANT OUTPUT REQUIREMENTS:
     }
 
     try {
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: level,
-        message: message,
-        component: component,
-        metadata: {
-          ...metadata,
-          timestamp: new Date().toISOString()
-        }
-      }, {
-        headers: this.getAuthHeaders()
+      await this.backendLogger.appendJobLog(jobId, level, message, component, {
+        ...metadata,
+        timestamp: new Date().toISOString()
       });
     } catch (error) {
       console.error(`⚠️ Failed to send log to backend: ${error.message}`);
@@ -6377,27 +6356,19 @@ return {
       
       // Save to job logs as metadata
       try {
-        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-          jobId,
-          level: 'info',
-          message: `💾 [SAVE-PAGE-DATA] ${step.name || 'Page data saved'}`,
-          component: 'WORKFLOW-SAVE-PAGE-DATA',
-          metadata: {
-            step_type: 'save-page-data',
-            step_name: step.name,
-            step_slug: step.slug || null,
-            pageData,
-            config: {
-              variableDump,
-              saveLegs: config.saveLegs,
-              saveInteractiveElements: config.saveInteractiveElements,
-              saveNonInteractiveElements: config.saveNonInteractiveElements,
-              saveLinks: config.saveLinks,
-              saveCookies: config.saveCookies
-            }
+        await this.backendLogger.appendJobLog(jobId, 'info', `💾 [SAVE-PAGE-DATA] ${step.name || 'Page data saved'}`, 'WORKFLOW-SAVE-PAGE-DATA', {
+          step_type: 'save-page-data',
+          step_name: step.name,
+          step_slug: step.slug || null,
+          pageData,
+          config: {
+            variableDump,
+            saveLegs: config.saveLegs,
+            saveInteractiveElements: config.saveInteractiveElements,
+            saveNonInteractiveElements: config.saveNonInteractiveElements,
+            saveLinks: config.saveLinks,
+            saveCookies: config.saveCookies
           }
-        }, {
-          headers: this.getAuthHeaders()
         });
         
         this.storeStepResult(step, {
@@ -7240,20 +7211,12 @@ return {
       
       if (jobId) {
         try {
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'info',
-            message: `🔧 Content-change: ${result.message}`,
-            component: 'WORKFLOW-ANALYZER',
-            metadata: {
-              step_id: step.id,
-              step_name: step.name,
-              step_type: 'content-change',
-              operation: opType,
-              result: result
-            }
-          }, {
-            headers: this.getAuthHeaders()
+          await this.backendLogger.appendJobLog(jobId, 'info', `🔧 Content-change: ${result.message}`, 'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            step_name: step.name,
+            step_type: 'content-change',
+            operation: opType,
+            result: result
           });
         } catch (e) {
           // Silent fail
@@ -7758,19 +7721,11 @@ return {
     // Log execution start
     if (jobId) {
       try {
-        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-          jobId: jobId,
-          level: 'debug',
-          message: `🚀 Starting code execution: ${step.name}`,
-          component: 'WORKFLOW-ANALYZER',
-          metadata: {
-            step_id: step.id,
-            step_name: step.name,
-            step_type: 'execute-code',
-            page_url: page.url()
-          }
-        }, {
-          headers: this.getAuthHeaders()
+        await this.backendLogger.appendJobLog(jobId, 'debug', `🚀 Starting code execution: ${step.name}`, 'WORKFLOW-ANALYZER', {
+          step_id: step.id,
+          step_name: step.name,
+          step_type: 'execute-code',
+          page_url: page.url()
         });
       } catch (e) {
         // Silent fail - don't block execution
@@ -7889,21 +7844,19 @@ return {
     if (!code || code.trim().length === 0) {
       if (jobId) {
         try {
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'error',
-            message: `❌ Script is empty after cleaning for step: ${step.name}`,
-            component: 'WORKFLOW-ANALYZER',
-            metadata: {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'error',
+            `❌ Script is empty after cleaning for step: ${step.name}`,
+            'WORKFLOW-ANALYZER',
+            {
               step_id: step.id,
               step_name: step.name,
               original_code_length: originalCodeLength,
               cleaned_code_length: cleanedCodeLength,
               original_code_preview: step.config?.code?.substring(0, 500) || step.code?.substring(0, 500) || 'N/A'
             }
-          }, {
-            headers: this.getAuthHeaders()
-          });
+          );
         } catch (e) {}
       }
       throw new Error(`Script is empty after cleaning for step: ${step.name}`);
@@ -7912,20 +7865,18 @@ return {
     // Log cleaned code info
     if (jobId) {
       try {
-        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-          jobId: jobId,
-          level: 'debug',
-          message: `📝 Code cleaned (${originalCodeLength} → ${cleanedCodeLength} chars)`,
-          component: 'WORKFLOW-ANALYZER',
-          metadata: {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'debug',
+          `📝 Code cleaned (${originalCodeLength} → ${cleanedCodeLength} chars)`,
+          'WORKFLOW-ANALYZER',
+          {
             step_id: step.id,
             step_name: step.name,
             cleaned_code_preview: code.substring(0, 500),
             cleaning_removed_chars: originalCodeLength - cleanedCodeLength
           }
-        }, {
-          headers: this.getAuthHeaders()
-        });
+        );
       } catch (e) {}
     }
     
@@ -7937,20 +7888,12 @@ return {
       // Log execution start
       if (jobId) {
         try {
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'debug',
-            message: `▶️ Executing code in browser context...`,
-            component: 'WORKFLOW-ANALYZER',
-            metadata: {
-              step_id: step.id,
-              step_name: step.name,
-              url_before: urlBefore,
-              title_before: titleBefore,
-              timeout_ms: timeout
-            }
-          }, {
-            headers: this.getAuthHeaders()
+          await this.backendLogger.appendJobLog(jobId, 'debug', `▶️ Executing code in browser context...`, 'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            step_name: step.name,
+            url_before: urlBefore,
+            title_before: titleBefore,
+            timeout_ms: timeout
           });
         } catch (e) {}
       }
@@ -8079,12 +8022,12 @@ return {
       // Log successful execution
       if (jobId) {
         try {
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'info',
-            message: `✅ Code executed successfully (${executionTime}ms): ${step.name}`,
-            component: 'WORKFLOW-ANALYZER',
-            metadata: {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            `✅ Code executed successfully (${executionTime}ms): ${step.name}`,
+            'WORKFLOW-ANALYZER',
+            {
               step_id: step.id,
               step_name: step.name,
               execution_time_ms: executionTime,
@@ -8096,9 +8039,7 @@ return {
               title_changed: titleBefore !== titleAfter,
               result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500)
             }
-          }, {
-            headers: this.getAuthHeaders()
-          });
+          );
         } catch (e) {}
       }
       
@@ -8204,12 +8145,12 @@ return {
       // Log execution failure
       if (jobId) {
         try {
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'error',
-            message: `❌ Code execution failed: ${error.message}`,
-            component: 'WORKFLOW-ANALYZER',
-            metadata: {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'error',
+            `❌ Code execution failed: ${error.message}`,
+            'WORKFLOW-ANALYZER',
+            {
               step_id: step.id,
               step_name: step.name,
               execution_time_ms: executionTime,
@@ -8218,9 +8159,7 @@ return {
               code_preview: code?.substring(0, 500) || 'N/A',
               page_url: page.url()
             }
-          }, {
-            headers: this.getAuthHeaders()
-          });
+          );
         } catch (e) {
           // Silent fail - don't block error throwing
         }
@@ -8741,20 +8680,18 @@ return {
     // Log parsing result to job logs for debugging
     if (jobId && actionLines.length > 0) {
       try {
-        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-          jobId: jobId,
-          level: 'debug',
-          message: `📋 Parsed ${actionLines.length} action lines from script (will log during execution)`,
-          component: 'WORKFLOW-ANALYZER',
-          metadata: {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'debug',
+          `📋 Parsed ${actionLines.length} action lines from script (will log during execution)`,
+          'WORKFLOW-ANALYZER',
+          {
             step_id: step.id,
             step_name: step.name,
             action_lines_count: actionLines.length,
             script_length: code.length
           }
-        }, {
-          headers: this.getAuthHeaders()
-        });
+        );
       } catch (logError) {
         console.error(`❌ Failed to log parsing result: ${logError.message}`);
       }
@@ -8769,22 +8706,14 @@ return {
           hasAsyncFunction || hasPageReference || hasReturn
             ? `ℹ️ No action lines parsed from script for logging (script length: ${code.length} chars) - script appears valid but may use patterns not recognized by parser`
             : `⚠️ No action lines parsed from script (script length: ${code.length} chars) - script may be empty or in unexpected format`;
-        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-          jobId: jobId,
-          level: warningLevel,
-          message: warningMessage,
-          component: 'WORKFLOW-ANALYZER',
-          metadata: {
-            step_id: step.id,
-            step_name: step.name,
-            script_length: code.length,
-            script_preview: code.substring(0, 300),
-            has_async: hasAsyncFunction,
-            has_page_ref: hasPageReference,
-            has_return: hasReturn
-          }
-        }, {
-          headers: this.getAuthHeaders()
+        await this.backendLogger.appendJobLog(jobId, warningLevel, warningMessage, 'WORKFLOW-ANALYZER', {
+          step_id: step.id,
+          step_name: step.name,
+          script_length: code.length,
+          script_preview: code.substring(0, 300),
+          has_async: hasAsyncFunction,
+          has_page_ref: hasPageReference,
+          has_return: hasReturn
         });
       } catch (logError) {
         console.error(`❌ Failed to log parsing warning: ${logError.message}`);
@@ -8929,19 +8858,17 @@ return {
       console.log(`✅ Total variable replacements: ${replacementCount}`);
       if (jobId) {
         try {
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'debug',
-            message: `🔧 Replaced ${replacementCount} undefined variable(s) with correct Playwright API equivalents`,
-            component: 'WORKFLOW-ANALYZER',
-            metadata: {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'debug',
+            `🔧 Replaced ${replacementCount} undefined variable(s) with correct Playwright API equivalents`,
+            'WORKFLOW-ANALYZER',
+            {
               step_id: step.id,
               step_name: step.name,
               replacement_count: replacementCount
             }
-          }, {
-            headers: this.getAuthHeaders()
-          });
+          );
         } catch (logError) {
           // Silent fail - don't block execution
         }
@@ -9004,12 +8931,12 @@ return {
           
           // Store screenshot link with action metadata
           const currentLeg = workflowState.currentLeg || {};
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'info',
-            message: `📸 Screenshot before action: ${step.name} - ${currentLeg.description || 'Action execution'}`,
-            component: 'WORKFLOW-STEP',
-            metadata: {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            `📸 Screenshot before action: ${step.name} - ${currentLeg.description || 'Action execution'}`,
+            'WORKFLOW-STEP',
+            {
               screenshot_type: 'before_action',
               action: step.name,
               leg_id: currentLeg.leg_id,
@@ -9017,9 +8944,7 @@ return {
               screenshot_key: screenshotBeforeKey,
               url: urlBeforeAction
             }
-          }, {
-            headers: this.getAuthHeaders()
-          });
+          );
         }
       } catch (screenshotError) {
         console.warn(`⚠️ Failed to capture before screenshot: ${screenshotError.message}`);
@@ -9047,12 +8972,12 @@ return {
               maxContentLength: Infinity,
               timeout: 30000
             });
-            await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-              jobId: jobId,
-              level: 'warn',
-              message: `🧩 CAPTCHA EVIDENCE: ${note}`,
-              component: 'CAPTCHA',
-              metadata: {
+            await this.backendLogger.appendJobLog(
+              jobId,
+              'warn',
+              `🧩 CAPTCHA EVIDENCE: ${note}`,
+              'CAPTCHA',
+              {
                 screenshot_type: screenshotType,
                 screenshot_key: key,
                 screenshot_file_id: key,
@@ -9065,7 +8990,7 @@ return {
                 captcha_type: captchaInfo?.type || null,
                 captcha_selector: captchaInfo?.selector || null
               }
-            }, { headers: this.getAuthHeaders(), timeout: 10000 });
+            );
             return { key, publicUrl: publicUrl || null };
           }
         } catch (e) {
@@ -9136,22 +9061,14 @@ return {
       
       if (jobId) {
         try {
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'debug',
-            message: executionStartMessage,
-            component: 'WORKFLOW-ANALYZER',
-            metadata: {
-              step_id: step.id,
-              step_name: step.name,
-              url_before: urlBeforeAction,
-              timeout_ms: timeout,
-              script_length: code.length,
-              script_preview: code.substring(0, 300),
-              script_download_url: executedScriptUrl
-            }
-          }, {
-            headers: this.getAuthHeaders()
+          await this.backendLogger.appendJobLog(jobId, 'debug', executionStartMessage, 'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            step_name: step.name,
+            url_before: urlBeforeAction,
+            timeout_ms: timeout,
+            script_length: code.length,
+            script_preview: code.substring(0, 300),
+            script_download_url: executedScriptUrl
           });
           
           // Log each action line with [executing] prefix
@@ -9162,28 +9079,13 @@ return {
             for (const actionLine of actionLines) {
               console.log(`📝 Logging action: [executing] ${actionLine.substring(0, 100)}`);
               try {
-                const response = await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-                  jobId: jobId,
-                  level: 'info',
-                  message: `[executing] ${actionLine}`,
-                  component: 'WORKFLOW-ANALYZER',
-                  metadata: {
-                    step_id: step.id,
-                    step_name: step.name,
-                    action_type: 'script_action',
-                    action_line: actionLine
-                  }
-                }, {
-                  headers: this.getAuthHeaders(),
-                  timeout: 5000 // 5 second timeout
+                await this.backendLogger.appendJobLog(jobId, 'info', `[executing] ${actionLine}`, 'WORKFLOW-ANALYZER', {
+                  step_id: step.id,
+                  step_name: step.name,
+                  action_type: 'script_action',
+                  action_line: actionLine
                 });
-                // Backend may return 202 when logs.jobs.append is queued to SQS (still successful).
-                if (response.status >= 200 && response.status < 300) {
-                  loggedCount++;
-                } else {
-                  failedCount++;
-                  console.error(`❌ Failed to log action line: HTTP ${response.status}`);
-                }
+                loggedCount++;
               } catch (logError) {
                 failedCount++;
                 console.error(`❌ Failed to log action line: ${logError.message}`, logError.response?.data || '');
@@ -9194,21 +9096,19 @@ return {
             // Log summary if some failed
             if (failedCount > 0 && jobId) {
               try {
-                await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-                  jobId: jobId,
-                  level: 'warn',
-                  message: `⚠️ Failed to log ${failedCount} out of ${actionLines.length} action lines`,
-                  component: 'WORKFLOW-ANALYZER',
-                  metadata: {
+                await this.backendLogger.appendJobLog(
+                  jobId,
+                  'warn',
+                  `⚠️ Failed to log ${failedCount} out of ${actionLines.length} action lines`,
+                  'WORKFLOW-ANALYZER',
+                  {
                     step_id: step.id,
                     step_name: step.name,
                     logged_count: loggedCount,
                     failed_count: failedCount,
                     total_count: actionLines.length
                   }
-                }, {
-                  headers: this.getAuthHeaders()
-                });
+                );
               } catch (summaryError) {
                 console.error(`❌ Failed to log summary: ${summaryError.message}`);
               }
@@ -9323,6 +9223,7 @@ return {
       
       // Wrap page object to intercept ALL Playwright method calls and log execution
       const createPageWrapperWithScreenshot = (pageObj, jobId, backendUrl, getAuthHeaders, stepInfo = null) => {
+        const jobLog = this.backendLogger;
         console.log(`🔧 Creating page wrapper for jobId: ${jobId}`);
         const wrapper = {};
         
@@ -9367,26 +9268,16 @@ return {
             }
             
             try {
-              const response = await axios.post(`${backendUrl}/api/logs/jobs/append`, {
-                jobId: jobId,
-                level: 'info',
-                message: `[executing] await page.${actionDisplay}`,
-                component: 'WORKFLOW-ANALYZER',
-                metadata: metadata
-              }, {
-                headers: getAuthHeaders(),
-                timeout: 5000 // 5 second timeout
-              });
-              
-              console.log(`✅ Successfully logged action: ${actionDisplay} (status: ${response.status})`);
+              await jobLog.appendJobLog(
+                jobId,
+                'info',
+                `[executing] await page.${actionDisplay}`,
+                'WORKFLOW-ANALYZER',
+                metadata
+              );
+              console.log(`✅ Successfully logged action: ${actionDisplay}`);
             } catch (axiosError) {
-              // Log the error but don't fail execution
-              console.error(`❌ Failed to log action via axios: ${axiosError.message}`);
-              if (axiosError.response) {
-                console.error(`Response status: ${axiosError.response.status}`);
-                console.error(`Response data:`, axiosError.response.data);
-              }
-              // Try to log via console as fallback
+              console.error(`❌ Failed to log action: ${axiosError.message}`);
               console.log(`[executing] await page.${actionDisplay}`);
             }
           } catch (logError) {
@@ -9581,23 +9472,15 @@ return {
                   const screenshotKey = presignedResponse.data.key;
                   
                   // Log screenshot with screenshot_type metadata (like screenshot-type elements)
-                  await axios.post(`${backendUrl}/api/logs/jobs/append`, {
-                    jobId: jobId,
-                    level: 'info',
-                    message: `📸 Screenshot captured`,
-                    component: 'WORKFLOW-ANALYZER',
-                    metadata: {
-                      screenshot_type: 'script_execution',
-                      screenshot_key: screenshotKey,
-                      screenshot_file_id: screenshotKey,
-                      is_screenshot: true,
-                      action_type: 'screenshot',
-                      screenshot_options: options,
-                      step_id: step.id,
-                      step_name: step.name
-                    }
-                  }, {
-                    headers: authHeaders
+                  await jobLog.appendJobLog(jobId, 'info', `📸 Screenshot captured`, 'WORKFLOW-ANALYZER', {
+                    screenshot_type: 'script_execution',
+                    screenshot_key: screenshotKey,
+                    screenshot_file_id: screenshotKey,
+                    is_screenshot: true,
+                    action_type: 'screenshot',
+                    screenshot_options: options,
+                    step_id: step.id,
+                    step_name: step.name
                   });
                 }
               } catch (screenshotLogError) {
@@ -10487,22 +10370,14 @@ ${executableBody}`;
       
       if (jobId) {
         try {
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'info',
-            message: successMessage,
-            component: 'WORKFLOW-ANALYZER',
-            metadata: {
-              step_id: step.id,
-              step_name: step.name,
-              execution_time_ms: executionTime,
-              url_before: urlBeforeAction,
-              url_after: page.url(),
-              result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500),
-              script_download_url: executedScriptUrl
-            }
-          }, {
-            headers: this.getAuthHeaders()
+          await this.backendLogger.appendJobLog(jobId, 'info', successMessage, 'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            step_name: step.name,
+            execution_time_ms: executionTime,
+            url_before: urlBeforeAction,
+            url_after: page.url(),
+            result_preview: typeof result === 'object' ? JSON.stringify(result).substring(0, 500) : String(result).substring(0, 500),
+            script_download_url: executedScriptUrl
           });
         } catch (e) {
           // Silent fail - don't block execution
@@ -10569,12 +10444,12 @@ ${executableBody}`;
           
           // Store screenshot link with action metadata
           const currentLeg = workflowState.currentLeg || {};
-          await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-            jobId: jobId,
-            level: 'info',
-            message: `📸 Screenshot after action: ${step.name} - ${currentLeg.description || 'Action execution'} ${pageChanged ? '(page changed)' : '(same page)'}`,
-            component: 'WORKFLOW-STEP',
-            metadata: {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            `📸 Screenshot after action: ${step.name} - ${currentLeg.description || 'Action execution'} ${pageChanged ? '(page changed)' : '(same page)'}`,
+            'WORKFLOW-STEP',
+            {
               screenshot_type: 'after_action',
               action: step.name,
               leg_id: currentLeg.leg_id,
@@ -10585,9 +10460,7 @@ ${executableBody}`;
               url_after: urlAfterAction,
               page_changed: pageChanged
             }
-          }, {
-            headers: this.getAuthHeaders()
-          });
+          );
         }
       } catch (screenshotError) {
         console.warn(`⚠️ Failed to capture after screenshot: ${screenshotError.message}`);
@@ -11346,15 +11219,13 @@ ${executableBody}`;
     };
 
     try {
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
+      await this.backendLogger.appendJobLog(
         jobId,
-        level: 'info',
-        message: `🧾 [VAR-DUMP] ${step.name || 'Workflow variables'}`,
-        component: 'WORKFLOW-VAR-DUMP',
+        'info',
+        `🧾 [VAR-DUMP] ${step.name || 'Workflow variables'}`,
+        'WORKFLOW-VAR-DUMP',
         metadata
-      }, {
-        headers: this.getAuthHeaders()
-      });
+      );
 
       this.storeStepResult(step, {
         dumped_scopes: scopes,
@@ -11510,15 +11381,7 @@ ${executableBody}`;
     this.enrichPrintMetadata(metadata, scope, workflowState);
 
     try {
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: level,
-        message: `📝 [PRINT] ${message}`,
-        component: 'WORKFLOW-PRINT',
-        metadata
-      }, {
-        headers: this.getAuthHeaders()
-      });
+      await this.backendLogger.appendJobLog(jobId, level, `📝 [PRINT] ${message}`, 'WORKFLOW-PRINT', metadata);
 
       this.storeStepResult(step, { 
         message,
@@ -13647,12 +13510,12 @@ ${executableBody}`;
     // Send log to backend for job history
     if (jobId) {
       try {
-        await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-          jobId: jobId,
-          level: 'info',
-          message: `✅ While-loop completed after ${iteration} iterations${finalLegStatus ? ` (final status: ${finalLegStatus})` : ''}`,
-          component: 'WORKFLOW-ANALYZER',
-          metadata: {
+        await this.backendLogger.appendJobLog(
+          jobId,
+          'info',
+          `✅ While-loop completed after ${iteration} iterations${finalLegStatus ? ` (final status: ${finalLegStatus})` : ''}`,
+          'WORKFLOW-ANALYZER',
+          {
             step_id: step.id,
             step_name: step.name || step.type,
             step_type: 'while-loop',
@@ -13664,10 +13527,7 @@ ${executableBody}`;
             final_leg_result: finalLegResult,
             timestamp: new Date().toISOString()
           }
-        }, {
-          headers: this.getAuthHeaders(),
-          timeout: 120000
-        });
+        );
       } catch (error) {
         console.error(`⚠️ Failed to log while-loop completion: ${error.message}`);
       }
@@ -14924,14 +14784,10 @@ ${executableBody}`;
     // Check if we've exceeded max retries
     if (retryCount >= maxRetries) {
       console.log(`❌ Max retries (${maxRetries}) exceeded for self-adjustable AI workflow`);
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: 'error',
-        message: `Max retries (${maxRetries}) exceeded for self-adjustable AI workflow`,
-        component: 'WORKFLOW-STEP',
-        metadata: { step: step.name, retryCount, maxRetries }
-      }, {
-        headers: this.getAuthHeaders()
+      await this.backendLogger.appendJobLog(jobId, 'error', `Max retries (${maxRetries}) exceeded for self-adjustable AI workflow`, 'WORKFLOW-STEP', {
+        step: step.name,
+        retryCount,
+        maxRetries
       });
       throw new Error(`Max retries (${maxRetries}) exceeded`);
     }
@@ -14946,21 +14802,19 @@ ${executableBody}`;
     console.log(`🔄 Retry ${retryCount + 1}/${maxRetries} for failed script execution`);
     
     // Log retry attempt
-    await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-      jobId: jobId,
-      level: 'info',
-      message: `🔄 Self-adjustable AI workflow retry ${retryCount + 1}/${maxRetries}`,
-      component: 'WORKFLOW-STEP',
-      metadata: {
+    await this.backendLogger.appendJobLog(
+      jobId,
+      'info',
+      `🔄 Self-adjustable AI workflow retry ${retryCount + 1}/${maxRetries}`,
+      'WORKFLOW-STEP',
+      {
         step: step.name,
         retryCount: retryCount + 1,
         maxRetries,
         previousError: lastFailure.error,
         explanation
       }
-    }, {
-      headers: this.getAuthHeaders()
-    });
+    );
     
     // Use the script generation step from the failure info (exact step that generated the failed script)
     const scriptGenerationStep = lastFailure.scriptGenerationStep;
@@ -15068,21 +14922,19 @@ ${executableBody}`;
       workflowState.selfAdjustableRetryCount = retryCount + 1;
       
       // Log workflow creation
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: 'info',
-        message: `✅ Created new AI-generated workflow for retry ${retryCount + 1}`,
-        component: 'WORKFLOW-STEP',
-        metadata: {
+      await this.backendLogger.appendJobLog(
+        jobId,
+        'info',
+        `✅ Created new AI-generated workflow for retry ${retryCount + 1}`,
+        'WORKFLOW-STEP',
+        {
           step: step.name,
           workflowId: newWorkflowId,
           workflowName: newWorkflowName,
           retryCount: retryCount + 1,
           parentWorkflowId: this.workflowTemplate._id
         }
-      }, {
-        headers: this.getAuthHeaders()
-      });
+      );
       
       // Load the new workflow and continue execution from the script generation step
       const newWorkflowResponse = await axios.get(
@@ -15103,19 +14955,17 @@ ${executableBody}`;
       
       console.log(`🔄 Loaded new workflow, will continue from step ${scriptGenerationStepIndex} (script generation step)`);
       
-      await axios.post(`${this.backendUrl}/api/logs/jobs/append`, {
-        jobId: jobId,
-        level: 'info',
-        message: `🔄 Continuing execution from step ${scriptGenerationStepIndex} with new adjusted workflow`,
-        component: 'SELF-ADJUSTABLE-WORKFLOW',
-        metadata: {
+      await this.backendLogger.appendJobLog(
+        jobId,
+        'info',
+        `🔄 Continuing execution from step ${scriptGenerationStepIndex} with new adjusted workflow`,
+        'SELF-ADJUSTABLE-WORKFLOW',
+        {
           retry_from_step: scriptGenerationStepIndex,
           new_workflow_id: newWorkflowId,
           page_id: pageId
         }
-      }, {
-        headers: this.getAuthHeaders()
-      });
+      );
       
       // Continue execution from the script generation step
       // We need to re-execute from that step with the new workflow

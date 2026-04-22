@@ -220,19 +220,31 @@ export async function createJobLogContext(jobId, metadata = {}) {
 
 /**
  * Append a log entry to a job (buffered; see flushAllBufferedLogs).
+ * @param {unknown[]|null|undefined} attachments Optional per-line attachments (same shape as single-append API).
  */
-export async function appendJobLog(jobId, level, message, component = 'unified-crawler', metadata = {}) {
+export async function appendJobLog(
+  jobId,
+  level,
+  message,
+  component = 'unified-crawler',
+  metadata = {},
+  attachments = null
+) {
   const jobIdStr = jobId != null ? String(jobId) : null;
   if (!jobIdStr) return { ok: false };
   _ensureLogFlushTimer();
   if (!_jobLogBuffers.has(jobIdStr)) _jobLogBuffers.set(jobIdStr, []);
-  _jobLogBuffers.get(jobIdStr).push({
+  const entry = {
     level,
     message,
     component,
     metadata: metadata || {},
     timestamp: new Date(),
-  });
+  };
+  if (Array.isArray(attachments) && attachments.length > 0) {
+    entry.attachments = attachments;
+  }
+  _jobLogBuffers.get(jobIdStr).push(entry);
   return { ok: true, buffered: true };
 }
 
