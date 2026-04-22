@@ -35,6 +35,19 @@ const execFileAsync = promisify(execFile);
 const VIDEO_TMP_DIR = process.env.SCREENCAST_TMP_DIR || '/tmp/aionqa_videos';
 const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
 const RECORDER_TAG = 'playwright-screencast-1.59-playlist';
+// Hard cap on a single stage's wall-clock duration. The workflow can take
+// minutes when an LLM call gets stuck; we don't want that to translate into a
+// minutes-long WebM full of idle frames. Anything that exceeds this gets
+// auto-ended (the next stage will simply start a fresh clip).
+const STAGE_MAX_DURATION_MS = Math.max(
+  5_000,
+  Number.parseInt(process.env.SCREENCAST_STAGE_MAX_MS || '45000', 10) || 45_000
+);
+// mpdecimate post-processing cuts near-duplicate frames before upload so the
+// final clip only contains frames where something actually changed (typing,
+// clicks, navigations, animations). Set `SCREENCAST_DECIMATE=false` to skip
+// this — useful only when debugging.
+const DECIMATE_ENABLED = String(process.env.SCREENCAST_DECIMATE ?? 'true').toLowerCase() !== 'false';
 
 function envInt(name, fallback) {
   const raw = Number.parseInt(process.env[name] || '', 10);
@@ -169,7 +182,11 @@ class ScreencastRecorder {
       actionsDispose: null,
       // Per-stage in-video metadata (chapters/actions/overlays).
       stageChapters: [],
-      stageActions: []
+      stageActions: [],
+      // Watchdog timer that auto-ends the stage if it overruns
+      // STAGE_MAX_DURATION_MS. Without this a stuck workflow leg can record
+      // for several minutes of pure idle waiting.
+      watchdog: null
     };
 
     try {
@@ -225,6 +242,19 @@ class ScreencastRecorder {
     });
 
     job.activeStage = stage;
+
+    // Arm the watchdog so a stuck stage can't grow unbounded. Use unref so
+    // the timer doesn't keep the runner process alive on its own.
+    try {
+      stage.watchdog = setTimeout(() => {
+        if (!stage.stopped) {
+          console.warn(`[SCREENCAST] Stage "${stage.label}" exceeded ${STAGE_MAX_DURATION_MS}ms — auto-ending to prevent idle bloat.`);
+          this.endStage(jobId, stage.id, { reason: 'max_duration_exceeded' }).catch(() => {});
+        }
+      }, STAGE_MAX_DURATION_MS);
+      if (typeof stage.watchdog?.unref === 'function') stage.watchdog.unref();
+    } catch (_) { /* ignore */ }
+
     console.log(`🎬 [SCREENCAST] Stage "${stage.label}" started for job ${jobId} -> ${filename}`);
     return id;
   }
@@ -244,6 +274,13 @@ class ScreencastRecorder {
     if (stage.stopped) return null;
     stage.stopped = true;
     job.activeStage = null;
+
+    // Clear the watchdog (we got here either naturally or from the watchdog
+    // itself firing — either way the timer is no longer needed).
+    if (stage.watchdog) {
+      try { clearTimeout(stage.watchdog); } catch (_) { /* ignore */ }
+      stage.watchdog = null;
+    }
 
     // Stop showActions disposer (best-effort).
     try {
@@ -276,27 +313,46 @@ class ScreencastRecorder {
     // Wait briefly for the WebM file to finish writing.
     await new Promise((resolve) => setTimeout(resolve, 250));
 
-    // Stat / measure / upload.
+    // Stat / measure.
     let stats = null;
     try { stats = await fs.promises.stat(stage.filePath); } catch (_) { stats = null; }
     if (!stats || stats.size <= 0) {
       console.warn(`[SCREENCAST] Stage "${stage.label}" produced no WebM file at ${stage.filePath}; skipping upload.`);
       return null;
     }
-    const duration = await this._probeDurationSeconds(stage.filePath);
-    const sizeBytes = stats.size;
+    const rawDuration = await this._probeDurationSeconds(stage.filePath);
+    const rawSize = stats.size;
     const startOffset = Math.max(0, (stage.startTime - job.jobStartTime) / 1000);
-    const endOffset = startOffset + (Number.isFinite(duration) ? duration : 0);
+
+    // Compact: drop near-duplicate frames so the clip only contains moments
+    // when something actually changed on screen. This is what turns a 100s
+    // clip of "waiting for the LLM with the page just sitting there" into
+    // a few seconds of real action.
+    const compacted = await this._compactClipWithMpdecimate(stage.filePath, rawDuration);
+    const finalPath = compacted?.path || stage.filePath;
+    const finalDuration = Number.isFinite(compacted?.duration) ? compacted.duration : rawDuration;
+    const finalSize = compacted?.size ?? rawSize;
+    const endOffset = startOffset + (Number.isFinite(finalDuration) ? finalDuration : 0);
+
+    if (compacted && compacted.path !== stage.filePath) {
+      const ratio = rawDuration && Number.isFinite(rawDuration) && rawDuration > 0
+        ? (finalDuration / rawDuration)
+        : 1;
+      console.log(`[SCREENCAST] Compacted "${stage.label}": ${rawDuration?.toFixed(2)}s -> ${finalDuration?.toFixed(2)}s (${(ratio * 100).toFixed(0)}% kept), ${(rawSize / 1024).toFixed(0)} KB -> ${(finalSize / 1024).toFixed(0)} KB`);
+    }
 
     let uploadInfo = null;
     try {
-      uploadInfo = await this._uploadSegmentFile(jobId, stage, sizeBytes);
+      uploadInfo = await this._uploadSegmentFile(jobId, stage, finalSize, finalPath);
     } catch (err) {
       console.error(`[SCREENCAST] Failed to upload stage "${stage.label}" for job ${jobId}: ${err.message}`);
     }
 
-    // Cleanup the local file.
+    // Cleanup local files (raw + compacted if separate).
     try { await fs.promises.unlink(stage.filePath); } catch (_) { /* ignore */ }
+    if (finalPath !== stage.filePath) {
+      try { await fs.promises.unlink(finalPath); } catch (_) { /* ignore */ }
+    }
 
     if (!uploadInfo) return null;
 
@@ -310,21 +366,26 @@ class ScreencastRecorder {
       end_offset: endOffset,
       padded_start: startOffset,
       padded_end: endOffset,
-      duration: Number.isFinite(duration) ? duration : 0,
+      duration: Number.isFinite(finalDuration) ? finalDuration : 0,
       video_url: uploadInfo.videoUrl,
       video_key: uploadInfo.key,
-      video_size_bytes: sizeBytes,
+      video_size_bytes: finalSize,
       metadata: {
         ...(stage.metadata || {}),
         end_metadata: extra || {},
         chapters: stage.stageChapters,
         actions: stage.stageActions,
-        recorder: RECORDER_TAG
+        recorder: RECORDER_TAG,
+        // Pre-compaction stats so the UI can show how much idle time was
+        // trimmed (or so a future debug page can re-examine the raw clip).
+        raw_duration_seconds: Number.isFinite(rawDuration) ? rawDuration : null,
+        raw_size_bytes: rawSize,
+        compacted: finalPath !== stage.filePath
       }
     };
 
     job.segments.push(segment);
-    console.log(`✅ [SCREENCAST] Stage "${stage.label}" uploaded: ${(sizeBytes / 1024).toFixed(0)} KB, ${segment.duration.toFixed(2)}s -> ${uploadInfo.videoUrl}`);
+    console.log(`✅ [SCREENCAST] Stage "${stage.label}" uploaded: ${(finalSize / 1024).toFixed(0)} KB, ${segment.duration.toFixed(2)}s -> ${uploadInfo.videoUrl}`);
 
     // Register with backend so the UI's playlist updates immediately.
     try {
@@ -529,7 +590,7 @@ class ScreencastRecorder {
     }
   }
 
-  async _uploadSegmentFile(jobId, stage, sizeBytes) {
+  async _uploadSegmentFile(jobId, stage, sizeBytes, filePath) {
     const headers = {};
     if (this.runnerToken) headers['Authorization'] = `Bearer ${this.runnerToken}`;
 
@@ -552,7 +613,8 @@ class ScreencastRecorder {
       throw new Error('prepare-video did not return uploadUrl/key');
     }
 
-    const stream = fs.createReadStream(stage.filePath);
+    const sourcePath = filePath || stage.filePath;
+    const stream = fs.createReadStream(sourcePath);
     await axios.put(uploadUrl, stream, {
       headers: { 'Content-Type': 'video/webm', 'Content-Length': sizeBytes },
       maxBodyLength: Infinity,
@@ -563,6 +625,69 @@ class ScreencastRecorder {
     const publicBackend = this.resolvePublicBackendUrl();
     const playableUrl = publicUrl || `${publicBackend}/stream-video?key=${encodeURIComponent(key)}`;
     return { videoUrl: playableUrl, key };
+  }
+
+  /**
+   * Drop near-duplicate frames from `inputPath` using ffmpeg's `mpdecimate`
+   * filter. Effectively this collapses long static / idle stretches (waiting
+   * for the LLM, slow page loads, etc.) so the resulting clip only contains
+   * frames where something actually changed on screen. PTS is reset so the
+   * output plays at constant 25fps without pauses.
+   *
+   * Returns `{ path, size, duration }` for the compacted file, or `null` if
+   * compaction was skipped or failed (caller should fall back to the raw
+   * input).
+   */
+  async _compactClipWithMpdecimate(inputPath, rawDuration) {
+    if (!DECIMATE_ENABLED) return null;
+    if (!inputPath || !fs.existsSync(inputPath)) return null;
+
+    // Skip very short clips — overhead isn't worth it.
+    if (Number.isFinite(rawDuration) && rawDuration < 1.5) return null;
+
+    const outputPath = inputPath.replace(/\.webm$/i, '') + '-compact.webm';
+    // mpdecimate parameters tuned for browser captures:
+    //   hi   - high diff threshold (default 64*12=768); raise slightly so
+    //          subtle anti-alias jitter doesn't keep frames.
+    //   lo   - low diff threshold (default 64*5=320).
+    //   frac - fraction of pixels that must differ (default 0.33).
+    // setpts resets timestamps so dropped frames don't leave gaps.
+    const filter = 'mpdecimate=hi=64*16:lo=64*5:frac=0.33,setpts=N/FRAME_RATE/TB';
+
+    try {
+      await execFileAsync('ffmpeg', [
+        '-y',
+        '-loglevel', 'error',
+        '-i', inputPath,
+        '-vf', filter,
+        '-an',
+        '-c:v', 'libvpx',
+        '-quality', 'good',
+        '-cpu-used', '2',
+        '-b:v', '1M',
+        '-deadline', 'good',
+        '-r', '25',
+        outputPath
+      ], { timeout: 600000 });
+    } catch (err) {
+      console.warn(`[SCREENCAST] mpdecimate failed for ${inputPath}: ${err.message}`);
+      try { await fs.promises.unlink(outputPath); } catch (_) { /* ignore */ }
+      return null;
+    }
+
+    let outStats = null;
+    try { outStats = await fs.promises.stat(outputPath); } catch (_) { outStats = null; }
+    if (!outStats || outStats.size <= 0) {
+      try { await fs.promises.unlink(outputPath); } catch (_) { /* ignore */ }
+      return null;
+    }
+    const outDuration = await this._probeDurationSeconds(outputPath);
+    if (!Number.isFinite(outDuration) || outDuration <= 0) {
+      try { await fs.promises.unlink(outputPath); } catch (_) { /* ignore */ }
+      return null;
+    }
+
+    return { path: outputPath, size: outStats.size, duration: outDuration };
   }
 
   async _registerSegment(jobId, segment) {

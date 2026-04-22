@@ -16892,6 +16892,23 @@ const sleep = safeWait;
         }
         // -----------------------------------------------------------------------
 
+        // try/finally so endStage runs no matter what (script throws,
+        // outer Promise.race timeout, fallback retries, etc.). Without this
+        // a stuck/timed-out journey leaves the screencast recording for
+        // tens of seconds of pure idle while we wait for the next iteration
+        // to preempt it.
+        let __scStageEnded = false;
+        const __endActiveStage = async (reason) => {
+          if (__scStageEnded || !__isJourneyClip || !__scStageId) return;
+          __scStageEnded = true;
+          try {
+            await __scRecorder.endStage(jobId, __scStageId, { reason });
+          } catch (stageEndErr) {
+            console.warn(`[Screencast] Could not end stage ${__scStageId}: ${stageEndErr.message}`);
+          }
+        };
+
+        try {
         try {
           rawResult = await fn(wrappedPage, wrappedPage, credentials, msHelper, delay, pageText, execContext, testHelper);
         } catch (runErr) {
@@ -16947,22 +16964,16 @@ const sleep = safeWait;
           );
         }
 
-        // ----- End the per-stage clip ------------------------------------------
-        // We end the stage immediately after the script returns (success or
+        // End the stage immediately after the script returns (success or
         // recovered fallback) so the WebM uploads while the runner is busy
-        // with post-processing. If the script threw and we never reached
-        // here, ScreencastRecorder.finalize() at job end will mop up any
-        // orphaned active stage.
-        if (__isJourneyClip && __scStageId) {
-          try {
-            await __scRecorder.endStage(jobId, __scStageId, {
-              reason: 'journey_script_completed'
-            });
-          } catch (stageEndErr) {
-            console.warn(`[Screencast] Could not end stage ${__scStageId}: ${stageEndErr.message}`);
-          }
+        // with post-processing.
+        await __endActiveStage('journey_script_completed');
+        } finally {
+          // Backstop: if the script threw or the outer Promise.race timed
+          // out, end the stage anyway so we don't accumulate idle frames
+          // while waiting for the next iteration's startStage to preempt us.
+          await __endActiveStage('journey_script_finally');
         }
-        // -----------------------------------------------------------------------
 
         const result = (rawResult === undefined || rawResult === null)
           ? { success: true, message: 'Script executed without explicit return value' }
