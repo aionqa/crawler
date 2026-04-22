@@ -6,6 +6,7 @@
 import * as backendLogger from '../backend-logger.js';
 import { executeLoginWithWorkflow } from './login-workflow-engine.js';
 import { getRunnerBackendUrl } from '../utils/runner-service-urls.js';
+import { navigationTargetKey } from '../utils/url-navigation-target-key.js';
 
 /**
  * Send log to backend (wrapper for backendLogger)
@@ -238,32 +239,25 @@ export async function detectLoginPage(
 
     const skipIntendedComparison = Boolean(detectionOptions?.skipIntendedUrlComparison);
     /**
-     * Treat near-identical HTTP surfaces as the same navigation target so password fields on
-     * the requested page do not imply a redirect gate when only trivial URL serialization differs.
+     * Use the same canonical shape as workflow queue keys (`urlKeyForDedupe` / `canonicalizeUrl`)
+     * so trivial serialization differences between `page.url()` and the queued crawl URL never
+     * look like an auth redirect when the browser surface is still the requested page.
      */
-    const comparableUrlKey = (u) => {
-      if (!u) return null;
-      try {
-        const h = normalizeHost(u.hostname);
-        const path = normalizePath(u.pathname).replace(/\/+$/, '') || '/';
-        const search = String(u.search || '');
-        return `${h}|${path}|${search}`;
-      } catch {
-        return null;
-      }
-    };
     const urlsDifferFromIntended = (() => {
       if (skipIntendedComparison) return true;
       const rawIntended =
-        intendedNavUrl ?? context?.login_redirect_intended_url ?? context?.start_url ?? context?.options?.start_url ?? null;
+        intendedNavUrl ??
+        context?.login_redirect_intended_url ??
+        context?.seed_url ??
+        context?.start_url ??
+        context?.options?.start_url ??
+        null;
       if (!rawIntended) return false;
       try {
-        const intendedForCompare = parseHttpUrl(rawIntended);
-        if (!intendedForCompare || !surfaceUrlObj) return false;
-        const a = comparableUrlKey(intendedForCompare);
-        const b = comparableUrlKey(surfaceUrlObj);
-        if (!a || !b) return false;
-        return a !== b;
+        const intendedKey = navigationTargetKey(rawIntended);
+        const surfaceKey = navigationTargetKey(surfaceUrlObj.href);
+        if (!intendedKey || !surfaceKey) return false;
+        return intendedKey !== surfaceKey;
       } catch {
         return false;
       }

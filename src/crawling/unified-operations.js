@@ -20,6 +20,7 @@ import { createBackendAxiosWithRetries, retryTransientAsync } from '../utils/bac
 import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 import { collectIframeEmbedLinkRows } from '../utils/iframe-embed-discovery.js';
+import { navigationTargetKey } from '../utils/url-navigation-target-key.js';
 
 const backendDiscoverAxios = createBackendAxiosWithRetries();
 
@@ -2179,27 +2180,7 @@ const modeHandlers = {
       if (/^[a-z0-9][a-z0-9._~/-]*\/[a-z0-9._~/-]+$/i.test(fragment)) return fragment;
       return '';
     };
-    const canonicalizeUrl = (url) => {
-      const withScheme = ensureUrlHasScheme(url);
-      if (!withScheme) return '';
-      try {
-        const u = new URL(withScheme);
-        const routeHash = normalizeHashRouteFragment(u.hash);
-        u.hash = '';
-        if ((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443')) {
-          u.port = '';
-        }
-        const normalizedPath = u.pathname.replace(/\/+$/, '') || '/';
-        const base = `${u.protocol}//${u.host}${normalizedPath}${u.search}`;
-        return routeHash ? `${base}#${routeHash}` : base;
-      } catch {
-        const raw = String(withScheme);
-        const noHash = raw.split('#')[0];
-        const routeHash = normalizeHashRouteFragment(raw.includes('#') ? raw.split('#').slice(1).join('#') : '');
-        const base = noHash.replace(/\/+$/, '') || noHash;
-        return routeHash ? `${base}#${routeHash}` : base;
-      }
-    };
+    const canonicalizeUrl = (url) => navigationTargetKey(url);
     // For queue/dedup: same page by default (canonical); when treat_trailing_slash_separately, /path and /path/ are different
     const treatTrailingSlashSeparately = context.options?.treat_trailing_slash_separately === true;
     const urlKeyForDedupe = (url) => {
