@@ -170,7 +170,12 @@ export async function detectLoginPage(
     // omit path detail during early post-navigation probes; registration seeds must still classify
     // as registration-like even when the rendered surface URL object is incomplete.
     const intendedObj = parseHttpUrl(
-      intendedNavUrl ?? context?.login_redirect_intended_url ?? context?.start_url ?? context?.options?.start_url
+      intendedNavUrl ??
+        context?.login_redirect_intended_url ??
+        context?.resolved_job_entry_url ??
+        context?.options?.resolved_job_entry_url ??
+        context?.start_url ??
+        context?.options?.start_url
     );
     pushPath(intendedObj);
     if (pathCandidates.size === 0) pushPath(surfaceUrlObj);
@@ -250,7 +255,13 @@ export async function detectLoginPage(
      */
     const crawlAnchorCandidates = [
       intendedNavUrl,
+      // Explicit rendered URL from caller (workflow `finalUrl`) — anchors when queue vs page.url() differ trivially
+      currentUrl,
+      context?.resolved_job_entry_url,
+      context?.options?.resolved_job_entry_url,
       context?.login_redirect_intended_url,
+      context?.url,
+      context?.options?.url,
       context?.seed_url,
       context?.start_url,
       context?.options?.start_url,
@@ -276,6 +287,10 @@ export async function detectLoginPage(
       const rawIntended =
         intendedNavUrl ??
         context?.login_redirect_intended_url ??
+        context?.resolved_job_entry_url ??
+        context?.options?.resolved_job_entry_url ??
+        context?.url ??
+        context?.options?.url ??
         context?.seed_url ??
         context?.start_url ??
         context?.options?.start_url ??

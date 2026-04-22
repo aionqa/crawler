@@ -1078,6 +1078,10 @@ async function executeCrawlJob(job, streamInterval) {
   
   const normalizedContext = {
     ...rawContext,
+    // Canonical entry URL this runner process actually crawls (job.url / start_url resolution).
+    // Distributed/page jobs may still carry a parent `seed_url` in context; workflow + login
+    // detection must anchor to this value first to avoid strict false "login redirect" fails.
+    resolved_job_entry_url: url,
     execute_workflow: executeWorkflowFlag,
     single_action_only: Boolean(singleActionOnlyValue),
     // Ensure redirect handling config is always present for unified-operations
@@ -1094,7 +1098,8 @@ async function executeCrawlJob(job, streamInterval) {
       ...mergedOptions,
       execute_workflow: executeWorkflowFlag,
       single_action_only: Boolean(singleActionOnlyValue),
-      handle_login_redirect: handleLoginRedirect
+      handle_login_redirect: handleLoginRedirect,
+      resolved_job_entry_url: url
     }
   };
   

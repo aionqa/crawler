@@ -2204,8 +2204,17 @@ const modeHandlers = {
     };
     // Get initial URL - handle case where page might navigate after cookies are loaded
     // IMPORTANT: Don't access page.url() immediately - page might not be ready or context might be destroyed
-    // Use the seed URL from context instead
-    let seedUrl = context.seed_url || context.start_url || context.url || (context.options && context.options.start_url);
+    // Prefer the runner-resolved job entry URL and explicit per-job targets before inherited
+    // `seed_url` (distributed children often keep the parent crawl seed while `job.url` is the page).
+    let seedUrl =
+      context.resolved_job_entry_url ||
+      context.options?.resolved_job_entry_url ||
+      context.url ||
+      context.start_url ||
+      (context.options && context.options.url) ||
+      (context.options && context.options.start_url) ||
+      context.seed_url ||
+      (context.options && context.options.seed_url);
     
     // If no seed URL in context, try to get from page as last resort
     if (!seedUrl || seedUrl === 'about:blank') {
@@ -7441,6 +7450,15 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
     : [url];
   if (urlList.length === 0) {
     throw new Error('No URLs to crawl (urlList is empty)');
+  }
+  const primaryEntryUrl = urlList[0] || url;
+  if (context && typeof context === 'object') {
+    if (!context.resolved_job_entry_url && primaryEntryUrl) {
+      context.resolved_job_entry_url = primaryEntryUrl;
+    }
+    if (context.options && typeof context.options === 'object' && !context.options.resolved_job_entry_url && primaryEntryUrl) {
+      context.options.resolved_job_entry_url = primaryEntryUrl;
+    }
   }
   const isSameBrowserScan = urlList.length > 1;
   if (isSameBrowserScan) {
