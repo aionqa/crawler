@@ -956,6 +956,25 @@ class WorkflowAnalyzer {
   }
 
   /**
+   * Playwright navigation options for SPA / websocket-heavy apps: `domcontentloaded` can stall
+   * indefinitely while realtime channels keep the navigation lifecycle "open" even though the UI
+   * has moved. `commit` completes once the response is received; follow with {@link waitForSpaInteractiveReady}.
+   */
+  _playwrightSpaNavigationOptions(workflowState, fallbackTimeoutMs = 90000) {
+    const raw = Number(
+      workflowState?.options?.timeout ??
+        workflowState?.configuration?.timeout ??
+        this.context?.configuration?.timeout ??
+        NaN,
+    );
+    let timeout = fallbackTimeoutMs;
+    if (Number.isFinite(raw) && raw > 0) {
+      timeout = Math.min(Math.max(raw, 45000), 180000);
+    }
+    return { waitUntil: 'commit', timeout };
+  }
+
+  /**
    * Merge iframe inventory into analysis using generic selectors.
    * Handles both empty-main-frame shells and mixed layouts where primary controls live inside iframes.
    */
@@ -5222,7 +5241,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           url: recoverUrl,
         });
         try {
-          await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
+          await page.reload(this._playwrightSpaNavigationOptions(workflowState)).catch(() => {});
           await this.waitForSpaInteractiveReady(page);
           const secondPass = await scan();
           if (!playwrightInventoryIsEmpty(secondPass)) {
@@ -5241,7 +5260,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           seed_url: seedUrl,
         });
         try {
-          await page.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 90000 }).catch(() => {});
+          await page.goto(seedUrl, this._playwrightSpaNavigationOptions(workflowState)).catch(() => {});
           await this.waitForSpaInteractiveReady(page);
           const thirdPass = await scan();
           if (!playwrightInventoryIsEmpty(thirdPass)) {
@@ -19229,7 +19248,8 @@ const sleep = safeWait;
           }
         );
         try {
-          await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 });
+          const navOpts = this._playwrightSpaNavigationOptions(workflowState);
+          await page.reload(navOpts);
           await page.waitForTimeout(settleMs());
           if (spaAfterJourneyNav) {
             try {
@@ -19247,7 +19267,7 @@ const sleep = safeWait;
             { target_url: target, previous_url: current || null, ...meta }
           );
           try {
-            await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
+            await page.goto(target, this._playwrightSpaNavigationOptions(workflowState));
             await page.waitForTimeout(settleMs());
             if (spaAfterJourneyNav) {
               try {
@@ -19289,7 +19309,7 @@ const sleep = safeWait;
       ...meta
     });
     try {
-      await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 90000 });
+      await page.goto(target, this._playwrightSpaNavigationOptions(workflowState));
       const ms = settleMs();
       await page.waitForTimeout(ms);
       if (spaAfterJourneyNav) {
