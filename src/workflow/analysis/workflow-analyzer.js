@@ -890,6 +890,12 @@ class WorkflowAnalyzer {
     try {
       await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
     } catch (_) {}
+    try {
+      await page.waitForLoadState('load', { timeout: 15000 }).catch(() => {});
+    } catch (_) {}
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
+    } catch (_) {}
     const busySelectors = [
       '#loading',
       '[data-loading="true"]',
@@ -12106,6 +12112,28 @@ return {
    * Detect visible success copy in headings / status nodes after client-side form flows.
    * Complements body-level scans when :invalid or alert heuristics false-positive on dynamic forms.
    */
+  /**
+   * LLMs sometimes emit page.click("") / page.click() after SPA transitions; Playwright treats these
+   * as valid calls that do not meaningfully exercise the journey. Exclude them from parsed action
+   * lists so degenerate detection + deterministic inventory fallback can run.
+   */
+  isDegeneratePlaywrightInteractionLine(lineText) {
+    const t = String(lineText || '').trim();
+    if (!t) return true;
+    const emptyQuotedFirstArgClick =
+      /\b(?:await\s+)?page\.click\s*\(\s*(?:['"]\s*['"]|`(?:\s*)`|)\s*\)/i.test(t) ||
+      /\b(?:await\s+)?page\.click\s*\(\s*\)/i.test(t);
+    if (emptyQuotedFirstArgClick) return true;
+    if (
+      /\b(?:await\s+)?page\.dblclick\s*\(\s*(?:['"]\s*['"]|`(?:\s*)`|)\s*\)/i.test(t) ||
+      /\b(?:await\s+)?page\.dblclick\s*\(\s*\)/i.test(t)
+    ) {
+      return true;
+    }
+    if (/\b(?:await\s+)?page\.fill\s*\(\s*['"]\s*['"]\s*,/i.test(t)) return true;
+    return false;
+  }
+
   async detectVisibleJourneySuccessChrome(page) {
     if (!page || typeof page.evaluate !== 'function') return false;
     try {
@@ -12504,9 +12532,13 @@ return {
 
         // Clean up the action line for display
         let displayLine = line;
-        
+
         // Remove leading/trailing semicolons and whitespace
         displayLine = displayLine.replace(/^[;\s]+|[;\s]+$/g, '');
+
+        if (this.isDegeneratePlaywrightInteractionLine(displayLine)) {
+          continue;
+        }
         
         // Truncate very long lines but preserve the action
         if (displayLine.length > 150) {
@@ -12578,7 +12610,7 @@ return {
 
     // Single-line async IIFE wrappers match the opening pattern then `continue`, skipping inner
     // `await page.*` segments — recover semicolon-split actions for logging/metrics parity.
-    if (filteredActions.length === 0 && script && typeof script === 'string') {
+      if (filteredActions.length === 0 && script && typeof script === 'string') {
       const compact = script.replace(/\s+/g, ' ').trim();
       if (
         /\bpage\.(click|dblclick|fill|type|press|selectOption|check|uncheck)\s*\(/i.test(compact) ||
@@ -12588,6 +12620,7 @@ return {
         for (const seg of rawSegs) {
           if (/waitFor(LoadState|Timeout|Navigation|Selector|Function)\s*\(/i.test(seg)) continue;
           if (/setDefault(Navigation)?Timeout\s*\(/i.test(seg)) continue;
+          if (this.isDegeneratePlaywrightInteractionLine(seg)) continue;
           if (
             heuristicMatchesPlaywrightUserAction(seg) ||
             /\bpage\.(click|dblclick|fill|type|press|selectOption)\s*\(/i.test(seg)
@@ -18924,12 +18957,13 @@ const sleep = safeWait;
     const tKey = this._canonicalWorkflowPageUrlKey(target);
     const cKey = this._canonicalWorkflowPageUrlKey(current);
     const needsLoad = !current || current === 'about:blank' || !tKey || !cKey || tKey !== cKey;
-    const settleMs = () => {
-      const settle = Number(workflowState.options?.spa_settle_ms);
-      return Number.isFinite(settle) && settle > 0 ? Math.min(settle, 5000) : 800;
-    };
     const whileIter = Number(meta.while_loop_iteration);
     const isJourneyWhileRetry = Number.isFinite(whileIter) && whileIter > 1;
+    const settleMs = () => {
+      const settle = Number(workflowState.options?.spa_settle_ms);
+      if (Number.isFinite(settle) && settle > 0) return Math.min(settle, 5000);
+      return isJourneyWhileRetry ? 1500 : 800;
+    };
     // After job-orchestrator re-queue the browser can still sit on the seed URL with a half-mutated
     // DOM while Node resumes; iteration 1 previously only waited for SPA readiness, which is
     // insufficient when Playwright was mid-script before restart (nested execute timeout / stuck waits).
