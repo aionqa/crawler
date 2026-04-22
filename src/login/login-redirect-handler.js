@@ -270,17 +270,20 @@ export async function detectLoginPage(
     })();
 
     // Password fields are common on registration pages (handled), demo HTML fixtures, and
-    // in-flow forms. Only pair password detection with the scoped host heuristic when the
-    // navigation actually changed to this surface (typical post-redirect auth gate), or
-    // when the path/query already looks like a dedicated login route (looksLikeLoginPath
-    // includes OAuth-style query keys).
-    const scopedAuthSurface = looksLikeLoginPath || (hasPasswordField && urlsDifferFromIntended);
+    // in-flow forms. Only treat auth-shaped paths/queries (login segments, OAuth query keys)
+    // or password fields as a *redirect* gate on the project/api host when the browser surface
+    // actually diverged from the URL we asked to visit. Otherwise, an intentional crawl of a
+    // public "/login/..." or credentials fixture (same intended vs final URL) is mis-labeled
+    // as "Auth-like redirect" and strict_stop fails the job spuriously.
+    const looksLikeAuthPathOrQuery = looksLikeLoginPath;
+    const scopedAuthSurface =
+      (looksLikeAuthPathOrQuery && urlsDifferFromIntended) || (hasPasswordField && urlsDifferFromIntended);
 
     if (hostInConfiguredSurface && !registrationLikeSurface && scopedAuthSurface) {
       return {
         isLoginPage: true,
         confidence: 'medium',
-        reason: 'Auth-like redirect on configured project/api host',
+        reason: 'Auth-like surface on configured project/api host (intended URL diverged from rendered URL)',
       };
     }
 
