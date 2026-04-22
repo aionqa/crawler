@@ -355,20 +355,29 @@ class ScreencastRecorder {
       } catch (_) { /* ignore */ }
     }
 
-    // Stop screencast on every still-attached page (this finalizes the file).
+    // Stop screencast on every still-attached page AND dispose the start
+    // handle. Disposing the start handle is what tells Playwright "I am done
+    // with the screencast"; without it Playwright may keep the WebM container
+    // open and never finalize the file on disk for short captures.
     const pageEntries = Array.from(recording.pages.entries());
     for (const [page, entry] of pageEntries) {
-      if (!this._isPageUsable(page)) continue;
-      try {
-        const screencast = page.screencast;
-        if (screencast && typeof screencast.stop === 'function') {
-          await screencast.stop();
-        } else if (entry.dispose && typeof entry.dispose.dispose === 'function') {
-          await entry.dispose.dispose();
+      if (this._isPageUsable(page)) {
+        try {
+          const screencast = page.screencast;
+          if (screencast && typeof screencast.stop === 'function') {
+            await screencast.stop();
+          }
+        } catch (err) {
+          console.warn(`[SCREENCAST] Failed to stop screencast on a page for job ${jobId}: ${err.message}`);
         }
-      } catch (err) {
-        console.warn(`[SCREENCAST] Failed to stop screencast on a page for job ${jobId}: ${err.message}`);
       }
+      try {
+        if (entry.dispose && typeof entry.dispose.dispose === 'function') {
+          await entry.dispose.dispose();
+        } else if (typeof entry.dispose === 'function') {
+          await entry.dispose();
+        }
+      } catch (_) { /* ignore */ }
     }
 
     // Stop activity detector.
@@ -381,8 +390,21 @@ class ScreencastRecorder {
     // Flush remaining frame notifies.
     try { await this._flushNotifyBatch(jobId); } catch (_) { /* ignore */ }
 
-    // Wait briefly for files to flush to disk (Playwright writes async).
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    // Force Playwright to finalize all WebM containers by closing the context.
+    // `screencast.stop()` alone has been observed to leave 0-byte files for
+    // short captures in 1.59.x; closing the context guarantees all buffers
+    // get flushed before we stat the files.
+    if (recording.context && typeof recording.context.close === 'function') {
+      try {
+        await recording.context.close();
+      } catch (err) {
+        console.warn(`[SCREENCAST] context.close() during stopRecording failed for job ${jobId}: ${err.message}`);
+      }
+    }
+
+    // Wait briefly for files to flush to disk (filesystem sync, even after
+    // context.close()).
+    await new Promise((resolve) => setTimeout(resolve, 500));
 
     // Collect all video files actually present on disk.
     const candidates = [];
@@ -406,7 +428,14 @@ class ScreencastRecorder {
     }
 
     if (candidates.length === 0) {
-      console.error(`[SCREENCAST] No screencast files were produced for job ${jobId}`);
+      // Diagnostic: list what's in the tmp dir so we can see what Playwright
+      // actually wrote (filename mismatches, 0-byte files, missing dir, etc.).
+      try {
+        const dirContents = await fs.promises.readdir(VIDEO_TMP_DIR).catch(() => []);
+        const matching = dirContents.filter((name) => name.includes(String(jobId)));
+        const expected = Array.from(recording.pages.values()).map((e) => e.path);
+        console.error(`[SCREENCAST] No screencast files for job ${jobId}. Expected paths: ${JSON.stringify(expected)}. Files in ${VIDEO_TMP_DIR} matching job: ${JSON.stringify(matching)}. Total entries in dir: ${dirContents.length}`);
+      } catch (_) { /* ignore */ }
       this.activeRecordings.delete(jobId);
       return null;
     }
