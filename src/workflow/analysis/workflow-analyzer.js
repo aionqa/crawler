@@ -15341,6 +15341,10 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       sourceField === 'legScriptToExecute' ||
       step.id === 'execute_journey_script' ||
       step.name?.includes('Execute Journey Action Script');
+    // Used when post-run validation marks success=false but Playwright finished without throwing (SPA/iframe noise).
+    if (isJourneyScriptExecutionStep) {
+      workflowState.__journeyScriptPlaywrightCompletedWithoutThrow = false;
+    }
     const skipEmptyJourneyScriptExecution = async (phase, metadata = {}) => {
       const skipMessage = `No journey script generated (${phase}); skipping execute-code-from-variable step.`;
       const skipResult = {
@@ -17245,6 +17249,7 @@ const sleep = safeWait;
       // stale execution signals with validation-only success=false (common on multi-step wizards).
       if (isJourneyScriptExecutionStep) {
         workflowState.executionErrorType = null;
+        workflowState.__journeyScriptPlaywrightCompletedWithoutThrow = true;
       }
       
       const executionTime = Date.now() - executionStartTime;
@@ -17707,6 +17712,7 @@ const sleep = safeWait;
         errorResult.execution_failed = true;
         errorResult.error_type = 'execution';
         workflowState.executionErrorType = 'execution';
+        workflowState.__journeyScriptPlaywrightCompletedWithoutThrow = false;
       }
       workflowState.lastExecutionResult = errorResult;
       await this.storeStepResult(step, errorResult, workflowState);
@@ -22697,10 +22703,16 @@ const sleep = safeWait;
       lastExecSnapshot.success !== false &&
       !workflowState.executionErrorType &&
       !lastExecSnapshot.error;
+    const journeyPlaywrightFinishedNoThrow =
+      workflowState.__journeyScriptPlaywrightCompletedWithoutThrow === true &&
+      lastExecSnapshot.skipped !== true &&
+      lastExecSnapshot.execution_failed !== true &&
+      lastExecSnapshot.error_type !== 'execution';
     const executionSucceeded =
       lastExecSnapshot.success === true ||
       (validationOnlyExecutionFailure && domJourneySuccessChrome) ||
-      (!workflowState.platformRestartResume && ambiguousExecutionOk);
+      (!workflowState.platformRestartResume && ambiguousExecutionOk) ||
+      journeyPlaywrightFinishedNoThrow;
 
     // Prefer AI justification status from the last while-loop iteration.
     if (!finalLegStatus && (lastAiStatus === 'success' || lastAiStatus === 'failure' || lastAiStatus === 'pending')) {
@@ -22802,10 +22814,11 @@ const sleep = safeWait;
           lastInner.success !== false &&
           !workflowState.executionErrorType &&
           !lastInner.error;
-        const executionSucceeded =
+        const executionSucceededInner =
           lastInner.success === true ||
           (validationOnlyExecutionFailure && domJourneySuccessChrome) ||
-          (!workflowState.platformRestartResume && innerAmbiguousOk);
+          (!workflowState.platformRestartResume && innerAmbiguousOk) ||
+          journeyPlaywrightFinishedNoThrow;
         const softVerifierFailure =
           failureReason.includes('step indicator not visible') ||
           failureReason.includes('step indicator not clearly visible') ||
@@ -22818,7 +22831,7 @@ const sleep = safeWait;
           String(workflowState.lastExecutionResult?.error || '').toLowerCase().includes('timeout') ||
           String(workflowState.lastExecutionResult?.error || '').toLowerCase().includes('not visible');
         if (loopExitedEarly) {
-          if (executionSucceeded) {
+          if (executionSucceededInner) {
             finalLegStatus = 'success';
             finalLegResult = 'success';
             console.log(`✅ Loop exited early with successful execution - overriding determine_completion failure status`);
@@ -22844,7 +22857,7 @@ const sleep = safeWait;
           }
         } else {
           // Prefer runtime execution evidence over verifier-only false negatives.
-          if (executionSucceeded && softVerifierFailure) {
+          if (executionSucceededInner && softVerifierFailure) {
             finalLegStatus = 'success';
             finalLegResult = 'success';
             console.log(`✅ Successful execution with soft verifier failure - overriding to success`);
