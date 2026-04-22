@@ -16063,7 +16063,20 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
       };
       
       // Wrap page object to intercept ALL Playwright method calls and log execution
-      const createPageWrapperWithScreenshot = (pageObj, jobId, backendUrl, getAuthHeaders, stepInfo = null, recordAction = null) => {
+      // generatedTimeoutClampMs: journey legs need Playwright defaults well above 60s (SPA/modals/WS hydration);
+      // non-journey generated code stays capped to avoid runaway hangs.
+      const createPageWrapperWithScreenshot = (
+        pageObj,
+        jobId,
+        backendUrl,
+        getAuthHeaders,
+        stepInfo = null,
+        recordAction = null,
+        generatedTimeoutClampMs = 60000
+      ) => {
+        const timeoutClampUpper = Number.isFinite(Number(generatedTimeoutClampMs))
+          ? Math.max(60000, Math.min(STEP_TIMEOUT_SETTINGS_CEILING_MS, Number(generatedTimeoutClampMs)))
+          : 60000;
         console.log(`🔧 Creating page wrapper for jobId: ${jobId}`);
         const wrapper = {};
         
@@ -16447,11 +16460,11 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
                   const rawTimeout =
                     typeof args[0] === 'string' ? Number.parseInt(args[0], 10) : Number(args[0]);
                   const clampedTimeout = Number.isFinite(rawTimeout)
-                    ? Math.min(Math.max(0, rawTimeout), 60000)
-                    : 60000;
+                    ? Math.min(Math.max(0, rawTimeout), timeoutClampUpper)
+                    : timeoutClampUpper;
                   if (!Number.isFinite(rawTimeout) || rawTimeout !== clampedTimeout) {
                     console.warn(
-                      `⚠️ Clamped ${propName}(${String(args[0])}) to ${clampedTimeout}ms to avoid long-running generated scripts`
+                      `⚠️ Clamped ${propName}(${String(args[0])}) to ${clampedTimeout}ms (upper=${timeoutClampUpper}ms for this execution context)`
                     );
                   }
                   args[0] = clampedTimeout;
@@ -16554,7 +16567,21 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
           console.log(`🔧 About to create page wrapper...`);
           // Pass step info for logging context
           const stepInfo = step ? { id: step.id, name: step.name } : null;
-          wrappedPage = createPageWrapperWithScreenshot(pageObj, jobId, this.backendUrl, () => this.getAuthHeaders(), stepInfo, recordAction);
+          const generatedTimeoutClampMs = isJourneyScriptExecutionStep
+            ? Math.min(
+                STEP_TIMEOUT_SETTINGS_CEILING_MS,
+                Math.max(Number(timeout) || 0, JOURNEY_ACTION_SCRIPT_MIN_TIMEOUT_MS)
+              )
+            : 60000;
+          wrappedPage = createPageWrapperWithScreenshot(
+            pageObj,
+            jobId,
+            this.backendUrl,
+            () => this.getAuthHeaders(),
+            stepInfo,
+            recordAction,
+            generatedTimeoutClampMs
+          );
           console.log(`✅ Page wrapper created successfully`);
         } catch (wrapperError) {
           console.error(`❌ Failed to create page wrapper: ${wrapperError.message}`, wrapperError);
@@ -22932,6 +22959,19 @@ const sleep = safeWait;
             finalJustificationStatus = 'failure';
           }
         }
+      }
+    }
+
+    // Mirror terminal failure/pending: verifier may still say continue/stuck at max iterations while
+    // finalLegStatus is already failure — avoid contradictory persisted journey rows / self-monitor drift.
+    {
+      const jst = String(finalJustificationStatus || '').toLowerCase();
+      const fls = String(finalLegStatus || '').toLowerCase();
+      if (
+        (fls === 'failure' || fls === 'pending' || fls === 'execution_failure') &&
+        (jst === 'continue' || jst === 'continuing' || jst === 'stuck')
+      ) {
+        finalJustificationStatus = finalLegStatus;
       }
     }
 
