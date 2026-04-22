@@ -6838,9 +6838,11 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
                 String(step.id || '').toLowerCase().includes('generate_journey_script');
               const cacheLooksDegenerate =
                 journeyGenStep && this.isDegenerateJourneyScriptForActionablePage(cached.script_code, workflowState);
-              if (cacheLooksDegenerate) {
+              const cacheLooksThinInventory =
+                journeyGenStep && this.isThinAiJourneyScriptPreferInventory(cached.script_code, workflowState);
+              if (cacheLooksDegenerate || cacheLooksThinInventory) {
                 console.log(
-                  `⚠️ [SCRIPTS-CACHE] Cache HIT ignored for ${step.id}: script parses to no actions while page has forms/controls — regenerating`
+                  `⚠️ [SCRIPTS-CACHE] Cache HIT ignored for ${step.id}: journey script unsuitable for cache reuse (${cacheLooksDegenerate ? 'degenerate' : 'thin-on-rich-page'}) — regenerating`
                 );
                 if (jobId) {
                   try {
@@ -7998,7 +8000,8 @@ return {
               isGenerateJourneyScriptStepPostUpsert &&
               cleanedScript &&
               cleanedScript.trim().length > 0 &&
-              this.isDegenerateJourneyScriptForActionablePage(cleanedScript, workflowState)
+              (this.isDegenerateJourneyScriptForActionablePage(cleanedScript, workflowState) ||
+                this.isThinAiJourneyScriptPreferInventory(cleanedScript, workflowState))
             ) {
               const det = this.prepareDeterministicJourneyExecutionScript(workflowState);
               if (det && typeof det === 'string' && det.trim().length > 0) {
@@ -12782,6 +12785,29 @@ return {
   }
 
   /**
+   * Rich SPA pages with large interactive inventories often need multi-step or inventory-aligned
+   * scripts. A single parseable page.click/fill from the model is frequently a misleading control
+   * (toolbar/filter) and causes bounded "inconclusive" retries — prefer journey-row inventory when
+   * a deterministic script exists. General threshold + journey presence only (no per-domain rules).
+   */
+  isThinAiJourneyScriptPreferInventory(scriptCode, workflowState) {
+    if (!scriptCode || typeof scriptCode !== 'string') return false;
+    const built = this.buildDeterministicJourneyScriptFromCurrentJourney(workflowState);
+    if (!built || !String(built).trim()) return false;
+    const interactiveSignals = Array.isArray(workflowState?.playwrightAnalysis?.interactive_elements)
+      ? workflowState.playwrightAnalysis.interactive_elements.length
+      : 0;
+    // Below this, a lone model click is often reasonable (small forms / landing pages).
+    if (interactiveSignals < 12) return false;
+    const finalized = this.finalizeAiGeneratedPlaywrightScript(scriptCode) || '';
+    if (!finalized.trim()) return false;
+    const parsed = this.parseScriptActions(finalized);
+    const hasUnlogged = this.journeyScriptHasUnloggedPlaywrightInteractions(finalized);
+    if (parsed.length !== 1 || hasUnlogged) return false;
+    return true;
+  }
+
+  /**
    * Deterministic Playwright steps from currentJourney.actions (inventory selectors).
    * Used when AI-generated scripts fail syntax/runtime ReferenceErrors.
    */
@@ -15753,6 +15779,40 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
     }
 
     let hasUnloggedPlaywright = this.journeyScriptHasUnloggedPlaywrightInteractions(code);
+
+    if (
+      isJourneyScriptExecutionStep &&
+      code &&
+      typeof code === 'string' &&
+      actionLines.length === 1 &&
+      this.isThinAiJourneyScriptPreferInventory(code, workflowState)
+    ) {
+      const detThin = this.prepareDeterministicJourneyExecutionScript(workflowState);
+      if (detThin && typeof detThin === 'string' && detThin.trim().length > 0) {
+        code = detThin;
+        workflowState.legScriptToExecute = detThin;
+        if (!workflowState.context) workflowState.context = {};
+        workflowState.context.legScriptToExecute = detThin;
+        this.initializeVariablePool(workflowState);
+        this.saveVariable(workflowState, 'legScriptToExecute', detThin, 'page', step);
+        actionLines = this.parseScriptActions(code);
+        hasUnloggedPlaywright = this.journeyScriptHasUnloggedPlaywrightInteractions(code);
+        if (jobId && this.backendLogger) {
+          await this.backendLogger.appendJobLog(
+            jobId,
+            'info',
+            'Using deterministic inventory journey script: thin single-action AI script on inventory-rich page.',
+            'WORKFLOW-ANALYZER',
+            {
+              step_id: step.id,
+              step_name: step.name,
+              source_field: sourceField,
+              fallback_script_length: detThin.length,
+            }
+          );
+        }
+      }
+    }
 
     if (isJourneyScriptExecutionStep && actionLines.length === 0 && !hasUnloggedPlaywright) {
       const formsSignals = Array.isArray(workflowState?.playwrightAnalysis?.forms)
@@ -24952,11 +25012,20 @@ const sleep = safeWait;
       const isJourneyGenUpsert =
         step?.id === 'generate_journey_script' ||
         String(step?.id || '').toLowerCase().includes('generate_journey_script');
-      if (isJourneyGenUpsert && this.isDegenerateJourneyScriptForActionablePage(scriptCode, workflowState)) {
-        console.warn('⚠️ [SCRIPTS] Skipping upsert: degenerate journey script (no parsed actions) on actionable page');
+      const skipJourneyGenAsLowSignal =
+        isJourneyGenUpsert &&
+        (this.isDegenerateJourneyScriptForActionablePage(scriptCode, workflowState) ||
+          this.isThinAiJourneyScriptPreferInventory(scriptCode, workflowState));
+      if (skipJourneyGenAsLowSignal) {
+        const thin = this.isThinAiJourneyScriptPreferInventory(scriptCode, workflowState);
+        console.warn(
+          `⚠️ [SCRIPTS] Skipping upsert: ${thin ? 'thin single-action' : 'degenerate'} journey script on rich/actionable page`
+        );
         await appendJobLog(
           'warn',
-          '⚠️ [SCRIPTS] Skipped persisting degenerate generate_journey_script (would poison script cache)',
+          thin
+            ? '⚠️ [SCRIPTS] Skipped persisting thin generate_journey_script (single parseable action on rich page; would poison script cache)'
+            : '⚠️ [SCRIPTS] Skipped persisting degenerate generate_journey_script (would poison script cache)',
           {
             step_id: step?.id || null,
             step_name: step?.name || null,
