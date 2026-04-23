@@ -283,6 +283,9 @@ healthApp.get('/health', (_req, res) => {
 const healthServer = healthApp.listen(HEALTH_CHECK_PORT, () => {
   console.log(`❤️  Health check server listening on port ${HEALTH_CHECK_PORT}`);
 });
+healthServer.on('error', (err) => {
+  console.error(`❌ Health check server error on port ${HEALTH_CHECK_PORT}:`, err?.message || err);
+});
 console.log(`✅ Health check endpoint available at http://localhost:${HEALTH_CHECK_PORT}/health`);
 
 /**
@@ -2702,6 +2705,49 @@ async function reportJobFailed(jobId, errorMessage, errorStack) {
     console.error(`❌ Error reporting job failure after retries:`, error?.message);
   }
 }
+
+// Avoid exit code 1 (docker-engine "immediate exit") when a late async path throws after normal failure handling.
+process.on('uncaughtException', (err) => {
+  console.error('❌ uncaughtException:', err);
+  if (TASK_MODE === 'single-job' && JOB_ID) {
+    void reportJobFailed(
+      JOB_ID,
+      `Uncaught exception during single-job runner: ${err?.message || String(err)}`,
+      err?.stack || ''
+    )
+      .catch(() => {})
+      .finally(() => {
+        void flushAllBufferedLogs()
+          .catch(() => {})
+          .finally(() => process.exit(0));
+      });
+    return;
+  }
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  const err =
+    reason instanceof Error
+      ? reason
+      : new Error(typeof reason === 'string' ? reason : JSON.stringify(reason));
+  console.error('❌ unhandledRejection:', err);
+  if (TASK_MODE === 'single-job' && JOB_ID) {
+    void reportJobFailed(
+      JOB_ID,
+      `Unhandled rejection during single-job runner: ${err.message}`,
+      err.stack || ''
+    )
+      .catch(() => {})
+      .finally(() => {
+        void flushAllBufferedLogs()
+          .catch(() => {})
+          .finally(() => process.exit(0));
+      });
+    return;
+  }
+  process.exit(1);
+});
 
 /**
  * Main polling loop
