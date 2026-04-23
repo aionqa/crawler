@@ -2802,8 +2802,12 @@ async function executeSingleJob() {
     );
     
     if (!response.data) {
-      console.error(`❌ Job ${JOB_ID} not found in backend`);
-      process.exit(1);
+      console.error(`❌ Job ${JOB_ID} not found in backend (empty response body)`);
+      try {
+        await reportJobFailed(JOB_ID, 'GET /api/jobs/:id returned empty body; job payload missing', '');
+        await flushAllBufferedLogs();
+      } catch (_) {}
+      process.exit(0);
     }
     
     const jobData = response.data;
@@ -2905,16 +2909,36 @@ async function executeSingleJob() {
       console.warn(`   ⚠️  Could not log error to backend: ${logError.message}`);
     }
 
-    process.exit(1);
+    try {
+      await reportJobFailed(
+        JOB_ID,
+        `Fatal error before job execution (fetch/configure): ${error.message}`,
+        error.stack || ''
+      );
+      await flushAllBufferedLogs();
+    } catch (_) {}
+
+    // Exit 0 so Docker helper does not surface a generic non-zero "container died" signal after /runner/jobs/:id/fail
+    process.exit(0);
   }
 }
 
 // Start the runner
 if (TASK_MODE === 'single-job') {
   console.log(`🚀 Starting in single-job mode`);
-  executeSingleJob().catch(error => {
+  executeSingleJob().catch(async (error) => {
     console.error(`❌ Fatal error:`, error);
-    process.exit(1);
+    if (JOB_ID) {
+      try {
+        await reportJobFailed(
+          JOB_ID,
+          `Fatal error (uncaught in executeSingleJob): ${error?.message || String(error)}`,
+          error?.stack || ''
+        );
+        await flushAllBufferedLogs();
+      } catch (_) {}
+    }
+    process.exit(0);
   });
 } else {
   console.log(`🚀 Starting in polling mode`);
