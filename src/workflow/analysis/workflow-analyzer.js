@@ -945,6 +945,20 @@ function reindexJourneyActions(actions) {
 function expandJourneyActionsToFullFormStory(journey, form, interactiveElements = []) {
   if (!journey || typeof journey !== 'object' || !form || typeof form !== 'object') return null;
   const existingActions = Array.isArray(journey.actions) ? journey.actions : [];
+  const allowedSelectorKeys = new Set();
+  const allowedNameKeys = new Set();
+  for (const field of Array.isArray(form?.fields) ? form.fields : []) {
+    const selectorKey = normalizeSelectorKey(field?.selector);
+    if (selectorKey) allowedSelectorKeys.add(selectorKey);
+    const nameKey = String(field?.name || field?.id || '').trim().toLowerCase();
+    if (nameKey) allowedNameKeys.add(nameKey);
+  }
+  for (const btn of Array.isArray(form?.buttons) ? form.buttons : []) {
+    const selectorKey = normalizeSelectorKey(btn?.selector);
+    if (selectorKey) allowedSelectorKeys.add(selectorKey);
+  }
+  const formSelectorKey = normalizeSelectorKey(form?.selector);
+  if (formSelectorKey) allowedSelectorKeys.add(formSelectorKey);
 
   const preservedPreActions = [];
   const existingAdvanceActions = [];
@@ -1032,6 +1046,17 @@ function expandJourneyActionsToFullFormStory(journey, form, interactiveElements 
 
   for (const action of allExistingFormActions) {
     if (consumedExisting.has(action)) continue;
+    const selectorKey = normalizeSelectorKey(action?.selector || action?.element_info?.selector);
+    const actionName =
+      extractNameAttributeFromActionSelector(action?.selector || action?.element_info?.selector) ||
+      String(action?.name || '').trim();
+    const nameKey = String(actionName || '').trim().toLowerCase();
+    const isAllowed =
+      (selectorKey && allowedSelectorKeys.has(selectorKey)) ||
+      (nameKey && allowedNameKeys.has(nameKey));
+    if (!isAllowed) {
+      continue;
+    }
     generatedFieldActions.push(action);
   }
 
