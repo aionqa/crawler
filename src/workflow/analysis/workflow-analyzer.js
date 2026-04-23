@@ -10924,7 +10924,12 @@ return {
       seoData: saveSeoData && seoAnalysis ? seoAnalysis : null,
       contentData: saveContentData && contentAnalysis ? contentAnalysis : null,
       accessibilityData: saveAccessibilityData && accessibilityAnalysis ? accessibilityAnalysis : null,
-      job_id: jobId
+      job_id: jobId,
+      project_id:
+        workflowState.projectId ||
+        this.context?.project_id ||
+        this.context?.projectId ||
+        null,
     };
     if (workflowState.pageDescription) {
       payload.page_description = workflowState.pageDescription;
