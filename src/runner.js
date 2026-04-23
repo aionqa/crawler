@@ -64,17 +64,20 @@ const RUNNER_ID = process.env.RUNNER_ID || (RUNNER_TYPE === 'service-managed'
 const STREAM_INTERVAL = 2000; // Stream browser frame every 2 seconds
 // WORKFLOW_API_PORT removed - runners do not expose HTTP endpoints (rule 51-runner-architecture.mdc)
 
+// Emit bootstrap on stderr before any early exit so Docker json-file tails are never empty for
+// deploy-churn / missing-env failures (avoids opaque "Unknown error" in engine startup grace).
+const _runnerBackendHost =
+  String(BACKEND_URL || '').replace(/^https?:\/\//, '').split('/')[0] || '(unset)';
+console.error(
+  `[aionqa-runner] bootstrap pid=${process.pid} taskMode=${TASK_MODE} jobId=${JOB_ID || '(none)'} node=${process.version} backendHost=${_runnerBackendHost} runnerType=${RUNNER_TYPE}`
+);
+
 // Validate runner token is configured
 if (!RUNNER_TOKEN) {
   console.error('❌ RUNNER_TOKEN environment variable is required');
   console.error('    Generate a token in the UI: Settings > Runners > Generate Token');
   process.exit(1);
 }
-
-// First-line diagnostic for Docker log tails when the process exits during cold start / deploy churn
-console.log(
-  `🔧 Runner bootstrap taskMode=${TASK_MODE} jobId=${JOB_ID || '(none)'} node=${process.version} backendHost=${String(BACKEND_URL || '').replace(/^https?:\/\//, '').split('/')[0] || '(unset)'}`
-);
 
 console.log(`🤖 Runner ID: ${RUNNER_ID}`);
 console.log(`🤖 Runner Type: ${RUNNER_TYPE} (${RUNNER_TYPE === 'service-managed' ? 'spawned by backend service' : 'user-managed'})`);
