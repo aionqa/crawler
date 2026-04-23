@@ -603,6 +603,12 @@ function looksLikePassiveObservationText(value) {
   return /\b(observe|readonly|read-only|background is static|no additional changes observed|no interactive elements)\b/.test(s);
 }
 
+function narrativeLooksLikeTerminalOutcome(value) {
+  const s = String(value || '').toLowerCase();
+  if (!s.trim()) return false;
+  return /\b(submit|submitted|success|successful|completed|completion|confirmation|terminal|result|finish|finished)\b/.test(s);
+}
+
 function isFormControlAction(action) {
   const t = normalizeJourneyActionType(action?.type || action?.action_type);
   if (['input', 'fill', 'type', 'select', 'selectoption', 'check', 'uncheck'].includes(t)) return true;
@@ -1153,12 +1159,19 @@ function expandJourneysToFullFormStories(journeys, forms, interactiveElements = 
         : `${existingInstructions}\n${stageHint}`;
     const rawDescription = String(journey?.description || '').trim();
     const rawExpectedOutcome = String(journey?.expected_outcome || '').trim();
+    const forceModalNarrative =
+      modalWizardFlow &&
+      !narrativeLooksLikeTerminalOutcome(`${rawDescription} ${rawExpectedOutcome}`);
     const sanitizedDescription =
-      rawDescription && !(modalWizardFlow && looksLikePassiveObservationText(rawDescription))
+      forceModalNarrative
+        ? `Complete modal/wizard flow ${formIndex + 1} through all stages and submit`
+        : rawDescription && !(modalWizardFlow && looksLikePassiveObservationText(rawDescription))
         ? rawDescription
         : (modalWizardFlow ? `Complete modal/wizard flow ${formIndex + 1}` : `Complete form flow ${formIndex + 1}`);
     const sanitizedExpectedOutcome =
-      rawExpectedOutcome && !(modalWizardFlow && looksLikePassiveObservationText(rawExpectedOutcome))
+      forceModalNarrative
+        ? 'Modal wizard reaches terminal outcome after required stages and submit (success confirmation or explicit validation feedback).'
+        : rawExpectedOutcome && !(modalWizardFlow && looksLikePassiveObservationText(rawExpectedOutcome))
         ? rawExpectedOutcome
         : 'Form submission reaches a terminal visible state (success confirmation or explicit validation/error).';
     return {
@@ -1195,14 +1208,21 @@ function expandJourneysToFullFormStories(journeys, forms, interactiveElements = 
       : 'Stage 1: reach the form. Stage 2: fill required controls (checkbox/radio random unless explicitly instructed). Stage 3: submit once. Stage 4: verify terminal outcome.';
   const forcedDescriptionRaw = String(selectedJourney?.description || '').trim();
   const forcedExpectedOutcomeRaw = String(selectedJourney?.expected_outcome || '').trim();
+  const forceSelectedModalNarrative =
+    selectedModalWizard &&
+    !narrativeLooksLikeTerminalOutcome(`${forcedDescriptionRaw} ${forcedExpectedOutcomeRaw}`);
   next[selectedIndex] = {
     ...selectedJourney,
     description:
-      forcedDescriptionRaw && !(selectedModalWizard && looksLikePassiveObservationText(forcedDescriptionRaw))
+      forceSelectedModalNarrative
+        ? 'Complete primary modal/wizard flow through all stages and submit'
+        : forcedDescriptionRaw && !(selectedModalWizard && looksLikePassiveObservationText(forcedDescriptionRaw))
         ? forcedDescriptionRaw
         : (selectedModalWizard ? 'Complete primary modal/wizard flow' : 'Complete primary form flow'),
     expected_outcome:
-      forcedExpectedOutcomeRaw && !(selectedModalWizard && looksLikePassiveObservationText(forcedExpectedOutcomeRaw))
+      forceSelectedModalNarrative
+        ? 'Modal wizard reaches terminal outcome after required stages and submit (success confirmation or explicit validation feedback).'
+        : forcedExpectedOutcomeRaw && !(selectedModalWizard && looksLikePassiveObservationText(forcedExpectedOutcomeRaw))
         ? forcedExpectedOutcomeRaw
         : 'Form submission reaches a terminal visible state (success confirmation or explicit validation/error).',
     test_instructions: baseInstructions ? `${baseInstructions}\n${forcedHint}` : forcedHint,
