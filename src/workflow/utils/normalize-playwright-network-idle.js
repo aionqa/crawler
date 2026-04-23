@@ -77,17 +77,22 @@ export function capPlaywrightAutomationTimeouts(source) {
 /**
  * Remove simple TypeScript `as` casts that `new Function` cannot parse ("Unexpected identifier 'as'").
  * Intentionally narrow: only `) as <identifier>` and `) as const` (common in AI output).
- * Broader "as" stripping risks corrupting natural-language strings or valid JS.
+ *
+ * IMPORTANT: Do not replace the whole `) as T` span with a single `)`. That drops one closing
+ * `)` in patterns like `func() as any)` or `(x() as T))` and yields `func())` / "Unexpected token ')'"
+ * in `new Function()`. We only remove the ` as T` *suffix* after a closing paren, then collapse
+ * redundant `) )` left by patterns such as `foo() as any)`.
  */
 export function stripCommonAiTypeScriptCasts(source) {
   if (typeof source !== 'string' || !source) return source;
   let s = source;
-  s = s.replace(/\)\s+as\s+const\b/g, ')');
-  for (let i = 0; i < 50; i++) {
-    const next = s.replace(/\)\s+as\s+[A-Za-z_][A-Za-z0-9_]*\b/g, ')');
+  s = s.replace(/(?<=\))\s+as\s+const\b/g, '');
+  for (let i = 0; i < 50; i += 1) {
+    const next = s.replace(/(?<=\))\s+as\s+[A-Za-z_][A-Za-z0-9_]*\b/g, '');
     if (next === s) break;
     s = next;
   }
+  s = s.replace(/\)\s+\)(?=[\s,;)\]}\n]|$)/g, ')');
   return s;
 }
 
