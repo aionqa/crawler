@@ -71,6 +71,11 @@ if (!RUNNER_TOKEN) {
   process.exit(1);
 }
 
+// First-line diagnostic for Docker log tails when the process exits during cold start / deploy churn
+console.log(
+  `🔧 Runner bootstrap taskMode=${TASK_MODE} jobId=${JOB_ID || '(none)'} node=${process.version} backendHost=${String(BACKEND_URL || '').replace(/^https?:\/\//, '').split('/')[0] || '(unset)'}`
+);
+
 console.log(`🤖 Runner ID: ${RUNNER_ID}`);
 console.log(`🤖 Runner Type: ${RUNNER_TYPE} (${RUNNER_TYPE === 'service-managed' ? 'spawned by backend service' : 'user-managed'})`);
 // Version info for image update verification
