@@ -1102,6 +1102,10 @@ async function executeCrawlJob(job, streamInterval) {
     ...jobOptions,
     ...(rawContext?.options || {})
   };
+  const crawlSubtype = rawContext.crawl_subtype || mergedOptions.crawl_subtype || job.crawl_subtype;
+  if (crawlSubtype) {
+    console.log(`[CRAWL] crawl_subtype=${crawlSubtype} job=${job.id || job.job_id || 'unknown'}`);
+  }
   const configurationTimeout =
     job.configuration && Number(job.configuration.timeout) > 0 ? Number(job.configuration.timeout) : null;
   if (mergedOptions.timeout == null && configurationTimeout != null) {
