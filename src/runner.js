@@ -37,6 +37,25 @@ const MAX_SITEMAP_SCAN_ENTRIES = 5000;
 const DEFAULT_AVAILABILITY_TIMEOUT_MS = 10000;
 /** Bootstrap GET /api/jobs/:id in ECS single-job mode; ALB/backend can be slow right after deploy or recovery. */
 const SINGLE_JOB_FETCH_TIMEOUT_MS = parseInt(process.env.RUNNER_JOB_FETCH_TIMEOUT_MS || '45000', 10);
+
+/**
+ * Delays (ms) between retry attempts for the initial single-job GET /api/jobs/:id.
+ * Longer ladder than the default backend retry: containers often start while GitHub/ECS
+ * deploys roll the API; brief 502/503/connection failures should not fail the whole job.
+ * Override with env SINGLE_JOB_FETCH_RETRY_DELAYS_MS=comma-separated milliseconds.
+ */
+function parseSingleJobFetchRetryDelays() {
+  const raw = process.env.SINGLE_JOB_FETCH_RETRY_DELAYS_MS;
+  if (raw && String(raw).trim()) {
+    const parts = String(raw)
+      .split(',')
+      .map((s) => parseInt(s.trim(), 10))
+      .filter((n) => Number.isFinite(n) && n >= 0);
+    if (parts.length) return parts;
+  }
+  return [5000, 10000, 20000, 45000, 90000, 120000];
+}
+const SINGLE_JOB_FETCH_RETRY_DELAYS_MS = parseSingleJobFetchRetryDelays();
 // Generate unique runner ID if not provided (includes hostname and UUID for uniqueness)
 // For service-managed runners, include type in ID
 const RUNNER_ID = process.env.RUNNER_ID || (RUNNER_TYPE === 'service-managed' 
@@ -324,23 +343,30 @@ function parseRetryAfterMs(error) {
  * crawler-write backpressure middleware on the backend), that value is
  * honored instead of the default ladder, capped at 3 minutes.
  */
-async function withBackendRetry(fn, label) {
+/**
+ * @param {() => Promise<any>} fn
+ * @param {string} label
+ * @param {{ delays?: number[] }} [options] — if `delays` is set, max attempts = 1 + delays.length; else default ladder.
+ */
+async function withBackendRetry(fn, label, options = {}) {
+  const delays = options.delays != null && options.delays.length ? options.delays : BACKEND_RETRY_DELAYS_MS;
+  const maxAttempts = 1 + delays.length;
   let lastError;
-  for (let attempt = 1; attempt <= BACKEND_RETRY_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       return await fn();
     } catch (error) {
       lastError = error;
-      if (!isRetryableBackendError(error) || attempt === BACKEND_RETRY_ATTEMPTS) break;
+      if (!isRetryableBackendError(error) || attempt === maxAttempts) break;
       const retryAfterMs = parseRetryAfterMs(error);
-      const defaultDelayMs = BACKEND_RETRY_DELAYS_MS[attempt - 1];
+      const defaultDelayMs = delays[attempt - 1] ?? delays[delays.length - 1];
       const delayMs = retryAfterMs != null ? retryAfterMs : defaultDelayMs;
       const reason = retryAfterMs != null ? `(Retry-After: ${Math.round(retryAfterMs / 1000)}s)` : '';
-      console.warn(`⚠️ [BACKEND-RETRY] ${label} attempt ${attempt}/${BACKEND_RETRY_ATTEMPTS} failed: ${error.message} ${reason}. Retrying in ${Math.round(delayMs / 1000)}s...`);
+      console.warn(`⚠️ [BACKEND-RETRY] ${label} attempt ${attempt}/${maxAttempts} failed: ${error.message} ${reason}. Retrying in ${Math.round(delayMs / 1000)}s...`);
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
   }
-  console.error(`❌ [BACKEND-RETRY] Request failed after ${BACKEND_RETRY_ATTEMPTS} attempts: ${label}: ${lastError?.message || lastError}`);
+  console.error(`❌ [BACKEND-RETRY] Request failed after ${maxAttempts} attempts: ${label}: ${lastError?.message || lastError}`);
   if (lastError?.response) {
     console.error(`   Status: ${lastError.response.status}; Response:`, lastError.response.data);
     if (lastError.response.status >= 500 && lastError.response.data) {
@@ -2771,7 +2797,8 @@ async function executeSingleJob() {
           headers: getAuthHeaders(),
           timeout: SINGLE_JOB_FETCH_TIMEOUT_MS
         }),
-      `single-job fetch /api/jobs/${JOB_ID}`
+      `single-job fetch /api/jobs/${JOB_ID}`,
+      { delays: SINGLE_JOB_FETCH_RETRY_DELAYS_MS }
     );
     
     if (!response.data) {
