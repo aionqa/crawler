@@ -734,12 +734,14 @@ class WorkflowExecutor {
     if (!this.videoRecorder) {
       return null;
     }
+    const journeyId = leg?.journey_id || leg?.leg_id || null;
     const label = leg?.description
-      ? `Leg: ${leg.description}`
-      : (leg?.leg_id ? `Leg ${leg.leg_id}` : 'Workflow Step');
-    return this.videoRecorder.startSegment(jobId, `leg-${leg?.leg_id || Date.now()}`, label, {
+      ? (journeyId ? `Journey ${journeyId}: ${leg.description}` : `Leg: ${leg.description}`)
+      : (journeyId ? `Journey ${journeyId}` : (leg?.leg_id ? `Leg ${leg.leg_id}` : 'Workflow Step'));
+    return this.videoRecorder.startSegment(jobId, `leg-${leg?.leg_id || journeyId || Date.now()}`, label, {
       type: 'workflow_leg',
       leg_id: leg?.leg_id || null,
+      journey_id: journeyId,
       description: leg?.description || null
     });
   }

@@ -763,7 +763,7 @@ class WorkflowExecutor {
     return this.videoRecorder.startSegment(jobId, `leg-${leg?.leg_id || journeyId || Date.now()}`, label, {
       type: 'workflow_leg',
       leg_id: leg?.leg_id || null,
-      journey_id: leg?.journey_id || null,
+      journey_id: journeyId || null,
       description: leg?.description || null
     });
   }

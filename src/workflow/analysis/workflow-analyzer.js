@@ -481,6 +481,446 @@ function shouldDropFormIntentJourneyOnFormlessPage(journey) {
   return false;
 }
 
+function normalizeJourneyActionType(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeJourneyActionElementType(action) {
+  if (!action || typeof action !== 'object') return '';
+  return normalizeJourneyActionType(
+    action.element_type ||
+      action.elementType ||
+      action?.interactive_element?.type ||
+      action?.element_info?.type
+  );
+}
+
+function selectorLooksLikeCheckboxOrRadio(selector) {
+  const s = String(selector || '').toLowerCase();
+  if (!s) return false;
+  if (/\btype\s*=\s*["']?(checkbox|radio)/.test(s)) return true;
+  if (/\b(?:checkbox|radio)\b/.test(s)) return true;
+  return false;
+}
+
+function isVerificationOnlyAction(action) {
+  const type = normalizeJourneyActionType(action?.type || action?.action_type || action);
+  if (!type) return false;
+  if (type === 'verify') return true;
+  if (type !== 'check') return false;
+
+  const elementType = normalizeJourneyActionElementType(action);
+  if (['checkbox', 'radio', 'toggle', 'switch'].includes(elementType)) {
+    return false;
+  }
+
+  const selector = String(action?.selector || action?.element_info?.selector || '');
+  if (selectorLooksLikeCheckboxOrRadio(selector)) {
+    return false;
+  }
+
+  const textBlob = `${action?.description || ''} ${action?.expected_outcome || ''}`.toLowerCase();
+  if (/\b(checkbox|radio|toggle|switch|tick|untick|accept terms|consent)\b/.test(textBlob)) {
+    return false;
+  }
+
+  return true;
+}
+
+function normalizeSelectorKey(selector) {
+  return String(selector || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function selectorLooksLikeSubmitControl(selector) {
+  const s = String(selector || '').toLowerCase();
+  if (!s) return false;
+  if (/\btype\s*=\s*["']?submit/.test(s)) return true;
+  if (/\bbutton\b/.test(s) && /submit|send|continue|next|finish|register|log\s?in|sign\s?in|apply/.test(s)) {
+    return true;
+  }
+  return false;
+}
+
+function isSubmitAction(action) {
+  const t = normalizeJourneyActionType(action?.type || action?.action_type);
+  if (t === 'form_submit' || t === 'submit') return true;
+  const desc = `${action?.description || ''} ${action?.expected_outcome || ''}`.toLowerCase();
+  if (/\b(submit|send|finish|complete|continue)\b/.test(desc) && !/\b(check|verify)\b/.test(desc)) {
+    return true;
+  }
+  return selectorLooksLikeSubmitControl(action?.selector || action?.element_info?.selector);
+}
+
+function isFormControlAction(action) {
+  const t = normalizeJourneyActionType(action?.type || action?.action_type);
+  if (['input', 'fill', 'type', 'select', 'selectoption', 'check', 'uncheck'].includes(t)) return true;
+  if (isSubmitAction(action)) return true;
+  const et = normalizeJourneyActionElementType(action);
+  if (['input', 'textarea', 'select', 'checkbox', 'radio', 'form'].includes(et)) return true;
+  const selector = String(action?.selector || action?.element_info?.selector || '').toLowerCase();
+  if (/^(input|textarea|select|form)\b/.test(selector)) return true;
+  if (/\b(type\s*=\s*["']?(checkbox|radio|submit)|name\s*=)/.test(selector)) return true;
+  return false;
+}
+
+function journeyMentionsFormFlow(journey) {
+  const blob = [
+    journey?.journey_id,
+    journey?.description,
+    journey?.test_instructions,
+    journey?.expected_outcome
+  ].join(' ').toLowerCase();
+  if (!blob.trim()) return false;
+  return /\b(form|submit|signup|sign up|register|login|wizard|modal|required field|checkbox|radio)\b/.test(blob);
+}
+
+function inferJourneyFormIndexFromInventory(journey, forms) {
+  if (!Array.isArray(forms) || forms.length === 0) return -1;
+  const actions = Array.isArray(journey?.actions) ? journey.actions : [];
+  if (forms.length === 1) {
+    if (actions.some((a) => isFormControlAction(a)) || journeyMentionsFormFlow(journey)) {
+      return 0;
+    }
+  }
+
+  const formSignals = forms.map((form) => {
+    const selectorKeys = new Set();
+    const fieldNames = new Set();
+    if (form?.selector) selectorKeys.add(normalizeSelectorKey(form.selector));
+    const fields = Array.isArray(form?.fields) ? form.fields : [];
+    for (const field of fields) {
+      if (field?.selector) selectorKeys.add(normalizeSelectorKey(field.selector));
+      if (field?.name) fieldNames.add(String(field.name).trim().toLowerCase());
+      if (field?.id) fieldNames.add(String(field.id).trim().toLowerCase());
+    }
+    const buttons = Array.isArray(form?.buttons) ? form.buttons : [];
+    for (const btn of buttons) {
+      if (btn?.selector) selectorKeys.add(normalizeSelectorKey(btn.selector));
+      if (btn?.text) fieldNames.add(String(btn.text).trim().toLowerCase());
+    }
+    return { selectorKeys, fieldNames };
+  });
+
+  let bestIndex = -1;
+  let bestScore = 0;
+  for (let i = 0; i < formSignals.length; i += 1) {
+    const signal = formSignals[i];
+    let score = 0;
+    for (const action of actions) {
+      const selector = action?.selector || action?.element_info?.selector || '';
+      const key = normalizeSelectorKey(selector);
+      if (key && signal.selectorKeys.has(key)) {
+        score += 3;
+      }
+      const actionName = extractNameAttributeFromActionSelector(selector);
+      if (actionName && signal.fieldNames.has(String(actionName).trim().toLowerCase())) {
+        score += 2;
+      }
+      const actionText = String(action?.description || '').trim().toLowerCase();
+      if (actionText && signal.fieldNames.has(actionText)) {
+        score += 1;
+      }
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      bestIndex = i;
+    }
+  }
+
+  if (bestScore > 0) return bestIndex;
+  if (forms.length === 1 && journeyMentionsFormFlow(journey)) return 0;
+  return -1;
+}
+
+function buildGeneratedActionForFormField(field, order) {
+  if (!field || typeof field !== 'object') return null;
+  const safeName = String(field.name || field.id || 'field').trim() || 'field';
+  const selector =
+    String(field.selector || '').trim() ||
+    (field.id ? `#${String(field.id).trim()}` : '') ||
+    (field.name ? `[name="${String(field.name).replace(/"/g, '\\"')}"]` : '');
+  if (!selector) return null;
+
+  const fieldType = normalizeJourneyActionType(field.type || 'input');
+  if (fieldType === 'checkbox') {
+    return {
+      action_id: `action_${order}`,
+      type: 'check',
+      element_type: 'checkbox',
+      selector,
+      description: `Set checkbox "${safeName}" (random checked/unchecked unless journey prompt explicitly specifies state).`,
+      target_state: 'random',
+      value: '__RANDOM_CHECKBOX_STATE__',
+      order
+    };
+  }
+  if (fieldType === 'radio') {
+    return {
+      action_id: `action_${order}`,
+      type: 'check',
+      element_type: 'radio',
+      selector,
+      description: `Select radio option for "${safeName}" (random option unless journey prompt explicitly specifies value).`,
+      target_state: 'random_option',
+      value: '__RANDOM_RADIO_OPTION__',
+      order
+    };
+  }
+  if (fieldType === 'select' || fieldType === 'select-one') {
+    return {
+      action_id: `action_${order}`,
+      type: 'input',
+      element_type: 'select',
+      selector,
+      description: `Choose option for "${safeName}"`,
+      order
+    };
+  }
+  if (fieldType === 'textarea') {
+    return {
+      action_id: `action_${order}`,
+      type: 'input',
+      element_type: 'textarea',
+      selector,
+      description: `Fill "${safeName}"`,
+      order
+    };
+  }
+  return {
+    action_id: `action_${order}`,
+    type: 'input',
+    element_type: 'input',
+    selector,
+    description: `Fill "${safeName}"`,
+    order
+  };
+}
+
+function buildSubmitActionFromForm(form, order) {
+  const buttons = Array.isArray(form?.buttons) ? form.buttons : [];
+  const preferredButton =
+    buttons.find((btn) => {
+      const txt = String(btn?.text || '').toLowerCase();
+      return /\b(submit|send|continue|next|finish|register|log\s?in|sign\s?in|apply|save)\b/.test(txt);
+    }) ||
+    buttons.find((btn) => selectorLooksLikeSubmitControl(btn?.selector)) ||
+    buttons[0] ||
+    null;
+
+  const formSelector = String(form?.selector || '').trim();
+  const fallbackSelector = formSelector
+    ? `${formSelector} button[type="submit"], ${formSelector} input[type="submit"]`
+    : 'button[type="submit"], input[type="submit"]';
+
+  return {
+    action_id: `action_${order}`,
+    type: 'form_submit',
+    element_type: 'button',
+    selector: String(preferredButton?.selector || '').trim() || fallbackSelector,
+    description: preferredButton?.text
+      ? `Submit: ${String(preferredButton.text).trim()}`
+      : 'Submit form',
+    order
+  };
+}
+
+function buildVerifyActionForForm(order) {
+  return {
+    action_id: `action_${order}`,
+    type: 'verify',
+    element_type: 'other',
+    selector: 'body',
+    description: 'Verify terminal form outcome (success confirmation or explicit validation/error message).',
+    order
+  };
+}
+
+function reindexJourneyActions(actions) {
+  if (!Array.isArray(actions)) return [];
+  return actions
+    .filter((a) => a && typeof a === 'object')
+    .map((action, index) => ({
+      ...action,
+      action_id: action.action_id || `action_${index}`,
+      order: index
+    }));
+}
+
+function expandJourneyActionsToFullFormStory(journey, form) {
+  if (!journey || typeof journey !== 'object' || !form || typeof form !== 'object') return null;
+  const existingActions = Array.isArray(journey.actions) ? journey.actions : [];
+
+  const preservedPreActions = [];
+  const formActionsBySelector = new Map();
+  const formActionsByName = new Map();
+  const allExistingFormActions = [];
+  let existingSubmitAction = null;
+  let existingVerifyAction = null;
+
+  for (const action of existingActions) {
+    if (!action || typeof action !== 'object') continue;
+    if (isVerificationOnlyAction(action)) {
+      if (!existingVerifyAction) existingVerifyAction = action;
+      continue;
+    }
+    if (isSubmitAction(action)) {
+      if (!existingSubmitAction) existingSubmitAction = action;
+      continue;
+    }
+    if (isFormControlAction(action)) {
+      allExistingFormActions.push(action);
+      const selectorKey = normalizeSelectorKey(action.selector || action?.element_info?.selector);
+      if (selectorKey && !formActionsBySelector.has(selectorKey)) {
+        formActionsBySelector.set(selectorKey, action);
+      }
+      const actionName =
+        extractNameAttributeFromActionSelector(action.selector || action?.element_info?.selector) ||
+        String(action?.name || '').trim();
+      if (actionName) {
+        const key = String(actionName).trim().toLowerCase();
+        if (!formActionsByName.has(key)) {
+          formActionsByName.set(key, action);
+        }
+      }
+      continue;
+    }
+    preservedPreActions.push(action);
+  }
+
+  const output = [...preservedPreActions];
+  const consumedExisting = new Set();
+  const fillableFields = (Array.isArray(form.fields) ? form.fields : []).filter(isFillableFormField);
+  for (const field of fillableFields) {
+    const generated = buildGeneratedActionForFormField(field, output.length);
+    if (!generated) continue;
+    const selectorKey = normalizeSelectorKey(generated.selector);
+    const nameKey = String(field?.name || field?.id || '').trim().toLowerCase();
+
+    let existing = null;
+    if (selectorKey && formActionsBySelector.has(selectorKey)) {
+      existing = formActionsBySelector.get(selectorKey);
+    } else if (nameKey && formActionsByName.has(nameKey)) {
+      existing = formActionsByName.get(nameKey);
+    }
+
+    if (existing) {
+      consumedExisting.add(existing);
+      const merged = {
+        ...generated,
+        ...existing,
+        type: generated.type,
+        element_type: generated.element_type,
+        selector: existing.selector || generated.selector,
+        description: existing.description || generated.description
+      };
+      if (generated.target_state != null && merged.target_state == null) merged.target_state = generated.target_state;
+      if (generated.value != null && merged.value == null) merged.value = generated.value;
+      output.push(merged);
+    } else {
+      output.push(generated);
+    }
+  }
+
+  for (const action of allExistingFormActions) {
+    if (consumedExisting.has(action)) continue;
+    output.push(action);
+  }
+
+  const generatedSubmit = buildSubmitActionFromForm(form, output.length);
+  const submitAction = existingSubmitAction
+    ? {
+      ...generatedSubmit,
+      ...existingSubmitAction,
+      type: 'form_submit',
+      selector: existingSubmitAction.selector || generatedSubmit.selector
+    }
+    : generatedSubmit;
+  output.push(submitAction);
+
+  const generatedVerify = buildVerifyActionForForm(output.length);
+  const verifyAction = existingVerifyAction
+    ? {
+      ...generatedVerify,
+      ...existingVerifyAction,
+      type: 'verify',
+      selector: existingVerifyAction.selector || generatedVerify.selector
+    }
+    : generatedVerify;
+  output.push(verifyAction);
+
+  return reindexJourneyActions(output);
+}
+
+function expandJourneysToFullFormStories(journeys, forms) {
+  if (!Array.isArray(journeys) || journeys.length === 0) {
+    return { journeys: Array.isArray(journeys) ? journeys : [], expandedCount: 0, retargetedCount: 0 };
+  }
+  if (!Array.isArray(forms) || forms.length === 0) {
+    return { journeys, expandedCount: 0, retargetedCount: 0 };
+  }
+
+  let expandedCount = 0;
+  let mappedCount = 0;
+  const expandedJourneys = journeys.map((journey) => {
+    const formIndex = inferJourneyFormIndexFromInventory(journey, forms);
+    if (formIndex < 0) {
+      return journey;
+    }
+    mappedCount += 1;
+    const expandedActions = expandJourneyActionsToFullFormStory(journey, forms[formIndex]);
+    if (!Array.isArray(expandedActions) || expandedActions.length === 0) {
+      return journey;
+    }
+    const prevCount = Array.isArray(journey?.actions) ? journey.actions.length : 0;
+    if (expandedActions.length !== prevCount) {
+      expandedCount += 1;
+    }
+    const stageHint =
+      'Stage 1: reach the form surface. Stage 2: populate required controls (checkbox/radio choices are random unless prompt says otherwise). Stage 3: submit once. Stage 4: verify terminal outcome.';
+    const existingInstructions = String(journey?.test_instructions || '').trim();
+    const testInstructions =
+      /stage\s*1/i.test(existingInstructions) || !existingInstructions
+        ? (existingInstructions || stageHint)
+        : `${existingInstructions}\n${stageHint}`;
+    return {
+      ...journey,
+      description: journey?.description || `Complete form flow ${formIndex + 1}`,
+      expected_outcome:
+        journey?.expected_outcome ||
+        'Form submission reaches a terminal visible state (success confirmation or explicit validation/error).',
+      test_instructions: testInstructions,
+      actions: expandedActions
+    };
+  });
+
+  if (mappedCount > 0) {
+    return { journeys: expandedJourneys, expandedCount, retargetedCount: 0 };
+  }
+
+  const retargetIndex = expandedJourneys.findIndex((journey) => journeyMentionsFormFlow(journey));
+  const selectedIndex = retargetIndex >= 0 ? retargetIndex : 0;
+  const selectedForm = pickPrimaryFormForHeuristic(forms) || forms[0];
+  const selectedJourney = expandedJourneys[selectedIndex];
+  const forcedActions = expandJourneyActionsToFullFormStory(selectedJourney, selectedForm);
+  if (!Array.isArray(forcedActions) || forcedActions.length === 0) {
+    return { journeys: expandedJourneys, expandedCount, retargetedCount: 0 };
+  }
+  const next = [...expandedJourneys];
+  const baseInstructions = String(selectedJourney?.test_instructions || '').trim();
+  const forcedHint =
+    'Stage 1: reach the form. Stage 2: fill required controls (checkbox/radio random unless explicitly instructed). Stage 3: submit once. Stage 4: verify terminal outcome.';
+  next[selectedIndex] = {
+    ...selectedJourney,
+    description: selectedJourney?.description || 'Complete primary form flow',
+    expected_outcome:
+      selectedJourney?.expected_outcome ||
+      'Form submission reaches a terminal visible state (success confirmation or explicit validation/error).',
+    test_instructions: baseInstructions ? `${baseInstructions}\n${forcedHint}` : forcedHint,
+    actions: forcedActions
+  };
+  return { journeys: next, expandedCount, retargetedCount: 1 };
+}
+
 function computeStableJourneyId(pageUrl, journey) {
   try {
     const crypto = require('crypto');
@@ -2289,9 +2729,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       return [];
     }
     const allowed = collectAllowedDocumentOnlySelectors(workflowState);
-    const isInteractiveActionType = (type) => {
-      const t = String(type || '').toLowerCase();
-      return Boolean(t && !['verify', 'check'].includes(t));
+    const isInteractiveActionType = (action) => {
+      const t = normalizeJourneyActionType(action?.type || action?.action_type || action);
+      return Boolean(t && !isVerificationOnlyAction(action));
     };
 
     const kept = [];
@@ -2305,7 +2745,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       }
       const actions = Array.isArray(journey.actions) ? journey.actions : [];
       if (actions.length === 0) continue;
-      if (actions.some((a) => isInteractiveActionType(a?.type))) {
+      if (actions.some((a) => isInteractiveActionType(a))) {
         console.log(
           `⚠️ Dropping journey on document-only surface (interactive action): ${journey.journey_id || journey.description || 'unknown'}`
         );
@@ -2379,7 +2819,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         console.log(`⚠️ Dropping leg on document-only surface: ${leg.leg_id || leg.description || 'unknown'} (${t})`);
         continue;
       }
-      if (t === 'verify' || t === 'check') {
+      if (isVerificationOnlyAction(leg)) {
         const sel = String(leg.selector || leg.element_info?.selector || '').trim();
         if (!sel || allowed.size === 0 || !allowed.has(sel)) {
           console.log(`⚠️ Dropping verify leg on document-only surface (selector not in analysis): ${sel || '(empty)'}`);
@@ -2459,8 +2899,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     if (isJourneyShape && item?.actions) {
       const actions = Array.isArray(item.actions) ? item.actions : [];
       const primary = actions.find((a) => {
-        const t = String(a?.type || '').toLowerCase();
-        return t && t !== 'verify' && t !== 'check';
+        const t = normalizeJourneyActionType(a?.type || a?.action_type);
+        return t && !isVerificationOnlyAction(a);
       }) || actions[0];
       if (!primary) return false;
       typeStr = String(primary.type || '').toLowerCase();
@@ -2580,8 +3020,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       // Convert journey to leg (prefer first non-verify action as primary)
       const actions = Array.isArray(journey.actions) ? journey.actions : [];
       const primaryAction = actions.find(action => {
-        const actionType = (action?.type || '').toLowerCase();
-        return actionType !== 'verify' && actionType !== 'check';
+        return !isVerificationOnlyAction(action);
       }) || actions[0] || null;
       
       const leg = {
@@ -2632,8 +3071,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       const dedupedJourneys = journeysForProcessing.filter((journey) => {
         const actions = Array.isArray(journey.actions) ? journey.actions : [];
         const primaryAction = actions.find(action => {
-          const actionType = (action?.type || '').toLowerCase();
-          return actionType !== 'verify' && actionType !== 'check';
+          return !isVerificationOnlyAction(action);
         }) || actions[0] || null;
         
         const selectorKey = (primaryAction?.selector || '').trim();
@@ -6320,10 +6758,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       let filteredJourney = { ...currentJourney };
       if (currentJourney.actions && Array.isArray(currentJourney.actions)) {
         filteredJourney.actions = currentJourney.actions.filter(action => {
-          const actionType = (action.type || '').toLowerCase();
-          return actionType !== 'verify' && actionType !== 'check';
+          return !isVerificationOnlyAction(action);
         });
-        console.log(`[WorkflowAnalyzer] Filtered journey actions: ${currentJourney.actions.length} -> ${filteredJourney.actions.length} (removed verify/check actions)`);
+        console.log(`[WorkflowAnalyzer] Filtered journey actions: ${currentJourney.actions.length} -> ${filteredJourney.actions.length} (removed verification-only actions)`);
       }
       
       stepPayload.currentJourney = filteredJourney;
@@ -6875,10 +7312,12 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- If an action adds dynamic inputs (e.g., Add Email/Add Phone), ensure every visible required input is non-empty before submit.\n'
           + '- Immediately before submit, handle browser validation safely: if any :invalid input exists, fill it with a valid realistic value and then submit.\n'
           + '- After submit/click of primary action, wait for either URL/navigation change OR visible DOM state change before returning script completion.\n'
+          + '- FORM JOURNEY COMPLETENESS: when currentJourney targets a form/modal/wizard, execute it as a full story (open stage if needed, fill all required controls, submit exactly once, then verify terminal outcome). Do not stop after a single auxiliary click.\n'
           + '- Never return success while required fields remain empty or browser validation messages are visible.\n'
           + '- NEVER emit .fill(..., "") or .fill(..., \'\') for inputs the journey must complete; use realistic synthetic values appropriate to the field type (valid email shape for email fields, multi-word text for messages/textarea, non-empty strings for names).\n'
           + '- NEVER put pseudocode or expressions inside string literals for .fill()/.type() second arguments (e.g. .fill("act.value || \'\'") types the literal characters a-c-t-.-v-a-l-u-e). Use a real JavaScript expression (variable you declared) or a concrete quoted string literal for the value.\n'
           + '- RADIO/CHECKBOX SELECTORS: the HTML `value` attribute (often slug-style: hyphens, lowercase) is what `[value="..."]` and `.check()` must target. Visible caption text next to the control (Title Case, spaces) is NOT the same as `value` — never copy label text into `[value="..."]` unless it exactly matches the attribute from the inventory/forms list. Prefer `#id`, `getByLabel`, or `locator(\'input[name="group"][value="<exact value from DOM>"]\')` using the provided `value` / `label_text` fields.\n'
+          + '- CHECKBOX/RADIO STATE RULE: obey explicit checked/unchecked/value only when currentJourney action metadata or instructions explicitly require it. Otherwise choose a random valid state/option once per action and continue (do not skip checkbox/radio actions).\n'
           + '- Never build mixed selectors like ".css, text=\\"Label\\"" in page.$, page.$$, page.locator, or waitForSelector.\n'
           + '- Use page.$/page.$$ with CSS-only selectors; for text use getByRole/getByText/locator("text=...") as standalone selectors only.\n'
           + '- For text locators, always disambiguate with .first() or .nth() before calling isVisible/click/fill.\n'
@@ -6916,10 +7355,12 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (JOURNEYS — MANDATORY):\n'
           + '- Top-level "journeys" (or page_summary.journeys) must list ONLY flows that are clearly interactive and have a verifiable on-page outcome.\n'
           + '- Include: (1) each multi-field form or submit flow; (2) embedded/shared widgets such as chat or support; (3) interactive menus that expand, toggle, or reveal panels on this page (not plain header/footer links — those are in menu_items / link map); (4) buttons or controls that open modals, drawers, or wizards; (5) video or media players when there is a concrete control to exercise (play/pause/fullscreen) with an observable result.\n'
+          + '- FORM FLOWS MUST BE FULL STORIES: for each emitted form journey include stage progression (open relevant modal/tab/step if needed), populate required controls, submit once, then verify terminal result. Do not emit one-click fragments such as only toggling a checkbox.\n'
           + '- Omit decorative regions, vague "click here" areas, and plain same-document navigation with no state change.\n'
           + '- Never create hypothetical or conditional journeys (for example: "if available", "if present", "maybe", "try"). If a concrete element is not observed, do not emit that journey.\n'
           + '- Every journey MUST have a non-empty "actions" array. Each action that interacts with the DOM MUST include a concrete Playwright-capable "selector" string (no placeholders like "selector" or "{{...}}").\n'
           + '- When interactive_elements / link inventory lists a control as type "link" (e.g. marketing "Read more" on cards), use link selectors (a[href], a:has-text(...)) or getByRole("link") — do not label it button:has-text unless the DOM is actually a <button>.\n'
+          + '- Checkbox/radio actions: if operator instructions do not explicitly require a fixed state/value, describe them as random state/option selection so execution can vary naturally.\n'
           + '- Every emitted journey must have at least one deterministic post-action verification signal (visible message/state change/url change) described in expected_outcome.\n'
           + '- If nothing qualifies, return an empty journeys array ([]).\n';
       }
@@ -8370,6 +8811,14 @@ return {
                 resolveActionSelectorFromForms(action, interactiveGroups.forms, consumed);
               }
             }
+            const formExpansionResult = expandJourneysToFullFormStories(journeys, interactiveGroups.forms);
+            journeys = Array.isArray(formExpansionResult?.journeys) ? formExpansionResult.journeys : journeys;
+            if ((formExpansionResult?.expandedCount || 0) > 0 || (formExpansionResult?.retargetedCount || 0) > 0) {
+              console.log(
+                `✅ [JOURNEYS-FULL-STORY] Expanded ${formExpansionResult.expandedCount || 0} journey(s) to full form stories` +
+                `${(formExpansionResult?.retargetedCount || 0) > 0 ? `; retargeted ${formExpansionResult.retargetedCount} journey(s) to primary form` : ''}`
+              );
+            }
           }
           if (journeys.length > 0) {
             const beforeInv = journeys.length;
@@ -8393,8 +8842,7 @@ return {
             const actions = Array.isArray(journey?.actions) ? journey.actions : [];
             if (actions.length === 0) return true;
             return actions.every((action) => {
-              const t = String(action?.type || action?.action_type || '').trim().toLowerCase();
-              return t === 'verify' || t === 'check';
+              return isVerificationOnlyAction(action);
             });
           };
           const journeysBeforeConditionalFilter = journeys.length;
@@ -8770,6 +9218,19 @@ return {
               confidence: leg.confidence || 0.8
             }))
             .filter((j) => Array.isArray(j.actions) && j.actions.length > 0);
+          const formsForConversion = Array.isArray(workflowState.playwrightAnalysis?.forms)
+            ? workflowState.playwrightAnalysis.forms
+            : (Array.isArray(workflowState.forms) ? workflowState.forms : []);
+          if (journeys.length > 0 && formsForConversion.length > 0) {
+            const formExpansionResult = expandJourneysToFullFormStories(journeys, formsForConversion);
+            journeys = Array.isArray(formExpansionResult?.journeys) ? formExpansionResult.journeys : journeys;
+            if ((formExpansionResult?.expandedCount || 0) > 0 || (formExpansionResult?.retargetedCount || 0) > 0) {
+              console.log(
+                `✅ [JOURNEYS-CONVERT-FULL-STORY] Expanded ${formExpansionResult.expandedCount || 0} converted journey(s)` +
+                `${(formExpansionResult?.retargetedCount || 0) > 0 ? `; retargeted ${formExpansionResult.retargetedCount} journey(s)` : ''}`
+              );
+            }
+          }
           if (journeys.length > 0 && this.isSparseInteractiveCrawlSurface(workflowState)) {
             const beforeCv = journeys.length;
             journeys = this.filterImpossibleJourneysOnSparseSurface(journeys, workflowState);
@@ -11570,48 +12031,20 @@ return {
       const formSelector = form.selector || form.selectors?.[0]?.selector || `form`;
       const formId = (form.id || formSelector.replace(/[^a-z0-9-_]/gi, '_') || `form_${formIndex}`).substring(0, 80);
       const journeyId = `form_${formId}`;
-      const actions = [];
-      let order = 0;
-      (form.fields || []).forEach((field) => {
-        const sel = field.selector || (field.id ? `#${field.id}` : null) || (field.name ? `[name="${field.name}"]` : null) || null;
-        if (sel) {
-          actions.push({
-            action_id: `action_${order}`,
-            type: 'input',
-            element_type: (field.type && field.type !== 'text' ? field.type : 'input'),
-            selector: sel,
-            description: `Fill ${field.name || field.id || 'field'}`,
-            order: order++
-          });
-        }
-      });
-      (form.buttons || []).forEach((btn) => {
-        const sel = btn.selector || (btn.text ? `button:has-text("${btn.text}")` : 'button[type="submit"]');
-        actions.push({
-          action_id: `action_${order}`,
-          type: 'form_submit',
-          element_type: 'button',
-          selector: sel,
-          description: btn.text ? `Submit: ${btn.text}` : 'Submit form',
-          order: order++
-        });
-      });
-      if (actions.length > 0) {
-        actions.push({
-          action_id: `action_${order}`,
-          type: 'verify',
-          element_type: 'other',
-          selector: 'body',
-          description: 'Verify submission or result',
-          order: order
-        });
+      const baseJourney = {
+        journey_id: journeyId,
+        description: `Fallback form journey for ${formSelector}`,
+        priority: 'high',
+        confidence: 0.72,
+        expected_outcome: 'Form submission reaches a terminal visible result (success confirmation or explicit validation/error).',
+        test_instructions:
+          'Stage 1: reach this form. Stage 2: fill required controls (checkbox/radio random unless explicitly instructed). Stage 3: submit once. Stage 4: verify terminal outcome.',
+        actions: []
+      };
+      const actions = expandJourneyActionsToFullFormStory(baseJourney, form);
+      if (Array.isArray(actions) && actions.length > 0) {
         journeys.push({
-          journey_id: journeyId,
-          description: `Fallback form journey for ${formSelector}`,
-          priority: 'high',
-          confidence: 0.7,
-          expected_outcome: 'Form submitted successfully',
-          test_instructions: 'Fill form and submit',
+          ...baseJourney,
           actions
         });
       }
@@ -12979,12 +13412,49 @@ return {
       "await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});",
       'await page.waitForTimeout(500);',
     ];
+    const explicitCheckboxStateFromAction = (action) => {
+      const actionType = normalizeJourneyActionType(action?.type || action?.action_type);
+      if (actionType === 'uncheck') return false;
+      const direct =
+        action?.checked ??
+        action?.is_checked ??
+        action?.should_be_checked ??
+        action?.target_checked;
+      if (typeof direct === 'boolean') return direct;
+
+      const rawState = String(action?.target_state || action?.state || action?.value || '').trim().toLowerCase();
+      if (rawState.includes('random')) return null;
+      if (['checked', 'check', 'true', 'on', 'yes', 'selected', 'enable', 'enabled'].includes(rawState)) return true;
+      if (['unchecked', 'uncheck', 'false', 'off', 'no', 'clear', 'disable', 'disabled'].includes(rawState)) return false;
+
+      const textBlob = `${action?.description || ''} ${action?.expected_outcome || ''} ${action?.test_instructions || ''}`.toLowerCase();
+      if (/\b(random|either)\b/.test(textBlob)) return null;
+      if (/\b(uncheck|untick|deselect|turn off|disable)\b/.test(textBlob)) return false;
+      if (/\b(check|tick|select|turn on|enable|accept)\b/.test(textBlob)) return true;
+      return null;
+    };
+    const isCheckboxLikeAction = (action, actionType) => {
+      if (actionType === 'check' || actionType === 'uncheck') return true;
+      const et = normalizeJourneyActionElementType(action);
+      if (['checkbox', 'radio', 'toggle', 'switch'].includes(et)) return true;
+      const selectorText = action?.selector || action?.element_info?.selector || action?.element_info?.primary_selector || '';
+      return selectorLooksLikeCheckboxOrRadio(selectorText);
+    };
+    const isSelectLikeAction = (action, actionType) => {
+      if (actionType === 'select' || actionType === 'selectoption') return true;
+      const et = normalizeJourneyActionElementType(action);
+      if (et === 'select') return true;
+      const selectorText = String(
+        action?.selector || action?.element_info?.selector || action?.element_info?.primary_selector || ''
+      ).toLowerCase();
+      return /^select\b/.test(selectorText) || /\bselect\[/.test(selectorText);
+    };
     for (const action of actions) {
       let selector =
         action?.selector || action?.element_info?.selector || action?.element_info?.primary_selector;
       if (!selector || typeof selector !== 'string') continue;
 
-      const actionType = String(action?.type || '').toLowerCase();
+      const actionType = normalizeJourneyActionType(action?.type || action?.action_type);
       // When the journey row says "button" but live inventory maps the same label to an <a>, use the
       // inventory selector so deterministic fallback matches real DOM (general SPA / marketing-card pattern).
       if (['click', 'navigate', 'open', 'press', 'tap', 'hover'].includes(actionType)) {
@@ -13000,7 +13470,7 @@ return {
       // default timeout (now 8s for journey scripts) and the resulting clip is mostly idle, which
       // mpdecimate trims down to ~1s of nothing visible. Failing fast lets the journey iteration
       // loop pick a different selector / journey instead of burning the recording on dead time.
-      if (actionType === 'input') {
+      if (actionType === 'input' && !isCheckboxLikeAction(action, actionType) && !isSelectLikeAction(action, actionType)) {
         const value =
           action?.value ||
           action?.input_value ||
@@ -13011,7 +13481,47 @@ return {
           `if ((await page.locator(${safeSelector}).count().catch(() => 0)) === 0) { return { success: false, message: 'Selector ' + ${safeSelector} + ' not present in DOM (pre-flight)' }; }`
         );
         lines.push(`await page.fill(${safeSelector}, ${JSON.stringify(String(value))});`);
-      } else if (actionType === 'verify' || actionType === 'check') {
+      } else if (isCheckboxLikeAction(action, actionType)) {
+        lines.push(
+          `if ((await page.locator(${safeSelector}).count().catch(() => 0)) === 0) { return { success: false, message: 'Selector ' + ${safeSelector} + ' not present in DOM (pre-flight)' }; }`
+        );
+        const explicitState = explicitCheckboxStateFromAction(action);
+        if (explicitState === null) {
+          lines.push('{');
+          lines.push(`  const __loc = page.locator(${safeSelector}).first();`);
+          lines.push('  const __desired = Math.random() >= 0.5;');
+          lines.push('  const __checked = await __loc.isChecked().catch(() => null);');
+          lines.push('  if (__checked !== __desired) {');
+          lines.push(`    await __loc.click({ force: true }).catch(async () => { await page.click(${safeSelector}, { force: true }).catch(() => {}); });`);
+          lines.push('  }');
+          lines.push('}');
+        } else {
+          lines.push('{');
+          lines.push(`  const __loc = page.locator(${safeSelector}).first();`);
+          lines.push('  const __checked = await __loc.isChecked().catch(() => null);');
+          lines.push(`  if (__checked !== ${explicitState ? 'true' : 'false'}) {`);
+          lines.push(`    await __loc.click({ force: true }).catch(async () => { await page.click(${safeSelector}, { force: true }).catch(() => {}); });`);
+          lines.push('  }');
+          lines.push('}');
+        }
+        lines.push('await page.waitForTimeout(300);');
+      } else if (isSelectLikeAction(action, actionType)) {
+        lines.push(
+          `if ((await page.locator(${safeSelector}).count().catch(() => 0)) === 0) { return { success: false, message: 'Selector ' + ${safeSelector} + ' not present in DOM (pre-flight)' }; }`
+        );
+        const selectValue = String(action?.value || action?.input_value || action?.option || '').trim();
+        if (!selectValue || /random/i.test(selectValue)) {
+          lines.push('{');
+          lines.push(`  const __options = await page.locator(${safeSelector}).locator('option').evaluateAll((opts) => opts.map((o) => ({ value: String(o.value || '').trim(), disabled: !!o.disabled })).filter((o) => o.value && !o.disabled)).catch(() => []);`);
+          lines.push('  if (__options.length > 0) {');
+          lines.push('    const __pick = __options[Math.floor(Math.random() * __options.length)].value;');
+          lines.push(`    await page.selectOption(${safeSelector}, { value: __pick }).catch(() => {});`);
+          lines.push('  }');
+          lines.push('}');
+        } else {
+          lines.push(`await page.selectOption(${safeSelector}, { value: ${JSON.stringify(selectValue)} }).catch(async () => { await page.selectOption(${safeSelector}, ${JSON.stringify(selectValue)}).catch(() => {}); });`);
+        }
+      } else if (isVerificationOnlyAction(action)) {
         lines.push(`await page.waitForSelector(${safeSelector}, { timeout: 5000 }).catch(() => null);`);
       } else {
         lines.push(
@@ -13425,8 +13935,7 @@ return {
   getInteractiveJourneyActionsForScript(actions) {
     if (!Array.isArray(actions)) return [];
     return actions.filter((action) => {
-      const actionType = String(action?.type || '').toLowerCase();
-      return actionType !== 'verify' && actionType !== 'check';
+      return !isVerificationOnlyAction(action);
     });
   }
 
@@ -22466,8 +22975,7 @@ const sleep = safeWait;
             if (executedScript && journey.actions && Array.isArray(journey.actions) && journey.actions.length > 0) {
               // Filter out verification/check actions first
               const interactiveActions = journey.actions.filter(action => {
-                const actionType = (action.type || '').toLowerCase();
-                return actionType !== 'verify' && actionType !== 'check';
+                return !isVerificationOnlyAction(action);
               });
               
               // Match actions to script execution by checking if action selectors/elements appear in the script
