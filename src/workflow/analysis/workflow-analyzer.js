@@ -8999,6 +8999,8 @@ return {
           : (Array.isArray(parsedResponse.page_summary?.journeys) ? parsedResponse.page_summary.journeys : null);
         if (rawJourneysFromResponse) {
           journeys = rawJourneysFromResponse;
+          // Used when validation filters out every journey — do not conflate with a truly empty LLM array.
+          const rawJourneyCountInitial = journeys.length;
           console.log(`✅ [JOURNEYS-EXTRACT] Found ${journeys.length} journeys in response (top-level or page_summary)`);
           let firstJourneyPreviewRaw = '';
           if (journeys.length > 0) {
@@ -9420,14 +9422,32 @@ return {
             workflowState.context.journeysToExecute = [];
             this.initializeVariablePool(workflowState);
             this.saveVariable(workflowState, 'journeysToExecute', [], 'page', step);
-            console.log(`ℹ️ [JOURNEYS] AI returned empty journeys array; stored empty journeysToExecute for this page.`);
+            const filteredAll =
+              typeof rawJourneyCountInitial === 'number' && rawJourneyCountInitial > 0;
+            if (filteredAll) {
+              console.log(
+                `ℹ️ [JOURNEYS] All ${rawJourneyCountInitial} journey(s) from the model were removed by platform validation (selectors, inventory match, verify-only/surface rules, or dedup). Stored empty journeysToExecute; raw journeys remain in stepResults for JOURNEYS-FINAL / reconciliation.`
+              );
+            } else {
+              console.log(`ℹ️ [JOURNEYS] AI returned empty journeys array; stored empty journeysToExecute for this page.`);
+            }
             if (jobId && this.backendLogger) {
-              await this.backendLogger.appendJobLog(jobId, 'info', `ℹ️ AI returned empty journeys array; stored empty journeysToExecute for this page.`, 'WORKFLOW-ANALYZER', {
-                forms_count: formsCount,
-                interactive_elements_count: interactiveElementsCount,
-                response_keys: Object.keys(parsedResponse).join(', '),
-                has_page_summary: !!parsedResponse.page_summary
-              });
+              await this.backendLogger.appendJobLog(
+                jobId,
+                'info',
+                filteredAll
+                  ? `ℹ️ [JOURNEYS] All ${rawJourneyCountInitial} model journey(s) filtered by validation; empty journeysToExecute (see step result for raw).`
+                  : `ℹ️ AI returned empty journeys array; stored empty journeysToExecute for this page.`,
+                'WORKFLOW-ANALYZER',
+                {
+                  forms_count: formsCount,
+                  interactive_elements_count: interactiveElementsCount,
+                  response_keys: Object.keys(parsedResponse).join(', '),
+                  has_page_summary: !!parsedResponse.page_summary,
+                  raw_journeys_before_validation: rawJourneyCountInitial,
+                  all_filtered_by_platform: filteredAll
+                }
+              );
             }
           }
           
