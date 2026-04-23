@@ -977,7 +977,10 @@ function expandJourneyActionsToFullFormStory(journey, form, interactiveElements 
   for (const action of existingActions) {
     if (!action || typeof action !== 'object') continue;
     if (isVerificationOnlyAction(action)) {
-      if (!existingVerifyAction) existingVerifyAction = action;
+      const verifyNarrative = `${action?.description || ''} ${action?.expected_outcome || ''}`;
+      if (!existingVerifyAction && narrativeLooksLikeTerminalOutcome(verifyNarrative)) {
+        existingVerifyAction = action;
+      }
       continue;
     }
     if (isSubmitAction(action)) {
@@ -1159,18 +1162,28 @@ function expandJourneysToFullFormStories(journeys, forms, interactiveElements = 
         : `${existingInstructions}\n${stageHint}`;
     const rawDescription = String(journey?.description || '').trim();
     const rawExpectedOutcome = String(journey?.expected_outcome || '').trim();
+    const hasSubmitInActions = expandedActions.some((action) => isSubmitAction(action));
+    const forceTerminalOutcome = hasSubmitInActions && !narrativeLooksLikeTerminalOutcome(rawExpectedOutcome);
+    const forceTerminalDescription =
+      hasSubmitInActions &&
+      (!rawDescription ||
+        !/\b(submit|submitted|complete|completed|finish|finished|register|sign\s?up|flow)\b/i.test(rawDescription));
     const forceModalNarrative =
       modalWizardFlow &&
       !narrativeLooksLikeTerminalOutcome(`${rawDescription} ${rawExpectedOutcome}`);
     const sanitizedDescription =
-      forceModalNarrative
-        ? `Complete modal/wizard flow ${formIndex + 1} through all stages and submit`
+      forceModalNarrative || forceTerminalDescription
+        ? (modalWizardFlow
+          ? `Complete modal/wizard flow ${formIndex + 1} through all stages and submit`
+          : `Complete form flow ${formIndex + 1} through required fields and submit`)
         : rawDescription && !(modalWizardFlow && looksLikePassiveObservationText(rawDescription))
         ? rawDescription
         : (modalWizardFlow ? `Complete modal/wizard flow ${formIndex + 1}` : `Complete form flow ${formIndex + 1}`);
     const sanitizedExpectedOutcome =
-      forceModalNarrative
-        ? 'Modal wizard reaches terminal outcome after required stages and submit (success confirmation or explicit validation feedback).'
+      forceModalNarrative || forceTerminalOutcome
+        ? (modalWizardFlow
+          ? 'Modal wizard reaches terminal outcome after required stages and submit (success confirmation or explicit validation feedback).'
+          : 'Form submission reaches terminal outcome after required fields and submit (success confirmation or explicit validation feedback).')
         : rawExpectedOutcome && !(modalWizardFlow && looksLikePassiveObservationText(rawExpectedOutcome))
         ? rawExpectedOutcome
         : 'Form submission reaches a terminal visible state (success confirmation or explicit validation/error).';
