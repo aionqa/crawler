@@ -531,24 +531,76 @@ function normalizeSelectorKey(selector) {
   return String(selector || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+function textLooksLikeSubmitControl(value) {
+  const s = String(value || '').toLowerCase();
+  if (!s) return false;
+  return /\b(submit|send|finish|complete|register|log\s?in|sign\s?in|apply|save|place order|place-order)\b/.test(s);
+}
+
+function textLooksLikeAdvanceControl(value) {
+  const s = String(value || '').toLowerCase();
+  if (!s) return false;
+  if (/\b(previous|prev|back|cancel|close)\b/.test(s)) return false;
+  return /\b(next|continue|proceed|go next|go forward|review)\b/.test(s);
+}
+
 function selectorLooksLikeSubmitControl(selector) {
   const s = String(selector || '').toLowerCase();
   if (!s) return false;
-  if (/\btype\s*=\s*["']?submit/.test(s)) return true;
-  if (/\bbutton\b/.test(s) && /submit|send|continue|next|finish|register|log\s?in|sign\s?in|apply/.test(s)) {
+  if (/\btype\s*=\s*["']?submit\b/.test(s)) return true;
+  if (/\b(button|input)\b/.test(s) && /\b(submit|send|finish|complete|register|log\s?in|sign\s?in|apply|save)\b/.test(s)) {
     return true;
   }
   return false;
 }
 
+function selectorLooksLikeAdvanceControl(selector) {
+  const s = String(selector || '').toLowerCase();
+  if (!s) return false;
+  if (/\b(previous|prev|back|cancel|close)\b/.test(s)) return false;
+  if (/#next(?:btn|button)?\b/.test(s)) return true;
+  if (/\b(button|input)\b/.test(s) && /\b(next|continue|proceed|review|step)\b/.test(s)) return true;
+  return false;
+}
+
 function isSubmitAction(action) {
   const t = normalizeJourneyActionType(action?.type || action?.action_type);
-  if (t === 'form_submit' || t === 'submit') return true;
+  const selector = action?.selector || action?.element_info?.selector || '';
   const desc = `${action?.description || ''} ${action?.expected_outcome || ''}`.toLowerCase();
-  if (/\b(submit|send|finish|complete|continue)\b/.test(desc) && !/\b(check|verify)\b/.test(desc)) {
+  const looksAdvance = textLooksLikeAdvanceControl(desc) || selectorLooksLikeAdvanceControl(selector);
+  const looksSubmit = textLooksLikeSubmitControl(desc) || selectorLooksLikeSubmitControl(selector);
+  if (t === 'form_submit' || t === 'submit') {
+    // LLMs sometimes mislabel "Next" as form_submit; treat that as stage advance unless submit semantics are explicit.
+    if (looksAdvance && selectorLooksLikeAdvanceControl(selector) && !selectorLooksLikeSubmitControl(selector)) return false;
+    if (looksAdvance && !looksSubmit) return false;
     return true;
   }
-  return selectorLooksLikeSubmitControl(action?.selector || action?.element_info?.selector);
+  if (looksSubmit && !/\b(check|verify)\b/.test(desc)) {
+    return true;
+  }
+  return selectorLooksLikeSubmitControl(selector);
+}
+
+function isAdvanceStageAction(action) {
+  if (!action || typeof action !== 'object') return false;
+  const t = normalizeJourneyActionType(action?.type || action?.action_type);
+  const selector = action?.selector || action?.element_info?.selector || '';
+  const blob = [
+    action?.description,
+    action?.expected_outcome,
+    action?.interactive_element?.text,
+    selector
+  ].join(' ');
+  const looksAdvance = textLooksLikeAdvanceControl(blob) || selectorLooksLikeAdvanceControl(selector);
+  if (!looksAdvance) return false;
+  if (isSubmitAction(action)) return false;
+  return ['click', 'form_submit', 'submit', 'press', 'tap', ''].includes(t) || selectorLooksLikeAdvanceControl(selector);
+}
+
+function looksLikePassiveObservationText(value) {
+  const s = String(value || '').toLowerCase();
+  if (!s.trim()) return false;
+  return /\b(observe|readonly|read-only|background is static|no additional changes observed|no interactive elements)\b/.test(s);
 }
 
 function isFormControlAction(action) {
@@ -686,6 +738,16 @@ function buildGeneratedActionForFormField(field, order) {
       order
     };
   }
+  if (fieldType === 'date') {
+    return {
+      action_id: `action_${order}`,
+      type: 'input',
+      element_type: 'date',
+      selector,
+      description: `Fill date "${safeName}" (YYYY-MM-DD)`,
+      order
+    };
+  }
   return {
     action_id: `action_${order}`,
     type: 'input',
@@ -696,30 +758,164 @@ function buildGeneratedActionForFormField(field, order) {
   };
 }
 
+function buildAdvanceActionFromForm(form, order) {
+  const buttons = Array.isArray(form?.buttons) ? form.buttons : [];
+  const preferredButton =
+    buttons.find((btn) => textLooksLikeAdvanceControl(btn?.text)) ||
+    buttons.find((btn) => selectorLooksLikeAdvanceControl(btn?.selector)) ||
+    null;
+  if (!preferredButton) return null;
+  const formSelector = String(form?.selector || '').trim();
+  const fallbackSelector = formSelector
+    ? `${formSelector} #nextBtn, ${formSelector} button:has-text("Next"), ${formSelector} button:has-text("Continue")`
+    : '#nextBtn, button:has-text("Next"), button:has-text("Continue")';
+
+  return {
+    action_id: `action_${order}`,
+    type: 'click',
+    element_type: 'button',
+    selector: String(preferredButton?.selector || '').trim() || fallbackSelector,
+    description: preferredButton?.text
+      ? `Advance stage: ${String(preferredButton.text).trim()}`
+      : 'Advance to next stage',
+    order
+  };
+}
+
 function buildSubmitActionFromForm(form, order) {
   const buttons = Array.isArray(form?.buttons) ? form.buttons : [];
   const preferredButton =
-    buttons.find((btn) => {
-      const txt = String(btn?.text || '').toLowerCase();
-      return /\b(submit|send|continue|next|finish|register|log\s?in|sign\s?in|apply|save)\b/.test(txt);
-    }) ||
+    buttons.find((btn) => textLooksLikeSubmitControl(btn?.text)) ||
     buttons.find((btn) => selectorLooksLikeSubmitControl(btn?.selector)) ||
+    // Fallback: pick a non-navigation button before accepting generic first button.
+    buttons.find((btn) => {
+      const txt = String(btn?.text || '');
+      return !textLooksLikeAdvanceControl(txt) && !selectorLooksLikeAdvanceControl(btn?.selector);
+    }) ||
     buttons[0] ||
     null;
 
   const formSelector = String(form?.selector || '').trim();
   const fallbackSelector = formSelector
-    ? `${formSelector} button[type="submit"], ${formSelector} input[type="submit"]`
-    : 'button[type="submit"], input[type="submit"]';
+    ? `${formSelector} button[type="submit"], ${formSelector} input[type="submit"], ${formSelector} button:has-text("Submit"), ${formSelector} button:has-text("Finish")`
+    : 'button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("Finish")';
 
   return {
     action_id: `action_${order}`,
     type: 'form_submit',
     element_type: 'button',
     selector: String(preferredButton?.selector || '').trim() || fallbackSelector,
-    description: preferredButton?.text
-      ? `Submit: ${String(preferredButton.text).trim()}`
-      : 'Submit form',
+    description:
+      preferredButton?.text && textLooksLikeAdvanceControl(preferredButton.text) && !textLooksLikeSubmitControl(preferredButton.text)
+        ? `Complete stage: ${String(preferredButton.text).trim()}`
+        : preferredButton?.text
+          ? `Submit: ${String(preferredButton.text).trim()}`
+          : 'Submit form',
+    order
+  };
+}
+
+function isModalLikeForm(form) {
+  return Boolean(form?.in_modal || String(form?.modal_selector || '').trim());
+}
+
+function isWizardLikeForm(form) {
+  const buttons = Array.isArray(form?.buttons) ? form.buttons : [];
+  const hasAdvance = buttons.some(
+    (btn) => textLooksLikeAdvanceControl(btn?.text) || selectorLooksLikeAdvanceControl(btn?.selector),
+  );
+  const hasSubmit = buttons.some(
+    (btn) => textLooksLikeSubmitControl(btn?.text) || selectorLooksLikeSubmitControl(btn?.selector),
+  );
+  return hasAdvance && hasSubmit;
+}
+
+function isOpenStageAction(action) {
+  if (!action || typeof action !== 'object') return false;
+  const type = normalizeJourneyActionType(action?.type || action?.action_type);
+  if (!['click', 'press', 'tap', 'form_submit', 'submit', ''].includes(type)) return false;
+  const selector = String(action?.selector || action?.element_info?.selector || '');
+  const blob = [
+    action?.description,
+    action?.expected_outcome,
+    action?.interactive_element?.text,
+    selector,
+  ]
+    .join(' ')
+    .toLowerCase();
+  if (/\b(close|cancel|previous|prev|back)\b/.test(blob)) return false;
+  const openLike = /\b(open|start|launch|begin|show|get started)\b/.test(blob);
+  const stageLike = /\b(modal|wizard|dialog|drawer|step)\b/.test(blob);
+  return openLike && stageLike;
+}
+
+function buildModalOpenerActionFromInteractiveInventory(form, interactiveElements, order) {
+  if (!isModalLikeForm(form)) return null;
+  const inventory = Array.isArray(interactiveElements) ? interactiveElements : [];
+  if (inventory.length === 0) return null;
+
+  const blockedSelectors = new Set();
+  for (const field of Array.isArray(form?.fields) ? form.fields : []) {
+    const key = normalizeSelectorKey(field?.selector);
+    if (key) blockedSelectors.add(key);
+  }
+  for (const btn of Array.isArray(form?.buttons) ? form.buttons : []) {
+    const key = normalizeSelectorKey(btn?.selector);
+    if (key) blockedSelectors.add(key);
+  }
+
+  const isBadCandidate = (blob) =>
+    /\b(close|cancel|previous|prev|back|submit|register|login|sign in|save|delete)\b/i.test(blob);
+
+  let best = null;
+  for (const el of inventory) {
+    const selector = String(el?.selector || el?.primary_selector || '').trim();
+    if (!selector) continue;
+    const key = normalizeSelectorKey(selector);
+    if (blockedSelectors.has(key)) continue;
+    const type = normalizeJourneyActionType(el?.type || el?.element_type);
+    if (['text', 'email', 'password', 'textarea', 'checkbox', 'radio', 'select'].includes(type)) continue;
+
+    const text = String(el?.text || el?.label_text || el?.name || '').trim();
+    const blob = `${text} ${selector}`;
+    if (isBadCandidate(blob)) continue;
+
+    let score = 0;
+    if (/\b(open|start|launch|begin|show|get started)\b/i.test(blob)) score += 8;
+    if (/\b(modal|wizard|dialog|drawer|step)\b/i.test(blob)) score += 4;
+    if (/start wizard/i.test(blob)) score += 6;
+    if (selectorLooksLikeAdvanceControl(selector)) score -= 3;
+    if (selectorLooksLikeSubmitControl(selector) || textLooksLikeSubmitControl(text)) score -= 2;
+    if (score <= 0) continue;
+
+    if (!best || score > best.score) {
+      best = {
+        score,
+        selector,
+        text,
+        type: type || 'button',
+        role: el?.role || null,
+        id: el?.id || null,
+        name: el?.name || null,
+      };
+    }
+  }
+
+  if (!best) return null;
+  return {
+    action_id: `action_${order}`,
+    type: 'click',
+    element_type: best.type === 'link' ? 'link' : 'button',
+    selector: best.selector,
+    description: best.text ? `Open modal/wizard: ${best.text}` : 'Open modal/wizard',
+    interactive_element: {
+      id: best.id,
+      selector: best.selector,
+      text: best.text || null,
+      type: best.type === 'link' ? 'link' : 'button',
+      name: best.name,
+      role: best.role
+    },
     order
   };
 }
@@ -746,11 +942,12 @@ function reindexJourneyActions(actions) {
     }));
 }
 
-function expandJourneyActionsToFullFormStory(journey, form) {
+function expandJourneyActionsToFullFormStory(journey, form, interactiveElements = []) {
   if (!journey || typeof journey !== 'object' || !form || typeof form !== 'object') return null;
   const existingActions = Array.isArray(journey.actions) ? journey.actions : [];
 
   const preservedPreActions = [];
+  const existingAdvanceActions = [];
   const formActionsBySelector = new Map();
   const formActionsByName = new Map();
   const allExistingFormActions = [];
@@ -765,6 +962,10 @@ function expandJourneyActionsToFullFormStory(journey, form) {
     }
     if (isSubmitAction(action)) {
       if (!existingSubmitAction) existingSubmitAction = action;
+      continue;
+    }
+    if (isAdvanceStageAction(action)) {
+      existingAdvanceActions.push(action);
       continue;
     }
     if (isFormControlAction(action)) {
@@ -787,11 +988,19 @@ function expandJourneyActionsToFullFormStory(journey, form) {
     preservedPreActions.push(action);
   }
 
-  const output = [...preservedPreActions];
+  const output = [];
+  for (const action of preservedPreActions) output.push(action);
+  const hasModalOpenerAlready = output.some((action) => isOpenStageAction(action));
+  if (!hasModalOpenerAlready) {
+    const opener = buildModalOpenerActionFromInteractiveInventory(form, interactiveElements, output.length);
+    if (opener) output.push(opener);
+  }
+
   const consumedExisting = new Set();
+  const generatedFieldActions = [];
   const fillableFields = (Array.isArray(form.fields) ? form.fields : []).filter(isFillableFormField);
   for (const field of fillableFields) {
-    const generated = buildGeneratedActionForFormField(field, output.length);
+    const generated = buildGeneratedActionForFormField(field, generatedFieldActions.length);
     if (!generated) continue;
     const selectorKey = normalizeSelectorKey(generated.selector);
     const nameKey = String(field?.name || field?.id || '').trim().toLowerCase();
@@ -815,15 +1024,41 @@ function expandJourneyActionsToFullFormStory(journey, form) {
       };
       if (generated.target_state != null && merged.target_state == null) merged.target_state = generated.target_state;
       if (generated.value != null && merged.value == null) merged.value = generated.value;
-      output.push(merged);
+      generatedFieldActions.push(merged);
     } else {
-      output.push(generated);
+      generatedFieldActions.push(generated);
     }
   }
 
   for (const action of allExistingFormActions) {
     if (consumedExisting.has(action)) continue;
-    output.push(action);
+    generatedFieldActions.push(action);
+  }
+
+  const appendAdvanceAction = () => {
+    const existing = existingAdvanceActions.shift();
+    if (existing) {
+      output.push({
+        ...existing,
+        type: 'click',
+        element_type: normalizeJourneyActionElementType(existing) || 'button',
+      });
+      return true;
+    }
+    const generated = buildAdvanceActionFromForm(form, output.length);
+    if (!generated) return false;
+    output.push(generated);
+    return true;
+  };
+
+  if (isWizardLikeForm(form) && generatedFieldActions.length >= 2) {
+    const splitIndex = Math.ceil(generatedFieldActions.length / 2);
+    output.push(...generatedFieldActions.slice(0, splitIndex));
+    appendAdvanceAction();
+    output.push(...generatedFieldActions.slice(splitIndex));
+    appendAdvanceAction();
+  } else {
+    output.push(...generatedFieldActions);
   }
 
   const generatedSubmit = buildSubmitActionFromForm(form, output.length);
@@ -832,7 +1067,8 @@ function expandJourneyActionsToFullFormStory(journey, form) {
       ...generatedSubmit,
       ...existingSubmitAction,
       type: 'form_submit',
-      selector: existingSubmitAction.selector || generatedSubmit.selector
+      selector: existingSubmitAction.selector || generatedSubmit.selector,
+      description: existingSubmitAction.description || generatedSubmit.description
     }
     : generatedSubmit;
   output.push(submitAction);
@@ -851,7 +1087,7 @@ function expandJourneyActionsToFullFormStory(journey, form) {
   return reindexJourneyActions(output);
 }
 
-function expandJourneysToFullFormStories(journeys, forms) {
+function expandJourneysToFullFormStories(journeys, forms, interactiveElements = []) {
   if (!Array.isArray(journeys) || journeys.length === 0) {
     return { journeys: Array.isArray(journeys) ? journeys : [], expandedCount: 0, retargetedCount: 0 };
   }
@@ -867,7 +1103,8 @@ function expandJourneysToFullFormStories(journeys, forms) {
       return journey;
     }
     mappedCount += 1;
-    const expandedActions = expandJourneyActionsToFullFormStory(journey, forms[formIndex]);
+    const selectedForm = forms[formIndex];
+    const expandedActions = expandJourneyActionsToFullFormStory(journey, selectedForm, interactiveElements);
     if (!Array.isArray(expandedActions) || expandedActions.length === 0) {
       return journey;
     }
@@ -875,19 +1112,34 @@ function expandJourneysToFullFormStories(journeys, forms) {
     if (expandedActions.length !== prevCount) {
       expandedCount += 1;
     }
+    const modalWizardFlow =
+      isModalLikeForm(selectedForm) ||
+      /\b(wizard|modal|dialog)\b/i.test(
+        [journey?.description, journey?.test_instructions, journey?.expected_outcome].join(' ')
+      );
     const stageHint =
-      'Stage 1: reach the form surface. Stage 2: populate required controls (checkbox/radio choices are random unless prompt says otherwise). Stage 3: submit once. Stage 4: verify terminal outcome.';
+      modalWizardFlow
+        ? 'Stage 1: open the modal/wizard surface. Stage 2: progress through stages and populate required controls (checkbox/radio choices are random unless prompt says otherwise). Stage 3: submit once. Stage 4: verify terminal outcome.'
+        : 'Stage 1: reach the form surface. Stage 2: populate required controls (checkbox/radio choices are random unless prompt says otherwise). Stage 3: submit once. Stage 4: verify terminal outcome.';
     const existingInstructions = String(journey?.test_instructions || '').trim();
     const testInstructions =
       /stage\s*1/i.test(existingInstructions) || !existingInstructions
         ? (existingInstructions || stageHint)
         : `${existingInstructions}\n${stageHint}`;
+    const rawDescription = String(journey?.description || '').trim();
+    const rawExpectedOutcome = String(journey?.expected_outcome || '').trim();
+    const sanitizedDescription =
+      rawDescription && !(modalWizardFlow && looksLikePassiveObservationText(rawDescription))
+        ? rawDescription
+        : (modalWizardFlow ? `Complete modal/wizard flow ${formIndex + 1}` : `Complete form flow ${formIndex + 1}`);
+    const sanitizedExpectedOutcome =
+      rawExpectedOutcome && !(modalWizardFlow && looksLikePassiveObservationText(rawExpectedOutcome))
+        ? rawExpectedOutcome
+        : 'Form submission reaches a terminal visible state (success confirmation or explicit validation/error).';
     return {
       ...journey,
-      description: journey?.description || `Complete form flow ${formIndex + 1}`,
-      expected_outcome:
-        journey?.expected_outcome ||
-        'Form submission reaches a terminal visible state (success confirmation or explicit validation/error).',
+      description: sanitizedDescription,
+      expected_outcome: sanitizedExpectedOutcome,
       test_instructions: testInstructions,
       actions: expandedActions
     };
@@ -901,20 +1153,33 @@ function expandJourneysToFullFormStories(journeys, forms) {
   const selectedIndex = retargetIndex >= 0 ? retargetIndex : 0;
   const selectedForm = pickPrimaryFormForHeuristic(forms) || forms[0];
   const selectedJourney = expandedJourneys[selectedIndex];
-  const forcedActions = expandJourneyActionsToFullFormStory(selectedJourney, selectedForm);
+  const forcedActions = expandJourneyActionsToFullFormStory(selectedJourney, selectedForm, interactiveElements);
   if (!Array.isArray(forcedActions) || forcedActions.length === 0) {
     return { journeys: expandedJourneys, expandedCount, retargetedCount: 0 };
   }
   const next = [...expandedJourneys];
   const baseInstructions = String(selectedJourney?.test_instructions || '').trim();
+  const selectedModalWizard =
+    isModalLikeForm(selectedForm) ||
+    /\b(wizard|modal|dialog)\b/i.test(
+      [selectedJourney?.description, selectedJourney?.test_instructions, selectedJourney?.expected_outcome].join(' ')
+    );
   const forcedHint =
-    'Stage 1: reach the form. Stage 2: fill required controls (checkbox/radio random unless explicitly instructed). Stage 3: submit once. Stage 4: verify terminal outcome.';
+    selectedModalWizard
+      ? 'Stage 1: open the modal/wizard. Stage 2: progress through stages and fill required controls (checkbox/radio random unless explicitly instructed). Stage 3: submit once. Stage 4: verify terminal outcome.'
+      : 'Stage 1: reach the form. Stage 2: fill required controls (checkbox/radio random unless explicitly instructed). Stage 3: submit once. Stage 4: verify terminal outcome.';
+  const forcedDescriptionRaw = String(selectedJourney?.description || '').trim();
+  const forcedExpectedOutcomeRaw = String(selectedJourney?.expected_outcome || '').trim();
   next[selectedIndex] = {
     ...selectedJourney,
-    description: selectedJourney?.description || 'Complete primary form flow',
+    description:
+      forcedDescriptionRaw && !(selectedModalWizard && looksLikePassiveObservationText(forcedDescriptionRaw))
+        ? forcedDescriptionRaw
+        : (selectedModalWizard ? 'Complete primary modal/wizard flow' : 'Complete primary form flow'),
     expected_outcome:
-      selectedJourney?.expected_outcome ||
-      'Form submission reaches a terminal visible state (success confirmation or explicit validation/error).',
+      forcedExpectedOutcomeRaw && !(selectedModalWizard && looksLikePassiveObservationText(forcedExpectedOutcomeRaw))
+        ? forcedExpectedOutcomeRaw
+        : 'Form submission reaches a terminal visible state (success confirmation or explicit validation/error).',
     test_instructions: baseInstructions ? `${baseInstructions}\n${forcedHint}` : forcedHint,
     actions: forcedActions
   };
@@ -8811,7 +9076,11 @@ return {
                 resolveActionSelectorFromForms(action, interactiveGroups.forms, consumed);
               }
             }
-            const formExpansionResult = expandJourneysToFullFormStories(journeys, interactiveGroups.forms);
+            const formExpansionResult = expandJourneysToFullFormStories(
+              journeys,
+              interactiveGroups.forms,
+              interactiveGroups.interactiveElements,
+            );
             journeys = Array.isArray(formExpansionResult?.journeys) ? formExpansionResult.journeys : journeys;
             if ((formExpansionResult?.expandedCount || 0) > 0 || (formExpansionResult?.retargetedCount || 0) > 0) {
               console.log(
@@ -9222,7 +9491,14 @@ return {
             ? workflowState.playwrightAnalysis.forms
             : (Array.isArray(workflowState.forms) ? workflowState.forms : []);
           if (journeys.length > 0 && formsForConversion.length > 0) {
-            const formExpansionResult = expandJourneysToFullFormStories(journeys, formsForConversion);
+            const conversionInteractiveElements = Array.isArray(workflowState.playwrightAnalysis?.interactive_elements)
+              ? workflowState.playwrightAnalysis.interactive_elements
+              : (Array.isArray(workflowState.interactive_elements) ? workflowState.interactive_elements : []);
+            const formExpansionResult = expandJourneysToFullFormStories(
+              journeys,
+              formsForConversion,
+              conversionInteractiveElements,
+            );
             journeys = Array.isArray(formExpansionResult?.journeys) ? formExpansionResult.journeys : journeys;
             if ((formExpansionResult?.expandedCount || 0) > 0 || (formExpansionResult?.retargetedCount || 0) > 0) {
               console.log(
@@ -14012,6 +14288,9 @@ return {
     if (/(^|[^a-z])pass(word)?($|[^a-z])|\bpwd\b|password/.test(h)) {
       return "String(((input_credentials && input_credentials.password) || 'JourneyTestPass#1'))";
     }
+    if (/\b(date|dob|birth|birthday)\b|type.?=.?["']date/.test(h)) {
+      return JSON.stringify('1990-01-01');
+    }
     if (/\bemail\b|e-mail|\bmail\b|type.?=.?["']email/.test(h)) {
       return JSON.stringify('journey-autofill@automation.aionqa.invalid');
     }
@@ -14243,6 +14522,9 @@ return {
       const varName = idMatch ? idMatch[1] : '';
       const vn = String(varName || '').toLowerCase();
       if (vn) {
+        if (vn.includes('date') || vn.includes('dob') || vn.includes('birth')) {
+          return `.fill(${JSON.stringify('1990-01-01')})`;
+        }
         if (vn.includes('password') || vn.includes('passwd') || vn === 'pwd' || vn === 'pass') {
           return `.fill(String(((input_credentials && input_credentials.password) || 'JourneyTestPass#1')))`;
         }
@@ -14280,6 +14562,9 @@ return {
       const varName = idMatch ? idMatch[1] : '';
       const vn = String(varName || '').toLowerCase();
       if (vn) {
+        if (vn.includes('date') || vn.includes('dob') || vn.includes('birth')) {
+          return `.fill(${JSON.stringify('1990-01-01')})`;
+        }
         if (vn.includes('password') || vn.includes('passwd') || vn === 'pwd' || vn === 'pass') {
           return `.fill(String(((input_credentials && input_credentials.password) || 'JourneyTestPass#1')))`;
         }
@@ -14366,7 +14651,29 @@ return {
     if (!script || typeof script !== 'string') return script;
     const emailLit = JSON.stringify('journey-autofill@automation.aionqa.invalid');
     const messageLit = JSON.stringify('Automated journey validation message.');
+    const dateLit = JSON.stringify('1990-01-01');
     const isPlausibleEmail = (s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || '').trim());
+    const isIsoDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || '').trim());
+    const normalizeDateString = (raw) => {
+      const v = String(raw || '').trim();
+      if (!v) return null;
+      if (isIsoDate(v)) return v;
+      const mdy = v.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+      if (mdy) {
+        const mm = String(Math.max(1, Math.min(12, Number(mdy[1])))).padStart(2, '0');
+        const dd = String(Math.max(1, Math.min(31, Number(mdy[2])))).padStart(2, '0');
+        const yyyy = String(mdy[3]);
+        return `${yyyy}-${mm}-${dd}`;
+      }
+      const ymd = v.match(/^(\d{4})[\/](\d{1,2})[\/](\d{1,2})$/);
+      if (ymd) {
+        const yyyy = String(ymd[1]);
+        const mm = String(Math.max(1, Math.min(12, Number(ymd[2])))).padStart(2, '0');
+        const dd = String(Math.max(1, Math.min(31, Number(ymd[3])))).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+      }
+      return null;
+    };
     const looksEmailTarget = (vn, locInner) => {
       const v = String(vn || '').toLowerCase();
       const l = String(locInner || '');
@@ -14381,6 +14688,15 @@ return {
       const v = String(vn || '').toLowerCase();
       return /\bmessage\b|\bcomment\b|\btextarea\b|\bbody\b/.test(v) || v.includes('message');
     };
+    const looksDateTarget = (vn, selectorHint) => {
+      const v = String(vn || '').toLowerCase();
+      const h = String(selectorHint || '');
+      if (/\b(date|dob|birth|birthday)\b/.test(v)) return true;
+      if (/type\s*=\s*['"]date['"]/i.test(h)) return true;
+      if (/\b#dob\b/i.test(h)) return true;
+      if (/\[name\s*=\s*['"](dob|date_of_birth|birth_date)['"]\]/i.test(h)) return true;
+      return false;
+    };
 
     let s = script;
     s = s.replace(
@@ -14388,6 +14704,11 @@ return {
       (full, varName, q, inner) => {
         const raw = String(inner || '').replace(/\\(.)/g, '$1');
         const vn = String(varName || '');
+        if (looksDateTarget(vn, '') && raw.length > 0) {
+          const normalizedDate = normalizeDateString(raw);
+          if (!normalizedDate) return `${varName}.fill(${dateLit})`;
+          if (!isIsoDate(raw)) return `${varName}.fill(${JSON.stringify(normalizedDate)})`;
+        }
         if (looksEmailTarget(vn, '') && raw.length > 0 && !isPlausibleEmail(raw)) {
           return `${varName}.fill(${emailLit})`;
         }
@@ -14402,6 +14723,11 @@ return {
       /\.locator\(\s*([^)]*)\)\s*\.fill\(\s*(['"])((?:\\.|(?!\2).)*)\2\s*\)/gi,
       (full, locInner, q, inner) => {
         const raw = String(inner || '').replace(/\\(.)/g, '$1');
+        if (looksDateTarget('', locInner) && raw.length > 0) {
+          const normalizedDate = normalizeDateString(raw);
+          if (!normalizedDate) return `.locator(${locInner}).fill(${dateLit})`;
+          if (!isIsoDate(raw)) return `.locator(${locInner}).fill(${JSON.stringify(normalizedDate)})`;
+        }
         if (looksEmailTarget('', locInner) && raw.length > 0 && !isPlausibleEmail(raw)) {
           return `.locator(${locInner}).fill(${emailLit})`;
         }
@@ -14414,6 +14740,11 @@ return {
       (full, selExpr, q, inner) => {
         const raw = String(inner || '').replace(/\\(.)/g, '$1');
         const sel = String(selExpr || '');
+        if (looksDateTarget('', sel) && raw.length > 0) {
+          const normalizedDate = normalizeDateString(raw);
+          if (!normalizedDate) return `page.fill(${sel}, ${dateLit})`;
+          if (!isIsoDate(raw)) return `page.fill(${sel}, ${JSON.stringify(normalizedDate)})`;
+        }
         if (looksEmailTarget('', sel) && raw.length > 0 && !isPlausibleEmail(raw)) {
           return `page.fill(${sel}, ${emailLit})`;
         }
