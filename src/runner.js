@@ -627,8 +627,13 @@ async function executeJob(job) {
       // Execute crawl job
       const result = await executeCrawlJob(job, streamInterval);
       await reportJobComplete(job.id, result);
-      console.log(`✅ Crawl job ${job.id} completed successfully`);
-      return true;
+      const crawlOk = result == null || result.success !== false;
+      if (crawlOk) {
+        console.log(`✅ Crawl job ${job.id} completed successfully`);
+      } else {
+        console.error(`❌ Crawl job ${job.id} reported success=false in result; runner will return failure to caller`);
+      }
+      return crawlOk;
     }
 
   } catch (error) {
