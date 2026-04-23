@@ -22,6 +22,11 @@
  * Idle time between stages — typically waiting for the LLM to decide what to
  * do next — is NOT recorded, so storage stays small and the UI playlist only
  * contains real interactions.
+ *
+ * Post-processing (when `SCREENCAST_DECIMATE` is on): if the stage has
+ * `action_started` / `action_completed` marks from `showAction`, we trim
+ * leading/trailing idle and long AI gaps with aggressive mpdecimate, but keep
+ * Playwright execution intervals at full frame rate (no mid-action decimation).
  */
 
 import axios from 'axios';
@@ -53,6 +58,141 @@ function envInt(name, fallback) {
   const raw = Number.parseInt(process.env[name] || '', 10);
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
+
+function envFloat(name, fallback) {
+  const raw = Number.parseFloat(process.env[name] || '');
+  return Number.isFinite(raw) && raw >= 0 ? raw : fallback;
+}
+
+/**
+ * mpdecimate compares 8x8 blocks on a coarse grid. With a high `frac`, only
+ * large screen changes (many medium-diff blocks) keep frames — small motion
+ * (cursor, text caret, subtle hover) is dropped. Defaults favor instructional
+ * clips; tighten storage via env:
+ *   SCREENCAST_MPDECIMATE_FILTER — full -vf chain (overrides hi/lo/frac)
+ *   SCREENCAST_MPDECIMATE_HI / _LO / _FRAC — integers / float for mpdecimate=
+ */
+function buildMpdecimateVideoFilter() {
+  const full = String(process.env.SCREENCAST_MPDECIMATE_FILTER || '').trim();
+  if (full) return full;
+  const hiParsed = Number.parseInt(process.env.SCREENCAST_MPDECIMATE_HI || '', 10);
+  const loParsed = Number.parseInt(process.env.SCREENCAST_MPDECIMATE_LO || '', 10);
+  const fracParsed = Number.parseFloat(process.env.SCREENCAST_MPDECIMATE_FRAC || '');
+  const hi = Number.isFinite(hiParsed) && hiParsed > 0 ? hiParsed : 64 * 8; // 512 — catch small UI deltas
+  const lo = Number.isFinite(loParsed) && loParsed > 0 ? loParsed : 64 * 4; // 256
+  const frac = Number.isFinite(fracParsed) && fracParsed > 0 && fracParsed <= 1
+    ? fracParsed
+    : 0.008; // low vs old 0.33 so cursor / typing keep far more frames
+  return `mpdecimate=hi=${hi}:lo=${lo}:frac=${frac},setpts=N/FRAME_RATE/TB`;
+}
+
+/** Harsh mpdecimate for LLM / static gaps only (not used on automation spans). */
+function buildAggressiveIdleMpdecimateFilter() {
+  const full = String(process.env.SCREENCAST_MPDECIMATE_IDLE_FILTER || '').trim();
+  if (full) return full;
+  return 'mpdecimate=hi=64*14:lo=64*5:frac=0.26,setpts=N/FRAME_RATE/TB';
+}
+
+function normalizeAutomationMarks(marks) {
+  if (!Array.isArray(marks) || marks.length === 0) return [];
+  return marks
+    .filter((m) => m && Number.isFinite(m.t))
+    .map((m) => ({ t: Math.max(0, Number(m.t)), kind: String(m.kind || '') }))
+    .sort((a, b) => a.t - b.t);
+}
+
+/**
+ * Wall-time spans where Playwright was driving the browser (padded), merged.
+ */
+function protectedIntervalsFromMarks(marks, rawDuration, padBefore, padAfter) {
+  const sorted = normalizeAutomationMarks(marks).filter(
+    (m) => m.kind === 'action_started' || m.kind === 'action_completed' || m.kind === 'action_failed'
+  );
+  const raw = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
+  const pre = Math.max(0, padBefore);
+  const post = Math.max(0, padAfter);
+  const stack = [];
+  const intervals = [];
+  for (const m of sorted) {
+    if (m.kind === 'action_started') {
+      stack.push(m.t);
+    } else if (m.kind === 'action_completed' || m.kind === 'action_failed') {
+      if (stack.length) {
+        const s = stack.pop();
+        const a = Math.max(0, s - pre);
+        const b = Math.min(raw, m.t + post);
+        if (b > a + 0.04) intervals.push([a, b]);
+      }
+    }
+  }
+  while (stack.length) {
+    const s = stack.pop();
+    const a = Math.max(0, s - pre);
+    const b = raw;
+    if (b > a + 0.04) intervals.push([a, b]);
+  }
+  if (intervals.length === 0) return [];
+  intervals.sort((x, y) => x[0] - y[0]);
+  const merged = [];
+  let [cs, ce] = intervals[0];
+  for (let i = 1; i < intervals.length; i++) {
+    const [s, e] = intervals[i];
+    if (s <= ce + 0.05) ce = Math.max(ce, e);
+    else {
+      merged.push([cs, ce]);
+      [cs, ce] = [s, e];
+    }
+  }
+  merged.push([cs, ce]);
+  return merged;
+}
+
+/**
+ * Alternating idle vs automation slices on the stage timeline.
+ * @returns {{ kind: 'idle_long'|'idle_short'|'automation', start: number, end: number }[]}
+ */
+function timelinePiecesFromProtected(protectedIv, rawDuration, longGapSec) {
+  const raw = Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
+  const thr = Math.max(0.1, longGapSec);
+  const pieces = [];
+  let cur = 0;
+  for (const [ps, pe] of protectedIv) {
+    if (ps > cur + 0.02) {
+      const len = ps - cur;
+      pieces.push({
+        kind: len >= thr ? 'idle_long' : 'idle_short',
+        start: cur,
+        end: ps
+      });
+    }
+    if (pe > ps + 0.02) {
+      pieces.push({ kind: 'automation', start: ps, end: pe });
+    }
+    cur = Math.max(cur, pe);
+  }
+  if (raw > cur + 0.02) {
+    const len = raw - cur;
+    pieces.push({
+      kind: len >= thr ? 'idle_long' : 'idle_short',
+      start: cur,
+      end: raw
+    });
+  }
+  return pieces;
+}
+
+const FFMPEG_VP9_OUT = [
+  '-an',
+  '-c:v', 'libvpx-vp9',
+  '-row-mt', '1',
+  '-tile-columns', '2',
+  '-frame-parallel', '1',
+  '-quality', 'good',
+  '-cpu-used', '1',
+  '-b:v', '4M',
+  '-deadline', 'good',
+  '-r', '25'
+];
 
 function nowMs() {
   return Date.now();
@@ -180,6 +320,8 @@ class ScreencastRecorder {
       stopped: false,
       startDispose: null,
       actionsDispose: null,
+      // Seconds since stage start — drives region-aware compaction (idle vs Playwright).
+      automationMarks: [],
       // Per-stage in-video metadata (chapters/actions/overlays).
       stageChapters: [],
       stageActions: [],
@@ -205,7 +347,7 @@ class ScreencastRecorder {
 
     try {
       stage.actionsDispose = await job.page.screencast.showActions({
-        duration: envInt('SCREENCAST_ACTION_HIGHLIGHT_MS', 1500),
+        duration: envInt('SCREENCAST_ACTION_HIGHLIGHT_MS', 2800),
         fontSize: envInt('SCREENCAST_ACTION_FONT_PX', 22),
         position: process.env.SCREENCAST_ACTION_POSITION || 'top-right'
       });
@@ -222,7 +364,7 @@ class ScreencastRecorder {
       if (job.page.screencast && typeof job.page.screencast.showChapter === 'function') {
         await job.page.screencast.showChapter(stage.label, {
           ...(description ? { description } : {}),
-          duration: envInt('SCREENCAST_STAGE_CHAPTER_MS', 1800)
+          duration: envInt('SCREENCAST_STAGE_CHAPTER_MS', 2400)
         });
       }
     } catch (err) {
@@ -327,11 +469,17 @@ class ScreencastRecorder {
     const rawSize = stats.size;
     const startOffset = Math.max(0, (stage.startTime - job.jobStartTime) / 1000);
 
-    // Compact: drop near-duplicate frames so the clip only contains moments
-    // when something actually changed on screen. This is what turns a 100s
-    // clip of "waiting for the LLM with the page just sitting there" into
-    // a few seconds of real action.
-    const compacted = await this._compactClipWithMpdecimate(stage.filePath, rawDuration);
+    // Prefer region-aware compaction when we have Playwright action marks:
+    // compress leading/trailing idle + long AI gaps only; keep automation spans intact.
+    let compacted = null;
+    const marks = stage.automationMarks || [];
+    if (DECIMATE_ENABLED && marks.length > 0) {
+      compacted = await this._compactClipRegionAware(stage.filePath, rawDuration, marks, stage.label);
+    }
+    if (!compacted && DECIMATE_ENABLED) {
+      // Uniform gentle mpdecimate (or no-op for very short clips) when there are no marks.
+      compacted = await this._compactClipWithMpdecimate(stage.filePath, rawDuration);
+    }
     const finalPath = compacted?.path || stage.filePath;
     const finalDuration = Number.isFinite(compacted?.duration) ? compacted.duration : rawDuration;
     const finalSize = compacted?.size ?? rawSize;
@@ -383,7 +531,9 @@ class ScreencastRecorder {
         // trimmed (or so a future debug page can re-examine the raw clip).
         raw_duration_seconds: Number.isFinite(rawDuration) ? rawDuration : null,
         raw_size_bytes: rawSize,
-        compacted: finalPath !== stage.filePath
+        compacted: finalPath !== stage.filePath,
+        compaction_mode: compacted?.regionPieces != null ? 'region' : (compacted ? 'uniform' : 'none'),
+        region_piece_count: compacted?.regionPieces != null ? compacted.regionPieces : undefined
       }
     };
 
@@ -408,7 +558,7 @@ class ScreencastRecorder {
    * Bake a chapter overlay into the active stage video. No-op if no stage is
    * recording (so it can be called from anywhere safely).
    */
-  async showChapter(jobId, title, description = null, durationMs = 1800) {
+  async showChapter(jobId, title, description = null, durationMs = null) {
     const job = this.jobs.get(jobId);
     if (!job || !job.activeStage || job.activeStage.stopped) return;
     const stage = job.activeStage;
@@ -424,7 +574,7 @@ class ScreencastRecorder {
       if (sc && typeof sc.showChapter === 'function') {
         await sc.showChapter(safeTitle, {
           ...(safeDescription ? { description: safeDescription } : {}),
-          duration: Math.max(500, Number(durationMs) || 1800)
+          duration: Math.max(500, Number(durationMs) || envInt('SCREENCAST_STAGE_CHAPTER_MS', 2400))
         });
       }
     } catch (err) {
@@ -441,6 +591,7 @@ class ScreencastRecorder {
     if (!job || !job.activeStage || job.activeStage.stopped) return;
     const stage = job.activeStage;
     if (!this._isPageUsable(stage.page)) return;
+    this._recordAutomationMark(stage, kind);
     const safeTitle = String(title || '').slice(0, 200);
     const time_offset_stage = Math.max(0, (nowMs() - stage.startTime) / 1000);
     const time_offset_job = Math.max(0, (nowMs() - job.jobStartTime) / 1000);
@@ -450,7 +601,7 @@ class ScreencastRecorder {
       const sc = stage.page.screencast;
       if (sc && typeof sc.showOverlay === 'function') {
         const html = `<div style="padding:8px 14px;background:rgba(15,23,42,0.85);color:#fff;border-radius:8px;font-family:-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.35);">${escapeHtml(safeTitle)}</div>`;
-        await sc.showOverlay(html, { duration: 1800 });
+        await sc.showOverlay(html, { duration: envInt('SCREENCAST_ACTION_OVERLAY_MS', 2400) });
       }
     } catch (_) { /* ignore */ }
   }
@@ -593,6 +744,147 @@ class ScreencastRecorder {
     }
   }
 
+  _recordAutomationMark(stage, kind) {
+    if (!stage || !Array.isArray(stage.automationMarks)) return;
+    const k = String(kind || '');
+    if (k !== 'action_started' && k !== 'action_completed' && k !== 'action_failed') return;
+    stage.automationMarks.push({
+      t: Math.max(0, (nowMs() - stage.startTime) / 1000),
+      kind: k
+    });
+  }
+
+  async _vp9EncodeFilteredSegment(inputPath, vf, outPath) {
+    try {
+      await execFileAsync('ffmpeg', [
+        '-y',
+        '-loglevel', 'error',
+        '-i', inputPath,
+        '-vf', vf,
+        ...FFMPEG_VP9_OUT,
+        outPath
+      ], { timeout: 600000 });
+    } catch (err) {
+      console.warn(`[SCREENCAST] segment encode failed: ${err.message}`);
+      try { await fs.promises.unlink(outPath); } catch (_) { /* ignore */ }
+      return false;
+    }
+    const st = await fs.promises.stat(outPath).catch(() => null);
+    return Boolean(st && st.size > 0);
+  }
+
+  async _concatWebmSegments(segmentPaths, outPath) {
+    if (!segmentPaths.length) return false;
+    if (segmentPaths.length === 1) {
+      await fs.promises.copyFile(segmentPaths[0], outPath);
+      return true;
+    }
+    const listPath = outPath.replace(/\.webm$/i, '') + '-concat.txt';
+    const escapeForConcat = (absPath) => absPath.replace(/\\/g, '/').replace(/'/g, "'\\''");
+    const body = segmentPaths
+      .map((p) => `file '${escapeForConcat(path.resolve(p))}'`)
+      .join('\n');
+    await fs.promises.writeFile(listPath, body, 'utf8');
+    try {
+      await execFileAsync('ffmpeg', [
+        '-y',
+        '-loglevel', 'error',
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', listPath,
+        ...FFMPEG_VP9_OUT,
+        outPath
+      ], { timeout: 600000 });
+    } catch (err) {
+      console.warn(`[SCREENCAST] concat failed: ${err.message}`);
+      try { await fs.promises.unlink(outPath); } catch (_) { /* ignore */ }
+      return false;
+    } finally {
+      try { await fs.promises.unlink(listPath); } catch (_) { /* ignore */ }
+    }
+    const st = await fs.promises.stat(outPath).catch(() => null);
+    return Boolean(st && st.size > 0);
+  }
+
+  /**
+   * Trim idle at the start/end of a stage and long gaps between actions, but
+   * keep full frame cadence during Playwright execution (between action_started
+   * and action_completed/failed), including short human-like pauses.
+   */
+  async _compactClipRegionAware(inputPath, rawDuration, marks, logLabel) {
+    if (!DECIMATE_ENABLED || !inputPath || !fs.existsSync(inputPath)) return null;
+    if (!Number.isFinite(rawDuration) || rawDuration <= 0) return null;
+
+    const norm = normalizeAutomationMarks(marks).filter(
+      (m) => m.kind === 'action_started' || m.kind === 'action_completed' || m.kind === 'action_failed'
+    );
+    if (norm.length === 0) return null;
+
+    const longGap = Math.max(0.15, envFloat('SCREENCAST_IDLE_GAP_COMPRESS_SEC', 2.5));
+    const padBefore = envFloat('SCREENCAST_AUTOMATION_PAD_BEFORE', 0.35);
+    const padAfter = envFloat('SCREENCAST_AUTOMATION_PAD_AFTER', 0.85);
+
+    const protectedIv = protectedIntervalsFromMarks(marks, rawDuration, padBefore, padAfter);
+    if (protectedIv.length === 0) return null;
+
+    const pieces = timelinePiecesFromProtected(protectedIv, rawDuration, longGap);
+    if (pieces.length === 0) return null;
+
+    const base = inputPath.replace(/\.webm$/i, '');
+    const segmentPaths = [];
+    const toCleanup = [];
+
+    for (let i = 0; i < pieces.length; i++) {
+      const p = pieces[i];
+      if (p.end <= p.start + 0.02) continue;
+      const s = p.start.toFixed(6);
+      const e = p.end.toFixed(6);
+      let vf = `trim=start=${s}:end=${e},setpts=PTS-STARTPTS`;
+      if (p.kind === 'idle_long') {
+        vf += `,${buildAggressiveIdleMpdecimateFilter()}`;
+      }
+      const segPath = `${base}-rseg-${i}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}.webm`;
+      toCleanup.push(segPath);
+      const ok = await this._vp9EncodeFilteredSegment(inputPath, vf, segPath);
+      if (!ok) {
+        for (const f of toCleanup) {
+          try { await fs.promises.unlink(f); } catch (_) { /* ignore */ }
+        }
+        return null;
+      }
+      segmentPaths.push(segPath);
+    }
+
+    if (segmentPaths.length === 0) {
+      for (const f of toCleanup) {
+        try { await fs.promises.unlink(f); } catch (_) { /* ignore */ }
+      }
+      return null;
+    }
+
+    const outPath = `${base}-region.webm`;
+    const concatOk = await this._concatWebmSegments(segmentPaths, outPath);
+    for (const f of segmentPaths) {
+      try { await fs.promises.unlink(f); } catch (_) { /* ignore */ }
+    }
+    if (!concatOk) {
+      try { await fs.promises.unlink(outPath); } catch (_) { /* ignore */ }
+      return null;
+    }
+
+    const outStats = await fs.promises.stat(outPath).catch(() => null);
+    const outDuration = await this._probeDurationSeconds(outPath);
+    if (!outStats || !outStats.size || !Number.isFinite(outDuration) || outDuration <= 0) {
+      try { await fs.promises.unlink(outPath); } catch (_) { /* ignore */ }
+      return null;
+    }
+
+    console.log(
+      `[SCREENCAST] Region-compacted "${logLabel || 'stage'}": ${pieces.length} span(s), raw ${rawDuration.toFixed(2)}s -> ${outDuration.toFixed(2)}s`
+    );
+    return { path: outPath, size: outStats.size, duration: outDuration, regionPieces: pieces.length };
+  }
+
   async _uploadSegmentFile(jobId, stage, sizeBytes, filePath) {
     const headers = {};
     if (this.runnerToken) headers['Authorization'] = `Bearer ${this.runnerToken}`;
@@ -651,13 +943,7 @@ class ScreencastRecorder {
     if (Number.isFinite(rawDuration) && rawDuration < 5) return null;
 
     const outputPath = inputPath.replace(/\.webm$/i, '') + '-compact.webm';
-    // mpdecimate parameters tuned for browser captures:
-    //   hi   - high diff threshold (default 64*12=768); raise slightly so
-    //          subtle anti-alias jitter doesn't keep frames.
-    //   lo   - low diff threshold (default 64*5=320).
-    //   frac - fraction of pixels that must differ (default 0.33).
-    // setpts resets timestamps so dropped frames don't leave gaps.
-    const filter = 'mpdecimate=hi=64*16:lo=64*5:frac=0.33,setpts=N/FRAME_RATE/TB';
+    const filter = buildMpdecimateVideoFilter();
 
     try {
       await execFileAsync('ffmpeg', [
