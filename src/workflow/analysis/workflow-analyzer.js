@@ -10,6 +10,7 @@ import {
   replaceNetworkIdleWithDomContentLoadedForAutomation,
   capPlaywrightAutomationTimeouts,
   injectJourneyClickExistencePreflight,
+  stripCommonAiTypeScriptCasts,
 } from '../utils/normalize-playwright-network-idle.js';
 import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
 import { evaluateLoginSessionEvidenceOverride } from '../utils/login-session-evidence-override.js';
@@ -17918,9 +17919,10 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         console.log(`🔍 Testing wrapper: wrappedPage.locator is function? ${typeof wrappedPage.locator === 'function'}`);
         console.log(`🔍 Testing wrapper: wrappedPage type=${typeof wrappedPage}, isProxy=${wrappedPage !== pageObj}`);
 
-        let scriptForExecution = replaceNetworkIdleWithDomContentLoadedForAutomation(
+        let scriptForExecution = stripCommonAiTypeScriptCasts(
           typeof scriptCode === 'string' ? scriptCode : String(scriptCode || '')
         );
+        scriptForExecution = replaceNetworkIdleWithDomContentLoadedForAutomation(scriptForExecution);
         scriptForExecution = capPlaywrightAutomationTimeouts(scriptForExecution);
         // Journey scripts only: wrap every literal-selector page.click('…') with a fast pre-flight
         // existence check so a missing/invented selector returns in <1s instead of stalling the
