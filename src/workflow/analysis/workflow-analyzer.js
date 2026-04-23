@@ -571,7 +571,7 @@ function resolveActionSelectorFromFormsFuzzy(action, form, consumedSelectors) {
   const role = legacyFormFieldRoleFromName(fieldName);
   if (role === 'unknown') return false;
   const fields = form.fields.filter(isFillableFormField);
-  const usable = (f) => f && f.selector && !consumedSelectors.has(String(f.selector)));
+  const usable = (f) => f && f.selector && !consumedSelectors.has(String(f.selector));
 
   const take = (f) => {
     if (!f || !f.selector) return false;
