@@ -270,6 +270,25 @@ function inventorySelectorMatches(candidate, inventory) {
     }
     return false;
   }
+  // Unquoted name="value" on generated selectors (e.g. input[name=first_name]) — require literal
+  // name token match in inventory so we do not fall through to overly-permissive substring logic.
+  if (/\[name\s*=/.test(t) && !/\bname\s*=\s*["']/i.test(t)) {
+    const extracted = extractNameAttributeFromActionSelector(t);
+    if (extracted) {
+      const value = String(extracted).trim().toLowerCase();
+      if (!value) return false;
+      const quotedNameRe = /\bname\s*=\s*["']([^"']+)["']/i;
+      const looseNameRe = /\bname\s*=\s*([^\s"'=\]]+)/i;
+      for (const r of inventory.raw) {
+        const rs = String(r || '');
+        const qm = rs.match(quotedNameRe);
+        if (qm && String(qm[1] || '').trim().toLowerCase() === value) return true;
+        const lm = rs.match(looseNameRe);
+        if (lm && String(lm[1] || '').trim().toLowerCase() === value) return true;
+      }
+      return false;
+    }
+  }
   // Bare `#id` shorthand (e.g. `button#new-request`, `#new-request`) — not in attribute form.
   const candHashId = t.match(/#([A-Za-z][A-Za-z0-9_-]*)\b/);
   if (candHashId) {
@@ -281,9 +300,14 @@ function inventorySelectorMatches(candidate, inventory) {
     }
     return false;
   }
+  const genericTagToken = (norm) =>
+    /^(input|button|textarea|select|form|a|label|div|span|li|ul|nav|p|section|main|article|header|footer)$/i.test(
+      String(norm || '').trim(),
+    );
   for (const r of inventory.raw) {
     const rn = normalizeSelectorTokenForInventory(r);
     if (!rn || !inventorySelectorMeaningful(rn)) continue;
+    if (genericTagToken(rn)) continue;
     if (n === rn || n.includes(rn) || rn.includes(n)) return true;
   }
   return false;
@@ -477,23 +501,159 @@ function computeStableJourneyId(pageUrl, journey) {
 }
 
 /**
+ * Extract HTML name= value from a CSS-ish selector (quoted or unquoted).
+ */
+function extractNameAttributeFromActionSelector(selector) {
+  const s = String(selector || '');
+  const quoted =
+    s.match(/(?:input|textarea)\[name\s*=\s*["']([^"']+)["']\]/i) ||
+    s.match(/\[name\s*=\s*["']([^"']+)["']\]/i);
+  if (quoted) return quoted[1];
+  const unquoted =
+    s.match(/(?:input|textarea)\[name\s*=\s*([^\s\]"'=]+)\]/i) || s.match(/\[name\s*=\s*([^\s\]"'=]+)\]/i);
+  return unquoted ? unquoted[1] : null;
+}
+
+function isFillableFormField(f) {
+  if (!f || typeof f !== 'object') return false;
+  const t = String(f.type || '').toLowerCase();
+  if (t === 'hidden' || t === 'submit' || t === 'button' || t === 'image') return false;
+  const nm = String(f.name || '').toLowerCase();
+  if (/honeypot|csrf|_wp_http|form_id|entry_id|post_id|hash|token|g-recaptcha-response|wpforms\[id\]/i.test(nm)) {
+    return false;
+  }
+  return true;
+}
+
+function legacyFormFieldRoleFromName(fieldName) {
+  const raw = String(fieldName || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!raw) return 'unknown';
+  if (/^(first_?name|firstname|fname|given_?name)$/.test(raw)) return 'first';
+  if (/^(last_?name|lastname|lname|surname|family_?name)$/.test(raw)) return 'last';
+  if (raw.includes('email') || raw === 'e_mail' || raw === 'mail') return 'email';
+  if (/(message|comment|body|details|description|question|inquiry|feedback)/.test(raw)) return 'message';
+  if (/(captcha|recaptcha|robot|human|not_a_robot|iamnot)/.test(raw)) return 'captcha';
+  if (/(phone|tel|mobile|cell)/.test(raw)) return 'phone';
+  if (/(company|organization|orgname|organisation)/.test(raw)) return 'subject_or_misc';
+  if (raw.includes('subject')) return 'subject_or_misc';
+  return 'unknown';
+}
+
+function pickPrimaryFormForHeuristic(forms) {
+  if (!Array.isArray(forms) || forms.length === 0) return null;
+  let best = forms[0];
+  let bestW = -1;
+  for (const form of forms) {
+    const fields = Array.isArray(form.fields) ? form.fields : [];
+    const fillable = fields.filter(isFillableFormField);
+    const hasEmail = fillable.some(
+      (f) => String(f.type || '').toLowerCase() === 'email' || /email|e-mail/i.test(f.name || ''),
+    );
+    const hasTa = fillable.some((f) => String(f.type || '').toLowerCase() === 'textarea');
+    const w = fillable.length + (hasEmail ? 4 : 0) + (hasTa ? 4 : 0);
+    if (w > bestW) {
+      bestW = w;
+      best = form;
+    }
+  }
+  return best;
+}
+
+function isTextLikeField(f) {
+  const t = String(f.type || '').toLowerCase();
+  return t === 'text' || t === '' || t === 'tel' || t === 'url' || t === 'search';
+}
+
+function resolveActionSelectorFromFormsFuzzy(action, form, consumedSelectors) {
+  if (!action || !form || !Array.isArray(form.fields)) return false;
+  const fieldName = extractNameAttributeFromActionSelector(action.selector);
+  if (!fieldName) return false;
+  const role = legacyFormFieldRoleFromName(fieldName);
+  if (role === 'unknown') return false;
+  const fields = form.fields.filter(isFillableFormField);
+  const usable = (f) => f && f.selector && !consumedSelectors.has(String(f.selector)));
+
+  const take = (f) => {
+    if (!f || !f.selector) return false;
+    action.selector = f.selector;
+    if (f.type) action.element_type = String(f.type).toLowerCase() === 'textarea' ? 'textarea' : (f.type || 'input');
+    consumedSelectors.add(String(f.selector));
+    return true;
+  };
+
+  if (role === 'email') {
+    const f =
+      fields.find((x) => usable(x) && (String(x.type || '').toLowerCase() === 'email' || /email|e-mail/i.test(x.name || ''))) ||
+      fields.find((x) => usable(x) && /email|e-mail/i.test(x.name || ''));
+    return take(f);
+  }
+  if (role === 'message') {
+    const f = fields.find((x) => usable(x) && String(x.type || '').toLowerCase() === 'textarea');
+    return take(f);
+  }
+  if (role === 'captcha') {
+    const f = fields.find(
+      (x) =>
+        usable(x) &&
+        String(x.type || '').toLowerCase() === 'checkbox' &&
+        /robot|captcha|not|human|consent|terms/i.test(`${x.name || ''} ${x.id || ''}`),
+    );
+    return take(f);
+  }
+  if (role === 'first') {
+    let f = fields.find(
+      (x) => usable(x) && isTextLikeField(x) && /(^|[^\w])(first|fname)([^\w]|$)/i.test(String(x.name || '')),
+    );
+    if (!f) f = fields.find((x) => usable(x) && isTextLikeField(x) && !/email|e-mail/i.test(x.name || ''));
+    return take(f);
+  }
+  if (role === 'last') {
+    let f = fields.find(
+      (x) => usable(x) && isTextLikeField(x) && /(last|lname|surname|family)/i.test(String(x.name || '')),
+    );
+    if (!f) {
+      const textLikes = fields.filter((x) => usable(x) && isTextLikeField(x) && !/email|e-mail/i.test(x.name || ''));
+      f = textLikes[0] || null;
+    }
+    return take(f);
+  }
+  if (role === 'phone' || role === 'subject_or_misc') {
+    const f = fields.find((x) => usable(x) && isTextLikeField(x));
+    return take(f);
+  }
+  return false;
+}
+
+/**
  * Resolve an action's selector from the actual forms data so input vs textarea (and other tag mismatches)
  * are corrected using what the page actually has. Works for any site - no hardcoded ids.
+ * When the LLM invents legacy field names (e.g. first_name) that are absent from the real DOM (WPForms, etc.),
+ * map to the closest real field using role heuristics and DOM order from Playwright form extraction.
  */
-function resolveActionSelectorFromForms(action, forms) {
-  if (!action || action.type !== 'input' || !action.selector || !Array.isArray(forms)) return;
-  const nameMatch = action.selector.match(/(?:input|textarea)\[name\s*=\s*["']([^"']+)["']\]/i) ||
-    action.selector.match(/\[name\s*=\s*["']([^"']+)["']\]/);
-  if (!nameMatch) return;
-  const fieldName = nameMatch[1];
+function resolveActionSelectorFromForms(action, forms, consumedSelectors = null) {
+  const consumed = consumedSelectors || new Set();
+  const at = String(action?.type || action?.action_type || '').toLowerCase();
+  if (!action || !action.selector || !Array.isArray(forms)) return;
+  if (!['input', 'fill', 'type'].includes(at)) return;
+  const fieldName = extractNameAttributeFromActionSelector(action.selector);
+  if (!fieldName) return;
   for (const form of forms) {
     const fields = form.fields || [];
-    const field = fields.find(f => (f.name || '').trim() === fieldName);
+    const field = fields.find((f) => (f.name || '').trim() === fieldName);
     if (field && field.selector) {
       action.selector = field.selector;
       if (field.type) action.element_type = field.type === 'textarea' ? 'textarea' : (field.type || 'input');
+      consumed.add(String(field.selector));
       return;
     }
+  }
+  const primary = pickPrimaryFormForHeuristic(forms);
+  if (primary && resolveActionSelectorFromFormsFuzzy(action, primary, consumed)) {
+    return;
+  }
+  for (const form of forms) {
+    if (form === primary) continue;
+    if (resolveActionSelectorFromFormsFuzzy(action, form, consumed)) return;
   }
 }
 
@@ -8200,6 +8360,17 @@ return {
           if (droppedEmptyJourneys > 0) {
             console.warn(`⚠️ [JOURNEYS-QUALITY] Removed ${droppedEmptyJourneys} journey(s) with no executable actions after selector validation`);
           }
+          // Align journey action selectors with Playwright-extracted forms before inventory grounding.
+          // Prevents LLM legacy names (first_name, etc.) from falsely passing substring inventory checks or timing out at execution.
+          if (journeys.length > 0 && interactiveGroups.forms?.length) {
+            for (const journey of journeys) {
+              const consumed = new Set();
+              const acts = Array.isArray(journey.actions) ? journey.actions : [];
+              for (const action of acts) {
+                resolveActionSelectorFromForms(action, interactiveGroups.forms, consumed);
+              }
+            }
+          }
           if (journeys.length > 0) {
             const beforeInv = journeys.length;
             journeys = filterJourneysAgainstPlaywrightInventory(journeys, workflowState);
@@ -8499,8 +8670,9 @@ return {
             
             // Resolve input/textarea selectors from actual forms so tag matches the page (flexible, any site)
             if (journey.actions.length > 0 && interactiveGroups.forms?.length) {
+              const consumedLate = new Set();
               for (const action of journey.actions) {
-                resolveActionSelectorFromForms(action, interactiveGroups.forms);
+                resolveActionSelectorFromForms(action, interactiveGroups.forms, consumedLate);
               }
             }
             
