@@ -14752,7 +14752,9 @@ return {
       if (/\b(date|dob|birth|birthday)\b/.test(v)) return true;
       if (/type\s*=\s*['"]date['"]/i.test(h)) return true;
       if (/\b#dob\b/i.test(h)) return true;
+      if (/\b(date|dob|birth|birthday)\b/i.test(h)) return true;
       if (/\[name\s*=\s*['"](dob|date_of_birth|birth_date)['"]\]/i.test(h)) return true;
+      if (/placeholder\s*=\s*['"][^'"]*(mm\/dd\/yyyy|date)[^'"]*['"]/i.test(h)) return true;
       return false;
     };
 
@@ -14788,6 +14790,22 @@ return {
         }
         if (looksEmailTarget('', locInner) && raw.length > 0 && !isPlausibleEmail(raw)) {
           return `.locator(${locInner}).fill(${emailLit})`;
+        }
+        return full;
+      }
+    );
+    s = s.replace(
+      /\.locator\(\s*([^)]*)\)\s*((?:\.\s*(?:first|last)\s*\(\s*\)|\.\s*nth\(\s*\d+\s*\))*)\s*\.fill\(\s*(['"])((?:\\.|(?!\3).)*)\3\s*\)/gi,
+      (full, locInner, chain, q, inner) => {
+        const raw = String(inner || '').replace(/\\(.)/g, '$1');
+        const chainPart = String(chain || '');
+        if (looksDateTarget('', locInner) && raw.length > 0) {
+          const normalizedDate = normalizeDateString(raw);
+          if (!normalizedDate) return `.locator(${locInner})${chainPart}.fill(${dateLit})`;
+          if (!isIsoDate(raw)) return `.locator(${locInner})${chainPart}.fill(${JSON.stringify(normalizedDate)})`;
+        }
+        if (looksEmailTarget('', locInner) && raw.length > 0 && !isPlausibleEmail(raw)) {
+          return `.locator(${locInner})${chainPart}.fill(${emailLit})`;
         }
         return full;
       }
