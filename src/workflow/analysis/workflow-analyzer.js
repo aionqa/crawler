@@ -1320,47 +1320,172 @@ function expandJourneysToFullFormStories(journeys, forms, interactiveElements = 
 }
 
 /**
- * Heuristic: "New request" / create-style clicks that open a known form (e.g. #new-request) do not
- * always score in inferJourneyFormIndexFromInventory; map them to the matching form.
+ * Map opener-only (click) journeys to a form index using only Playwright inventory: modal forms
+ * and interactive_elements selector equality — no static copy or site-specific text rules.
  */
-function inferOpenerJourneyToFormHeuristic(journey, forms) {
-  if (!journey || !Array.isArray(forms) || forms.length === 0) return -1;
+function inferOpenerJourneyToFormByInventory(journey, forms, interactiveElements) {
+  if (!journey || !Array.isArray(forms) || forms.length === 0) {
+    return -1;
+  }
   const actions = Array.isArray(journey.actions) ? journey.actions : [];
-  if (actions.length > 3) return -1;
-  const blob = [
-    journey.journey_id,
-    journey.description,
-    journey.test_instructions,
-    ...actions.map(
-      (a) =>
-        `${a?.description || ''} ${a?.selector || ''} ${a?.element_info?.text || a?.interactive_element?.text || ''}`,
-    ),
-  ]
-    .join(' ')
-    .toLowerCase();
-  const looksLikeFormOpener =
-    /\b(new request|add request|create request|new ppm|open request|get started|open (the )?form|add (a )?new)\b/.test(
-      blob,
-    ) ||
-    (actions.length === 1 &&
-      /:has-text\(\s*['"][^'"]*request['"]/i.test(String(actions[0]?.selector || '')));
-  if (!looksLikeFormOpener) return -1;
+  if (actions.length === 0 || actions.length > 4) {
+    return -1;
+  }
+  const openLike = actions.filter((a) => {
+    if (isSubmitAction(a) || isVerificationOnlyAction(a)) {
+      return false;
+    }
+    const t = normalizeJourneyActionType(a?.type || a?.action_type);
+    if (['input', 'fill', 'type', 'select', 'selectoption', 'check', 'uncheck'].includes(t)) {
+      return false;
+    }
+    return ['click', 'press', 'tap', ''].includes(t || 'click');
+  });
+  if (openLike.length === 0) {
+    return -1;
+  }
+  const inv = Array.isArray(interactiveElements) ? interactiveElements : [];
+
   for (let i = 0; i < forms.length; i += 1) {
-    const f = forms[i];
-    const fs = String(f?.selector || '').toLowerCase();
-    if (fs.includes('new-request') || fs.includes('new_request') || /#new-/.test(fs)) {
-      return i;
+    const form = forms[i];
+    if (!isModalLikeForm(form)) {
+      continue;
+    }
+    const fieldSelKeys = new Set();
+    for (const f of form.fields || []) {
+      if (f?.selector) {
+        fieldSelKeys.add(normalizeSelectorKey(f.selector));
+      }
+    }
+    for (const btn of form.buttons || []) {
+      if (btn?.selector) {
+        fieldSelKeys.add(normalizeSelectorKey(btn.selector));
+      }
+    }
+    for (const a of openLike) {
+      const ak = normalizeSelectorKey(a?.selector || a?.element_info?.selector || '');
+      if (!ak) {
+        continue;
+      }
+      for (const el of inv) {
+        const ek = normalizeSelectorKey(el?.selector || el?.primary_selector || '');
+        if (!ek || ek !== ak) {
+          continue;
+        }
+        const t = String(el.type || el.element_type || '').toLowerCase();
+        if (['text', 'email', 'password', 'textarea', 'select', 'checkbox', 'radio', 'search'].includes(t)) {
+          continue;
+        }
+        if (fieldSelKeys.has(ek)) {
+          continue;
+        }
+        return i;
+      }
     }
   }
-  for (let i = 0; i < forms.length; i += 1) {
-    if (isModalLikeForm(forms[i])) {
-      return i;
-    }
-  }
+
+  // Single form on the page: tie a non-input control click to that form via strict selector
+  // match against interactive inventory (so we never hard-code customer strings).
   if (forms.length === 1) {
-    return 0;
+    const f0 = forms[0];
+    if ((f0.fields || []).filter(isFillableFormField).length === 0) {
+      return -1;
+    }
+    const fieldKeysSingle = new Set();
+    for (const f of f0.fields || []) {
+      if (f?.selector) {
+        fieldKeysSingle.add(normalizeSelectorKey(f.selector));
+      }
+    }
+    for (const btn of f0.buttons || []) {
+      if (btn?.selector) {
+        fieldKeysSingle.add(normalizeSelectorKey(btn.selector));
+      }
+    }
+    for (const a of openLike) {
+      const ak = normalizeSelectorKey(a?.selector || a?.element_info?.selector || '');
+      if (!ak) {
+        continue;
+      }
+      for (const el of inv) {
+        const ek = normalizeSelectorKey(el?.selector || el?.primary_selector || '');
+        if (!ek || ek !== ak) {
+          continue;
+        }
+        const t = String(el.type || el.element_type || '').toLowerCase();
+        if (['text', 'email', 'password', 'textarea', 'select', 'checkbox', 'radio', 'search'].includes(t)) {
+          continue;
+        }
+        if (fieldKeysSingle.has(ek)) {
+          continue;
+        }
+        return 0;
+      }
+    }
   }
   return -1;
+}
+
+function formIndexAlreadyCoveredByJourneys(journeys, forms, formIndex, interactiveElements) {
+  for (const j of journeys) {
+    let idx = inferJourneyFormIndexFromInventory(j, forms);
+    if (idx < 0) {
+      idx = inferOpenerJourneyToFormByInventory(j, forms, interactiveElements);
+    }
+    if (idx !== formIndex) {
+      continue;
+    }
+    const acts = j.actions || [];
+    if (acts.some((a) => isSubmitAction(a))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * For every Playwright form with at least one fillable or submittable control, ensure one journey
+ * that runs expandJourneyActionsToFullFormStory (open where modal + inventory says so, variadic
+ * field fills, submit, verify) if nothing with a submit step already covers that form.
+ */
+function ensureDiscoveredFormJourneys(journeys, forms, interactiveElements) {
+  if (!Array.isArray(forms) || forms.length === 0) {
+    return journeys;
+  }
+  const out = Array.isArray(journeys) ? [...journeys] : [];
+  let added = 0;
+  for (let i = 0; i < forms.length; i += 1) {
+    if (formIndexAlreadyCoveredByJourneys(out, forms, i, interactiveElements)) {
+      continue;
+    }
+    const form = forms[i];
+    const fillable = (Array.isArray(form.fields) ? form.fields : []).filter(isFillableFormField);
+    const hasBtn = Array.isArray(form.buttons) && form.buttons.length > 0;
+    if (fillable.length === 0 && !hasBtn) {
+      continue;
+    }
+    const base = {
+      journey_id: `discovered_form_${i}`,
+      description:
+        'Complete the on-page form using discovered field inventory: fill with varied data, submit once, verify a terminal UI outcome.',
+      expected_outcome:
+        'A definitive post-submit state appears (success, list refresh, inline validation, or error).',
+      test_instructions:
+        'Use only selectors from the page analysis. Use varied or random-like test values unless the app forbids. After submit, verify visible outcome text or layout change.',
+      actions: []
+    };
+    const expanded = expandJourneyActionsToFullFormStory(base, form, interactiveElements);
+    if (Array.isArray(expanded) && expanded.length > 0) {
+      out.push({ ...base, actions: expanded });
+      added += 1;
+    }
+  }
+  if (added > 0) {
+    console.log(
+      `📋 [JOURNEYS-INVENTORY] Appended ${added} data-driven form journey(s) from Playwright form inventory (no static site copy)`,
+    );
+  }
+  return out;
 }
 
 function mergeJourneyGroupMergePriority(journey) {
@@ -1416,14 +1541,15 @@ function dedupeFormActionsBySelector(actions) {
  * When the model emits several journeys for one form (e.g. "open New request" + "submit #new-request"),
  * merge into a single journey so expandJourneyActionsToFullFormStory can add fill + verify in order.
  */
-function mergeJourneysForSameFormTarget(journeys, forms) {
+function mergeJourneysForSameFormTarget(journeys, forms, interactiveElements) {
   if (!Array.isArray(journeys) || journeys.length < 2 || !Array.isArray(forms) || forms.length === 0) {
     return journeys;
   }
+  const inv = Array.isArray(interactiveElements) ? interactiveElements : [];
   const inferWithOpener = (j) => {
     let idx = inferJourneyFormIndexFromInventory(j, forms);
     if (idx < 0) {
-      idx = inferOpenerJourneyToFormHeuristic(j, forms);
+      idx = inferOpenerJourneyToFormByInventory(j, forms, inv);
     }
     return idx;
   };
@@ -9502,7 +9628,11 @@ return {
           // Prevents LLM legacy names (first_name, etc.) from falsely passing substring inventory checks or timing out at execution.
           if (journeys.length > 0 && interactiveGroups.forms?.length) {
             const beforeMerge = journeys.length;
-            journeys = mergeJourneysForSameFormTarget(journeys, interactiveGroups.forms);
+            journeys = mergeJourneysForSameFormTarget(
+              journeys,
+              interactiveGroups.forms,
+              interactiveGroups.interactiveElements,
+            );
             if (journeys.length < beforeMerge) {
               console.log(
                 `🧩 [JOURNEYS-MERGE] Merged ${beforeMerge} → ${journeys.length} journey(s) (open + fill + submit + verify in one flow per form)`,
@@ -9525,6 +9655,28 @@ return {
               console.log(
                 `✅ [JOURNEYS-FULL-STORY] Expanded ${formExpansionResult.expandedCount || 0} journey(s) to full form stories` +
                 `${(formExpansionResult?.retargetedCount || 0) > 0 ? `; retargeted ${formExpansionResult.retargetedCount} journey(s) to primary form` : ''}`
+              );
+            }
+            const beforeInvEnsure = journeys.length;
+            journeys = ensureDiscoveredFormJourneys(
+              journeys,
+              interactiveGroups.forms,
+              interactiveGroups.interactiveElements,
+            );
+            if (journeys.length > beforeInvEnsure) {
+              console.log(
+                `📋 [JOURNEYS-INVENTORY] ${journeys.length - beforeInvEnsure} form flow(s) added from analysis-only coverage`,
+              );
+            }
+            const beforeMerge2 = journeys.length;
+            journeys = mergeJourneysForSameFormTarget(
+              journeys,
+              interactiveGroups.forms,
+              interactiveGroups.interactiveElements,
+            );
+            if (journeys.length < beforeMerge2) {
+              console.log(
+                `🧩 [JOURNEYS-MERGE-2] Merged after inventory ensure: ${beforeMerge2} → ${journeys.length} journey(s)`,
               );
             }
           }
@@ -9962,11 +10114,18 @@ return {
               ? workflowState.playwrightAnalysis.interactive_elements
               : (Array.isArray(workflowState.interactive_elements) ? workflowState.interactive_elements : []);
             const beforeMergeCv = journeys.length;
-            journeys = mergeJourneysForSameFormTarget(journeys, formsForConversion);
+            journeys = mergeJourneysForSameFormTarget(journeys, formsForConversion, conversionInteractiveElements);
             if (journeys.length < beforeMergeCv) {
               console.log(
                 `🧩 [JOURNEYS-CONVERT-MERGE] Merged ${beforeMergeCv} → ${journeys.length} journey(s) (full form flow)`,
               );
+            }
+            for (const jConv of journeys) {
+              const consumedC = new Set();
+              const actsC = Array.isArray(jConv.actions) ? jConv.actions : [];
+              for (const ac of actsC) {
+                resolveActionSelectorFromForms(ac, formsForConversion, consumedC);
+              }
             }
             const formExpansionResult = expandJourneysToFullFormStories(
               journeys,
@@ -9974,6 +10133,14 @@ return {
               conversionInteractiveElements,
             );
             journeys = Array.isArray(formExpansionResult?.journeys) ? formExpansionResult.journeys : journeys;
+            journeys = ensureDiscoveredFormJourneys(journeys, formsForConversion, conversionInteractiveElements);
+            const beforeMergeCv2 = journeys.length;
+            journeys = mergeJourneysForSameFormTarget(journeys, formsForConversion, conversionInteractiveElements);
+            if (journeys.length < beforeMergeCv2) {
+              console.log(
+                `🧩 [JOURNEYS-CONVERT-MERGE-2] Merged after inventory: ${beforeMergeCv2} → ${journeys.length} journey(s)`,
+              );
+            }
             if ((formExpansionResult?.expandedCount || 0) > 0 || (formExpansionResult?.retargetedCount || 0) > 0) {
               console.log(
                 `✅ [JOURNEYS-CONVERT-FULL-STORY] Expanded ${formExpansionResult.expandedCount || 0} converted journey(s)` +
