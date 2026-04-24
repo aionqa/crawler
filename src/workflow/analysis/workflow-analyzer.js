@@ -1444,7 +1444,13 @@ function formIndexAlreadyCoveredByJourneys(journeys, forms, formIndex, interacti
       continue;
     }
     const acts = j.actions || [];
-    if (acts.some((a) => isSubmitAction(a))) {
+    const hasRealFill = acts.some((a) => {
+      const t = normalizeJourneyActionType(a?.type || a?.action_type);
+      return ['input', 'fill', 'type', 'select', 'selectoption', 'check', 'uncheck'].includes(t);
+    });
+    const hasSubmit = acts.some((a) => isSubmitAction(a));
+    // Submit-only (or a bare click on submit) is NOT a full story — we still need inventory fill+verify.
+    if (hasSubmit && hasRealFill) {
       return true;
     }
   }
