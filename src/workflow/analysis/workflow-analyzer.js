@@ -587,6 +587,25 @@ function normalizeSelectorKey(selector) {
   return String(selector || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+/**
+ * Clicks on anchor / role=link surfaces are link-map territory, not user journeys, unless
+ * an onclick or javascript: handler changes same-page state.
+ */
+function actionIsClickOnHyperlinkSurface(action, typeStr) {
+  const t = normalizeJourneyActionType(typeStr || action?.type || action?.action_type);
+  if (!['click', 'press', 'tap', ''].includes(t || 'click')) return false;
+  const et = normalizeJourneyActionElementType(action);
+  if (et === 'link') return true;
+  const sel = String(action?.selector || action?.element_info?.selector || '').trim();
+  if (!sel) return false;
+  const sl = sel.toLowerCase();
+  if (sl.includes('a:has-text') || sl.includes('a:has-text(')) return true;
+  if (/getbyrole\s*\(\s*['\"]link['\"]/.test(sl)) return true;
+  if (/\[role=["']?link["']?\]/i.test(sel)) return true;
+  if (/^a[\[.#:\s>]/i.test(sel)) return true;
+  return false;
+}
+
 function textLooksLikeSubmitControl(value) {
   const s = String(value || '').toLowerCase();
   if (!s) return false;
@@ -3264,6 +3283,32 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
   }
 
   /**
+   * SPAs often omit anchors from the flat `links` list; interactive_elements may still carry href.
+   */
+  findPlaywrightHrefFromInteractiveElements(interactiveElements, selector, interactiveElementHint) {
+    if (!Array.isArray(interactiveElements) || !selector) return '';
+    const sel = String(selector).trim();
+    if (!sel) return '';
+    const selNorm = normalizeSelectorKey(sel);
+    const hintId = interactiveElementHint && typeof interactiveElementHint === 'object'
+      ? String(interactiveElementHint.id || interactiveElementHint.element_id || '').trim()
+      : '';
+    for (const el of interactiveElements) {
+      if (!el || typeof el !== 'object') continue;
+      const es = String(el.selector || '').trim();
+      if (es && normalizeSelectorKey(es) === selNorm) {
+        const h = el.href || el.url || el.target_url;
+        if (h) return String(h).trim();
+      }
+      if (hintId && String(el.id || el.element_id || '').trim() === hintId) {
+        const h = el.href || el.url || el.target_url;
+        if (h) return String(h).trim();
+      }
+    }
+    return '';
+  }
+
+  /**
    * Plain http(s) document navigation belongs in the link map, not as executable journeys.
    * Exceptions: javascript: URLs, handlers (onclick), same-page fragments (#…), and non-link actions (forms, toggles).
    */
@@ -3316,7 +3361,41 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
     }
     if (oc && oc !== 'no') return false;
 
-    if (!href) return false;
+    if (!href && selector && Array.isArray(workflowState?.playwrightAnalysis?.interactive_elements)) {
+      let hint = null;
+      if (isJourneyShape && item?.actions) {
+        const actList = Array.isArray(item.actions) ? item.actions : [];
+        const p = actList.find((a) => {
+          const t = normalizeJourneyActionType(a?.type || a?.action_type);
+          return t && !isVerificationOnlyAction(a);
+        }) || actList[0];
+        hint = p?.interactive_element || p?.element_info || null;
+      } else {
+        hint = item?.element_info || item;
+      }
+      href = this.findPlaywrightHrefFromInteractiveElements(
+        workflowState.playwrightAnalysis.interactive_elements,
+        selector,
+        hint
+      );
+    }
+
+    if (!href) {
+      let act = null;
+      if (isJourneyShape && item?.actions) {
+        const actList = Array.isArray(item.actions) ? item.actions : [];
+        act = actList.find((a) => {
+          const t = normalizeJourneyActionType(a?.type || a?.action_type);
+          return t && !isVerificationOnlyAction(a);
+        }) || actList[0];
+      } else {
+        act = item;
+      }
+      if (act && actionIsClickOnHyperlinkSurface(act, typeStr)) {
+        return true;
+      }
+      return false;
+    }
 
     const hlow = href.toLowerCase();
     if (hlow.startsWith('javascript:')) return false;
