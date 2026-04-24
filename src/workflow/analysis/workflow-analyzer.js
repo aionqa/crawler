@@ -704,7 +704,18 @@ function journeyMentionsFormFlow(journey) {
     journey?.expected_outcome
   ].join(' ').toLowerCase();
   if (!blob.trim()) return false;
-  return /\b(form|submit|signup|sign up|register|login|wizard|modal|required field|checkbox|radio)\b/.test(blob);
+  if (/\b(form|submit|signup|sign up|register|login|wizard|modal|required field|checkbox|radio)\b/.test(blob)) {
+    return true;
+  }
+  // Generic "start a work flow" phrasing the model often uses without the word "form" (e.g. toolbar openers).
+  if (
+    /\b(new\s+request|work\s*order|service\s*request|file\s+a\s+request|create\s+request|open\s+request|submit\s+request)\b/.test(
+      blob,
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function inferJourneyFormIndexFromInventory(journey, forms) {
@@ -1391,15 +1402,15 @@ function inferOpenerJourneyToFormByInventory(journey, forms, interactiveElements
     if ((f0.fields || []).filter(isFillableFormField).length === 0) {
       return -1;
     }
+    // Only real field selectors — not form.buttons. Playwright often attaches "New request"/opener
+    // controls as form buttons; they must still be mappable to this form for merge + full-story expansion.
     const fieldKeysSingle = new Set();
     for (const f of f0.fields || []) {
+      if (!isFillableFormField(f)) {
+        continue;
+      }
       if (f?.selector) {
         fieldKeysSingle.add(normalizeSelectorKey(f.selector));
-      }
-    }
-    for (const btn of f0.buttons || []) {
-      if (btn?.selector) {
-        fieldKeysSingle.add(normalizeSelectorKey(btn.selector));
       }
     }
     for (const a of openLike) {
