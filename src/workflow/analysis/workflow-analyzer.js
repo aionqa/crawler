@@ -1319,6 +1319,174 @@ function expandJourneysToFullFormStories(journeys, forms, interactiveElements = 
   return { journeys: next, expandedCount, retargetedCount: 1 };
 }
 
+/**
+ * Heuristic: "New request" / create-style clicks that open a known form (e.g. #new-request) do not
+ * always score in inferJourneyFormIndexFromInventory; map them to the matching form.
+ */
+function inferOpenerJourneyToFormHeuristic(journey, forms) {
+  if (!journey || !Array.isArray(forms) || forms.length === 0) return -1;
+  const actions = Array.isArray(journey.actions) ? journey.actions : [];
+  if (actions.length > 3) return -1;
+  const blob = [
+    journey.journey_id,
+    journey.description,
+    journey.test_instructions,
+    ...actions.map(
+      (a) =>
+        `${a?.description || ''} ${a?.selector || ''} ${a?.element_info?.text || a?.interactive_element?.text || ''}`,
+    ),
+  ]
+    .join(' ')
+    .toLowerCase();
+  const looksLikeFormOpener =
+    /\b(new request|add request|create request|new ppm|open request|get started|open (the )?form|add (a )?new)\b/.test(
+      blob,
+    ) ||
+    (actions.length === 1 &&
+      /:has-text\(\s*['"][^'"]*request['"]/i.test(String(actions[0]?.selector || '')));
+  if (!looksLikeFormOpener) return -1;
+  for (let i = 0; i < forms.length; i += 1) {
+    const f = forms[i];
+    const fs = String(f?.selector || '').toLowerCase();
+    if (fs.includes('new-request') || fs.includes('new_request') || /#new-/.test(fs)) {
+      return i;
+    }
+  }
+  for (let i = 0; i < forms.length; i += 1) {
+    if (isModalLikeForm(forms[i])) {
+      return i;
+    }
+  }
+  if (forms.length === 1) {
+    return 0;
+  }
+  return -1;
+}
+
+function mergeJourneyGroupMergePriority(journey) {
+  const actions = Array.isArray(journey?.actions) ? journey.actions : [];
+  if (actions.length === 0) {
+    return 99;
+  }
+  if (actions.every((a) => isSubmitAction(a))) {
+    return 2;
+  }
+  if (actions.some((a) => isFormControlAction(a) && !isSubmitAction(a) && !isVerificationOnlyAction(a))) {
+    return 1;
+  }
+  return 0;
+}
+
+function actionPhaseForFormMerge(a) {
+  if (isVerificationOnlyAction(a)) {
+    return 3;
+  }
+  if (isSubmitAction(a)) {
+    return 2;
+  }
+  const t = normalizeJourneyActionType(a?.type || a?.action_type);
+  if (['input', 'fill', 'type', 'select', 'selectoption', 'check', 'uncheck'].includes(t)) {
+    return 1;
+  }
+  return 0;
+}
+
+function dedupeFormActionsBySelector(actions) {
+  if (!Array.isArray(actions) || actions.length === 0) {
+    return [];
+  }
+  const out = [];
+  const seen = new Set();
+  for (const a of actions) {
+    if (!a || typeof a !== 'object') {
+      continue;
+    }
+    const t = normalizeJourneyActionType(a?.type || a?.action_type);
+    const k = `${t}|${normalizeSelectorKey(a?.selector || a?.element_info?.selector || '')}`;
+    if (seen.has(k)) {
+      continue;
+    }
+    seen.add(k);
+    out.push(a);
+  }
+  return out;
+}
+
+/**
+ * When the model emits several journeys for one form (e.g. "open New request" + "submit #new-request"),
+ * merge into a single journey so expandJourneyActionsToFullFormStory can add fill + verify in order.
+ */
+function mergeJourneysForSameFormTarget(journeys, forms) {
+  if (!Array.isArray(journeys) || journeys.length < 2 || !Array.isArray(forms) || forms.length === 0) {
+    return journeys;
+  }
+  const inferWithOpener = (j) => {
+    let idx = inferJourneyFormIndexFromInventory(j, forms);
+    if (idx < 0) {
+      idx = inferOpenerJourneyToFormHeuristic(j, forms);
+    }
+    return idx;
+  };
+  const byForm = new Map();
+  for (let i = 0; i < journeys.length; i += 1) {
+    const idx = inferWithOpener(journeys[i]);
+    if (idx < 0) {
+      continue;
+    }
+    if (!byForm.has(idx)) {
+      byForm.set(idx, []);
+    }
+    byForm.get(idx).push(i);
+  }
+  const out = [];
+  for (let i = 0; i < journeys.length; i += 1) {
+    const fi = inferWithOpener(journeys[i]);
+    if (fi < 0) {
+      out.push(journeys[i]);
+      continue;
+    }
+    const group = byForm.get(fi);
+    if (!group || group.length < 2) {
+      out.push(journeys[i]);
+      continue;
+    }
+    const leader = Math.min(...group);
+    if (i !== leader) {
+      continue;
+    }
+    const parts = group.map((ix) => journeys[ix]).sort((a, b) => mergeJourneyGroupMergePriority(a) - mergeJourneyGroupMergePriority(b));
+    let combined = [];
+    for (const p of parts) {
+      const acts = Array.isArray(p?.actions) ? p.actions : [];
+      combined = combined.concat(acts);
+    }
+    combined = dedupeFormActionsBySelector(combined);
+    combined.sort((a, b) => {
+      const pa = actionPhaseForFormMerge(a);
+      const pb = actionPhaseForFormMerge(b);
+      if (pa !== pb) {
+        return pa - pb;
+      }
+      return 0;
+    });
+    const prefer =
+      parts.find((p) => (p?.actions || []).some((a) => isSubmitAction(a))) || parts[parts.length - 1] || parts[0];
+    const safeId = String(prefer?.journey_id || 'form').replace(/[^a-z0-9_-]/gi, '_');
+    out.push({
+      ...prefer,
+      journey_id: `journey_full_flow_${fi}_${safeId}`.slice(0, 120),
+      description:
+        'Open the target flow, complete required fields, submit once, and verify the terminal visible outcome (success, updated list, validation, or error).',
+      test_instructions:
+        'Stage 1: open the form or modal. Stage 2: complete required field values. Stage 3: submit. Stage 4: assert a definitive post-submit state in the UI.',
+      expected_outcome:
+        'A clear post-submit state appears: success message, data refresh, or explicit validation/error text.',
+      actions: combined
+    });
+  }
+  return out;
+}
+
 function computeStableJourneyId(pageUrl, journey) {
   try {
     const crypto = require('crypto');
@@ -9333,6 +9501,13 @@ return {
           // Align journey action selectors with Playwright-extracted forms before inventory grounding.
           // Prevents LLM legacy names (first_name, etc.) from falsely passing substring inventory checks or timing out at execution.
           if (journeys.length > 0 && interactiveGroups.forms?.length) {
+            const beforeMerge = journeys.length;
+            journeys = mergeJourneysForSameFormTarget(journeys, interactiveGroups.forms);
+            if (journeys.length < beforeMerge) {
+              console.log(
+                `🧩 [JOURNEYS-MERGE] Merged ${beforeMerge} → ${journeys.length} journey(s) (open + fill + submit + verify in one flow per form)`,
+              );
+            }
             for (const journey of journeys) {
               const consumed = new Set();
               const acts = Array.isArray(journey.actions) ? journey.actions : [];
@@ -9786,6 +9961,13 @@ return {
             const conversionInteractiveElements = Array.isArray(workflowState.playwrightAnalysis?.interactive_elements)
               ? workflowState.playwrightAnalysis.interactive_elements
               : (Array.isArray(workflowState.interactive_elements) ? workflowState.interactive_elements : []);
+            const beforeMergeCv = journeys.length;
+            journeys = mergeJourneysForSameFormTarget(journeys, formsForConversion);
+            if (journeys.length < beforeMergeCv) {
+              console.log(
+                `🧩 [JOURNEYS-CONVERT-MERGE] Merged ${beforeMergeCv} → ${journeys.length} journey(s) (full form flow)`,
+              );
+            }
             const formExpansionResult = expandJourneysToFullFormStories(
               journeys,
               formsForConversion,
