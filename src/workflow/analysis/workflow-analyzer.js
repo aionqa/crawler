@@ -1423,6 +1423,14 @@ function inferOpenerJourneyToFormByInventory(journey, forms, interactiveElements
       }
     }
   }
+  // Single form + opener-only actions: if the model journey text already mentions a form-like flow, associate
+  // (uses journey blob only — no site-specific copy).
+  if (forms.length === 1 && openLike.length >= 1) {
+    const f0 = forms[0];
+    if ((f0.fields || []).filter(isFillableFormField).length > 0 && journeyMentionsFormFlow(journey)) {
+      return 0;
+    }
+  }
   return -1;
 }
 
@@ -9677,6 +9685,29 @@ return {
             if (journeys.length < beforeMerge2) {
               console.log(
                 `🧩 [JOURNEYS-MERGE-2] Merged after inventory ensure: ${beforeMerge2} → ${journeys.length} journey(s)`,
+              );
+            }
+          } else if (Array.isArray(interactiveGroups.forms) && interactiveGroups.forms.length > 0) {
+            // Model returned no journeys (or all were dropped): still synthesize from Playwright form inventory only.
+            const fromInv = ensureDiscoveredFormJourneys(
+              [],
+              interactiveGroups.forms,
+              interactiveGroups.interactiveElements,
+            );
+            if (fromInv.length > 0) {
+              for (const invJ of fromInv) {
+                const consumedInv = new Set();
+                for (const act of invJ.actions || []) {
+                  resolveActionSelectorFromForms(act, interactiveGroups.forms, consumedInv);
+                }
+              }
+              journeys = mergeJourneysForSameFormTarget(
+                fromInv,
+                interactiveGroups.forms,
+                interactiveGroups.interactiveElements,
+              );
+              console.log(
+                `📋 [JOURNEYS-INVENTORY-ONLY] ${journeys.length} journey(s) from form analysis (no model journeys)`,
               );
             }
           }
