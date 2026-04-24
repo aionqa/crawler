@@ -457,10 +457,23 @@ function shouldDropFormIntentJourneyOnFormlessPage(journey) {
   if (types.some((t) => t === 'form_submit' || t === 'submit')) return true;
   if (/form_submit|submit_form|_form_submit\b|form_submission\b/i.test(jid)) return true;
   if (
-    /\b(submit the form|form submission|complete the form|fill out the form|fill required fields|registration form|contact form|login form|survey form)\b/i.test(
+    /\b(submit the form|form submission|complete the form|fill out the form|fill and submit|fill required fields|registration form|contact form|request form|login form|survey form)\b/i.test(
       blob
     )
   ) {
+    return true;
+  }
+  // "contact or request form", "example form on the page", "if a form is available" — not valid when Playwright has zero <form> tags.
+  if (
+    /\b(contact|request|support|feedback)\b[^.]{0,80}\bform\b/i.test(blob) &&
+    /\b(submit|fill|send|register|sign\s*up|complete|enter|populate)\b/i.test(blob)
+  ) {
+    return true;
+  }
+  if (/\b(example form|form on the page|form \(example|or similar\))\b/i.test(blob)) {
+    return true;
+  }
+  if (/\b(if available|if present|if any|if applicable|if there is|where applicable|when present)\b/i.test(blob) && /\bform\b/.test(blob)) {
     return true;
   }
 
@@ -479,6 +492,48 @@ function shouldDropFormIntentJourneyOnFormlessPage(journey) {
     return true;
   }
 
+  return false;
+}
+
+/**
+ * Journeys that only expand/toggle site chrome (nav drawer, hamburger) are not test "stories" — use the link map / menu_items.
+ */
+function journeyIsNavigationToggleOnlyJourney(journey) {
+  const actions = Array.isArray(journey?.actions) ? journey.actions : [];
+  const nonVerify = actions.filter((a) => !isVerificationOnlyAction(a));
+  if (nonVerify.length === 0) return false;
+  return nonVerify.every((a) => {
+    const t = normalizeJourneyActionType(a?.type || a?.action_type);
+    return ['navigation_toggle', 'toggle', 'dropdown'].includes(t);
+  });
+}
+
+/**
+ * Single click whose copy clearly describes only opening the main/mobile menu — not a product workflow.
+ */
+function journeyIsNavMenuOpenClickOnly(journey) {
+  const actions = Array.isArray(journey?.actions) ? journey.actions : [];
+  const nonVerify = actions.filter((a) => !isVerificationOnlyAction(a));
+  if (nonVerify.length !== 1) return false;
+  for (const a of nonVerify) {
+    if (isFormControlAction(a) || isSubmitAction(a)) return false;
+  }
+  const t = normalizeJourneyActionType(nonVerify[0]?.type || nonVerify[0]?.action_type);
+  if (!['click', 'press', 'tap', 'custom', ''].includes(t || 'click')) return false;
+  const blob = [
+    journey?.description,
+    journey?.test_instructions,
+    nonVerify[0]?.description,
+    nonVerify[0]?.expected_outcome
+  ]
+    .join(' ')
+    .toLowerCase();
+  if (/\b(open|expand|reveal|toggle|show|display)\b.{0,120}\b(menu|nav|drawer|sidebar|navigation|hamburger|burger|navbar)\b/i.test(blob)) {
+    return true;
+  }
+  if (/\b(mobile|main|primary)\b.{0,40}\b(menu|nav|navigation|drawer)\b/i.test(blob) && /\b(open|expand|toggle|show)\b/i.test(blob)) {
+    return true;
+  }
   return false;
 }
 
@@ -3284,6 +3339,37 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
   }
 
   /**
+   * Remove journeys that are only plain in-site navigation, menu toggles, or "open nav" clicks.
+   * Those belong in the link map / menu_items, not in executable journey lists.
+   */
+  filterJourneysRemoveLinkMapAndMenuChrome(journeys, workflowState) {
+    if (!Array.isArray(journeys) || journeys.length === 0) return [];
+    const out = [];
+    for (const journey of journeys) {
+      if (journeyIsNavigationToggleOnlyJourney(journey)) {
+        console.log(
+          `🧭 [JOURNEYS-QUALITY] Dropping navigation_toggle-only journey: ${journey.journey_id || journey.description || 'unknown'}`
+        );
+        continue;
+      }
+      if (journeyIsNavMenuOpenClickOnly(journey)) {
+        console.log(
+          `🧭 [JOURNEYS-QUALITY] Dropping menu-open-only click journey: ${journey.journey_id || journey.description || 'unknown'}`
+        );
+        continue;
+      }
+      if (this.shouldSkipPlainHyperlinkJourneyItem(journey, workflowState, true)) {
+        console.log(
+          `🧭 [JOURNEYS-QUALITY] Dropping plain document navigation link journey (link map, not a journey): ${journey.journey_id || journey.description || 'unknown'}`
+        );
+        continue;
+      }
+      out.push(journey);
+    }
+    return out;
+  }
+
+  /**
    * Convert legs to journeys (one leg = one journey with one action)
    * For backwards compatibility, also converts journeys to legs format
    */
@@ -3412,15 +3498,19 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         return true;
       });
 
-      const plainNavigationJourneyCount = dedupedJourneys.reduce((count, journey) => {
-        return count + (this.shouldSkipPlainHyperlinkJourneyItem(journey, workflowState, true) ? 1 : 0);
-      }, 0);
-      if (plainNavigationJourneyCount > 0) {
-        console.log(
-          `🧭 Retaining ${plainNavigationJourneyCount} plain navigation journey(s) so menu/link flows are testable journeys (not link-map only).`
-        );
+      let linkFilteredJourneys = this.filterJourneysRemoveLinkMapAndMenuChrome(dedupedJourneys, workflowState);
+      const formsLenForLegs = Array.isArray(workflowState?.playwrightAnalysis?.forms)
+        ? workflowState.playwrightAnalysis.forms.length
+        : 0;
+      if (formsLenForLegs === 0 && linkFilteredJourneys.length > 0) {
+        const beforeFormless = linkFilteredJourneys.length;
+        linkFilteredJourneys = linkFilteredJourneys.filter((j) => !shouldDropFormIntentJourneyOnFormlessPage(j));
+        if (linkFilteredJourneys.length !== beforeFormless) {
+          console.log(
+            `✅ [applyLegsToWorkflowState] Dropped ${beforeFormless - linkFilteredJourneys.length} form-intent journey(s) — zero HTML forms in Playwright analysis`
+          );
+        }
       }
-      const linkFilteredJourneys = dedupedJourneys;
 
       const journeysWithExecutableActions = linkFilteredJourneys.filter((journey) => {
         const acts = Array.isArray(journey.actions) ? journey.actions : [];
@@ -3434,15 +3524,46 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       // Convert journeys to legs for internal processing (backwards compatibility)
       processedItems = this.convertJourneysToLegs(journeysWithExecutableActions);
     } else {
-      const plainNavigationLegCount = rawLegs.reduce((count, leg) => {
-        return count + (this.shouldSkipPlainHyperlinkJourneyItem(leg, workflowState, false) ? 1 : 0);
-      }, 0);
-      if (plainNavigationLegCount > 0) {
-        console.log(
-          `🧭 Retaining ${plainNavigationLegCount} plain navigation leg(s) so internal links can be exercised as journeys.`
-        );
+      let linkFilteredLegs = rawLegs.filter((leg) => !this.shouldSkipPlainHyperlinkJourneyItem(leg, workflowState, false));
+      linkFilteredLegs = linkFilteredLegs.filter((leg) => {
+        const t = String(leg?.type || leg?.action || '').toLowerCase();
+        if (['navigation_toggle', 'toggle', 'dropdown'].includes(t)) {
+          console.log(
+            `🧭 [applyLegsToWorkflowState] Dropping navigation chrome leg (not a user story): ${leg.leg_id || leg.description || 'unknown'}`
+          );
+          return false;
+        }
+        return true;
+      });
+      const formsLenLeg = Array.isArray(workflowState?.playwrightAnalysis?.forms)
+        ? workflowState.playwrightAnalysis.forms.length
+        : 0;
+      if (formsLenLeg === 0 && linkFilteredLegs.length > 0) {
+        const syn = (leg) => ({
+          journey_id: leg.leg_id,
+          description: leg.description,
+          expected_outcome: leg.expected_outcome,
+          test_instructions: leg.test_instructions,
+          actions: [
+            {
+              type: leg.type,
+              action_type: leg.type,
+              description: leg.description,
+              expected_outcome: leg.expected_outcome,
+              selector: leg.selector,
+              element_info: leg.element_info
+            }
+          ]
+        });
+        const beforeF = linkFilteredLegs.length;
+        linkFilteredLegs = linkFilteredLegs.filter((leg) => !shouldDropFormIntentJourneyOnFormlessPage(syn(leg)));
+        if (linkFilteredLegs.length !== beforeF) {
+          console.log(
+            `✅ [applyLegsToWorkflowState] Dropped ${beforeF - linkFilteredLegs.length} form-intent leg(s) — zero HTML forms in Playwright analysis`
+          );
+        }
       }
-      processedItems = rawLegs;
+      processedItems = linkFilteredLegs;
       processedItems = this.filterImpossibleLegsOnSparseSurface(processedItems, workflowState);
     }
 
@@ -7678,6 +7799,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       if (isPageSummaryStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (JOURNEYS — MANDATORY):\n'
           + '- Top-level "journeys" (or page_summary.journeys) must list ONLY flows that are clearly interactive and have a verifiable on-page outcome.\n'
+          + '- NEVER emit journeys that only click a normal http(s) in-site link to another route. Those are already in the "links" / link map — they are NOT journeys. Exception: in-page #anchors, javascript: links, or links with onclick that change the same view.\n'
+          + '- NEVER emit journeys that only open/expand/toggle the site header/mobile menu, nav drawer, or hamburger. That is navigation chrome (menu_items / link map), not a test story.\n'
+          + '- If Playwright "forms" in the provided JSON is empty (length 0), do NOT describe or imply filling, submitting, or "contact/registration" forms. Do not invent "example" or "if available" form flows.\n'
           + '- Include: (1) each multi-field form or submit flow; (2) embedded/shared widgets such as chat or support; (3) interactive menus that expand, toggle, or reveal panels on this page (not plain header/footer links — those are in menu_items / link map); (4) buttons or controls that open modals, drawers, or wizards; (5) video or media players when there is a concrete control to exercise (play/pause/fullscreen) with an observable result.\n'
           + '- FORM FLOWS MUST BE FULL STORIES: for each emitted form journey include stage progression (open relevant modal/tab/step if needed), populate required controls, submit once, then verify terminal result. Do not emit one-click fragments such as only toggling a checkbox.\n'
           + '- Omit decorative regions, vague "click here" areas, and plain same-document navigation with no state change.\n'
@@ -9292,6 +9416,16 @@ return {
             if (journeys.length !== beforeFormless) {
               console.log(
                 `✅ [JOURNEYS-FORMLESS] Dropped ${beforeFormless - journeys.length} form-oriented journey(s) — Playwright reported zero HTML forms`
+              );
+            }
+          }
+
+          if (journeys.length > 0) {
+            const beforeNav = journeys.length;
+            journeys = this.filterJourneysRemoveLinkMapAndMenuChrome(journeys, workflowState);
+            if (journeys.length !== beforeNav) {
+              console.log(
+                `✅ [JOURNEYS-NAV-QUALITY] Dropped ${beforeNav - journeys.length} plain link / menu-chrome journey(s) (use link map / menu_items)`
               );
             }
           }
