@@ -680,6 +680,18 @@ async function resolveHttpStatusAfterNavigation(page, response, finalUrl) {
   return null;
 }
 
+/**
+ * Persistable HTTP code for backend PATCH/discover: apply the same Playwright-0 → 200 rule when the
+ * raw navigation instrument reads 0 but the loaded document URL is a normal http(s) page.
+ */
+function coerceStorableHttpStatusFromNavigation(lastHttpStatus, urlHint) {
+  const normalized = normalizeHttpStatusCode(lastHttpStatus);
+  if (normalized != null) return normalized;
+  const rawNum = Number(lastHttpStatus);
+  if (rawNum === 0 && isHttpOrHttpsUrl(urlHint)) return 200;
+  return null;
+}
+
 // Helper function to send logs to backend via HTTP
 // Send basic page data to backend first (creates page document)
 // Returns the pageId from the backend
@@ -724,7 +736,7 @@ async function sendBasicPageToBackend(
       title: pageTitle,
       analyzed: false // Will be updated after analysis
     };
-    const httpCode = normalizeHttpStatusCode(lastHttpStatus);
+    const httpCode = coerceStorableHttpStatusFromNavigation(lastHttpStatus, pageUrl);
     if (httpCode != null) {
       requestBody.last_http_status = httpCode;
     }
@@ -834,7 +846,8 @@ async function sendDiscoveredPageToBackend(
       requested_url: pageData.requested_url || null,
       final_url: pageData.final_url || pageData.url || null
     };
-    const discoverHttp = normalizeHttpStatusCode(pageData.last_http_status);
+    const hintUrl = pageData.final_url || pageData.url || '';
+    const discoverHttp = coerceStorableHttpStatusFromNavigation(pageData.last_http_status, hintUrl);
     if (discoverHttp != null) {
       requestBody.last_http_status = discoverHttp;
     }
@@ -5842,7 +5855,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
             analysis_skipped: true,
             reason: 'External domain - AI analysis skipped to save time and resources',
             ...(() => {
-              const code = normalizeHttpStatusCode(workflowNavHttpStatus);
+              const code = coerceStorableHttpStatusFromNavigation(workflowNavHttpStatus, pageUrl);
               return code != null ? { last_http_status: code } : {};
             })()
           };
@@ -5862,7 +5875,7 @@ async function recursiveCrawl(page, jobId, startUrl, approach, openaiClient, opt
         pageAnalysis.requested_url = currentUrl;
         pageAnalysis.final_url = pageUrl;
         pageAnalysis.project_id = context?.project_id || null;
-        const navForStore = normalizeHttpStatusCode(workflowNavHttpStatus);
+        const navForStore = coerceStorableHttpStatusFromNavigation(workflowNavHttpStatus, pageUrl);
         if (navForStore != null) pageAnalysis.last_http_status = navForStore;
         
         return { pageAnalysis, pageId, pageTitle, pageUrl };
