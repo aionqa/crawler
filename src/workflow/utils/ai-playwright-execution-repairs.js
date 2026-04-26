@@ -115,8 +115,13 @@ export function applyAiPlaywrightExecutionRepairs(script) {
   cleaned = cleaned.replace(
     /(^|\n)(\s*)((?:await\s+)?page\.(click|fill|check|uncheck|isVisible|waitForSelector)\(\s*)([a-zA-Z][^'"`)\n]*(?:\[[^\)\n]+\]|:[^)\n]+)[^)\n]*)\s*\)/g,
     (m, lineStart, indent, lead, method, sel) => {
-      const hadAwait = /^await\s+/i.test(lead);
       const selector = String(sel || '').trim();
+      // Multi-arg calls (options object, timeout, state) must not be collapsed into one quoted string —
+      // that breaks parsing with errors like `Unexpected token ')'` (e.g. waitForSelector(selector, { state: ... })).
+      if (selector.includes(',')) return m;
+      // Bare JS identifier = variable holding a selector handle, not a CSS literal to quote.
+      if (/^[A-Za-z_$][\w$]*$/.test(selector)) return m;
+      const hadAwait = /^await\s+/i.test(lead);
       const call = `page.${method}('${selector.replace(/'/g, "\\'")}')`;
       return `${lineStart}${indent}${hadAwait ? `await ${call}` : call}`;
     }
