@@ -147,10 +147,51 @@ export function repairQuotedSelectorParenBalanceInAiScript(script) {
  * @param {string} script
  * @returns {string}
  */
+/**
+ * LLMs sometimes emit `.catch` then a newline and a bare `await` statement, omitting the required
+ * `(handler)` — often followed by a stray `});` left from a half-erased arrow function. That makes
+ * `new Function` throw `Unexpected token ')'` before any runtime execution.
+ * @param {string} script
+ * @returns {string}
+ */
+export function repairMangledMultilineCatchMissingOpenParen(script) {
+  if (!script || typeof script !== 'string') return script;
+  let s = script;
+  for (let i = 0; i < 12; i += 1) {
+    const next = s.replace(
+      /\.catch\s*\r?\n\s*(await\s+[^;]+;)\s*\r?\n\s*\}\s*\)\s*;/g,
+      '.catch(async () => { $1 });',
+    );
+    if (next === s) break;
+    s = next;
+  }
+  // Same glitch but closing is only `);` (no extra `}` before `)`)
+  for (let i = 0; i < 12; i += 1) {
+    const next = s.replace(
+      /\.catch\s*\r?\n\s*(await\s+[^;]+;)\s*\r?\n\s*\)\s*;/g,
+      '.catch(async () => { $1 });',
+    );
+    if (next === s) break;
+    s = next;
+  }
+  // `return` variant (same structural bug)
+  for (let i = 0; i < 12; i += 1) {
+    const next = s.replace(
+      /\.catch\s*\r?\n\s*(return\s+[^;]+;)\s*\r?\n\s*\}\s*\)\s*;/g,
+      '.catch(() => { $1 });',
+    );
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+
 export function applyAiPlaywrightExecutionRepairs(script) {
   if (!script || typeof script !== 'string') return script;
   let cleaned = script.trim();
   if (!cleaned) return cleaned;
+
+  cleaned = repairMangledMultilineCatchMissingOpenParen(cleaned);
 
   // Models often duplicate the closing `)` after `.catch(() => null)` mid-script (not only EOL) → Unexpected token ')'.
   for (let i = 0; i < 16; i += 1) {
