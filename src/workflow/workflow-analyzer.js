@@ -5127,11 +5127,7 @@ return {
             cleanedScript = cleanedScript.replace(/\$\{resolvedVisibleText\}/gi, "${await page.textContent('body') || ''}");
             cleanedScript = cleanedScript.replace(/\$\{visible_text\}/gi, "${await page.textContent('body') || ''}");
             cleanedScript = cleanedScript.replace(/\$\{visibleText\}/gi, "${await page.textContent('body') || ''}");
-            
-            // Method 4: Case-insensitive regex without word boundaries (catches in strings, comments, etc.)
-            cleanedScript = cleanedScript.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
-            cleanedScript = cleanedScript.replace(/visible_text/gi, "(await page.textContent('body') || '')");
-            cleanedScript = cleanedScript.replace(/visibleText/gi, "(await page.textContent('body') || '')");
+            // Do not use substring replaces for visibleText / resolvedVisibleText (breaks isVisible, invisibleText, etc.).
             
             // Replace credentials.username/password with input_credentials.username/password
             cleanedScript = cleanedScript.replace(/\bcredentials\.username\b/gi, 'input_credentials.username');
@@ -9167,8 +9163,12 @@ return {
                         workflowState?.variablePool?.job?.isLoginJob === true ||
                         workflowState?.variablePool?.job?.jobType === 'login' ||
                         workflowState?.variablePool?.job?.preventNavigation === true;
+      const isAiLoginPlaywrightStep =
+        String(step?.id || '').toLowerCase().includes('login_script') ||
+        String(step?.name || '').toLowerCase().includes('login script');
+      const treatAsLoginScriptNav = isLoginJob || isAiLoginPlaywrightStep;
       
-      if (isLoginJob) {
+      if (treatAsLoginScriptNav) {
         // Login scripts should interact with the current login page only.
         // AI often emits page.goto(...) wrappers; strip those lines instead of failing immediately.
         const beforeGotoStrip = code;

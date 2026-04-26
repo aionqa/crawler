@@ -153,9 +153,9 @@ export function applyAiPlaywrightExecutionRepairs(script) {
   if (!cleaned) return cleaned;
 
   // Models often duplicate the closing `)` after `.catch(() => null)` mid-script (not only EOL) → Unexpected token ')'.
-  for (let i = 0; i < 12; i += 1) {
+  for (let i = 0; i < 16; i += 1) {
     const next = cleaned.replace(
-      /\.catch\s*\(\s*\(\s*\)\s*=>\s*(?:null|undefined)\s*\)\s*\)/g,
+      /\.catch\s*\(\s*\(\s*\)\s*=>\s*(?:null|undefined)\s*\)\s*\)+/g,
       '.catch(() => null)',
     );
     if (next === cleaned) break;
