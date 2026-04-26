@@ -13,7 +13,8 @@ const URL_SCHEME_SLASHES_PLACEHOLDER = '\uE000AIONQA_SCHEME_SLASHES\uE001';
 
 /**
  * Strip `// ...` line comments without corrupting `http(s)://`, `ws(s)://`, or `ftp://` inside literals.
- * Naive `/\/\/[^\n]*/g` matches the slashes in `https://host` and breaks `new Function` parsing.
+ * A naive global regex that removes from `//` to newline also matches the slashes inside `https://`
+ * host text and breaks `new Function` parsing (must mask URL schemes before stripping).
  * @param {string} script
  * @returns {string}
  */
