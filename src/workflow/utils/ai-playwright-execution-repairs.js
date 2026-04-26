@@ -152,6 +152,26 @@ export function applyAiPlaywrightExecutionRepairs(script) {
   let cleaned = script.trim();
   if (!cleaned) return cleaned;
 
+  // Models often duplicate the closing `)` after `.catch(() => null)` mid-script (not only EOL) → Unexpected token ')'.
+  for (let i = 0; i < 12; i += 1) {
+    const next = cleaned.replace(
+      /\.catch\s*\(\s*\(\s*\)\s*=>\s*(?:null|undefined)\s*\)\s*\)/g,
+      '.catch(() => null)',
+    );
+    if (next === cleaned) break;
+    cleaned = next;
+  }
+
+  // Extra `)` after page.goto when the URL arg is a simple identifier (e.g. `await page.goto(link))`).
+  cleaned = cleaned.replace(/\b(await\s+)?page\.goto\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\)/g, (_m, aw, id) =>
+    `${aw ? 'await ' : ''}page.goto(${id})`,
+  );
+  // Same for quoted URL literals: `page.goto('https://...'))`
+  cleaned = cleaned.replace(
+    /\b(await\s+)?page\.goto\s*\(\s*(['"])((?:\\.|(?!\2).)*)\2\s*\)\s*\)/g,
+    (_m, aw, q, body) => `${aw ? 'await ' : ''}page.goto(${q}${body}${q})`,
+  );
+
   cleaned = cleaned.replace(/\u2018|\u2019/g, "'").replace(/\u201C|\u201D/g, '"').replace(/\u2026/g, '...');
   cleaned = cleaned.replace(/page\.locator\(\s*text\s*=\s*"([^"]+)"\s*\)/g, "page.locator('text=\"$1\"')");
   cleaned = cleaned.replace(/page\.locator\(\s*text\s*=\s*'([^']+)'\s*\)/g, "page.locator('text=$1')");
@@ -234,6 +254,14 @@ export function applyAiPlaywrightExecutionRepairs(script) {
   cleaned = cleaned.replace(
     /(\bawait\s+)?page\.goto\(\s*(https?:\/\/[^)\s]+)\s*\)/gi,
     (m, aw, url) => `${aw || ''}page.goto(${JSON.stringify(String(url))})`
+  );
+  // Bare load-state tokens (invalid JS / parse errors): waitForLoadState(domcontentloaded)
+  cleaned = cleaned.replace(
+    /\b(await\s+)?page\.waitForLoadState\s*\(\s*(domcontentloaded|networkidle|load)\s*\)/gi,
+    (_m, aw, state) => {
+      const lit = JSON.stringify(String(state || '').toLowerCase());
+      return `${aw ? 'await ' : ''}page.waitForLoadState(${lit})`;
+    },
   );
   // Truncated first arg to waitForSelector (unterminated string) — breaks `new Function` parsing
   cleaned = cleaned.replace(
