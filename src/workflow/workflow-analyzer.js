@@ -7535,7 +7535,7 @@ return {
     // Preserve async IIFE wrappers (return await (async () => { ... })()) to avoid breaking structure
     const asyncIifePattern = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{/;
     if (asyncIifePattern.test(cleaned)) {
-      return cleaned;
+      return applyAiPlaywrightExecutionRepairs(cleaned);
     }
     
     // First, extract code from markdown code blocks if present
@@ -7630,7 +7630,10 @@ return {
     if (cleaned.startsWith('{') && cleaned.endsWith('}')) {
       cleaned = cleaned.slice(1, -1).trim();
     }
-    
+
+    // Re-apply execution repairs after markdown/comment stripping so selector strings and
+    // .catch(() => null)) glitches are fixed before `new Function` (login + execute-code path).
+    cleaned = applyAiPlaywrightExecutionRepairs(cleaned);
     return cleaned;
   }
 

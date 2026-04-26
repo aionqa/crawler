@@ -9,6 +9,58 @@
 import { stripCommonAiTypeScriptCasts } from './normalize-playwright-network-idle.js';
 
 /**
+ * LLMs sometimes emit an extra `)` inside a quoted Playwright selector (or a surplus `)` after
+ * .catch(() => null)) which makes `new Function` throw "Unexpected token ')'".
+ * Mirrors `workflow/analysis/workflow-analyzer.js` repairLocatorQuotedSelectorParenBalance, plus
+ * `page.goto` (URL strings) and a trailing `.catch` cleanup.
+ * @param {string} script
+ * @returns {string}
+ */
+export function repairQuotedSelectorParenBalanceInAiScript(script) {
+  if (!script || typeof script !== 'string') return script;
+  const fixInner = (inner) => {
+    let s = inner;
+    while (s.length > 0 && s.endsWith(')')) {
+      const opens = (s.match(/\(/g) || []).length;
+      const closes = (s.match(/\)/g) || []).length;
+      if (closes <= opens) break;
+      s = s.slice(0, -1);
+    }
+    return s;
+  };
+  let s = script;
+  s = s.replace(
+    /\b([A-Za-z_$][\w$]*)\.(locator|frameLocator)\s*\(\s*(['"])((?:\\.|(?!\3).)*)\3/g,
+    (full, obj, method, q, body) => {
+      const fixed = fixInner(body);
+      return fixed === body ? full : `${obj}.${method}(${q}${fixed}${q}`;
+    }
+  );
+  const pageSelectorMethods =
+    'click|dblclick|fill|check|uncheck|hover|tap|press|focus|selectOption|waitForSelector|locator|getByPlaceholder|getByText|getByLabel|getByTitle|getByAltText|goto';
+  s = s.replace(
+    new RegExp(
+      `\\bpage\\.(${pageSelectorMethods})\\s*\\(\\s*(['"])((?:\\\\.|(?!\\2).)*)\\2`,
+      'g',
+    ),
+    (full, method, q, body) => {
+      const fixed = fixInner(body);
+      return fixed === body ? full : `page.${method}(${q}${fixed}${q}`;
+    }
+  );
+  // Surplus closing paren after a null-returning .catch (common in AI login scripts)
+  s = s.replace(
+    /\.catch\s*\(\s*\(\s*\)\s*=>\s*(?:null|undefined)\s*\)\s*\)\s*$/gm,
+    '.catch(() => null)',
+  );
+  s = s.replace(
+    /\.catch\s*\(\s*\(\s*\)\s*=>\s*(?:null|undefined)\s*\)\s*\)\s*;/g,
+    '.catch(() => null);',
+  );
+  return s;
+}
+
+/**
  * @param {string} script
  * @returns {string}
  */
@@ -95,6 +147,25 @@ export function applyAiPlaywrightExecutionRepairs(script) {
     /(\bawait\s+)?page\.goto\(\s*(https?:\/\/[^)\s]+)\s*\)/gi,
     (m, aw, url) => `${aw || ''}page.goto(${JSON.stringify(String(url))})`
   );
+  // Truncated first arg to waitForSelector (unterminated string) — breaks `new Function` parsing
+  cleaned = cleaned.replace(
+    /^\s*await\s+page\.waitForSelector\(\s*(['"])(?:\\.|(?!\1).)*$/gm,
+    (full) => {
+      const indent = String(full.match(/^\s*/)?.[0] || '');
+      return `${indent}await page.waitForTimeout(500); /* repaired unterminated waitForSelector */`;
+    }
+  );
+  // Multiselector union typos with a surplus `)` (analysis/workflow-analyzer)
+  cleaned = cleaned.replace(
+    /(button\[type=(?:['"]submit['"]|\\"submit\\")\]\s*,\s*button)\)/gi,
+    '$1',
+  );
+  cleaned = cleaned.replace(
+    /(input\[type=(?:['"]submit['"]|\\"submit\\")\]\s*,\s*(?:button|input))\)/gi,
+    '$1',
+  );
+  cleaned = repairQuotedSelectorParenBalanceInAiScript(cleaned);
   cleaned = stripCommonAiTypeScriptCasts(cleaned);
+  cleaned = repairQuotedSelectorParenBalanceInAiScript(cleaned);
   return cleaned;
 }
