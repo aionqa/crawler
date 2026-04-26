@@ -10175,6 +10175,17 @@ return {
           return lines.join('\n');
         };
 
+        // Last-line syntax repair: aggressive `visibleText` / visible_text substitution above can unbalance
+        // parens; `stripCommonAiTypeScriptCasts` may leave stray `)` tokens. Re-run Playwright execution
+        // repairs on the async IIFE body immediately before `new Function` (login + journey execute path).
+        (() => {
+          const prefix = 'return (async function() {\n';
+          const suffix = '\n})();';
+          if (!functionBody.startsWith(prefix) || !functionBody.endsWith(suffix)) return;
+          const inner = functionBody.slice(prefix.length, -suffix.length);
+          functionBody = prefix + applyAiPlaywrightExecutionRepairs(inner) + suffix;
+        })();
+
         // CRITICAL: Test if function can be created and if it contains the variable
         // This is a final safety check before actual execution
         try {
