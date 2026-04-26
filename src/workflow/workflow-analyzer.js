@@ -5082,91 +5082,28 @@ return {
           // CRITICAL: Store as legScriptToExecute for execute-code-from-variable steps
           let cleanedScript = this.cleanScript(parsedResponse.playwright_script);
           
-          // CRITICAL: Fix undefined variable references that AI might generate
-          // Use MULTIPLE aggressive methods to catch ALL variations (including edge cases)
+          // Fix AI context placeholders — only whole identifiers; substring replace breaks invisibleText, etc.
           if (cleanedScript) {
             const beforeReplacement = cleanedScript;
-            const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
-            
-            // Check if variables are present BEFORE replacement
-            const hasVarsBefore = variableNames.some(v => cleanedScript.includes(v));
-            if (hasVarsBefore) {
-              console.error(`❌ CRITICAL: Found forbidden variables in cleanedScript BEFORE replacement!`);
-              const foundVars = variableNames.filter(v => cleanedScript.includes(v));
-              console.error(`❌ Found variables: ${foundVars.join(', ')}`);
-            }
-            
-            // Method 1: Simple string replace using while loop (catches ANY form, even if split or encoded)
-            for (const varName of variableNames) {
-              let replaced = 0;
-              while (cleanedScript.includes(varName)) {
-                cleanedScript = cleanedScript.replace(varName, "(await page.textContent('body') || '')");
-                replaced++;
-                if (replaced > 100) break; // Safety limit
-              }
-              if (replaced > 0) {
-                console.log(`🔧 Method 1: Replaced ${replaced} occurrence(s) of ${varName} using while loop`);
-              }
-              // Also try case variations
-              const lowerVar = varName.toLowerCase();
-              const upperVar = varName.toUpperCase();
-              while (cleanedScript.includes(lowerVar)) {
-                cleanedScript = cleanedScript.replace(lowerVar, "(await page.textContent('body') || '')");
-              }
-              while (cleanedScript.includes(upperVar)) {
-                cleanedScript = cleanedScript.replace(upperVar, "(await page.textContent('body') || '')");
-              }
-            }
-            
-            // Method 2: Word boundary regex (catches as identifiers)
-            cleanedScript = cleanedScript.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
-            cleanedScript = cleanedScript.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
-            cleanedScript = cleanedScript.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
-            
-            // Method 3: Template literal context
+            const body = "(await page.textContent('body') || '')";
+            cleanedScript = cleanedScript.replace(/\bresolvedVisibleText\b/gi, body);
+            cleanedScript = cleanedScript.replace(/\bvisibleText\b/gi, body);
+            cleanedScript = cleanedScript.replace(/\bvisible_text\b/gi, body);
             cleanedScript = cleanedScript.replace(/\$\{resolvedVisibleText\}/gi, "${await page.textContent('body') || ''}");
             cleanedScript = cleanedScript.replace(/\$\{visible_text\}/gi, "${await page.textContent('body') || ''}");
             cleanedScript = cleanedScript.replace(/\$\{visibleText\}/gi, "${await page.textContent('body') || ''}");
-            // Do not use substring replaces for visibleText / resolvedVisibleText (breaks isVisible, invisibleText, etc.).
-            
-            // Replace credentials.username/password with input_credentials.username/password
             cleanedScript = cleanedScript.replace(/\bcredentials\.username\b/gi, 'input_credentials.username');
             cleanedScript = cleanedScript.replace(/\bcredentials\.password\b/gi, 'input_credentials.password');
             cleanedScript = cleanedScript.replace(/\bcreds\.username\b/gi, 'input_credentials.username');
             cleanedScript = cleanedScript.replace(/\bcreds\.password\b/gi, 'input_credentials.password');
-            
             if (cleanedScript !== beforeReplacement) {
-              const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
-              console.log(`🔧 Enhanced replacement in legScriptToExecute: Fixed ${replacedCount} undefined variable(s)`);
+              const n = (beforeReplacement.match(/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/gi) || []).length;
+              console.log(`🔧 Enhanced replacement in legScriptToExecute: Fixed ${n} context placeholder(s)`);
             }
-            
-            // Final verification - if still present, this is critical
-            if (/resolvedVisibleText|visibleText|visible_text/i.test(cleanedScript)) {
-              console.error(`❌ CRITICAL: Variable STILL present in cleanedScript after ALL replacement methods!`);
-              const stillPresent = cleanedScript.match(/resolvedVisibleText|visibleText|visible_text/gi);
-              console.error(`❌ Still present: ${stillPresent?.length || 0} occurrence(s): ${stillPresent?.slice(0, 5).join(', ') || 'none'}`);
-              // Find exact positions
-              const positions = [];
-              for (const varName of variableNames) {
-                let pos = 0;
-                while ((pos = cleanedScript.indexOf(varName, pos)) !== -1) {
-                  positions.push({ varName, pos });
-                  pos += varName.length;
-                }
-              }
-              positions.slice(0, 3).forEach(({ varName, pos }, i) => {
-                const context = cleanedScript.substring(Math.max(0, pos - 200), Math.min(cleanedScript.length, pos + 200));
-                console.error(`❌ Position ${i + 1}: ${varName} at ${pos}, context: ...${context}...`);
-              });
-              // Last resort: replace character by character if needed
-              for (const varName of variableNames) {
-                const chars = varName.split('');
-                const pattern = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('');
-                cleanedScript = cleanedScript.replace(new RegExp(pattern, 'gi'), "(await page.textContent('body') || '')");
-              }
-              console.warn(`⚠️ Applied character-by-character replacement as last resort`);
+            if (/\b(resolvedVisibleText|visibleText|visible_text)\b/i.test(cleanedScript)) {
+              console.error(`❌ CRITICAL: context placeholder still in cleanedScript after word-bounded pass`);
             } else {
-              console.log(`✅ Verified: No forbidden variables remain in cleanedScript`);
+              console.log(`✅ Verified: no forbidden context placeholders remain in cleanedScript`);
             }
           }
           
@@ -5395,46 +5332,29 @@ return {
           // This is the earliest possible point to catch and fix the issue
           if (typeof scriptValue === 'string') {
             const beforeReplacement = scriptValue;
-            const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
-            
-            // Replace using multiple methods to catch all forms
-            for (const varName of variableNames) {
-              // Method 1: Simple string replace (catches any form)
-              while (scriptValue.includes(varName)) {
-                scriptValue = scriptValue.replace(varName, "(await page.textContent('body') || '')");
-              }
-              // Method 2: Case-insensitive regex
-              scriptValue = scriptValue.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
-            }
-            
-            // Also replace credentials variables
+            const body = "(await page.textContent('body') || '')";
+            scriptValue = scriptValue.replace(/\bresolvedVisibleText\b/gi, body);
+            scriptValue = scriptValue.replace(/\bvisibleText\b/gi, body);
+            scriptValue = scriptValue.replace(/\bvisible_text\b/gi, body);
             scriptValue = scriptValue.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
             scriptValue = scriptValue.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
             scriptValue = scriptValue.replace(/\bcreds\.username\b/gi, "input_credentials.username");
             scriptValue = scriptValue.replace(/\bcreds\.password\b/gi, "input_credentials.password");
             
             if (scriptValue !== beforeReplacement) {
-              const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
-              console.log(`🔧 IMMEDIATE replacement in AI response: Fixed ${replacedCount} undefined variable(s) in playwright_script`);
-              // Update parsedResponse so the fixed version is stored
+              const n = (beforeReplacement.match(/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/gi) || []).length;
+              console.log(`🔧 IMMEDIATE replacement in AI response: fixed ${n} context placeholder(s) in playwright_script`);
               parsedResponse.playwright_script = scriptValue;
             }
           }
-          
-          // CRITICAL: Final validation - if script still contains forbidden variables, reject and fix
-          const forbiddenVars = ['resolvedVisibleText', 'visibleText', 'visible_text'];
-          let hasForbiddenVars = false;
-          for (const varName of forbiddenVars) {
-            if (scriptValue.includes(varName)) {
-              hasForbiddenVars = true;
-              console.error(`❌ CRITICAL: AI generated script contains forbidden variable: ${varName}`);
-              console.error(`❌ Script will be automatically fixed, but this indicates the AI prompt needs improvement`);
-              // Force replace all instances
-              scriptValue = scriptValue.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
-            }
-          }
-          if (hasForbiddenVars) {
-            console.warn(`⚠️ Fixed forbidden variables in AI response - script should now work`);
+          if (typeof scriptValue === 'string' && /\b(resolvedVisibleText|visibleText|visible_text)\b/i.test(scriptValue)) {
+            console.error(`❌ Script still has forbidden context placeholders after word-bounded pass — applying again`);
+            const body2 = "(await page.textContent('body') || '')";
+            scriptValue = scriptValue.replace(/\bresolvedVisibleText\b/gi, body2);
+            scriptValue = scriptValue.replace(/\bvisibleText\b/gi, body2);
+            scriptValue = scriptValue.replace(/\bvisible_text\b/gi, body2);
+            parsedResponse.playwright_script = scriptValue;
+            console.warn(`⚠️ Re-applied context-placeholder fix on playwright_script`);
           }
           
           // Store playwright_script directly in page namespace for easy access
@@ -6774,16 +6694,10 @@ return {
     let cleanedValue = value;
     if ((variableName === 'playwright_script' || variableName.includes('script') || variableName.includes('code')) && typeof value === 'string') {
       const beforeClean = cleanedValue;
-      const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
-      
-      for (const varName of variableNames) {
-        // Replace using while loop to catch all instances
-        while (cleanedValue.includes(varName)) {
-          cleanedValue = cleanedValue.replace(varName, "(await page.textContent('body') || '')");
-        }
-        // Also use regex for case-insensitive matching
-        cleanedValue = cleanedValue.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
-      }
+      const body = "(await page.textContent('body') || '')";
+      cleanedValue = cleanedValue.replace(/\bresolvedVisibleText\b/gi, body);
+      cleanedValue = cleanedValue.replace(/\bvisibleText\b/gi, body);
+      cleanedValue = cleanedValue.replace(/\bvisible_text\b/gi, body);
       
       // Also replace credentials variables
       cleanedValue = cleanedValue.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
@@ -8248,11 +8162,11 @@ return {
       if (rawCode && typeof rawCode === 'string' && rawCode.length > 0) {
         console.log(`🔍 DEBUG: Entering replacement block - rawCode is valid string`);
         // CRITICAL: Check for unresolved variables BEFORE replacement
-        const hasUnresolved = /resolvedVisibleText|visibleText|visible_text/i.test(rawCode);
+        const hasUnresolved = /\b(resolvedVisibleText|visibleText|visible_text)\b/i.test(rawCode);
         console.log(`🔍 DEBUG: hasUnresolved check: ${hasUnresolved}`);
         if (hasUnresolved) {
           console.warn(`⚠️ WARNING: Code contains unresolved variables! Checking before replacement...`);
-          const unresolvedMatches = rawCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+          const unresolvedMatches = rawCode.match(/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/gi);
           console.warn(`⚠️ Found ${unresolvedMatches?.length || 0} unresolved variable(s): ${unresolvedMatches?.slice(0, 5).join(', ') || 'none'}`);
         } else {
           console.log(`🔍 DEBUG: No unresolved variables found in code`);
@@ -8262,28 +8176,19 @@ return {
         // Use regex with global flag for efficiency (faster than while loops when no matches)
         console.log(`🔧 Starting variable replacement on ${rawCode.length} char code`);
         const beforeReplacement = rawCode;
-        const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
-        
-        // Quick check - if no variables found, skip expensive operations
-        const hasAnyVariables = variableNames.some(v => rawCode.includes(v)) || 
-                                rawCode.includes('credentials.username') || 
-                                rawCode.includes('credentials.password') ||
-                                rawCode.includes('creds.username') ||
-                                rawCode.includes('creds.password');
+        const hasAnyVariables =
+          /\b(resolvedVisibleText|visibleText|visible_text)\b/i.test(rawCode) ||
+          rawCode.includes('credentials.username') ||
+          rawCode.includes('credentials.password') ||
+          rawCode.includes('creds.username') ||
+          rawCode.includes('creds.password');
         
         if (hasAnyVariables) {
           console.log(`🔧 Variables found, applying replacement...`);
-          // Replace using regex with global flag (faster and catches all)
-          for (const varName of variableNames) {
-            if (rawCode.includes(varName)) {
-              const regex = new RegExp(varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-              const matches = rawCode.match(regex);
-              if (matches) {
-                rawCode = rawCode.replace(regex, "(await page.textContent('body') || '')");
-                console.log(`🔧 Replaced ${matches.length} occurrence(s) of ${varName}`);
-              }
-            }
-          }
+          const body = "(await page.textContent('body') || '')";
+          rawCode = rawCode.replace(/\bresolvedVisibleText\b/gi, body);
+          rawCode = rawCode.replace(/\bvisibleText\b/gi, body);
+          rawCode = rawCode.replace(/\bvisible_text\b/gi, body);
           
           // Replace credentials using regex
           if (rawCode.includes('credentials.username')) {
@@ -8308,11 +8213,12 @@ return {
           console.log(`🔧 No variables found, skipping replacement`);
         }
         
-        // CRITICAL: Final aggressive pass - replace ANY remaining instances using regex with global flag
+        // CRITICAL: Final aggressive pass — word-boundary only. Plain /visibleText/gi matches the tail of
+        // `invisibleText` / `getVisibleText` and mangles valid scripts → Unexpected token ')' in new Function.
         const beforeFinal = rawCode;
-        rawCode = rawCode.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
-        rawCode = rawCode.replace(/visibleText/gi, "(await page.textContent('body') || '')");
-        rawCode = rawCode.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+        rawCode = rawCode.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+        rawCode = rawCode.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+        rawCode = rawCode.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
         
         if (rawCode !== beforeReplacement || rawCode !== beforeFinal) {
           const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text|credentials\.(username|password)|creds\.(username|password)/gi) || []).length;
@@ -8321,21 +8227,18 @@ return {
         console.log(`🔧 Variable replacement completed`);
         
         // CRITICAL: Final check - if still present, this is a critical error
-        if (/resolvedVisibleText|visibleText|visible_text/i.test(rawCode)) {
+        if (/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/i.test(rawCode)) {
           console.error(`❌ CRITICAL ERROR: Variables STILL present after ALL replacement attempts!`);
-          const stillPresent = rawCode.match(/resolvedVisibleText|visibleText|visible_text/gi);
+          const stillPresent = rawCode.match(/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/gi);
           console.error(`❌ Still present: ${stillPresent?.length || 0} occurrence(s): ${stillPresent?.slice(0, 5).join(', ') || 'none'}`);
-          const firstIndex = rawCode.search(/resolvedVisibleText|visibleText|visible_text/i);
+          const firstIndex = rawCode.search(/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/i);
           if (firstIndex >= 0) {
             console.error(`❌ Code snippet: ${rawCode.substring(Math.max(0, firstIndex - 100), Math.min(rawCode.length, firstIndex + 200))}`);
           }
-          // Emergency replacement - replace everything one more time using while loop
-          for (const varName of variableNames) {
-            while (rawCode.includes(varName)) {
-              rawCode = rawCode.replace(varName, "(await page.textContent('body') || '')");
-            }
-          }
-          console.warn(`⚠️ Applied emergency replacement - script may still fail`);
+          rawCode = rawCode.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+          rawCode = rawCode.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+          rawCode = rawCode.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
+          console.warn(`⚠️ Applied emergency word-bounded replacement - script may still fail`);
         }
         
         code = rawCode;
@@ -8352,11 +8255,11 @@ return {
         code = fieldData;
       }
       if (code && typeof code === 'string') {
-        // CRITICAL: Apply variable replacement
+        // CRITICAL: Apply variable replacement (word-boundary for context vars — see note above)
         const beforeReplacement = code;
-        code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
-        code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
-        code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
         code = code.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
         code = code.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
         code = code.replace(/\bcreds\.username\b/gi, "input_credentials.username");
@@ -8373,11 +8276,11 @@ return {
     if (!code && workflowState.context?.[sourceField]) {
       code = workflowState.context[sourceField];
       if (code && typeof code === 'string') {
-        // CRITICAL: Apply variable replacement
+        // CRITICAL: Apply variable replacement (word-boundary for context vars)
         const beforeReplacement = code;
-        code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
-        code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
-        code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
         code = code.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
         code = code.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
         code = code.replace(/\bcreds\.username\b/gi, "input_credentials.username");
@@ -8434,38 +8337,13 @@ return {
     // Use MULTIPLE aggressive methods to catch ALL variations
     if (code && typeof code === 'string') {
       const beforeReplacement = code;
-      const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
-      
-      // Method 1: Simple string replace using while loop (catches ANY form)
-      for (const varName of variableNames) {
-        while (code.includes(varName)) {
-          code = code.replace(varName, "(await page.textContent('body') || '')");
-        }
-        // Also try case variations
-        const lowerVar = varName.toLowerCase();
-        const upperVar = varName.toUpperCase();
-        while (code.includes(lowerVar)) {
-          code = code.replace(lowerVar, "(await page.textContent('body') || '')");
-        }
-        while (code.includes(upperVar)) {
-          code = code.replace(upperVar, "(await page.textContent('body') || '')");
-        }
-      }
-      
-      // Method 2: Word boundary regex
+      // Word boundaries only — while(includes(visibleText)) mutates `invisibleText` / `getVisibleText` etc.
       code = code.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
       code = code.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
       code = code.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
-      
-      // Method 3: Template literal context
       code = code.replace(/\$\{resolvedVisibleText\}/gi, "${await page.textContent('body') || ''}");
       code = code.replace(/\$\{visible_text\}/gi, "${await page.textContent('body') || ''}");
       code = code.replace(/\$\{visibleText\}/gi, "${await page.textContent('body') || ''}");
-      
-      // Method 4: Case-insensitive regex without word boundaries
-      code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
-      code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
-      code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
       
       // Replace credentials references
       code = code.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
@@ -8479,17 +8357,14 @@ return {
       }
       
       // Final verification
-      if (/resolvedVisibleText|visibleText|visible_text/i.test(code)) {
+      if (/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/i.test(code)) {
         console.error(`❌ CRITICAL: Variable STILL present after retrieval replacement!`);
-        const stillPresent = code.match(/resolvedVisibleText|visibleText|visible_text/gi);
+        const stillPresent = code.match(/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/gi);
         console.error(`❌ Still present: ${stillPresent?.length || 0} occurrence(s)`);
-        // Last resort: character-by-character replacement
-        for (const varName of variableNames) {
-          const chars = varName.split('');
-          const pattern = chars.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('');
-          code = code.replace(new RegExp(pattern, 'gi'), "(await page.textContent('body') || '')");
-        }
-        console.warn(`⚠️ Applied character-by-character replacement as last resort`);
+        code = code.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+        code = code.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
+        console.warn(`⚠️ Re-applied word-bounded context-var replacement as last resort`);
       }
       if (code !== beforeReplacement) {
         const replacedCount = (beforeReplacement.match(/resolvedVisibleText|visibleText|visible_text|credentials\.(username|password)|creds\.(username|password)/gi) || []).length;
@@ -8506,15 +8381,12 @@ return {
         // CRITICAL: Apply replacement on fallback code too
         if (code && typeof code === 'string') {
           const beforeFallbackReplacement = code;
-          const fallbackVariableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
-          for (const varName of fallbackVariableNames) {
-            while (code.includes(varName)) {
-              code = code.replace(varName, "(await page.textContent('body') || '')");
-            }
-            code = code.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
-          }
+          const body = "(await page.textContent('body') || '')";
+          code = code.replace(/\bresolvedVisibleText\b/gi, body);
+          code = code.replace(/\bvisibleText\b/gi, body);
+          code = code.replace(/\bvisible_text\b/gi, body);
           if (code !== beforeFallbackReplacement) {
-            const replacedCount = (beforeFallbackReplacement.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+            const replacedCount = (beforeFallbackReplacement.match(/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/gi) || []).length;
             console.log(`🔧 Replacement on fallback legScriptToExecute: Fixed ${replacedCount} undefined variable(s)`);
           }
         }
@@ -8525,15 +8397,12 @@ return {
         // CRITICAL: Apply replacement on fallback code too
         if (code && typeof code === 'string') {
           const beforeFallbackReplacement = code;
-          const fallbackVariableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
-          for (const varName of fallbackVariableNames) {
-            while (code.includes(varName)) {
-              code = code.replace(varName, "(await page.textContent('body') || '')");
-            }
-            code = code.replace(new RegExp(varName, 'gi'), "(await page.textContent('body') || '')");
-          }
+          const body = "(await page.textContent('body') || '')";
+          code = code.replace(/\bresolvedVisibleText\b/gi, body);
+          code = code.replace(/\bvisibleText\b/gi, body);
+          code = code.replace(/\bvisible_text\b/gi, body);
           if (code !== beforeFallbackReplacement) {
-            const replacedCount = (beforeFallbackReplacement.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+            const replacedCount = (beforeFallbackReplacement.match(/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/gi) || []).length;
             console.log(`🔧 Replacement on fallback context.legScriptToExecute: Fixed ${replacedCount} undefined variable(s)`);
           }
         }
@@ -8722,13 +8591,12 @@ return {
       }
     }
     
-    // CRITICAL: Apply variable replacement BEFORE cleaning
-    // This ensures variables are replaced even if they're in comments or strings that might be removed
+    // CRITICAL: Apply variable replacement BEFORE cleaning (word-boundary for context vars)
     if (code && typeof code === 'string') {
       const beforePreClean = code;
-      code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
-      code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
-      code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
       code = code.replace(/\bcredentials\.username\b/gi, "input_credentials.username");
       code = code.replace(/\bcredentials\.password\b/gi, "input_credentials.password");
       code = code.replace(/\bcreds\.username\b/gi, "input_credentials.username");
@@ -8779,81 +8647,30 @@ return {
       }
     }
     
-    // CRITICAL: Final aggressive pass - replace ANY remaining instances (case-insensitive, no word boundaries)
-    // This catches variables in any context (strings, comments, variable names, etc.)
     const beforeAggressive = code;
-    code = code.replace(/resolvedVisibleText/gi, "(await page.textContent('body') || '')");
-    code = code.replace(/visibleText/gi, "(await page.textContent('body') || '')");
-    code = code.replace(/visible_text/gi, "(await page.textContent('body') || '')");
+    code = code.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+    code = code.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+    code = code.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
     if (code !== beforeAggressive) {
-      const aggressiveCount = (beforeAggressive.match(/resolvedVisibleText|visibleText|visible_text/gi) || []).length;
+      const aggressiveCount = (beforeAggressive.match(/\bresolvedVisibleText\b|\bvisibleText\b|\bvisible_text\b/gi) || []).length;
       replacementCount += aggressiveCount;
-      console.log(`🔧 Applied aggressive replacement: ${aggressiveCount} occurrence(s) removed`);
+      console.log(`🔧 Applied word-bounded context-var pass: ${aggressiveCount} occurrence(s) removed`);
     }
-    
-    // CRITICAL: Final check - search for variable in ALL possible forms (including edge cases)
-    // Use multiple methods to ensure we catch it
-    const variableNames = ['resolvedVisibleText', 'visibleText', 'visible_text'];
-    let foundVariables = [];
-    
-    for (const varName of variableNames) {
-      // Method 1: Simple indexOf (catches any form)
-      const indexOfMatch = code.indexOf(varName);
-      if (indexOfMatch >= 0) {
-        foundVariables.push({ name: varName, method: 'indexOf', position: indexOfMatch });
+
+    if (/\b(resolvedVisibleText|visibleText|visible_text)\b/i.test(code)) {
+      console.error(`❌ CRITICAL ERROR: Code STILL contains unresolved context var after word-bounded replacement`);
+      const m = code.match(/\b(resolvedVisibleText|visibleText|visible_text)\b/gi) || [];
+      if (m.length) {
+        const pos = code.search(/\b(resolvedVisibleText|visibleText|visible_text)\b/i);
+        const context = pos >= 0
+          ? code.substring(Math.max(0, pos - 200), Math.min(code.length, pos + 200))
+          : '';
+        console.error(`❌ Unresolved at ~${pos}: ...${context}...`);
       }
-      
-      // Method 2: Case-insensitive regex
-      const regexMatch = new RegExp(varName, 'gi').test(code);
-      if (regexMatch) {
-        const matches = code.match(new RegExp(varName, 'gi'));
-        foundVariables.push({ name: varName, method: 'regex', count: matches?.length || 0 });
-      }
-    }
-    
-    if (foundVariables.length > 0) {
-      console.error(`❌ CRITICAL ERROR: Code STILL contains unresolved variable after ALL replacement attempts!`);
-      foundVariables.forEach(({ name, method, position, count }) => {
-        if (method === 'indexOf') {
-          const context = code.substring(Math.max(0, position - 200), Math.min(code.length, position + 200));
-          console.error(`❌ Found '${name}' via ${method} at position ${position}, context: ...${context}...`);
-        } else {
-          console.error(`❌ Found '${name}' via ${method}, count: ${count}`);
-        }
-      });
-      
-      // Last resort: replace with a safe fallback using multiple methods
-      // Method 1: Simple string replace (catches any form)
-      for (const varName of variableNames) {
-        while (code.includes(varName)) {
-          code = code.replace(varName, "(await page.textContent('body') || '')");
-        }
-        // Also try case variations
-        const lowerVar = varName.toLowerCase();
-        const upperVar = varName.toUpperCase();
-        while (code.includes(lowerVar)) {
-          code = code.replace(lowerVar, "(await page.textContent('body') || '')");
-        }
-        while (code.includes(upperVar)) {
-          code = code.replace(upperVar, "(await page.textContent('body') || '')");
-        }
-      }
-      
-      // Method 2: Regex replace (catches word boundaries and template literals)
-      code = code.replace(/resolvedVisibleText|visibleText|visible_text/gi, "(await page.textContent('body') || '')");
-      
-      console.warn(`⚠️ Applied emergency replacement using multiple methods - script should now be clean`);
-      
-      // Final verification
-      const stillPresent = variableNames.some(v => code.includes(v));
-      if (stillPresent) {
-        console.error(`❌ CRITICAL: Variable STILL present after emergency replacement! This should not happen!`);
-        // One more aggressive pass - replace character by character if needed
-        for (const varName of variableNames) {
-          const regex = new RegExp(varName.split('').join('[\\s\\S]*?'), 'gi');
-          code = code.replace(regex, "(await page.textContent('body') || '')");
-        }
-      }
+      code = code.replace(/\bresolvedVisibleText\b/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/\bvisibleText\b/gi, "(await page.textContent('body') || '')");
+      code = code.replace(/\bvisible_text\b/gi, "(await page.textContent('body') || '')");
+      console.warn(`⚠️ Re-applied word-bounded context-var replacement; verify script manually if still failing`);
     }
     
     if (replacementCount > 0) {
