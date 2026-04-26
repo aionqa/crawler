@@ -8,6 +8,7 @@ import {
   capPlaywrightAutomationTimeouts,
   stripCommonAiTypeScriptCasts,
 } from './utils/normalize-playwright-network-idle.js';
+import { applyAiPlaywrightExecutionRepairs } from './utils/ai-playwright-execution-repairs.js';
 import { evaluateLoginSessionEvidenceOverride } from './utils/login-session-evidence-override.js';
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 import * as backendLoggerModule from '../backend-logger.js';
@@ -7529,6 +7530,7 @@ return {
     }
     
     let cleaned = script.trim();
+    cleaned = applyAiPlaywrightExecutionRepairs(cleaned);
     cleaned = this.hardenAiPlaywrightScriptFragment(cleaned);
     // Preserve async IIFE wrappers (return await (async () => { ... })()) to avoid breaking structure
     const asyncIifePattern = /^return\s+await\s+\(async\s*\(\)\s*=>\s*\{/;
@@ -9588,7 +9590,7 @@ return {
         
         // CRITICAL: Apply variable replacement AGAIN right before execution
         // This ensures any variables that weren't replaced earlier are caught
-        let finalScriptCode = scriptCode;
+        let finalScriptCode = applyAiPlaywrightExecutionRepairs(scriptCode);
         const escVarRe = (v) => String(v).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const varWord = (v) => new RegExp(`\\b${escVarRe(v)}\\b`, 'gi');
         const VARS_RESOLVE_TEXT = ['resolvedVisibleText', 'visibleText', 'visible_text'];
