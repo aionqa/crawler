@@ -8,6 +8,21 @@
 
 import { stripCommonAiTypeScriptCasts } from './normalize-playwright-network-idle.js';
 
+/** Private-use placeholder so `//` inside `https://` is not treated as a line comment. */
+const URL_SCHEME_SLASHES_PLACEHOLDER = '\uE000AIONQA_SCHEME_SLASHES\uE001';
+
+/**
+ * Strip `// ...` line comments without corrupting `http(s)://`, `ws(s)://`, or `ftp://` inside literals.
+ * Naive `/\/\/[^\n]*/g` matches the slashes in `https://host` and breaks `new Function` parsing.
+ * @param {string} script
+ * @returns {string}
+ */
+export function stripLineCommentsPreservingUrlSchemes(script) {
+  if (!script || typeof script !== 'string') return script;
+  const masked = script.replace(/\b(https?|wss?|ftp)(:\/\/)/gi, (_, scheme) => `${scheme}${URL_SCHEME_SLASHES_PLACEHOLDER}`);
+  return masked.replace(/\/\/[^\n]*/g, '').split(URL_SCHEME_SLASHES_PLACEHOLDER).join('://');
+}
+
 /**
  * Find the closing `)` matching an opening `(` at `fromOpen`, respecting strings and line/block comments.
  * @param {string} s

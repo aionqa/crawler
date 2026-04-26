@@ -8,7 +8,11 @@ import {
   capPlaywrightAutomationTimeouts,
   stripCommonAiTypeScriptCasts,
 } from './utils/normalize-playwright-network-idle.js';
-import { applyAiPlaywrightExecutionRepairs, stripPageGotoCallsForLoginScript } from './utils/ai-playwright-execution-repairs.js';
+import {
+  applyAiPlaywrightExecutionRepairs,
+  stripLineCommentsPreservingUrlSchemes,
+  stripPageGotoCallsForLoginScript,
+} from './utils/ai-playwright-execution-repairs.js';
 import { evaluateLoginSessionEvidenceOverride } from './utils/login-session-evidence-override.js';
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 import * as backendLoggerModule from '../backend-logger.js';
@@ -7528,8 +7532,8 @@ return {
     // Remove template variables
     cleaned = cleaned.replace(/\{\{[^}]+\}\}/g, '');
     
-    // Remove comments
-    cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
+    // Remove comments (preserve :// in URLs so https://... literals are not corrupted)
+    cleaned = stripLineCommentsPreservingUrlSchemes(cleaned);
     cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
     
     // Clean up extra whitespace
@@ -9612,6 +9616,9 @@ return {
             } catch (_) {}
           }
         }
+
+        // `stripCommonAiTypeScriptCasts` can leave redundant `)`; re-run execution repairs before `new Function`.
+        finalScriptCode = applyAiPlaywrightExecutionRepairs(finalScriptCode);
         
         // Log a sample of the script to verify it's clean
         const scriptSample = finalScriptCode.substring(0, 500);

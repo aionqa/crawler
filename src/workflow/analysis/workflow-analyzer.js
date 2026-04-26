@@ -12,6 +12,7 @@ import {
   injectJourneyClickExistencePreflight,
   stripCommonAiTypeScriptCasts,
 } from '../utils/normalize-playwright-network-idle.js';
+import { stripLineCommentsPreservingUrlSchemes } from '../utils/ai-playwright-execution-repairs.js';
 import { analyzePageWithLighthouse } from '../../lighthouse-analyzer.js';
 import { evaluateLoginSessionEvidenceOverride } from '../utils/login-session-evidence-override.js';
 import {
@@ -14859,8 +14860,8 @@ return {
     // Remove template variables
     cleaned = cleaned.replace(/\{\{[^}]+\}\}/g, '');
     
-    // Remove comments
-    cleaned = cleaned.replace(/\/\/[^\n]*/g, '');
+    // Remove comments (preserve :// in URLs so https://... literals are not corrupted)
+    cleaned = stripLineCommentsPreservingUrlSchemes(cleaned);
     cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
 
     // Repair helper wrapper corruption seen in generated modal scripts.
