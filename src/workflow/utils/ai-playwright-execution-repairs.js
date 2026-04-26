@@ -9,6 +9,84 @@
 import { stripCommonAiTypeScriptCasts } from './normalize-playwright-network-idle.js';
 
 /**
+ * Find the closing `)` matching an opening `(` at `fromOpen`, respecting strings and line/block comments.
+ * @param {string} s
+ * @param {number} fromOpen index of `(`
+ * @returns {number} index of `)` or -1
+ */
+function findMatchingCloseParen(s, fromOpen) {
+  if (!s || fromOpen < 0 || fromOpen >= s.length || s[fromOpen] !== '(') return -1;
+  let depth = 1;
+  let inStr = null; // ' | " | `
+  let esc = false;
+  for (let i = fromOpen + 1; i < s.length; i++) {
+    const c = s[i];
+    const c2 = s[i + 1];
+    if (inStr) {
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (c === '\\' && inStr !== '`') {
+        esc = true;
+        continue;
+      }
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      inStr = c;
+      continue;
+    }
+    if (c === '/' && c2 === '/') {
+      i += 1;
+      while (i + 1 < s.length && s[i + 1] !== '\n' && s[i + 1] !== '\r') i++;
+      continue;
+    }
+    if (c === '/' && c2 === '*') {
+      i += 2;
+      while (i + 1 < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++;
+      i++;
+      continue;
+    }
+    if (c === '(') depth += 1;
+    else if (c === ')') {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Remove `page.goto` / `await page.goto` calls for login jobs. A non-greedy `([\\s\\S]*?)\\)`
+ * match stops at the first `)` and corrupts `page.goto(url, { waitUntil: ... })` and URLs with
+ * `)`, leaving stray tokens that make `new Function` throw "Unexpected token ')'".
+ * @param {string} script
+ * @returns {string}
+ */
+export function stripPageGotoCallsForLoginScript(script) {
+  if (!script || typeof script !== 'string') return script;
+  const re = /\b(?:await\s+)?page\.goto\s*\(/g;
+  let s = script;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const openParen = m.index + m[0].length - 1;
+    const closeParen = findMatchingCloseParen(s, openParen);
+    if (closeParen < 0) {
+      re.lastIndex = m.index + 1;
+      continue;
+    }
+    let end = closeParen + 1;
+    while (end < s.length && /[\s\t]/.test(s[end])) end += 1;
+    if (s[end] === ';') end += 1;
+    s = s.slice(0, m.index) + s.slice(end);
+    re.lastIndex = Math.max(0, m.index);
+  }
+  return s;
+}
+
+/**
  * LLMs sometimes emit an extra `)` inside a quoted Playwright selector (or a surplus `)` after
  * .catch(() => null)) which makes `new Function` throw "Unexpected token ')'".
  * Mirrors `workflow/analysis/workflow-analyzer.js` repairLocatorQuotedSelectorParenBalance, plus
@@ -56,6 +134,11 @@ export function repairQuotedSelectorParenBalanceInAiScript(script) {
   s = s.replace(
     /\.catch\s*\(\s*\(\s*\)\s*=>\s*(?:null|undefined)\s*\)\s*\)\s*;/g,
     '.catch(() => null);',
+  );
+  // `)).catch(() => null)` on promise chains (extra `)` before .catch) — keep single closing paren
+  s = s.replace(
+    /\)\s*\)\s*(\.catch\s*\(\s*\(\s*\)\s*=>\s*(?:null|undefined)\s*\))/g,
+    ')$1',
   );
   return s;
 }

@@ -8,7 +8,7 @@ import {
   capPlaywrightAutomationTimeouts,
   stripCommonAiTypeScriptCasts,
 } from './utils/normalize-playwright-network-idle.js';
-import { applyAiPlaywrightExecutionRepairs } from './utils/ai-playwright-execution-repairs.js';
+import { applyAiPlaywrightExecutionRepairs, stripPageGotoCallsForLoginScript } from './utils/ai-playwright-execution-repairs.js';
 import { evaluateLoginSessionEvidenceOverride } from './utils/login-session-evidence-override.js';
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 import * as backendLoggerModule from '../backend-logger.js';
@@ -9171,11 +9171,13 @@ return {
       if (isLoginJob) {
         // Login scripts should interact with the current login page only.
         // AI often emits page.goto(...) wrappers; strip those lines instead of failing immediately.
-        const gotoRegex = /\b(?:await\s+)?page\.goto\s*\([\s\S]*?\)\s*;?/gi;
-        const gotoMatches = code.match(gotoRegex) || [];
-        if (gotoMatches.length > 0) {
-          code = code.replace(gotoRegex, '');
-          console.warn(`⚠️ Removed ${gotoMatches.length} page.goto() call(s) from login script before execution`);
+        const beforeGotoStrip = code;
+        code = stripPageGotoCallsForLoginScript(code);
+        if (code !== beforeGotoStrip) {
+          const n = (beforeGotoStrip.match(/\b(?:await\s+)?page\.goto\s*\(/gi) || []).length;
+          console.warn(`⚠️ Removed page.goto() call(s) from login script before execution (balanced parse)`);
+          // Regex strip used to break multi-arg gotos; re-apply repairs on the full script
+          code = applyAiPlaywrightExecutionRepairs(code);
         }
 
         // Use a word boundary so aliases like vpage.goto(...) are not mistaken for page.goto(...)
