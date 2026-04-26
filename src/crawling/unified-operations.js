@@ -7590,6 +7590,29 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         Array.isArray(context.api_domains) ? context.api_domains : []
       );
 
+      // app.aionqa.com: Vue's persisted route-restore (localStorage) can force the first navigation
+      // to the last saved path (e.g. /stats), so the crawler's requested URLs all dedupe to one page.
+      // sessionStorage is read in ui/src/router.js to skip that restore and stop persisting aionqa_route_state.
+      try {
+        const host = new URL(scopeSeedUrl).hostname.replace(/^www\./, '').toLowerCase();
+        if (host === 'app.aionqa.com') {
+          await browserContext.addInitScript(() => {
+            try {
+              sessionStorage.setItem('aionqa_spa_crawl', '1');
+            } catch {
+              // ignore
+            }
+          });
+          await sendLog(
+            jobId,
+            'info',
+            'AionQA app: SPA crawl session flag (skip route-state restore) enabled for this browser context'
+          );
+        }
+      } catch {
+        // invalid scope URL — skip init script
+      }
+
       // Diagnostics: capture runtime JS errors and failed requests so we can explain
       // "Application error: a client-side exception has occurred" screenshots.
       try {
