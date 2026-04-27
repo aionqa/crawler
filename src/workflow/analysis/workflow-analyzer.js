@@ -27,6 +27,11 @@ import {
 import { snapshotPageHtml } from '../../utils/page-html-snapshot.js';
 import { collectIframeEmbedLinkRows } from '../../utils/iframe-embed-discovery.js';
 import * as backendLoggerModule from '../../backend-logger.js';
+import {
+  textLooksSpeculativeOrConditional,
+  filterJourneysAgainstSpeculativeLanguage,
+  filterLegsAgainstSpeculativeLanguage,
+} from './journey-language-filters.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -3384,21 +3389,34 @@ class WorkflowAnalyzer {
       return template;
     }
 
-    const normalized = template.toLowerCase();
-    if (normalized.includes('"legs"') || normalized.includes(' legs array') || normalized.includes('workflow legs')) {
-      return template;
+    const strictEvidenceBlock = `STRICT (EVIDENCE-ONLY JOURNEYS / LEGS):
+- Use ONLY UI controls that are explicitly present in the provided machine-readable data: interactive_elements, forms (and their fields/buttons), links, menu_items, and non_interactive_elements. Copy selectors EXACTLY from that JSON. Do not invent #ids, class paths, or data-testid values that are not in the payload.
+- The screenshot and visible_text are supporting context; they do NOT add new interactive controls. If a control is not in the JSON inventory, do not create a leg or journey for it.
+- Do NOT add journeys for "common" product patterns (view density, compact mode, theme toggles, keyboard shortcuts) unless a matching control with a real selector appears in the JSON.
+- Prohibited phrasing in descriptions and test instructions: "if present", "if any", "optional", "e.g.", "eg.", "such as", "for example", "try to", "might", "you could" — use concrete actions on named controls from the JSON only.`;
+
+    let base = template.trim();
+    if (!/STRICT \(EVIDENCE-ONLY JOURNEYS/i.test(base)) {
+      base = `${base}
+
+${strictEvidenceBlock}`;
     }
 
-    return `${template.trim()}
+    const normalized = base.toLowerCase();
+    if (normalized.includes('"legs"') || normalized.includes(' legs array') || normalized.includes('workflow legs')) {
+      return base;
+    }
+
+    return `${base}
 
 IMPORTANT OUTPUT REQUIREMENTS:
 - Return valid JSON that includes all of the page summary fields above.
-- ALSO include a top-level "legs" array describing the highest value interactive test actions (buttons, toggles, form submissions, input flows).
+- ALSO include a top-level "legs" array describing the highest value interactive test actions drawn ONLY from the provided interactive_elements / forms / links JSON (buttons, form submissions, input flows) — not guessed controls.
 - CRITICAL: If FORMS (JSON) data is provided, you MUST create a leg for EACH form in that array. Each form leg must:
   - Have type: "form_submit"
   - Use the form's selector property from the forms JSON (form.selector or form.selectors[0].selector)
   - Include form fields and buttons in element_info
-  - Describe what the form does (e.g., "Submit contact form", "Submit newsletter signup")
+  - Describe what the form does in concrete terms and the exact selectors used (no hypothetical examples)
 - Each item in "legs" MUST include:
   - "leg_id": unique snake_case string identifier
   - "description": concise sentence describing the action and purpose
@@ -3919,9 +3937,11 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         }
         return true;
       });
+
+      const evidenceOnlyJourneys = filterJourneysAgainstSpeculativeLanguage(journeysWithExecutableActions);
       
       // Convert journeys to legs for internal processing (backwards compatibility)
-      processedItems = this.convertJourneysToLegs(journeysWithExecutableActions);
+      processedItems = this.convertJourneysToLegs(evidenceOnlyJourneys);
     } else {
       let linkFilteredLegs = rawLegs.filter((leg) => !this.shouldSkipPlainHyperlinkJourneyItem(leg, workflowState, false));
       linkFilteredLegs = linkFilteredLegs.filter((leg) => {
@@ -3962,7 +3982,7 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           );
         }
       }
-      processedItems = linkFilteredLegs;
+      processedItems = filterLegsAgainstSpeculativeLanguage(linkFilteredLegs);
       processedItems = this.filterImpossibleLegsOnSparseSurface(processedItems, workflowState);
     }
 
@@ -9743,10 +9763,6 @@ return {
               console.log(`✅ [JOURNEYS-SPARSE] Surface filter: ${beforeSparse} → ${journeys.length} journey(s)`);
             }
           }
-          const containsConditionalLanguage = (value) =>
-            /\b(if available|if present|if exists|if any|if expandable|where applicable|when applicable|maybe|might|try to|attempt to)\b/i.test(
-              String(value || '')
-            );
           const isVerifyOnlyJourney = (journey) => {
             const actions = Array.isArray(journey?.actions) ? journey.actions : [];
             if (actions.length === 0) return true;
@@ -9760,9 +9776,14 @@ return {
               journey?.description,
               journey?.test_instructions,
               journey?.expected_outcome,
-              ...(Array.isArray(journey?.actions) ? journey.actions.map((a) => `${a?.description || ''} ${a?.expected_outcome || ''}`) : [])
+              journey?.journey_id,
+              ...(Array.isArray(journey?.actions)
+                ? journey.actions.map(
+                    (a) => `${a?.description || ''} ${a?.expected_outcome || ''} ${a?.test_instructions || ''}`,
+                  )
+                : []),
             ].join(' ');
-            if (containsConditionalLanguage(summaryText)) {
+            if (textLooksSpeculativeOrConditional(summaryText)) {
               console.warn(`⚠️ [JOURNEYS-QUALITY] Removing speculative journey "${journey?.journey_id || journey?.description || 'unknown'}" due to conditional language`);
               return false;
             }
