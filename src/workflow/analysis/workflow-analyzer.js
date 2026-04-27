@@ -32,6 +32,7 @@ import {
   filterJourneysAgainstSpeculativeLanguage,
   filterLegsAgainstSpeculativeLanguage,
 } from './journey-language-filters.js';
+import { buildJourneyEvidenceChecklist } from '../evidence-checklist-builder.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -20364,11 +20365,23 @@ const sleep = safeWait;
     }
     
     try {
+      const legForEvidence =
+        workflowState.currentLeg ||
+        (Array.isArray(workflowState.legs) && workflowState.legs.find((l) => l.leg_id === legId || l.journey_id === legId)) ||
+        null;
+      const evidence_checklist = buildJourneyEvidenceChecklist({
+        workflowState,
+        leg: legForEvidence,
+        jobId,
+        legId
+      });
       await axios.post(
         `${this.backendUrl}/api/workflows/${workflowState.workflowId}/legs/${legId}/complete`,
         {
           final_result: finalResult,
-          error: error
+          error: error,
+          job_id: jobId,
+          evidence_checklist
         },
         {
           headers: this.getAuthHeaders()
@@ -24863,12 +24876,19 @@ const sleep = safeWait;
             
             // Also call complete-leg endpoint to update action status
             try {
+              const evidence_checklist = buildJourneyEvidenceChecklist({
+                workflowState,
+                leg: legToSave,
+                jobId,
+                legId: legToSave.leg_id
+              });
               const completeResponse = await axios.post(
                 `${this.backendUrl}/api/workflows/${workflowState.workflowId}/legs/${legToSave.leg_id}/complete`,
                 {
                   final_result: finalLegResult,
                   error: finalLegError,
-                  job_id: jobId
+                  job_id: jobId,
+                  evidence_checklist
                 },
                 {
                   headers: this.getAuthHeaders(),

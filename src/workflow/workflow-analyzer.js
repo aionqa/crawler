@@ -17,6 +17,7 @@ import { evaluateLoginSessionEvidenceOverride } from './utils/login-session-evid
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 import * as backendLoggerModule from '../backend-logger.js';
 import { filterLegsAgainstSpeculativeLanguage } from './analysis/journey-language-filters.js';
+import { buildJourneyEvidenceChecklist } from './evidence-checklist-builder.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -10999,11 +11000,23 @@ ${executableBody}`;
     }
     
     try {
+      const legForEvidence =
+        workflowState.currentLeg ||
+        (Array.isArray(workflowState.legs) && workflowState.legs.find((l) => l.leg_id === legId || l.journey_id === legId)) ||
+        null;
+      const evidence_checklist = buildJourneyEvidenceChecklist({
+        workflowState,
+        leg: legForEvidence,
+        jobId,
+        legId
+      });
       await axios.post(
         `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys/${legId}/complete`,
         {
           final_result: finalResult,
-          error: error
+          error: error,
+          job_id: jobId,
+          evidence_checklist
         },
         {
           headers: this.getAuthHeaders()
@@ -12006,13 +12019,20 @@ ${executableBody}`;
           const error = justifyResult?.reason || null;
           
           try {
+            const evidence_checklist = buildJourneyEvidenceChecklist({
+              workflowState,
+              leg: journey,
+              jobId,
+              legId
+            });
             // CRITICAL: Include job_id in the completion request so actions can be matched correctly
             await axios.post(
               `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys/${legId}/complete`,
               {
                 final_result: finalResult,
                 error: error,
-                job_id: jobId  // CRITICAL: Include job_id for action matching
+                job_id: jobId, // CRITICAL: Include job_id for action matching
+                evidence_checklist
               },
               {
                 headers: this.getAuthHeaders()
@@ -12109,12 +12129,19 @@ ${executableBody}`;
         const error = justifyResult?.reason || null;
         
         try {
+          const evidence_checklist = buildJourneyEvidenceChecklist({
+            workflowState,
+            leg: journey,
+            jobId,
+            legId
+          });
           await axios.post(
             `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys/${legId}/complete`,
             {
               final_result: finalResult,
               error: error,
-              job_id: jobId
+              job_id: jobId,
+              evidence_checklist
             },
             {
               headers: this.getAuthHeaders()
@@ -13327,13 +13354,20 @@ ${executableBody}`;
           try {
             // Try journeys endpoint first (new), fallback to legs (legacy)
             const journeyId = finalCurrentLeg.journey_id || finalCurrentLeg.leg_id || finalCurrentLeg.id;
+            const evidence_checklist = buildJourneyEvidenceChecklist({
+              workflowState,
+              leg,
+              jobId,
+              legId: journeyId
+            });
             // CRITICAL: Include job_id in the completion request so actions can be matched correctly
             await axios.post(
               `${this.backendUrl}/api/workflows/${workflowState.workflowId}/journeys/${journeyId}/complete`,
               {
                 final_result: finalLegResult,
                 error: finalLegError,
-                job_id: jobId  // CRITICAL: Include job_id for action matching
+                job_id: jobId, // CRITICAL: Include job_id for action matching
+                evidence_checklist
               },
               {
                 headers: this.getAuthHeaders(),
