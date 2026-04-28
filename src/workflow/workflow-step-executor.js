@@ -3,6 +3,7 @@ import axios from 'axios';
 import { AIConversationLogger } from '../../shared/ai-conversation-logger.js';
 import * as BackendLogger from '../backend-logger.js';
 import { getRunnerBackendUrl } from '../utils/runner-service-urls.js';
+import { gatherDomCandidatesAcrossFrames } from '../utils/page-element-candidates.js';
 
 /**
  * WorkflowStepExecutor
@@ -292,26 +293,31 @@ export class WorkflowStepExecutor {
       // Collect interactive elements if requested
       const onlyVisibleInteractiveElements = parameters.onlyVisibleInteractiveElements === true;
       if (parameters.collectInteractiveElements !== false) {
-        const interactiveSelectors = [
-          'button', 'input', 'select', 'textarea', 'a[href]',
-          '[onclick]', '[role="button"]', '[tabindex]'
-        ];
-        
-        for (const selector of interactiveSelectors) {
-          const elements = await page.$$(selector);
-          for (const element of elements) {
-            const isVisible = await element.isVisible();
-            if (!onlyVisibleInteractiveElements || isVisible) {
-              const elementData = {
-                tag: await element.evaluate(el => el.tagName.toLowerCase()),
-                text: await element.textContent(),
-                selector: await this.getElementSelector(element),
-                attributes: await this.getElementAttributes(element),
-                visible: isVisible
-              };
-              
-              analysis.interactive_elements.push(elementData);
-            }
+        const domCandidates = await gatherDomCandidatesAcrossFrames(page, {
+          perFrameCap: 280,
+          maxTotal: 500,
+        });
+        for (const row of domCandidates) {
+          const elementData = {
+            tag: row.type,
+            text: row.text,
+            selector: row.selector,
+            attributes: {
+              role: row.role,
+              tabindex: row.tabindex,
+              href: row.href,
+              name: row.name,
+              id: row.id,
+              placeholder: row.placeholder,
+              has_onclick: row.has_onclick,
+            },
+            visible: true,
+            click_targets_undetermined: true,
+            in_frame: row.in_frame,
+            frame_url: row.frame_url,
+          };
+          if (!onlyVisibleInteractiveElements || elementData.visible) {
+            analysis.interactive_elements.push(elementData);
           }
         }
       }

@@ -18,6 +18,7 @@ import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 import * as backendLoggerModule from '../backend-logger.js';
 import { filterLegsAgainstSpeculativeLanguage } from './analysis/journey-language-filters.js';
 import { buildJourneyEvidenceChecklist } from './evidence-checklist-builder.js';
+import { gatherDomCandidatesAcrossFrames } from '../utils/page-element-candidates.js';
 
 /** Clone object for JSON serialization, breaking circular references (legs/journeys/iterations) */
 function safeJsonClone(obj) {
@@ -625,22 +626,36 @@ class WorkflowAnalyzer {
         }
       }
 
-      // Extract interactive elements (buttons, clickable divs, etc.)
-      const buttons = await page.$$('button:not(form button), input[type="button"], [role="button"], [onclick]');
-      for (const button of buttons) {
-        const text = await button.textContent();
-        const role = await button.getAttribute('role');
-        const onclick = await button.getAttribute('onclick');
-
-        const buttonSelectors = await this.getElementSelector(button);
-        analysis.interactive_elements.push({
-          type: 'button',
-          text: text?.trim(),
-          role,
-          onclick: onclick ? 'yes' : 'no',
-          selector: buttonSelectors[0]?.selector, // Primary selector
-          selectors: buttonSelectors // All strategies
+      const INTERACTIVE_SURFACE_CAP = 450;
+      const seenInteractiveSelectors = new Set(
+        analysis.interactive_elements
+          .map((e) => String(e.selector || '').trim())
+          .filter(Boolean),
+      );
+      try {
+        const domCandidates = await gatherDomCandidatesAcrossFrames(page, {
+          perFrameCap: 420,
+          maxTotal: INTERACTIVE_SURFACE_CAP,
         });
+        for (const row of domCandidates) {
+          if (!row?.selector || seenInteractiveSelectors.has(row.selector)) continue;
+          seenInteractiveSelectors.add(row.selector);
+          analysis.interactive_elements.push({
+            type: row.type || 'unknown',
+            text: row.text,
+            role: row.role,
+            tabindex: row.tabindex,
+            href: row.href,
+            onclick: row.has_onclick ? 'yes' : 'no',
+            selector: row.selector,
+            selectors: [],
+            click_targets_undetermined: row.click_targets_undetermined ?? true,
+            in_frame: row.in_frame,
+            frame_url: row.frame_url,
+          });
+        }
+      } catch (ieErr) {
+        console.warn(`[PLAYWRIGHT] DOM candidate inventory failed: ${ieErr.message}`);
       }
 
       // CRITICAL: Also add form fields (inputs, selects, textareas) to interactive_elements
@@ -808,7 +823,7 @@ class WorkflowAnalyzer {
     const legs = [];
     const forms = Array.isArray(playwrightAnalysis.forms) ? playwrightAnalysis.forms.slice(0, 20) : [];
     const interactiveElements = Array.isArray(playwrightAnalysis.interactive_elements)
-      ? playwrightAnalysis.interactive_elements.slice(0, 20)
+      ? playwrightAnalysis.interactive_elements.slice(0, 120)
       : [];
     const links = Array.isArray(playwrightAnalysis.links) ? playwrightAnalysis.links.slice(0, 30) : [];
     
@@ -1003,8 +1018,9 @@ class WorkflowAnalyzer {
     }
 
     const strictEvidenceBlock = `STRICT (EVIDENCE-ONLY JOURNEYS / LEGS):
-- Use ONLY UI controls that are explicitly present in the provided machine-readable data: interactive_elements, forms (and their fields/buttons), links, menu_items, and non_interactive_elements. Copy selectors EXACTLY from that JSON. Do not invent #ids, class paths, or data-testid values that are not in the payload.
-- The screenshot and visible_text are supporting context; they do NOT add new interactive controls. If a control is not in the JSON inventory, do not create a leg or journey for it.
+- Use ONLY surfaces present in the machine-readable data: interactive_elements (DOM candidates — NOT pre-labeled as clickable), forms (and their fields/buttons), links, menu_items, and non_interactive_elements. You MUST decide which DOM candidates are actionable (click, type, toggle) using attributes, roles, href, tabindex, onclick hints, plus screenshot/visible_text — the crawler does not assert clickability.
+- Copy selectors EXACTLY from that JSON for legs you author. Do not invent #ids, class paths, or data-testid values that are not in the payload.
+- The screenshot and visible_text are supporting context; use them to disambiguate DOM candidates. Do not invent controls that have no matching selector in the payloads.
 - Do NOT add journeys for "common" product patterns (view density, compact mode, theme toggles, keyboard shortcuts) unless a matching control with a real selector appears in the JSON.
 - Prohibited phrasing in descriptions and test instructions: "if present", "if any", "optional", "e.g.", "eg.", "such as", "for example", "try to", "might", "you could" — use concrete actions on named controls from the JSON only.`;
 
@@ -1024,7 +1040,7 @@ ${strictEvidenceBlock}`;
 
 IMPORTANT OUTPUT REQUIREMENTS:
 - Return valid JSON that includes all of the page summary fields above.
-- ALSO include a top-level "legs" array describing the highest value interactive test actions drawn ONLY from the provided interactive_elements / forms / links JSON (buttons, form submissions, input flows) — not guessed controls.
+- ALSO include a top-level "legs" array describing the highest-value test actions from selectors you judged actionable in interactive_elements / forms / links JSON — do not mint controls absent from payloads.
 - CRITICAL: If FORMS (JSON) data is provided, you MUST create a leg for EACH form in that array. Each form leg must:
   - Have type: "form_submit"
   - Use the form's selector property from the forms JSON (form.selector or form.selectors[0].selector)
@@ -5596,7 +5612,7 @@ return {
       ? workflowState.playwrightAnalysis.forms.slice(0, 20)
       : [];
     const interactiveData = Array.isArray(workflowState.playwrightAnalysis?.interactive_elements)
-      ? workflowState.playwrightAnalysis.interactive_elements.slice(0, 30)
+      ? workflowState.playwrightAnalysis.interactive_elements.slice(0, 120)
       : [];
     const linksData = Array.isArray(workflowState.playwrightAnalysis?.links)
       ? workflowState.playwrightAnalysis.links.slice(0, 40)
