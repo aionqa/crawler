@@ -36,5 +36,8 @@
   "devDependencies": {
     "@vitest/ui": "^4.0.15",
     "vitest": "^4.0.15"
+  },
+  "overrides": {
+    "yaml": "^2.8.3"
   }
 }
