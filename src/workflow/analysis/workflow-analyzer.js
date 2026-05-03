@@ -5224,6 +5224,27 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
   }
 
   /**
+   * Build a single block from page.behavior_insights (OpenReplay-derived narratives, etc.).
+   */
+  formatBehaviorInsightsBlock(insights) {
+    const arr = Array.isArray(insights) ? insights : [];
+    const blocks = [];
+    for (let i = 0; i < arr.length; i += 1) {
+      const row = arr[i];
+      if (!row || row.enabled === false) continue;
+      const text = String(row.narrative_text || row.text || '').trim();
+      if (!text) continue;
+      const title = String(row.title || row.session_id || `Session insight ${i + 1}`).trim();
+      blocks.push(`### ${title}\n${text}`);
+    }
+    if (!blocks.length) return '';
+    return (
+      '=== REAL USER SESSIONS (OpenReplay-derived; align journey intent with observed usage) ===\n\n' +
+      blocks.join('\n\n')
+    );
+  }
+
+  /**
    * Get additional_prompt_text for AI payloads: project context + page-specific prompt (if page_id set).
    * Page prompt is fetched from backend and cached in workflowState._pagePromptCache.
    */
@@ -5255,8 +5276,10 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
         res.data?.special_prompts?.page_prompt ||
         ''
       ).trim();
-      workflowState._pagePromptCache[pageId] = pagePrompt;
-      return pagePrompt ? (base ? `${base}\n\n=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}` : `=== PAGE-SPECIFIC CONTEXT ===\n${pagePrompt}`).trim() : base;
+      const behaviorBlock = this.formatBehaviorInsightsBlock(res.data?.behavior_insights);
+      const combined = [pagePrompt, behaviorBlock].filter(Boolean).join('\n\n').trim();
+      workflowState._pagePromptCache[pageId] = combined;
+      return combined ? (base ? `${base}\n\n=== PAGE-SPECIFIC CONTEXT ===\n${combined}` : `=== PAGE-SPECIFIC CONTEXT ===\n${combined}`).trim() : base;
     } catch (e) {
       workflowState._pagePromptCache[pageId] = '';
       return base;
