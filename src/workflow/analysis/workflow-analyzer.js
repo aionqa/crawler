@@ -21815,7 +21815,18 @@ const sleep = safeWait;
     let iteration = 0;
     let condition = true; // Start with true to enter loop
     let lastResult = null;
-    
+
+    // Internal time budget: stop starting new iterations once we approach the outer Promise.race
+    // budget (getStepTimeout, driven by config.timeout_ms). Hitting that outer race throws and
+    // hard-aborts the whole workflow, skipping terminal finalize steps (e.g. validate_login_success,
+    // collect_final_cookies). Breaking here lets the loop return normally so those steps still run.
+    const loopStartedAt = Date.now();
+    const configuredLoopTimeoutMs = Number(config.timeout_ms);
+    const internalLoopBudgetMs = Number.isFinite(configuredLoopTimeoutMs) && configuredLoopTimeoutMs > 0
+      ? Math.max(60000, configuredLoopTimeoutMs - Math.min(90000, Math.floor(configuredLoopTimeoutMs * 0.15)))
+      : null;
+    let loopEndedByTimeBudget = false;
+
     console.log(`🔄 Starting while-loop (max ${maxIterations} iterations)`);
     
     // Send log to backend
@@ -21860,6 +21871,23 @@ const sleep = safeWait;
     
     // Loop while condition is true (or false if inverted) and under max iterations
     while ((invertCondition ? !condition : condition) && iteration < maxIterations) {
+      // Graceful finalize when the configured time budget is (nearly) exhausted: return normally so the
+      // workflow proceeds to its terminal validation/cookie steps instead of the outer race throwing and
+      // aborting the run mid-flight (which would lose an otherwise-finalizable login/journey result).
+      if (internalLoopBudgetMs != null && (Date.now() - loopStartedAt) >= internalLoopBudgetMs) {
+        loopEndedByTimeBudget = true;
+        console.warn(`⏱️ While-loop "${step.name || step.id}" reached internal time budget (${Math.round(internalLoopBudgetMs / 1000)}s) after ${iteration} iteration(s) — finalizing gracefully so terminal steps still run`);
+        try {
+          await this.sendLogToBackend(jobId, 'warn', `⏱️ While-loop reached internal time budget after ${iteration} iteration(s) — finalizing gracefully so terminal validation steps still run`, 'WORKFLOW-ANALYZER', {
+            step_id: step.id,
+            step_name: step.name || step.type,
+            step_type: 'while-loop',
+            iterations_completed: iteration,
+            internal_budget_ms: internalLoopBudgetMs
+          });
+        } catch (_logErr) { /* non-blocking */ }
+        break;
+      }
       iteration++;
       loopState.currentIteration = iteration;
       // Also set workflowState.currentIteration for use by other steps
