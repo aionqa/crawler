@@ -8283,13 +8283,14 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           + '- If Playwright "forms" in the provided JSON is empty (length 0), do NOT describe or imply filling, submitting, or "contact/registration" forms. Do not invent "example" or "if available" form flows.\n'
           + '- Include: (1) each multi-field form or submit flow; (2) embedded/shared widgets such as chat or support; (3) interactive menus that expand, toggle, or reveal panels on this page (not plain header/footer links — those are in menu_items / link map); (4) buttons or controls that open modals, drawers, or wizards; (5) video or media players when there is a concrete control to exercise (play/pause/fullscreen) with an observable result.\n'
           + '- FORM FLOWS MUST BE FULL STORIES: for each emitted form journey include stage progression (open relevant modal/tab/step if needed), populate required controls, submit once, then verify terminal result. Do not emit one-click fragments such as only toggling a checkbox.\n'
+          + '- MANDATORY FORM COVERAGE: if Playwright "forms" (JSON) is non-empty, you MUST emit at least one full-story journey for EVERY form in that array (fill its required fields with realistic values, submit once, verify the terminal result). Returning an empty journeys array is NOT permitted whenever one or more forms are present — every detected form is a testable flow.\n'
           + '- Omit decorative regions, vague "click here" areas, and plain same-document navigation with no state change.\n'
           + '- Never create hypothetical or conditional journeys (for example: "if available", "if present", "maybe", "try"). If a concrete element is not observed, do not emit that journey.\n'
           + '- Every journey MUST have a non-empty "actions" array. Each action that interacts with the DOM MUST include a concrete Playwright-capable "selector" string (no placeholders like "selector" or "{{...}}").\n'
           + '- When interactive_elements / link inventory lists a control as type "link" (e.g. marketing "Read more" on cards), use link selectors (a[href], a:has-text(...)) or getByRole("link") — do not label it button:has-text unless the DOM is actually a <button>.\n'
           + '- Checkbox/radio actions: if operator instructions do not explicitly require a fixed state/value, describe them as random state/option selection so execution can vary naturally.\n'
           + '- Every emitted journey must have at least one deterministic post-action verification signal (visible message/state change/url change) described in expected_outcome.\n'
-          + '- If nothing qualifies, return an empty journeys array ([]).\n';
+          + '- Return an empty journeys array ([]) ONLY when there are zero forms AND no other qualifying interactive flow on the page (e.g. a pure content/navigation page). If any form is present, an empty array is invalid.\n';
       }
       const promptConfig = {
         user_message_template: effectiveTemplate,
