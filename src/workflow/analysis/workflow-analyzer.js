@@ -24594,35 +24594,6 @@ const sleep = safeWait;
       lastIteration?.step_result?.verification_details ||
       null;
 
-    // [SDLC-DEBUG-LEG] One-shot diagnostic: dump the actual data available to leg-status determination so
-    // we can see why a genuinely-rejected journey (always-fail form) isn't surfacing as failure here.
-    try {
-      const _sr = lastIteration?.step_result;
-      const _poolSteps = workflowState.variablePool?.steps || {};
-      const _justifyPoolHits = Object.keys(_poolSteps).filter((k) => /justify/i.test(k));
-      const _dbg = {
-        step_id: step?.id,
-        lastAiStatus,
-        lastAiReason: lastAiReason ? String(lastAiReason).slice(0, 200) : null,
-        justifyExtracted_status: justifyExtracted?.status || null,
-        stepResult_type: typeof _sr,
-        stepResult_keys: _sr && typeof _sr === 'object' ? Object.keys(_sr).slice(0, 20).join(',') : String(_sr).slice(0, 60),
-        stepResult_status: (_sr && (_sr.status || _sr.completion_status)) || null,
-        iterations_count: Array.isArray(loopState?.iterations) ? loopState.iterations.length : 0,
-        pool_step_keys: Object.keys(_poolSteps).slice(0, 30).join(','),
-        justify_pool_keys: _justifyPoolHits.join(','),
-        justify_pool_status: _justifyPoolHits.length
-          ? (() => { const v = _poolSteps[_justifyPoolHits[_justifyPoolHits.length - 1]]; const r = v?.result?.value || v?.result || v?.value || v; return r && typeof r === 'object' ? (r.status || r.completion_status || null) : null; })()
-          : null,
-        this_verifier: this.__lastJourneyVerifierStatus || null,
-        ws_verifier: workflowState.__lastJourneyVerifierStatus || null,
-      };
-      if (jobId && this.backendLogger) {
-        await this.backendLogger.appendJobLog(jobId, 'info', '🧪 [SDLC-DEBUG-LEG] ' + JSON.stringify(_dbg), 'WORKFLOW-ANALYZER', _dbg);
-      }
-      console.log('🧪 [SDLC-DEBUG-LEG] ' + JSON.stringify(_dbg));
-    } catch (_dbgErr) { /* non-blocking */ }
-
     const reachedIterationBudget = iteration >= maxIterations;
     const loopIterations = Array.isArray(loopState?.iterations) ? loopState.iterations : [];
     const hasSuccessfulIterationEvidence = loopIterations.some((iter) => {
@@ -24688,19 +24659,9 @@ const sleep = safeWait;
     // this scores genuinely-rejected submissions (e.g. always-fail forms) as failure without
     // re-introducing SPA false-negatives where the verifier was merely unsure.
     const _capturedVerifierStatus = String(this.__lastJourneyVerifierStatus || workflowState.__lastJourneyVerifierStatus || '');
-    try {
-      const _hcDbg = { at: 'honor-check-entry', finalLegStatus: finalLegStatus, capturedVerifierStatus: _capturedVerifierStatus, domJourneyErrorChrome };
-      if (jobId && this.backendLogger) await this.backendLogger.appendJobLog(jobId, 'info', '🧪 [SDLC-DEBUG-HONOR] ' + JSON.stringify(_hcDbg), 'WORKFLOW-ANALYZER', _hcDbg);
-      console.log('🧪 [SDLC-DEBUG-HONOR] ' + JSON.stringify(_hcDbg));
-    } catch (_e) { /* non-blocking */ }
     if (!finalLegStatus && _capturedVerifierStatus === 'failure') {
       const _vReason = String(this.__lastJourneyVerifierReason || workflowState.__lastJourneyVerifierReason || lastAiReason || '');
       const _vCitesFailure = /(validation\s+failed|configured\s+to\s+always\s+fail|was\s+(?:explicitly\s+)?rejected|submission\s+(?:was\s+)?rejected|rejected\s+by\s+the\s+page|did\s+not\s+complete(?:\s+successfully)?|blocked\/rejected|error\s+banner|validation\s+banner|is\s+(?:invalid|required)|not\s+valid|access\s+denied)/i.test(_vReason);
-      try {
-        const _hcDbg2 = { at: 'honor-check-inner', vCitesFailure: _vCitesFailure, vReason: _vReason.slice(0, 160) };
-        if (jobId && this.backendLogger) await this.backendLogger.appendJobLog(jobId, 'info', '🧪 [SDLC-DEBUG-HONOR2] ' + JSON.stringify(_hcDbg2), 'WORKFLOW-ANALYZER', _hcDbg2);
-        console.log('🧪 [SDLC-DEBUG-HONOR2] ' + JSON.stringify(_hcDbg2));
-      } catch (_e) { /* non-blocking */ }
       if (_vCitesFailure || domJourneyErrorChrome) {
         finalLegStatus = 'failure';
         finalLegResult = 'failure';
