@@ -8270,8 +8270,8 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       }
       if (isJustifyJourneyStep) {
         effectiveTemplate += '\n\nRUNTIME OVERRIDE (MANDATORY):\n'
-          + '- If visible validation/error text exists, return status="failure".\n'
-          + '- If expected_outcome is visible in DOM, return status="success" and expected_outcome_verified=true.\n'
+          + '- ABSOLUTE RULE — REJECTED/BLOCKED SUBMISSION = FAILURE: if the page shows a visible validation, error, or rejection message (or the form/action otherwise did NOT complete — e.g. "Validation failed", "configured to always fail", "invalid", "required", "try again", a red error banner, the form still present with an error), return status="failure". This OVERRIDES every other rule below. NEVER return status="success" for a submission/action that was rejected, blocked, or did not complete — even if the journey description or expected_outcome anticipated a rejection/error. "The form was correctly rejected" is still status="failure" (the journey did not achieve a completed/successful action). Do not let expected_outcome_verified=true coexist with a visible rejection/error.\n'
+          + '- Only when there is NO visible error/validation/rejection AND the journey\'s positive intended outcome (a success/confirmation message, the intended post-action state) is visible in the DOM, return status="success" and expected_outcome_verified=true.\n'
           + '- For non-reactive form submit journeys: when submit was attempted and page is in clean initial state after submit with NO visible validation/error text, treat as status="success" (submit likely reloaded/reset page).\n'
           + '- For reactive controls (toggles, counters, dynamic button labels): when execution_result reports success and there is no error/validation banner, treat status="success" if the UI shows a plausible post-interaction state; do not return failure only because visible button text changed between before/after screenshots (e.g. "Click to Toggle" vs "Toggled ON").\n'
           + '- For embedded chat/support widgets: after a send action, treat status="success" when screenshots/DOM show a user-authored line, typing indicator cleared, delivery state, or an agent reply stub inside the chat surface (including inside iframes), even if the host page URL unchanged.\n'
@@ -13883,6 +13883,47 @@ return {
           if (!isUserVisible(el)) continue;
           const t = (el.textContent || '').trim();
           if (successRe.test(t)) return true;
+        }
+        return false;
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Inverse of detectVisibleJourneySuccessChrome: returns true when the page is currently showing a
+   * visible error/validation-failure surface (alert, error/invalid styled element with error text).
+   * Used to avoid promoting an AI "failure" verdict to "success" just because the script ran without
+   * throwing — pages designed to reject input (e.g. always-fail forms) execute cleanly yet surface a
+   * real, visible validation error that must be scored as a failure.
+   */
+  async detectVisibleJourneyErrorChrome(page) {
+    if (!page || typeof page.evaluate !== 'function') return false;
+    try {
+      return await page.evaluate(() => {
+        const isUserVisible = (el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
+          if (style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+          let node = el;
+          while (node && node !== document.documentElement) {
+            if (node instanceof HTMLElement && window.getComputedStyle(node).display === 'none') {
+              return false;
+            }
+            node = node.parentElement;
+          }
+          const rect = el.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
+        const errorRe =
+          /(validation\s+failed|invalid|is\s+required|required\s+field|rejected|declined|not\s+valid|incorrect|unsuccessful|access\s+denied|forbidden|unauthorized|please\s+(try\s+again|correct|enter|fix)|something\s+went\s+wrong|failed)/i;
+        const selectors =
+          '[role="alert"],[aria-invalid="true"],.error,.alert-danger,.alert-error,.invalid-feedback,.field-error,.form-error,[data-testid*="error"],[class*="error"]';
+        for (const el of Array.from(document.querySelectorAll(selectors))) {
+          if (!isUserVisible(el)) continue;
+          const t = (el.textContent || '').trim();
+          if (t && errorRe.test(t)) return true;
         }
         return false;
       });
@@ -24563,6 +24604,20 @@ const sleep = safeWait;
       domJourneySuccessChrome = false;
     }
 
+    let domJourneyErrorChrome = false;
+    try {
+      if (
+        page &&
+        typeof page.isClosed === 'function' &&
+        !page.isClosed() &&
+        typeof this.detectVisibleJourneyErrorChrome === 'function'
+      ) {
+        domJourneyErrorChrome = await this.detectVisibleJourneyErrorChrome(page);
+      }
+    } catch (_) {
+      domJourneyErrorChrome = false;
+    }
+
     const lastExecSnapshot = workflowState.lastExecutionResult || {};
     const validationOnlyExecutionFailure =
       lastExecSnapshot.success === false &&
@@ -24594,12 +24649,27 @@ const sleep = safeWait;
         finalLegResult = 'success';
       } else if (lastAiStatus === 'failure') {
         // Verifier false negatives are common on SPAs: Playwright run + post-execution validation may be clean
-        // while the justify step still returns failure. Trust deterministic execution evidence when present.
-        if (executionSucceeded) {
+        // while the justify step still returns failure. Trust deterministic execution evidence when present —
+        // BUT only when the verifier did NOT observe a concrete visible failure signal. Pages designed to reject
+        // input (e.g. always-fail forms) run the fill/submit script cleanly (no throw) yet surface a visible
+        // validation/error message; that is a REAL failure and must not be flipped to success by execution evidence.
+        // Affirmative visible-failure phrasing in the verifier's own reason (avoid uncertainty words like
+        // "could not confirm" which indicate a false-negative rather than an observed error).
+        const aiFailureCitesVisibleError = /(validation\s+failed|is\s+(?:invalid|required)|required\s+field|rejected|declined|not\s+valid|incorrect|unsuccessful|access\s+denied|forbidden|unauthorized|error\s+(?:message|shown|displayed|appeared|is\s+visible)|visible\s+error|please\s+(?:try\s+again|correct|fix)|configured\s+to\s+always\s+fail)/i.test(String(lastAiReason || ''));
+        // A visible error surface in the live DOM is deterministic, reliable evidence of a real failure.
+        const visibleFailureSignal = domJourneyErrorChrome || aiFailureCitesVisibleError;
+        if (executionSucceeded && !visibleFailureSignal) {
           finalLegStatus = 'success';
           finalLegResult = 'success';
           finalLegError = null;
-          console.log('✅ Overriding AI failure: journey script execution succeeded (no blocking validation / throw)');
+          console.log('✅ Overriding AI failure: journey script execution succeeded (no blocking validation / throw) and no visible failure signal (DOM/verifier)');
+        } else if (visibleFailureSignal) {
+          // Trust the verifier: a visible validation/error surface means the journey genuinely failed
+          // (e.g. always-fail forms that render "Validation failed" yet run the submit script cleanly).
+          finalLegStatus = 'failure';
+          finalLegResult = 'failure';
+          finalLegError = lastAiReason || finalLegError;
+          console.log(`⛔ Not overriding AI failure: visible failure signal present (domError=${domJourneyErrorChrome}, verifierCited=${aiFailureCitesVisibleError}) — trusting failure`);
         } else {
           const interruptParts = [lastExecSnapshot.error, workflowState.lastExecutionResult?.error];
           for (const iter of loopIterations) {
