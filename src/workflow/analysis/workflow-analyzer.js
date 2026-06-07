@@ -13974,15 +13974,18 @@ return {
   }
 
   /**
-   * Detect when the currently navigated resource is a standalone binary/media asset
-   * (image, SVG, PDF, video, font, archive) rather than an HTML document. Such resources
-   * have no interactive DOM, so any "journeys" the model emits for them are hallucinated
-   * (e.g. invented "start streaming" / "mic gain" controls on a raw .jpg) and every action
-   * fails, which incorrectly marks the page as a failure. Used to suppress journey generation.
+   * Detect when the currently navigated resource is NOT a real HTML document — i.e. the browser
+   * loaded a standalone binary/media resource (image, PDF, video, font, …) rather than a web page.
+   * Such resources have no interactive DOM, so any "journeys" the model emits for them are
+   * hallucinated (e.g. invented "start streaming" / "mic gain" controls on a raw .jpg) and every
+   * action fails, which wrongly marks the page as a failure. Used to suppress journey generation.
    *
-   * Resolution order: (1) live document.contentType (most reliable, covers extensionless
-   * asset URLs served with an image/binary MIME type); (2) URL extension fallback when the
-   * page is closed / evaluate is unavailable. Result is cached on workflowState per page.
+   * This is a STRUCTURAL / transport-level fact, not a semantic page judgment: the authority is the
+   * live `document.contentType` reported by the browser for the server response. A real web page is
+   * parsed as `text/html` (or `application/xhtml+xml`); anything else the browser rendered as a
+   * standalone document is treated as a non-testable asset. No hardcoded extension/MIME inventories
+   * are maintained here — the only fallback (when the page can't be evaluated, e.g. already closed)
+   * reuses the shared `urlSuggestsStandaloneImageDocument` helper. Result cached on workflowState.
    */
   async isStandaloneAssetDocument(page, workflowState = null) {
     if (workflowState && typeof workflowState.__isStandaloneAssetDoc === 'boolean') {
@@ -13990,36 +13993,34 @@ return {
     }
 
     let result = false;
-    let pageUrl = '';
-    try { pageUrl = typeof page?.url === 'function' ? page.url() : ''; } catch { pageUrl = ''; }
+    let resolvedFromRuntime = false;
 
-    // URL-extension signal first (cheap, and the only option when the page can't be evaluated).
-    if (urlSuggestsStandaloneImageDocument(pageUrl)) {
-      result = true;
-    } else if (/\.(pdf|zip|rar|7z|tar|gz|tgz|bz2|mp4|webm|mov|avi|mkv|mp3|wav|ogg|flac|m4a|woff2?|ttf|otf|eot)(?:[?#]|$)/i.test(String(pageUrl || ''))) {
-      result = true;
-    } else {
-      try {
-        if (page && typeof page.isClosed === 'function' && !page.isClosed() && typeof page.evaluate === 'function') {
-          result = await page.evaluate(() => {
-            const ct = (document.contentType || '').toLowerCase();
-            if (!ct) return false;
-            if (ct === 'text/html' || ct === 'application/xhtml+xml') return false;
-            // Anything the browser renders as a standalone resource (image/*, application/pdf,
-            // video/*, audio/*, font/*) has no testable interactive DOM.
-            return (
-              ct.startsWith('image/') ||
-              ct.startsWith('video/') ||
-              ct.startsWith('audio/') ||
-              ct.startsWith('font/') ||
-              ct === 'application/pdf' ||
-              ct === 'application/octet-stream'
-            );
-          });
+    // Authoritative signal: the content type the browser actually parsed for this response.
+    try {
+      if (page && typeof page.isClosed === 'function' && !page.isClosed() && typeof page.evaluate === 'function') {
+        const verdict = await page.evaluate(() => {
+          const ct = (document.contentType || '').trim().toLowerCase();
+          if (!ct) return null; // unknown — let caller fall back / treat as page
+          // A genuine web page is parsed as an HTML/XHTML document. Anything else (image/*, video/*,
+          // application/pdf, font/*, octet-stream, …) is a standalone resource with no testable DOM.
+          const isHtmlDocument = ct === 'text/html' || ct === 'application/xhtml+xml' || ct === 'application/xml' || ct === 'text/xml';
+          return { isAsset: !isHtmlDocument };
+        });
+        if (verdict && typeof verdict.isAsset === 'boolean') {
+          result = verdict.isAsset;
+          resolvedFromRuntime = true;
         }
-      } catch {
-        result = false;
       }
+    } catch {
+      resolvedFromRuntime = false;
+    }
+
+    // Fallback only when the runtime content type was unavailable (e.g. page closed mid-navigation):
+    // reuse the existing shared structural helper rather than duplicating any asset inventory here.
+    if (!resolvedFromRuntime) {
+      let pageUrl = '';
+      try { pageUrl = typeof page?.url === 'function' ? page.url() : ''; } catch { pageUrl = ''; }
+      result = urlSuggestsStandaloneImageDocument(pageUrl);
     }
 
     if (workflowState) {
