@@ -25003,10 +25003,39 @@ const sleep = safeWait;
       );
     }
 
+    // Last-resort robust read of the journey verifier result directly from the shared variable pool.
+    // Nested for-each/while-loop contexts can stop the condition-path resolution above from surfacing the
+    // justify result (leaving lastAiStatus/lastAiReason empty), which previously let a genuinely-rejected
+    // submission (e.g. an always-fail form) get promoted to success below. If the verifier terminally
+    // reported failure with a concrete rejection/validation reason, the journey failed — score it failure.
+    try {
+      if (finalLegStatus !== 'failure') {
+        const _poolSteps = workflowState.variablePool?.steps || {};
+        let _vRes = null;
+        for (const [k, v] of Object.entries(_poolSteps)) {
+          if (!/justify/i.test(k)) continue;
+          const r = v?.result?.value || v?.result || v?.value || v;
+          if (r && typeof r === 'object' && (r.status || r.completion_status)) _vRes = r;
+        }
+        if (_vRes) {
+          const _vStatus = String(_vRes.status || _vRes.completion_status || '').toLowerCase();
+          const _vReason = String(_vRes.reason || _vRes.verification_details || _vRes.what_happened || '');
+          if (_vStatus === 'failure' && /(validation\s+failed|configured\s+to\s+always\s+fail|rejected|did\s+not\s+complete|is\s+(?:invalid|required)|not\s+valid|error\s+banner|validation\s+banner|access\s+denied|blocked)/i.test(_vReason)) {
+            finalLegStatus = 'failure';
+            finalLegResult = 'failure';
+            finalLegError = _vReason || finalLegError || 'Submission rejected (journey did not complete successfully).';
+            console.log('⛔ Verifier (variable pool) reported a rejected submission — scoring leg as failure');
+          }
+        }
+      }
+    } catch (_) { /* non-blocking */ }
+
     // Policy: non-success is allowed only when AI explicitly provides a reason.
     // If there is no AI reason for a terminal non-success, promote to success.
     // Never promote intentional platform/signal skips (would mis-report monitor rollups).
-    const explicitAiReason = String(lastAiReason || '').trim();
+    // NOTE: also treat a concrete finalLegError (set by a failure-evidence path above) as an explicit
+    // reason so a detected rejection/validation failure is never wrongly promoted back to success.
+    const explicitAiReason = String(lastAiReason || finalLegError || '').trim();
     const isNonSuccessTerminal = finalLegStatus && finalLegStatus !== 'success' && finalLegStatus !== 'completed';
     const isIntentionalSkipTerminal =
       String(finalLegStatus || '').toLowerCase() === 'skipped' ||
