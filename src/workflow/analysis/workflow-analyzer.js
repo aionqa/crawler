@@ -24645,8 +24645,22 @@ const sleep = safeWait;
     // Prefer AI justification status from the last while-loop iteration.
     if (!finalLegStatus && (lastAiStatus === 'success' || lastAiStatus === 'failure' || lastAiStatus === 'pending')) {
       if (lastAiStatus === 'success') {
-        finalLegStatus = 'success';
-        finalLegResult = 'success';
+        // Deterministic correction for verifier mislabels: gpt-class models sometimes return status="success"
+        // for a submission that was actually rejected/blocked — e.g. an always-fail form where the journey
+        // framed the rejection as its "expected outcome", so the verifier reports success while its own
+        // justification says the submission failed. If the live DOM shows a visible error surface, or the
+        // verifier's justification clearly describes a rejected/blocked/failed/incomplete submission, the leg
+        // genuinely failed and must be scored as failure (the page view and matrix should reflect the failure).
+        const aiTextSaysFailed = /(was\s+rejected|submission\s+(?:was\s+)?(?:rejected|blocked|failed)|did\s+not\s+(?:complete|succeed|submit|go\s+through)|was\s+not\s+(?:submitted|accepted|completed)|configured\s+to\s+always\s+fail|always\s+fails?\s+validation|validation\s+(?:error|failed)\b)/i.test(String(lastAiReason || ''));
+        if (domJourneyErrorChrome || aiTextSaysFailed) {
+          finalLegStatus = 'failure';
+          finalLegResult = 'failure';
+          finalLegError = lastAiReason || 'Submission rejected/blocked (visible validation error)';
+          console.log(`⛔ Verifier labeled success but evidence shows a rejected/failed submission (domError=${domJourneyErrorChrome}, textSaysFailed=${aiTextSaysFailed}) — scoring leg as failure`);
+        } else {
+          finalLegStatus = 'success';
+          finalLegResult = 'success';
+        }
       } else if (lastAiStatus === 'failure') {
         // Verifier false negatives are common on SPAs: Playwright run + post-execution validation may be clean
         // while the justify step still returns failure. Trust deterministic execution evidence when present —
