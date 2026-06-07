@@ -25088,6 +25088,22 @@ const sleep = safeWait;
       console.log('✅ Promoting non-success terminal state to success (no explicit AI reason provided)');
     }
 
+    // FINAL authoritative override (last point before the status is logged/applied): if the journey
+    // verifier terminally reported failure with a concrete rejection/validation reason, the journey
+    // genuinely failed. Placed here so no earlier success-promotion or execution-evidence path can
+    // revert it (e.g. always-fail forms whose submit script runs cleanly but the page rejects it).
+    try {
+      const _fvStatus = String(this.__lastJourneyVerifierStatus || workflowState.__lastJourneyVerifierStatus || '');
+      const _fvReason = String(this.__lastJourneyVerifierReason || workflowState.__lastJourneyVerifierReason || lastAiReason || '');
+      const _fvCites = /(validation\s+failed|configured\s+to\s+always\s+fail|was\s+(?:explicitly\s+)?rejected|submission\s+(?:was\s+)?rejected|rejected\s+by\s+the\s+page|did\s+not\s+complete|is\s+(?:invalid|required)|not\s+valid|error\s+banner|validation\s+banner|access\s+denied|blocked|unsuccessful)/i.test(_fvReason);
+      if (finalLegStatus !== 'failure' && _fvStatus === 'failure' && _fvCites) {
+        console.log(`⛔ [FINAL-OVERRIDE] verifier terminally reported rejection (was finalLegStatus=${finalLegStatus}) — forcing leg failure`);
+        finalLegStatus = 'failure';
+        finalLegResult = 'failure';
+        finalLegError = _fvReason;
+      }
+    } catch (_e) { /* non-blocking */ }
+
     // Log final status determination for debugging
     if (finalLegStatus) {
       console.log(`✅ Determined final leg status: ${finalLegStatus} (result: ${finalLegResult}, iterations: ${iteration}, loopExitedEarly: ${loopExitedEarly}, lastExecutionResult.success: ${workflowState.lastExecutionResult?.success})`);
