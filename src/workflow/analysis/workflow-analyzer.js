@@ -24688,9 +24688,19 @@ const sleep = safeWait;
     // this scores genuinely-rejected submissions (e.g. always-fail forms) as failure without
     // re-introducing SPA false-negatives where the verifier was merely unsure.
     const _capturedVerifierStatus = String(this.__lastJourneyVerifierStatus || workflowState.__lastJourneyVerifierStatus || '');
+    try {
+      const _hcDbg = { at: 'honor-check-entry', finalLegStatus: finalLegStatus, capturedVerifierStatus: _capturedVerifierStatus, domJourneyErrorChrome };
+      if (jobId && this.backendLogger) await this.backendLogger.appendJobLog(jobId, 'info', '🧪 [SDLC-DEBUG-HONOR] ' + JSON.stringify(_hcDbg), 'WORKFLOW-ANALYZER', _hcDbg);
+      console.log('🧪 [SDLC-DEBUG-HONOR] ' + JSON.stringify(_hcDbg));
+    } catch (_e) { /* non-blocking */ }
     if (!finalLegStatus && _capturedVerifierStatus === 'failure') {
       const _vReason = String(this.__lastJourneyVerifierReason || workflowState.__lastJourneyVerifierReason || lastAiReason || '');
       const _vCitesFailure = /(validation\s+failed|configured\s+to\s+always\s+fail|was\s+(?:explicitly\s+)?rejected|submission\s+(?:was\s+)?rejected|rejected\s+by\s+the\s+page|did\s+not\s+complete(?:\s+successfully)?|blocked\/rejected|error\s+banner|validation\s+banner|is\s+(?:invalid|required)|not\s+valid|access\s+denied)/i.test(_vReason);
+      try {
+        const _hcDbg2 = { at: 'honor-check-inner', vCitesFailure: _vCitesFailure, vReason: _vReason.slice(0, 160) };
+        if (jobId && this.backendLogger) await this.backendLogger.appendJobLog(jobId, 'info', '🧪 [SDLC-DEBUG-HONOR2] ' + JSON.stringify(_hcDbg2), 'WORKFLOW-ANALYZER', _hcDbg2);
+        console.log('🧪 [SDLC-DEBUG-HONOR2] ' + JSON.stringify(_hcDbg2));
+      } catch (_e) { /* non-blocking */ }
       if (_vCitesFailure || domJourneyErrorChrome) {
         finalLegStatus = 'failure';
         finalLegResult = 'failure';
