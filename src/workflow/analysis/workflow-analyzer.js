@@ -24618,6 +24618,18 @@ const sleep = safeWait;
       domJourneyErrorChrome = false;
     }
 
+    // HIGHEST-PRIORITY deterministic failure signal: if the live page shows a visible validation/error
+    // surface after the journey ran, the submission/action was rejected and the journey failed — regardless
+    // of how the verifier labeled its status, how the journey framed its expected_outcome, or whether the
+    // Playwright script ran without throwing. This is what fixes always-fail forms being mis-scored as
+    // success (the verifier observes "Validation failed" but the model still emits status="success").
+    if (!finalLegStatus && domJourneyErrorChrome) {
+      finalLegStatus = 'failure';
+      finalLegResult = 'failure';
+      finalLegError = lastAiReason || 'A visible validation/error message indicates the submission was rejected (journey did not complete successfully).';
+      console.log('⛔ Visible error surface detected on page after journey — scoring leg as failure (rejected/blocked submission)');
+    }
+
     const lastExecSnapshot = workflowState.lastExecutionResult || {};
     const validationOnlyExecutionFailure =
       lastExecSnapshot.success === false &&
