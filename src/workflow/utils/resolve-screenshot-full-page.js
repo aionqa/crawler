@@ -2,7 +2,7 @@
  * URL path suggests a direct image/svg asset (not an HTML document).
  * Used so we avoid fullPage when page.evaluate is unavailable or flaky.
  */
-function urlSuggestsStandaloneImageDocument(pageUrl) {
+export function urlSuggestsStandaloneImageDocument(pageUrl) {
   if (!pageUrl || typeof pageUrl !== 'string') return false;
   const pathOnly = pageUrl.split(/[?#]/)[0];
   const lower = pathOnly.toLowerCase();

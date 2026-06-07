@@ -3,7 +3,7 @@ import { isTransientGatewayError, isNetworkUnreachableError } from '../../openai
 
 const axios = createBackendAxiosWithRetries();
 import { isSearchEngineInfraUrl } from '../../utils/search-engine-infra-url.js';
-import { resolveScreenshotFullPage } from '../utils/resolve-screenshot-full-page.js';
+import { resolveScreenshotFullPage, urlSuggestsStandaloneImageDocument } from '../utils/resolve-screenshot-full-page.js';
 import { StaticNodeExecutor } from '../execution/static-node-executor.js';
 import { appendRequirementToTemplate, getRequirementTextForNextStep } from '../../step-requirements.js';
 import {
@@ -9617,9 +9617,33 @@ return {
           console.log(`🔍 [JOURNEYS-EXTRACT] page_summary keys: ${Object.keys(parsedResponse.page_summary).join(', ')}`);
         }
         
-        const rawJourneysFromResponse = Array.isArray(parsedResponse.journeys)
+        let rawJourneysFromResponse = Array.isArray(parsedResponse.journeys)
           ? parsedResponse.journeys
           : (Array.isArray(parsedResponse.page_summary?.journeys) ? parsedResponse.page_summary.journeys : null);
+
+        // Standalone binary/media assets (images, SVG, PDF, video, fonts) have no interactive DOM,
+        // so any journeys the model emits are hallucinated (invented controls that don't exist) and
+        // every action fails — wrongly marking the asset "page" as a failure. Drop them here so the
+        // asset is recorded with zero journeys instead of fabricated failing ones.
+        if (Array.isArray(rawJourneysFromResponse) && rawJourneysFromResponse.length > 0) {
+          let isAssetDoc = false;
+          try { isAssetDoc = await this.isStandaloneAssetDocument(page, workflowState); } catch (_) { isAssetDoc = false; }
+          if (isAssetDoc) {
+            console.warn(`🖼️ Standalone binary/media asset detected (${(() => { try { return page.url(); } catch { return 'unknown-url'; } })()}) — dropping ${rawJourneysFromResponse.length} hallucinated journey(s); assets have no interactive DOM to test`);
+            if (jobId && this.backendLogger) {
+              try {
+                await this.backendLogger.appendJobLog(jobId, 'info', `🖼️ Standalone binary/media asset — skipped journey generation (dropped ${rawJourneysFromResponse.length} hallucinated journey(s))`, 'WORKFLOW-ANALYZER', {
+                  step_id: step.id,
+                  dropped_journeys: rawJourneysFromResponse.length
+                });
+              } catch (_logErr) { /* non-blocking */ }
+            }
+            rawJourneysFromResponse = [];
+            if (Array.isArray(parsedResponse.journeys)) parsedResponse.journeys = [];
+            if (parsedResponse.page_summary && Array.isArray(parsedResponse.page_summary.journeys)) parsedResponse.page_summary.journeys = [];
+          }
+        }
+
         if (rawJourneysFromResponse) {
           journeys = rawJourneysFromResponse;
           // Used when validation filters out every journey — do not conflate with a truly empty LLM array.
@@ -13947,6 +13971,61 @@ return {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Detect when the currently navigated resource is a standalone binary/media asset
+   * (image, SVG, PDF, video, font, archive) rather than an HTML document. Such resources
+   * have no interactive DOM, so any "journeys" the model emits for them are hallucinated
+   * (e.g. invented "start streaming" / "mic gain" controls on a raw .jpg) and every action
+   * fails, which incorrectly marks the page as a failure. Used to suppress journey generation.
+   *
+   * Resolution order: (1) live document.contentType (most reliable, covers extensionless
+   * asset URLs served with an image/binary MIME type); (2) URL extension fallback when the
+   * page is closed / evaluate is unavailable. Result is cached on workflowState per page.
+   */
+  async isStandaloneAssetDocument(page, workflowState = null) {
+    if (workflowState && typeof workflowState.__isStandaloneAssetDoc === 'boolean') {
+      return workflowState.__isStandaloneAssetDoc;
+    }
+
+    let result = false;
+    let pageUrl = '';
+    try { pageUrl = typeof page?.url === 'function' ? page.url() : ''; } catch { pageUrl = ''; }
+
+    // URL-extension signal first (cheap, and the only option when the page can't be evaluated).
+    if (urlSuggestsStandaloneImageDocument(pageUrl)) {
+      result = true;
+    } else if (/\.(pdf|zip|rar|7z|tar|gz|tgz|bz2|mp4|webm|mov|avi|mkv|mp3|wav|ogg|flac|m4a|woff2?|ttf|otf|eot)(?:[?#]|$)/i.test(String(pageUrl || ''))) {
+      result = true;
+    } else {
+      try {
+        if (page && typeof page.isClosed === 'function' && !page.isClosed() && typeof page.evaluate === 'function') {
+          result = await page.evaluate(() => {
+            const ct = (document.contentType || '').toLowerCase();
+            if (!ct) return false;
+            if (ct === 'text/html' || ct === 'application/xhtml+xml') return false;
+            // Anything the browser renders as a standalone resource (image/*, application/pdf,
+            // video/*, audio/*, font/*) has no testable interactive DOM.
+            return (
+              ct.startsWith('image/') ||
+              ct.startsWith('video/') ||
+              ct.startsWith('audio/') ||
+              ct.startsWith('font/') ||
+              ct === 'application/pdf' ||
+              ct === 'application/octet-stream'
+            );
+          });
+        }
+      } catch {
+        result = false;
+      }
+    }
+
+    if (workflowState) {
+      workflowState.__isStandaloneAssetDoc = result;
+    }
+    return result;
   }
 
   /**
