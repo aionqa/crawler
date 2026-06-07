@@ -9311,6 +9311,18 @@ return {
           summaryMessage = `✅ Outcome: ${parsedResponse.status}${parsedResponse.reason ? ` - ${parsedResponse.reason}` : ''}`;
           summaryMetadata.status = parsedResponse.status;
           summaryMetadata.is_complete = parsedResponse.is_complete;
+          // Capture the journey verifier's terminal status/reason at parse time. The stored while-loop
+          // iteration step_result shape sometimes hides this from leg-status determination, which then
+          // defaults a genuinely-failed journey (e.g. an always-fail form) to success via execution
+          // evidence. Keep the reliable signal here so leg determination can honor a real failure.
+          try {
+            const _verifierStepId = String(step?.id || promptIdentifier || '').toLowerCase();
+            if (_verifierStepId.includes('justify')) {
+              workflowState.__lastJourneyVerifierStatus = String(parsedResponse.status).toLowerCase();
+              workflowState.__lastJourneyVerifierReason =
+                parsedResponse.reason || parsedResponse.verification_details || parsedResponse.what_happened || null;
+            }
+          } catch (_) { /* non-blocking */ }
         } else if (parsedResponse.playwright_script) {
           summaryMessage = `📜 Generated script (${parsedResponse.playwright_script.length} chars)`;
           summaryMetadata.script_length = parsedResponse.playwright_script.length;
@@ -21864,6 +21876,9 @@ const sleep = safeWait;
     // budget (getStepTimeout, driven by config.timeout_ms). Hitting that outer race throws and
     // hard-aborts the whole workflow, skipping terminal finalize steps (e.g. validate_login_success,
     // collect_final_cookies). Breaking here lets the loop return normally so those steps still run.
+    // Reset per-journey verifier capture so a prior journey's terminal status cannot leak into this one.
+    workflowState.__lastJourneyVerifierStatus = null;
+    workflowState.__lastJourneyVerifierReason = null;
     const loopStartedAt = Date.now();
     const configuredLoopTimeoutMs = Number(config.timeout_ms);
     const internalLoopBudgetMs = Number.isFinite(configuredLoopTimeoutMs) && configuredLoopTimeoutMs > 0
@@ -24628,6 +24643,22 @@ const sleep = safeWait;
       finalLegResult = 'failure';
       finalLegError = lastAiReason || 'A visible validation/error message indicates the submission was rejected (journey did not complete successfully).';
       console.log('⛔ Visible error surface detected on page after journey — scoring leg as failure (rejected/blocked submission)');
+    }
+
+    // Honor the journey verifier's terminal status captured at justify parse time (the most reliable
+    // source — the stored iteration step_result sometimes hides it). Only when the verifier said
+    // "failure" AND its reason describes a concrete rejection/validation error (or the DOM showed one):
+    // this scores genuinely-rejected submissions (e.g. always-fail forms) as failure without
+    // re-introducing SPA false-negatives where the verifier was merely unsure.
+    if (!finalLegStatus && String(workflowState.__lastJourneyVerifierStatus || '') === 'failure') {
+      const _vReason = String(workflowState.__lastJourneyVerifierReason || lastAiReason || '');
+      const _vCitesFailure = /(validation\s+failed|configured\s+to\s+always\s+fail|was\s+(?:explicitly\s+)?rejected|submission\s+(?:was\s+)?rejected|rejected\s+by\s+the\s+page|did\s+not\s+complete(?:\s+successfully)?|blocked\/rejected|error\s+banner|validation\s+banner|is\s+(?:invalid|required)|not\s+valid|access\s+denied)/i.test(_vReason);
+      if (_vCitesFailure || domJourneyErrorChrome) {
+        finalLegStatus = 'failure';
+        finalLegResult = 'failure';
+        finalLegError = _vReason || 'Verifier reported the submission was rejected (journey did not complete successfully).';
+        console.log('⛔ Honoring verifier terminal status=failure with concrete rejection evidence — scoring leg as failure');
+      }
     }
 
     const lastExecSnapshot = workflowState.lastExecutionResult || {};
