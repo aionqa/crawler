@@ -24593,6 +24593,36 @@ const sleep = safeWait;
       lastIteration?.step_result?.reason ||
       lastIteration?.step_result?.verification_details ||
       null;
+
+    // [SDLC-DEBUG-LEG] One-shot diagnostic: dump the actual data available to leg-status determination so
+    // we can see why a genuinely-rejected journey (always-fail form) isn't surfacing as failure here.
+    try {
+      const _sr = lastIteration?.step_result;
+      const _poolSteps = workflowState.variablePool?.steps || {};
+      const _justifyPoolHits = Object.keys(_poolSteps).filter((k) => /justify/i.test(k));
+      const _dbg = {
+        step_id: step?.id,
+        lastAiStatus,
+        lastAiReason: lastAiReason ? String(lastAiReason).slice(0, 200) : null,
+        justifyExtracted_status: justifyExtracted?.status || null,
+        stepResult_type: typeof _sr,
+        stepResult_keys: _sr && typeof _sr === 'object' ? Object.keys(_sr).slice(0, 20).join(',') : String(_sr).slice(0, 60),
+        stepResult_status: (_sr && (_sr.status || _sr.completion_status)) || null,
+        iterations_count: Array.isArray(loopState?.iterations) ? loopState.iterations.length : 0,
+        pool_step_keys: Object.keys(_poolSteps).slice(0, 30).join(','),
+        justify_pool_keys: _justifyPoolHits.join(','),
+        justify_pool_status: _justifyPoolHits.length
+          ? (() => { const v = _poolSteps[_justifyPoolHits[_justifyPoolHits.length - 1]]; const r = v?.result?.value || v?.result || v?.value || v; return r && typeof r === 'object' ? (r.status || r.completion_status || null) : null; })()
+          : null,
+        this_verifier: this.__lastJourneyVerifierStatus || null,
+        ws_verifier: workflowState.__lastJourneyVerifierStatus || null,
+      };
+      if (jobId && this.backendLogger) {
+        await this.backendLogger.appendJobLog(jobId, 'info', '🧪 [SDLC-DEBUG-LEG] ' + JSON.stringify(_dbg), 'WORKFLOW-ANALYZER', _dbg);
+      }
+      console.log('🧪 [SDLC-DEBUG-LEG] ' + JSON.stringify(_dbg));
+    } catch (_dbgErr) { /* non-blocking */ }
+
     const reachedIterationBudget = iteration >= maxIterations;
     const loopIterations = Array.isArray(loopState?.iterations) ? loopState.iterations : [];
     const hasSuccessfulIterationEvidence = loopIterations.some((iter) => {
