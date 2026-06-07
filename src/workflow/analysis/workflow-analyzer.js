@@ -9318,9 +9318,14 @@ return {
           try {
             const _verifierStepId = String(step?.id || promptIdentifier || '').toLowerCase();
             if (_verifierStepId.includes('justify')) {
-              workflowState.__lastJourneyVerifierStatus = String(parsedResponse.status).toLowerCase();
-              workflowState.__lastJourneyVerifierReason =
-                parsedResponse.reason || parsedResponse.verification_details || parsedResponse.what_happened || null;
+              const _vs = String(parsedResponse.status).toLowerCase();
+              const _vr = parsedResponse.reason || parsedResponse.verification_details || parsedResponse.what_happened || null;
+              // Store on the analyzer instance (stable across nested cycle-scoped workflowState clones) AND
+              // on workflowState as a fallback, so leg-status determination can reliably honor a real failure.
+              this.__lastJourneyVerifierStatus = _vs;
+              this.__lastJourneyVerifierReason = _vr;
+              workflowState.__lastJourneyVerifierStatus = _vs;
+              workflowState.__lastJourneyVerifierReason = _vr;
             }
           } catch (_) { /* non-blocking */ }
         } else if (parsedResponse.playwright_script) {
@@ -21879,6 +21884,8 @@ const sleep = safeWait;
     // Reset per-journey verifier capture so a prior journey's terminal status cannot leak into this one.
     workflowState.__lastJourneyVerifierStatus = null;
     workflowState.__lastJourneyVerifierReason = null;
+    this.__lastJourneyVerifierStatus = null;
+    this.__lastJourneyVerifierReason = null;
     const loopStartedAt = Date.now();
     const configuredLoopTimeoutMs = Number(config.timeout_ms);
     const internalLoopBudgetMs = Number.isFinite(configuredLoopTimeoutMs) && configuredLoopTimeoutMs > 0
@@ -24650,8 +24657,9 @@ const sleep = safeWait;
     // "failure" AND its reason describes a concrete rejection/validation error (or the DOM showed one):
     // this scores genuinely-rejected submissions (e.g. always-fail forms) as failure without
     // re-introducing SPA false-negatives where the verifier was merely unsure.
-    if (!finalLegStatus && String(workflowState.__lastJourneyVerifierStatus || '') === 'failure') {
-      const _vReason = String(workflowState.__lastJourneyVerifierReason || lastAiReason || '');
+    const _capturedVerifierStatus = String(this.__lastJourneyVerifierStatus || workflowState.__lastJourneyVerifierStatus || '');
+    if (!finalLegStatus && _capturedVerifierStatus === 'failure') {
+      const _vReason = String(this.__lastJourneyVerifierReason || workflowState.__lastJourneyVerifierReason || lastAiReason || '');
       const _vCitesFailure = /(validation\s+failed|configured\s+to\s+always\s+fail|was\s+(?:explicitly\s+)?rejected|submission\s+(?:was\s+)?rejected|rejected\s+by\s+the\s+page|did\s+not\s+complete(?:\s+successfully)?|blocked\/rejected|error\s+banner|validation\s+banner|is\s+(?:invalid|required)|not\s+valid|access\s+denied)/i.test(_vReason);
       if (_vCitesFailure || domJourneyErrorChrome) {
         finalLegStatus = 'failure';
