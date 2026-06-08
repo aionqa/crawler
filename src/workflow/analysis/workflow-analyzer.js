@@ -9331,11 +9331,20 @@ return {
           console.log(`📄 VAR_DUMP: playwright_script length=${playwrightScript.length}`);
           console.log(`📄 VAR_DUMP: playwright_script preview: ${playwrightScript.substring(0, 300)}`);
 
-          const isCredSensitiveScript =
-            (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script')) ||
+          const isLoginScript =
+            (step.id === 'generate_login_script' || step.name?.includes('Generate Login Script'));
+          const isJourneyScript =
             promptIdentifier === 'generate_journey_script' ||
             String(step.id || '').toLowerCase().includes('generate_journey_script') ||
             String(step.name || '').toLowerCase().includes('generate journey action script');
+          // Credential hardening (substituting input_credentials into fills) is only meaningful when
+          // the script actually performs a login: a dedicated login script, or a journey on a page
+          // that declares login credentials. Applying it to ordinary form journeys (contact /
+          // registration / survey) corrupts the AI script — e.g. rewriting a valid email fill to an
+          // empty input_credentials value or producing unbalanced parens — which yields a broken
+          // script + native validation failure. Leave non-login journey scripts untouched.
+          const isCredSensitiveScript =
+            isLoginScript || (isJourneyScript && workflowState.pageDeclaredCredentials === true);
           if (isCredSensitiveScript) {
             const before = playwrightScript;
             let script = String(before || '');
