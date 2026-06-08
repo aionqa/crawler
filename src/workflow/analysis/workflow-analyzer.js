@@ -24690,16 +24690,34 @@ const sleep = safeWait;
       domJourneyErrorChrome = false;
     }
 
+    // Deterministic failure evidence from a captured browser dialog: some pages signal a rejection ONLY
+    // via a JS alert()/confirm() (e.g. "Form submission failed", "configured to always fail", "invalid")
+    // which leaves no DOM/screenshot trace once dismissed — so the screenshot-based verifier reports
+    // "not verifiable" and the outcome is wrongly promoted to success. The dialog text is captured during
+    // execution (lastDialogMessage); an error/rejection dialog is concrete evidence the action failed.
+    let journeyRejectionDialog = false;
+    try {
+      const _dlg = String(workflowState.lastDialogMessage || '');
+      if (_dlg) {
+        journeyRejectionDialog = /(fail(?:ed|ure|s)?|reject|invalid|not\s+(?:valid|allowed|submitted|accepted|sent)|denied|unsuccessful|unable|could\s+not|cannot|wrong|incorrect|error|required\b)/i.test(_dlg);
+      }
+    } catch (_) {
+      journeyRejectionDialog = false;
+    }
+
     // HIGHEST-PRIORITY deterministic failure signal: if the live page shows a visible validation/error
-    // surface after the journey ran, the submission/action was rejected and the journey failed — regardless
-    // of how the verifier labeled its status, how the journey framed its expected_outcome, or whether the
-    // Playwright script ran without throwing. This is what fixes always-fail forms being mis-scored as
-    // success (the verifier observes "Validation failed" but the model still emits status="success").
-    if (!finalLegStatus && domJourneyErrorChrome) {
+    // surface after the journey ran (DOM error chrome) OR the page raised a rejection/error dialog, the
+    // submission/action was rejected and the journey failed — regardless of how the verifier labeled its
+    // status, how the journey framed its expected_outcome, or whether the Playwright script ran without
+    // throwing. This is what fixes always-fail forms being mis-scored as success (the verifier observes
+    // "Validation failed" / an alert but the model still emits status="success" or "pending").
+    if (!finalLegStatus && (domJourneyErrorChrome || journeyRejectionDialog)) {
       finalLegStatus = 'failure';
       finalLegResult = 'failure';
-      finalLegError = lastAiReason || 'A visible validation/error message indicates the submission was rejected (journey did not complete successfully).';
-      console.log('⛔ Visible error surface detected on page after journey — scoring leg as failure (rejected/blocked submission)');
+      finalLegError = lastAiReason || (journeyRejectionDialog
+        ? `The page reported a failure via a browser dialog: "${String(workflowState.lastDialogMessage || '').slice(0, 200)}"`
+        : 'A visible validation/error message indicates the submission was rejected (journey did not complete successfully).');
+      console.log(`⛔ Failure evidence after journey (domError=${domJourneyErrorChrome}, rejectionDialog=${journeyRejectionDialog}) — scoring leg as failure (rejected/blocked submission)`);
     }
 
     // Honor the journey verifier's terminal status captured at justify parse time (the most reliable
