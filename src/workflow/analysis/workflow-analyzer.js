@@ -8081,6 +8081,16 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
 
     if (workflowState.lastDialogMessage) {
       stepPayload.last_dialog_message = workflowState.lastDialogMessage;
+      // Surface the browser dialog/alert text in the verifier's visible-text evidence. Some pages
+      // signal a rejection/failure ONLY via a JS alert()/confirm() with no DOM error element — once
+      // the dialog is dismissed the screenshot and DOM show nothing, so the verifier reports
+      // "no visible error" and the outcome is wrongly treated as success (e.g. a form whose submit
+      // handler alerts "submission failed"). Including the dialog text as neutral evidence lets the
+      // AI judge the real outcome (it decides; this is not a hardcoded pass/fail rule).
+      const dialogEvidence = `\n[Browser dialog shown during this action]: ${String(workflowState.lastDialogMessage).slice(0, 500)}`;
+      if (!String(stepPayload.visible_text || '').includes('[Browser dialog shown during this action]')) {
+        stepPayload.visible_text = `${stepPayload.visible_text || ''}${dialogEvidence}`;
+      }
     }
     
     // DEBUG: Log legsToExecute data for "Justify Journeys" step
