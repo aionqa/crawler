@@ -5499,16 +5499,9 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       await this.ensurePageId(workflowState, effectiveJobId);
     }
     
-    // Check if we should retry from a specific step (after self-adjustable workflow)
-    let startStepIndex = 0;
-    if (workflowState.shouldRetryFromStep !== undefined && workflowState.shouldRetryFromStep !== null) {
-      startStepIndex = workflowState.shouldRetryFromStep;
-      console.log(`🔄 Retrying from step ${startStepIndex} with adjusted workflow`);
-      // Clear the flag so we don't loop
-      delete workflowState.shouldRetryFromStep;
-      // Clear the last script failure so self-adjustable workflow doesn't trigger again
-      delete workflowState.lastScriptFailure;
-    }
+    // Single attempt: always start from the first step. No retry-from-step / self-adjust
+    // re-run (52-no-retries-one-attempt.mdc).
+    const startStepIndex = 0;
     
     // Execute each step in sequence
     // CRITICAL: Store steps length at start to prevent issues if steps array is modified
@@ -5837,17 +5830,6 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
           variable_pool_summary: variablePoolSummaryForBackend,
           variable_pool_download_url: variablePoolUrl
         });
-        
-        // Check if this is a script execution failure and next step is self-adjustable-ai-workflow
-        const isScriptExecutionFailure = (
-          step.type === 'execute-code' || 
-          step.type === 'execute-code-from-variable'
-        );
-        const nextStepIndex = i + 1;
-        const nextStep = nextStepIndex < this.workflowTemplate.steps.length 
-          ? this.workflowTemplate.steps[nextStepIndex] 
-          : null;
-        const nextStepIsAdjustable = nextStep && nextStep.type === 'self-adjustable-ai-workflow';
         
         // Template-controlled: explicit continueOnError allows non-critical steps (e.g. screenshot) to skip without aborting journeys/analysis.
         if (step.continueOnError === true) {
@@ -17278,26 +17260,7 @@ const humanDelay = async (minMs = 250, maxMs = 650) => {
         }
       }
       
-      // If next step is self-adjustable-ai-workflow, don't throw - let workflow continue
-      if (nextStep && nextStep.type === 'self-adjustable-ai-workflow') {
-        console.log(`🔄 Script execution failed, but next step is self-adjustable-ai-workflow - will retry`);
-        // Store failure info for retry
-        workflowState.lastScriptFailure = {
-          step: step,
-          error: error.message,
-          script: code?.substring(0, 500) || 'N/A',
-          timestamp: new Date(),
-          executionResult: {
-            success: false,
-            error: error.message
-          }
-        };
-        return {
-          success: false,
-          error: error.message
-        }; // Return error result instead of throwing
-      }
-      
+      // Single attempt (52-no-retries-one-attempt.mdc): a script failure is terminal — throw.
       throw error;
     }
   }
@@ -19694,20 +19657,7 @@ const sleep = safeWait;
       workflowState.lastExecutionResult = errorResult;
       await this.storeStepResult(step, errorResult, workflowState);
       
-      // If next step is self-adjustable-ai-workflow, don't throw - let workflow continue
-      if (nextStep && nextStep.type === 'self-adjustable-ai-workflow') {
-        console.log(`🔄 Script execution failed, but next step is self-adjustable-ai-workflow - will retry`);
-        // Store failure info for retry
-        workflowState.lastScriptFailure = {
-          step: step,
-          error: error.message,
-          script: workflowState[step.config?.sourceField] || null,
-          timestamp: new Date(),
-          executionResult: errorResult
-        };
-        return errorResult; // Return error result instead of throwing
-      }
-      
+      // Single attempt (52-no-retries-one-attempt.mdc): a script failure is terminal — throw.
       throw error;
     }
   }

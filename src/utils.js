@@ -218,28 +218,11 @@ export function logOperation(level, operation, message, data = {}) {
 }
 
 /**
- * Retries an operation with exponential backoff
+ * Runs an operation exactly once (52-no-retries-one-attempt.mdc).
+ * Retained for call-site compatibility; no retry loop or backoff. If it fails, it fails.
  */
-export async function retryOperation(operation, maxRetries = 3, baseDelay = 1000) {
-  let lastError;
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      return await operation();
-    } catch (error) {
-      lastError = error;
-      
-      if (attempt === maxRetries) {
-        throw error;
-      }
-      
-      const delay = baseDelay * Math.pow(2, attempt - 1);
-      console.log(`Attempt ${attempt} failed, retrying in ${delay}ms...`);
-      await new Promise(resolve => setTimeout(resolve, delay));
-    }
-  }
-  
-  throw lastError;
+export async function retryOperation(operation) {
+  return await operation();
 }
 
 /**

@@ -155,8 +155,6 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
     return status === 401 || /invalid token/i.test(msg) || /invalid token/i.test(responseMsg);
   };
 
-  const MAX_TRANSIENT_RETRIES = 6;
-
   /** Per-request axios timeout to AI service (workflow can lower via context.ai_http_timeout_ms). */
   const rawHttpTimeout = Number(context.ai_http_timeout_ms);
   const defaultAiHttpTimeoutMs = 900000;
@@ -172,7 +170,6 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
       const baseUrl = String(aiServiceUrlCandidates[i]).replace(/\/$/, '');
       const url = `${baseUrl}/api/ai/chat`;
       let tried401 = false;
-      let transientAttempts = 0;
       for (;;) {
         try {
           const response = await axios.post(url, requestBody, requestConfig(currentToken));
@@ -189,16 +186,9 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
             currentToken = await getAIServiceTokenInternal(projectId, jobId, true);
             continue;
           }
-          if (isTransientGatewayError(e) && transientAttempts < MAX_TRANSIENT_RETRIES) {
-            transientAttempts++;
-            const delayMs = Math.min(16000, 500 * 2 ** (transientAttempts - 1));
-            const st = e.response?.status ?? e.status ?? '?';
-            console.warn(
-              `[OpenAI-Client] Transient HTTP ${st} from ${baseUrl}; retry ${transientAttempts}/${MAX_TRANSIENT_RETRIES} in ${delayMs}ms...`
-            );
-            await new Promise((r) => setTimeout(r, delayMs));
-            continue;
-          }
+          // Single attempt per AI call (52-no-retries-one-attempt.mdc): no transient-gateway
+          // retry/backoff loop. A transient error is a failure — fall through and throw (after
+          // endpoint failover below, which is endpoint resolution, not a retry of a failed call).
           if (isNetworkUnreachableError(e) && i < aiServiceUrlCandidates.length - 1) {
             console.warn(`[OpenAI-Client] Unreachable at ${baseUrl}: ${e.message}; trying next AI service URL...`);
             break;

@@ -6,7 +6,7 @@
 import { createBackendAxiosWithRetries } from './utils/backend-http-retry.js';
 import { getRunnerBackendUrl } from './utils/runner-service-urls.js';
 
-const axios = createBackendAxiosWithRetries({ maxRetries: 10, capDelayMs: 25000 });
+const axios = createBackendAxiosWithRetries();
 
 const BACKEND_URL = getRunnerBackendUrl();
 const RUNNER_TOKEN = process.env.RUNNER_TOKEN;
