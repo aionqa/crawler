@@ -8079,16 +8079,22 @@ CRITICAL (document-only page: ZERO forms AND ZERO interactive_elements in Playwr
       }
     }
 
-    if (workflowState.lastDialogMessage) {
-      stepPayload.last_dialog_message = workflowState.lastDialogMessage;
-      // Surface the browser dialog/alert text in the verifier's visible-text evidence. Some pages
-      // signal a rejection/failure ONLY via a JS alert()/confirm() with no DOM error element — once
-      // the dialog is dismissed the screenshot and DOM show nothing, so the verifier reports
-      // "no visible error" and the outcome is wrongly treated as success (e.g. a form whose submit
-      // handler alerts "submission failed"). Including the dialog text as neutral evidence lets the
-      // AI judge the real outcome (it decides; this is not a hardcoded pass/fail rule).
-      const dialogEvidence = `\n[Browser dialog shown during this action]: ${String(workflowState.lastDialogMessage).slice(0, 500)}`;
-      if (!String(stepPayload.visible_text || '').includes('[Browser dialog shown during this action]')) {
+    // Prefer the instance-level capture: the justify step's workflowState is a cycle-scoped CLONE, so
+    // a dialog captured in the execute step is only reliably readable via this.__lastJourneyDialogMessage.
+    const capturedDialogForEvidence = this.__lastJourneyDialogMessage || workflowState.lastDialogMessage || null;
+    if (capturedDialogForEvidence) {
+      stepPayload.last_dialog_message = capturedDialogForEvidence;
+      // Surface the browser dialog/alert text in the verifier's evidence. Some pages signal a
+      // rejection/failure ONLY via a JS alert()/confirm() with no DOM error element — once the dialog
+      // is dismissed the screenshot and DOM show nothing, so the verifier reports "no visible error"
+      // and the outcome is wrongly treated as success/pending (e.g. an always-fail form whose submit
+      // handler alerts "submission failed"). The dialog the page showed IS authoritative visible
+      // evidence of what happened on submit; include it so the AI judges the real outcome.
+      const dialogEvidence =
+        `\n[Browser dialog the page displayed during this action — authoritative evidence of the submit result]: ` +
+        `${String(capturedDialogForEvidence).slice(0, 500)}\n` +
+        `(A dialog reporting an error/rejection/failure means the action did NOT succeed.)`;
+      if (!String(stepPayload.visible_text || '').includes('[Browser dialog the page displayed during this action')) {
         stepPayload.visible_text = `${stepPayload.visible_text || ''}${dialogEvidence}`;
       }
     }
@@ -25150,6 +25156,24 @@ const sleep = safeWait;
         finalLegStatus = 'failure';
         finalLegResult = 'failure';
         finalLegError = _fvReason;
+      }
+    } catch (_e) { /* non-blocking */ }
+
+    // FINAL authoritative override for dialog-only failures: a non-reactive / always-fail form may
+    // signal rejection ONLY via a JS alert() (no DOM error element, and a modal dialog cannot be
+    // screenshotted), so the screenshot-based verifier reports pending/success and the promotions
+    // above flip it to success. A captured rejection/error dialog is authoritative evidence the
+    // action failed on submit — force failure here, last, so nothing can mask it.
+    try {
+      const _dlg = String(this.__lastJourneyDialogMessage || workflowState.lastDialogMessage || '');
+      const _dlgFails =
+        _dlg &&
+        /(fail(?:ed|ure|s)?|reject|invalid|not\s+(?:valid|allowed|submitted|accepted|sent)|denied|unsuccessful|unable|could\s+not|cannot|error|wrong|incorrect|required\b)/i.test(_dlg);
+      if (_dlgFails && finalLegStatus !== 'failure') {
+        console.log(`⛔ [FINAL-OVERRIDE] rejection/error dialog captured (was finalLegStatus=${finalLegStatus}) — forcing leg failure: ${_dlg.slice(0, 160)}`);
+        finalLegStatus = 'failure';
+        finalLegResult = 'failure';
+        finalLegError = _dlg.slice(0, 500);
       }
     } catch (_e) { /* non-blocking */ }
 
