@@ -19771,6 +19771,14 @@ const sleep = safeWait;
    */
   async postRunnerSaveAnalysis(pageId, payload, jobId, options = {}) {
     let pid = pageId != null ? String(pageId) : '';
+    // Tag failure-diagnosis ("why failed") save calls so the backend preserves the page's recorded
+    // journeys/status instead of overwriting them with this explain-only re-analysis crawl.
+    if (
+      payload && typeof payload === 'object' && payload.why_failure === undefined &&
+      (this.context?.why_failure === true || this.context?.options?.why_failure === true)
+    ) {
+      payload.why_failure = true;
+    }
     // Align with ALB idle budget after infra bump (terraform idle_timeout); save-analysis can be Mongo-heavy.
     const timeout = options.timeout ?? 165000;
     // Default 10: balance ALB/504 recovery vs total wall time when multiple save-analysis calls run
