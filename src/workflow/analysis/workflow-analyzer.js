@@ -19212,6 +19212,17 @@ const sleep = safeWait;
       
       page.off('dialog', dialogHandler);
       workflowState.lastDialogMessage = dialogMessage;
+      // Also store on the analyzer instance: leg-status determination runs against a cycle-scoped
+      // workflowState CLONE (same reason __lastJourneyVerifierStatus exists), so a dialog captured here
+      // (e.g. an always-fail form's "submission failed" alert — the only failure evidence, since the
+      // alert can't be screenshotted) must be readable there to score the journey as failed.
+      if (dialogMessage) {
+        this.__lastJourneyDialogMessage = dialogMessage;
+        console.log(`💬 Captured browser dialog during journey action: ${String(dialogMessage).slice(0, 200)}`);
+        try {
+          await this.sendLogToBackend(jobId, 'info', `💬 Captured browser dialog during journey action: ${String(dialogMessage).slice(0, 300)}`, 'WORKFLOW-ANALYZER', {});
+        } catch (_) { /* non-blocking */ }
+      }
 
       // A prior iteration may have set executionErrorType when Playwright threw; if this run completed
       // without entering the catch below, clear it so post-step inconclusive-retry logic does not mix
@@ -21943,6 +21954,7 @@ const sleep = safeWait;
     workflowState.__lastJourneyVerifierReason = null;
     this.__lastJourneyVerifierStatus = null;
     this.__lastJourneyVerifierReason = null;
+    this.__lastJourneyDialogMessage = null;
     const loopStartedAt = Date.now();
     const configuredLoopTimeoutMs = Number(config.timeout_ms);
     const internalLoopBudgetMs = Number.isFinite(configuredLoopTimeoutMs) && configuredLoopTimeoutMs > 0
@@ -24705,7 +24717,8 @@ const sleep = safeWait;
     // execution (lastDialogMessage); an error/rejection dialog is concrete evidence the action failed.
     let journeyRejectionDialog = false;
     try {
-      const _dlg = String(workflowState.lastDialogMessage || '');
+      // Read the instance-level capture first (stable across the cycle-scoped workflowState clone).
+      const _dlg = String(this.__lastJourneyDialogMessage || workflowState.lastDialogMessage || '');
       if (_dlg) {
         journeyRejectionDialog = /(fail(?:ed|ure|s)?|reject|invalid|not\s+(?:valid|allowed|submitted|accepted|sent)|denied|unsuccessful|unable|could\s+not|cannot|wrong|incorrect|error|required\b)/i.test(_dlg);
       }
