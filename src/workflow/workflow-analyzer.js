@@ -4292,7 +4292,8 @@ return { success: true, action: hasPasswordField ? 'login_submitted' : 'login_st
         deterministicLoginFallbackResponse = {
           playwright_script: deterministicScript,
           reason: 'Deterministic login script fallback used because AI was unavailable.',
-          confidence: 0.7
+          confidence: 0.7,
+          _deterministic_login_script: true
         };
         if (generatedEmailModeEnabled) {
           generatedEmailDeterministicFallbackResponse = {
@@ -4491,6 +4492,9 @@ return {
             Boolean(workflowState.pageDeclaredCredentials);
           if (useDeterministicLoginScript) {
             aiResponse = generatedEmailDeterministicFallbackResponse || deterministicLoginFallbackResponse;
+            if (aiResponse && !aiResponse._deterministic_login_script) {
+              aiResponse._deterministic_login_script = true;
+            }
             if (aiResponse && jobId && this.backendLogger) {
               await this.backendLogger.appendJobLog(
                 jobId,
@@ -5114,7 +5118,7 @@ return {
             promptIdentifier === 'generate_journey_script' ||
             String(step.id || '').toLowerCase().includes('generate_journey_script') ||
             String(step.name || '').toLowerCase().includes('generate journey action script');
-          if (isCredSensitiveScript) {
+          if (isCredSensitiveScript && !parsedResponse._deterministic_login_script) {
             const before = parsedResponse.playwright_script;
             let script = String(before || '');
 
@@ -7678,6 +7682,9 @@ return {
       "  return null;",
       "};",
       "const emailInput = await pickVisible([",
+      "  'input#username',",
+      "  'input[name=\"username\"]',",
+      "  'input[type=\"text\"]:not([type=\"hidden\"]):not([name=\"captcha_token\"])',",
       "  'input[type=\"email\"]',",
       "  'input[name*=\"email\" i]:not([type=\"hidden\"])',",
       "  'input[id*=\"email\" i]:not([type=\"hidden\"])',",
@@ -7701,6 +7708,8 @@ return {
       "}",
       "await page.waitForTimeout(1400);",
       "let passwordInput = await pickVisible([",
+      "  'input#password',",
+      "  'input[name=\"password\"]',",
       "  'input[type=\"password\"]:not([type=\"hidden\"])',",
       "  'input[name*=\"password\" i]:not([type=\"hidden\"])',",
       "  'input[id*=\"password\" i]:not([type=\"hidden\"])',",
