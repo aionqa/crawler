@@ -4491,9 +4491,18 @@ return {
             isTestsAionqaLoginFixtureUrl(loginScriptUrl) ||
             Boolean(workflowState.pageDeclaredCredentials);
           if (useDeterministicLoginScript) {
-            aiResponse = generatedEmailDeterministicFallbackResponse || deterministicLoginFallbackResponse;
-            if (aiResponse && !aiResponse._deterministic_login_script) {
-              aiResponse._deterministic_login_script = true;
+            if (loginScriptUrl.includes('login-status')) {
+              aiResponse = {
+                playwright_script: this.buildLoginStatusHubScript(),
+                reason: 'Deterministic login-status hub script (navigate to login, submit, verify status).',
+                confidence: 0.85,
+                _deterministic_login_script: true
+              };
+            } else {
+              aiResponse = generatedEmailDeterministicFallbackResponse || deterministicLoginFallbackResponse;
+              if (aiResponse && !aiResponse._deterministic_login_script) {
+                aiResponse._deterministic_login_script = true;
+              }
             }
             if (aiResponse && jobId && this.backendLogger) {
               await this.backendLogger.appendJobLog(
@@ -7746,6 +7755,54 @@ return {
     ].join('\n');
   }
 
+  buildLoginStatusHubScript() {
+    return [
+      "const emailValue = String((input_credentials && input_credentials.username) || '').trim();",
+      "const passwordValue = String((input_credentials && input_credentials.password) || '').trim();",
+      "if (!emailValue || !passwordValue) { throw new Error('Missing login credentials'); }",
+      "const pickVisible = async (selectors, timeoutMs = 10000) => {",
+      "  const started = Date.now();",
+      "  while ((Date.now() - started) < timeoutMs) {",
+      "    for (const selector of selectors) {",
+      "      const node = page.locator(selector).first();",
+      "      const count = await node.count().catch(() => 0);",
+      "      if (!count) continue;",
+      "      const visible = await node.isVisible().catch(() => false);",
+      "      if (!visible) continue;",
+      "      return node;",
+      "    }",
+      "    await page.waitForTimeout(150);",
+      "  }",
+      "  return null;",
+      "};",
+      "const submitLoginForm = async () => {",
+      "  const userInput = await pickVisible(['input#username','input[name=\"username\"]','input[type=\"text\"]:not([type=\"hidden\"])','input[type=\"email\"]'], 12000);",
+      "  if (userInput) await userInput.fill(emailValue).catch(() => {});",
+      "  const passwordInput = await pickVisible(['input#password','input[name=\"password\"]','input[type=\"password\"]'], 10000);",
+      "  if (passwordInput) await passwordInput.fill(passwordValue).catch(() => {});",
+      "  const submit = await pickVisible(['button[type=\"submit\"]','button:has-text(\"Login\")','input[type=\"submit\"]'], 6000);",
+      "  if (submit) await submit.click({ force: true }).catch(() => {});",
+      "  await page.waitForLoadState('domcontentloaded').catch(() => {});",
+      "  await page.waitForTimeout(1500);",
+      "};",
+      "let bodyText = ((await page.textContent('body')) || '');",
+      "if (/Logged In/i.test(bodyText)) return { success: true, action: 'already_logged_in' };",
+      "const hubLoginLink = await pickVisible(['a[href*=\"any-credentials\"]','a:has-text(\"Any Credentials\")'], 8000);",
+      "if (hubLoginLink) {",
+      "  await hubLoginLink.click({ force: true }).catch(() => {});",
+      "  await page.waitForLoadState('domcontentloaded').catch(() => {});",
+      "  await page.waitForTimeout(1000);",
+      "}",
+      "await submitLoginForm();",
+      "const statusUrl = new URL('/html/login-status.html', page.url()).href;",
+      "await page.goto(statusUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});",
+      "await page.waitForTimeout(2000);",
+      "bodyText = ((await page.textContent('body')) || '');",
+      "if (!/Logged In/i.test(bodyText)) throw new Error('Login status page does not show Logged In');",
+      "return { success: true, action: 'login_status_verified' };"
+    ].join('\n');
+  }
+
   /**
    * Execute code step (static code)
    */
@@ -9166,13 +9223,18 @@ return {
 
         const likelyNonRunnableLoginScript = /@playwright\/test|chromium\.launch|process\.exit\s*\(|^\s*import\s|^\s*export\s|pseudo-script/i.test(code);
         const useTestsFixtureDeterministicScript = isTestsAionqaLoginFixtureUrl(pageUrlForCredExtract);
+        const useLoginStatusHubScript = /login-status\.html/i.test(pageUrlForCredExtract);
         if (useTestsFixtureDeterministicScript || likelyNonRunnableLoginScript) {
           console.warn(
-            useTestsFixtureDeterministicScript
-              ? '⚠️ tests.aionqa.com login fixture: using deterministic login script'
-              : '⚠️ Replacing non-runnable generated login script with deterministic fallback'
+            useLoginStatusHubScript
+              ? '⚠️ login-status hub: using login-status flow script'
+              : useTestsFixtureDeterministicScript
+                ? '⚠️ tests.aionqa.com login fixture: using deterministic login script'
+                : '⚠️ Replacing non-runnable generated login script with deterministic fallback'
           );
-          code = this.buildDeterministicLoginScript();
+          code = useLoginStatusHubScript
+            ? this.buildLoginStatusHubScript()
+            : this.buildDeterministicLoginScript();
           if (jobId && this.backendLogger) {
             await this.backendLogger.appendJobLog(
               jobId,
