@@ -7786,7 +7786,8 @@ return {
       "  await page.waitForTimeout(1500);",
       "};",
       "let bodyText = ((await page.textContent('body')) || '');",
-      "if (/Logged In/i.test(bodyText)) return { success: true, action: 'already_logged_in' };",
+      "const isLoggedInStatus = /\\bLogged In\\b/i.test(bodyText) && !/Not Logged In/i.test(bodyText);",
+      "if (isLoggedInStatus) return { success: true, action: 'already_logged_in' };",
       "const hubLoginLink = await pickVisible(['a[href*=\"any-credentials\"]','a:has-text(\"Any Credentials\")'], 8000);",
       "if (hubLoginLink) {",
       "  await hubLoginLink.click({ force: true }).catch(() => {});",
@@ -7794,11 +7795,11 @@ return {
       "  await page.waitForTimeout(1000);",
       "}",
       "await submitLoginForm();",
-      "const statusUrl = new URL('/html/login-status.html', page.url()).href;",
-      "await page.goto(statusUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});",
+      "await page.evaluate(() => { window.location.href = '/html/login-status.html'; });",
+      "await page.waitForLoadState('domcontentloaded').catch(() => {});",
       "await page.waitForTimeout(2000);",
       "bodyText = ((await page.textContent('body')) || '');",
-      "if (!/Logged In/i.test(bodyText)) throw new Error('Login status page does not show Logged In');",
+      "if (!(/\\bLogged In\\b/i.test(bodyText) && !/Not Logged In/i.test(bodyText))) throw new Error('Login status page does not show Logged In');",
       "return { success: true, action: 'login_status_verified' };"
     ].join('\n');
   }
@@ -9224,7 +9225,7 @@ return {
         const likelyNonRunnableLoginScript = /@playwright\/test|chromium\.launch|process\.exit\s*\(|^\s*import\s|^\s*export\s|pseudo-script/i.test(code);
         const useTestsFixtureDeterministicScript = isTestsAionqaLoginFixtureUrl(pageUrlForCredExtract);
         const useLoginStatusHubScript = /login-status\.html/i.test(pageUrlForCredExtract);
-        if (useTestsFixtureDeterministicScript || likelyNonRunnableLoginScript) {
+        if (useLoginStatusHubScript || useTestsFixtureDeterministicScript || likelyNonRunnableLoginScript) {
           console.warn(
             useLoginStatusHubScript
               ? '⚠️ login-status hub: using login-status flow script'
