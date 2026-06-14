@@ -21,6 +21,12 @@ import { isSearchEngineInfraUrl } from '../utils/search-engine-infra-url.js';
 import { snapshotPageHtml } from '../utils/page-html-snapshot.js';
 import { collectIframeEmbedLinkRows } from '../utils/iframe-embed-discovery.js';
 import { navigationTargetKey } from '../utils/url-navigation-target-key.js';
+import {
+  applySpaCrawlContextInit,
+  isSpaSameOriginPathMismatch,
+  navigateToSpaRouteTarget,
+  spaPathKeysMatch,
+} from '../utils/spa-route-navigation.js';
 import { gatherDomCandidatesAcrossFrames } from '../utils/page-element-candidates.js';
 
 const backendDiscoverAxios = createBackendAxiosWithRetries();
@@ -833,7 +839,8 @@ async function sendDiscoveredPageToBackend(
       analyzed: true,
       // Redirect/SSO metadata (optional)
       requested_url: pageData.requested_url || null,
-      final_url: pageData.final_url || pageData.url || null
+      final_url: pageData.final_url || pageData.url || null,
+      spa_route_resolved: pageData.spa_route_resolved === true,
     };
     const discoverHttp = normalizeHttpStatusCode(pageData.last_http_status);
     if (discoverHttp != null) {
@@ -1926,6 +1933,7 @@ async function withBrowser(action, options = {}) {
   }
   
   const context = await browser.newContext(contextOptions);
+  await applySpaCrawlContextInit(context);
   const page = await context.newPage();
   
   // Inject stealth scripts to hide automation
@@ -2367,58 +2375,37 @@ const modeHandlers = {
         const sameLogicalPage = Boolean(queuedKey && pageKey && queuedKey === pageKey);
         if (!sameLogicalPage) {
           try {
-            // Capture response status and retry transient 5xx (common with CDNs returning 503).
-            let response = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            let status = response ? response.status() : null;
-            if (status && status >= 500) {
-              await sendLog(jobId, 'warn', `⚠️ Navigation returned HTTP ${status} for ${currentUrl} — retrying once after backoff...`, {
-                component: 'CRAWLER-TEXT',
-                action: 'nav_retry_5xx',
-                url: currentUrl,
-                status
-              });
-              await page.waitForTimeout(3000);
-              response = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-              status = response ? response.status() : null;
-              if (status && status >= 500) {
-                await sendLog(jobId, 'warn', `⚠️ Navigation still HTTP ${status} after retry`, {
-                  component: 'CRAWLER-TEXT',
-                  action: 'nav_retry_5xx_failed',
-                  url: currentUrl,
-                  status
+            const spaNav = await navigateToSpaRouteTarget(page, currentUrl, {
+              timeout: 30000,
+              settlementMs: 2500,
+              maxRecoveryAttempts: 2,
+              onLog: (message, extra) => {
+                void sendLog(jobId, 'info', message, {
+                  component: 'CRAWLER-SPA-NAV',
+                  queued_url: currentUrl,
+                  ...(extra && typeof extra === 'object' ? extra : {}),
                 });
-              }
-            }
-            await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {
-              console.warn('Page DOM not fully loaded after 30s, continuing with analysis');
+              },
             });
-            // Wait a bit for any post-navigation redirects
-            await page.waitForTimeout(1000);
-            // Get the final URL after navigation (may have redirected)
-            try {
-              finalUrl = page.url();
-              if (finalUrl !== currentUrl) {
-                await sendLog(jobId, 'info', `🔄 Page redirected from ${currentUrl} to ${finalUrl}`);
-                try {
-                  const fromHost = normalizeDomainHost(new URL(currentUrl).hostname);
-                  const toHost = normalizeDomainHost(new URL(finalUrl).hostname);
-                  if (fromHost && toHost && fromHost !== toHost && isWithinDomain(finalUrl, seedUrl, allowSubdomains, domainScope)) {
-                    await sendLog(
-                      jobId,
-                      'warn',
-                      `⚠️ Redirect crossed project domains: ${fromHost} -> ${toHost} (both allowed in project scope)`
-                    );
-                  }
-                } catch (_) {
-                  // ignore host parse errors
-                }
-              }
-            } catch (urlError) {
-              console.warn(`Could not get page URL after navigation: ${urlError.message}`);
+            finalUrl = spaNav.finalUrl || currentUrl;
+            if (spaNav.recovered) {
+              await sendLog(jobId, 'info', `🧭 SPA route recovery: reached ${finalUrl} (requested ${currentUrl})`, {
+                component: 'CRAWLER-SPA-NAV',
+                action: 'spa_route_recovered',
+                requested_url: currentUrl,
+                final_url: finalUrl,
+              });
+            } else if (!spaNav.success && isSpaSameOriginPathMismatch(currentUrl, finalUrl)) {
+              await sendLog(jobId, 'warn', `⚠️ SPA route mismatch after navigation: requested ${currentUrl}, browser at ${finalUrl}`, {
+                component: 'CRAWLER-SPA-NAV',
+                action: 'spa_route_mismatch',
+                requested_url: currentUrl,
+                final_url: finalUrl,
+              });
+            } else if (finalUrl !== currentUrl) {
+              await sendLog(jobId, 'info', `🔄 Page redirected from ${currentUrl} to ${finalUrl}`);
             }
-            lastNavHttpStatus = await resolveHttpStatusAfterNavigation(page, response, finalUrl);
-            // Defer strict-domain skip until after login-redirect handling.
-            // Some authenticated sites redirect to an auth subdomain first and can recover in-session.
+            lastNavHttpStatus = await resolveHttpStatusAfterNavigation(page, spaNav.response ?? null, finalUrl);
             {
               const __scopeJar = await page.context().cookies().catch(() => []);
               redirectedOutsideSeedDomain = computeRedirectedOutsideSeedDomain(
@@ -2763,15 +2750,48 @@ const modeHandlers = {
         }
         const projectStartUrl = seedUrl; // Use seed URL so we only store pages from this crawl's domain
         const requestedPageUrlCanonical = urlKeyForDedupe(currentUrl);
-        const actualPageUrlCanonical = urlKeyForDedupe(actualPageUrl);
-        if (actualPageUrlCanonical && analyzedPageUrls.has(actualPageUrlCanonical)) {
-          // Preserve redirected routes as first-class analyzed pages so they appear in Pages UI/reporting.
-          // Without this, nav items that redirect to an already analyzed page get silently dropped.
-          if (
-            requestedPageUrlCanonical &&
-            requestedPageUrlCanonical !== actualPageUrlCanonical &&
-            isWithinDomain(requestedPageUrlCanonical, seedUrl, allowSubdomains, domainScope)
-          ) {
+        let actualPageUrlCanonical = urlKeyForDedupe(actualPageUrl);
+        let pageUrlForStorage = requestedPageUrlCanonical || actualPageUrlCanonical || actualPageUrl;
+        let spaRouteResolved = spaPathKeysMatch(currentUrl, actualPageUrl);
+
+        if (
+          actualPageUrlCanonical &&
+          analyzedPageUrls.has(actualPageUrlCanonical) &&
+          requestedPageUrlCanonical &&
+          requestedPageUrlCanonical !== actualPageUrlCanonical &&
+          isWithinDomain(requestedPageUrlCanonical, seedUrl, allowSubdomains, domainScope)
+        ) {
+          let spaRecoveredForQueuedRoute = false;
+          if (isSpaSameOriginPathMismatch(requestedPageUrlCanonical, actualPageUrlCanonical)) {
+            const spaNav = await navigateToSpaRouteTarget(page, requestedPageUrlCanonical, {
+              timeout: 30000,
+              settlementMs: 2500,
+              maxRecoveryAttempts: 2,
+              onLog: (message, extra) => {
+                void sendLog(jobId, 'info', message, {
+                  component: 'CRAWLER-SPA-NAV',
+                  queued_url: requestedPageUrlCanonical,
+                  ...(extra && typeof extra === 'object' ? extra : {}),
+                });
+              },
+            });
+            if (spaNav.success) {
+              spaRecoveredForQueuedRoute = true;
+              spaRouteResolved = true;
+              actualPageUrl = spaNav.finalUrl;
+              actualPageUrlCanonical = urlKeyForDedupe(actualPageUrl);
+              pageUrlForStorage = requestedPageUrlCanonical;
+              pageTitle = await page.title().catch(() => pageTitle);
+              await sendLog(jobId, 'info', `🧭 SPA route reached for queued URL ${requestedPageUrlCanonical} (browser ${actualPageUrl})`, {
+                component: 'CRAWLER-SPA-NAV',
+                action: 'spa_route_analysis',
+                requested_url: requestedPageUrlCanonical,
+                final_url: actualPageUrl,
+              });
+            }
+          }
+
+          if (!spaRecoveredForQueuedRoute) {
             try {
               const redirectSummary = `Route redirected to ${actualPageUrlCanonical} and reused existing analysis for that destination page.`;
               await sendDiscoveredPageToBackend(
@@ -2825,13 +2845,26 @@ const modeHandlers = {
                 `⚠️ Failed to store redirected route page (${requestedPageUrlCanonical}): ${redirectStoreError.message}`
               );
             }
+            await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrlCanonical} already analyzed in this job (in-memory dedupe), skipping duplicate analysis`);
+            continue;
           }
-          await sendLog(jobId, 'info', `⏭️ Page ${actualPageUrlCanonical} already analyzed in this job (in-memory dedupe), skipping duplicate analysis`);
+        }
+
+        if (requestedPageUrlCanonical && spaRouteResolved) {
+          pageUrlForStorage = requestedPageUrlCanonical;
+        } else if (!pageUrlForStorage) {
+          pageUrlForStorage = actualPageUrlCanonical || actualPageUrl;
+        }
+
+        const storageKey = urlKeyForDedupe(pageUrlForStorage);
+        if (storageKey && analyzedPageUrls.has(storageKey)) {
+          await sendLog(jobId, 'info', `⏭️ Page ${pageUrlForStorage} already analyzed in this job (in-memory dedupe), skipping duplicate analysis`);
           continue;
         }
+
         const pageResult = await sendBasicPageToBackend(
           jobId,
-          actualPageUrlCanonical || actualPageUrl,
+          pageUrlForStorage,
           pageTitle,
           projectId,
           projectStartUrl,
@@ -3238,6 +3271,30 @@ const modeHandlers = {
             }
           }
         }
+
+        if (spaRouteResolved && pageUrlForStorage) {
+          try {
+            await sendDiscoveredPageToBackend(
+              jobId,
+              {
+                url: pageUrlForStorage,
+                requested_url: requestedPageUrlCanonical || pageUrlForStorage,
+                final_url: actualPageUrl,
+                project_id: projectId,
+                title: pageTitle,
+                analyzed: true,
+                spa_route_resolved: true,
+                last_http_status: lastNavHttpStatus ?? undefined,
+              },
+              projectStartUrl,
+              allowSubdomains,
+              domainScope,
+              sessionJarForStorage
+            );
+          } catch (spaDiscoverErr) {
+            await sendLog(jobId, 'warn', `⚠️ SPA route discover touch-up failed: ${spaDiscoverErr.message}`);
+          }
+        }
         
         // Step 3: Extract links from page for crawling (if not at max depth), or for queue-based distributed we always extract+report from this page so backend can create subjobs
         // Use seed URL as domain authority so "internal" = same domain as crawl seed only (no other domains)
@@ -3246,11 +3303,16 @@ const modeHandlers = {
           // CRITICAL: Workflow execution may have navigated away (e.g. clicked "Get Started" -> app). Extract links from the page we analyzed, not the post-navigation URL.
           try {
             const currentPageUrl = page.url();
-            const pageToExtractFrom = actualPageUrlCanonical || currentUrl;
+            const pageToExtractFrom = spaRouteResolved
+              ? pageUrlForStorage
+              : (actualPageUrlCanonical || currentUrl);
             if (currentPageUrl && pageToExtractFrom && urlKeyForDedupe(currentPageUrl) !== urlKeyForDedupe(pageToExtractFrom)) {
               await sendLog(jobId, 'info', `🔗 Navigating back to ${pageToExtractFrom} to extract links (workflow may have navigated away)`);
-              await page.goto(pageToExtractFrom, { waitUntil: 'domcontentloaded', timeout: 15000 });
-              await page.waitForTimeout(1500);
+              await navigateToSpaRouteTarget(page, pageToExtractFrom, {
+                timeout: 15000,
+                settlementMs: 1500,
+                maxRecoveryAttempts: 1,
+              });
             }
           } catch (navBackError) {
             await sendLog(jobId, 'warn', `⚠️ Could not navigate back for link extraction: ${navBackError.message}`);
@@ -3456,7 +3518,9 @@ const modeHandlers = {
             await sendLog(jobId, 'info', `⏭️ Skipping link collection (max_pages: ${maxPages}, current: ${pagesAnalyzed}, max_depth: ${maxDepth}, current: ${depth})`);
           }
         }
-        if (actualPageUrlCanonical) {
+        if (storageKey) {
+          analyzedPageUrls.add(storageKey);
+        } else if (actualPageUrlCanonical) {
           analyzedPageUrls.add(actualPageUrlCanonical);
         }
       }
@@ -7276,28 +7340,7 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
         Array.isArray(context.api_domains) ? context.api_domains : []
       );
 
-      // app.aionqa.com: Vue's persisted route-restore (localStorage) can force the first navigation
-      // to the last saved path (e.g. /stats), so the crawler's requested URLs all dedupe to one page.
-      // sessionStorage is read in ui/src/router.js to skip that restore and stop persisting aionqa_route_state.
-      try {
-        const host = new URL(scopeSeedUrl).hostname.replace(/^www\./, '').toLowerCase();
-        if (host === 'app.aionqa.com') {
-          await browserContext.addInitScript(() => {
-            try {
-              sessionStorage.setItem('aionqa_spa_crawl', '1');
-            } catch {
-              // ignore
-            }
-          });
-          await sendLog(
-            jobId,
-            'info',
-            'AionQA app: SPA crawl session flag (skip route-state restore) enabled for this browser context'
-          );
-        }
-      } catch {
-        // invalid scope URL — skip init script
-      }
+      // SPA crawl init is applied in withBrowser (applySpaCrawlContextInit) for every session.
 
       // Diagnostics: capture runtime JS errors and failed requests so we can explain
       // "Application error: a client-side exception has occurred" screenshots.
