@@ -7765,7 +7765,61 @@ export async function startCrawl(url, cookies, context, openaiApiKey = null) {
       // Set authentication tokens from login if provided
       if (context.authTokens) {
         await sendLog(jobId, 'info', '🔑 Setting authentication tokens from login...');
-        
+
+        // CRITICAL FIX: seed auth localStorage/sessionStorage via a context init-script that runs
+        // BEFORE any page script on every navigation. localStorage/sessionStorage are origin-scoped,
+        // so writing them while still on about:blank (pre-goto) or only after navigation does NOT
+        // reliably authenticate SPAs that gate client-side routing on a localStorage JWT — those
+        // apps redirect every deep link to /login before the token is applied, so only the landing
+        // page ever gets analyzed. Seeding through addInitScript guarantees the token exists for the
+        // target origin when the SPA boots, so deep links resolve directly (no login redirect loop).
+        const lsTokens = (context.authTokens.localStorage && typeof context.authTokens.localStorage === 'object')
+          ? context.authTokens.localStorage
+          : null;
+        const ssTokens = (context.authTokens.sessionStorage && typeof context.authTokens.sessionStorage === 'object')
+          ? context.authTokens.sessionStorage
+          : null;
+        const lsCount = lsTokens ? Object.keys(lsTokens).length : 0;
+        const ssCount = ssTokens ? Object.keys(ssTokens).length : 0;
+        if (lsCount > 0 || ssCount > 0) {
+          const seedOrigins = [];
+          for (const candidate of [...urlList, context.start_url, context.seed_url, context.options?.start_url]) {
+            try {
+              if (candidate) {
+                const origin = new URL(candidate).origin;
+                if (!seedOrigins.includes(origin)) seedOrigins.push(origin);
+              }
+            } catch (_) { /* ignore non-URL candidate */ }
+          }
+          try {
+            await browserContext.addInitScript(({ ls, ss, origins }) => {
+              try {
+                if (Array.isArray(origins) && origins.length > 0 && !origins.includes(window.location.origin)) return;
+                // Do not restore a persisted client-router route — it would bounce deep-link crawls
+                // back to a saved landing route (e.g. /stats or /verify-email). Mirror the SPA-crawl
+                // contract: drop saved route state and flag this as a crawl session.
+                const skipKeys = ['aionqa_route_state'];
+                try { window.localStorage.removeItem('aionqa_route_state'); } catch (_) { /* ignore */ }
+                try { window.sessionStorage.setItem('aionqa_spa_crawl', '1'); } catch (_) { /* ignore */ }
+                if (ls) {
+                  for (const k of Object.keys(ls)) {
+                    if (skipKeys.includes(k)) continue;
+                    try { window.localStorage.setItem(k, ls[k]); } catch (_) { /* ignore */ }
+                  }
+                }
+                if (ss) {
+                  for (const k of Object.keys(ss)) {
+                    try { window.sessionStorage.setItem(k, ss[k]); } catch (_) { /* ignore */ }
+                  }
+                }
+              } catch (_) { /* ignore storage seeding failure */ }
+            }, { ls: lsTokens, ss: ssTokens, origins: seedOrigins });
+            await sendLog(jobId, 'info', `🔐 Registered auth storage init-script (${lsCount} localStorage, ${ssCount} sessionStorage) for origin(s): ${seedOrigins.join(', ') || 'any'} — SPA boots authenticated before route guards run`);
+          } catch (initErr) {
+            await sendLog(jobId, 'warn', `⚠️ Failed to register auth storage init-script: ${initErr.message}`);
+          }
+        }
+
         // Set localStorage tokens
         if (context.authTokens && context.authTokens.localStorage && typeof context.authTokens.localStorage === 'object' && Object.keys(context.authTokens.localStorage).length > 0) {
           const localStorageSuccess = await safeSetLocalStorage(page, context.authTokens.localStorage);
