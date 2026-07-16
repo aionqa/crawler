@@ -235,6 +235,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                   console.log(`[OpenAI-Client] Using fallback token (project/job IDs not available)`);
                 }
                 
+                const byokKey = context.openai_api_key || fallbackApiKey || null;
                 const requestBody = {
                   project_id: projectId,
                   job_id: jobId,
@@ -242,12 +243,14 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                   model: params.model || llmConfig.model || openaiOptions.model || 'gpt-5-mini',
                   temperature: params.temperature,
                   max_tokens: params.max_tokens,
-                  ...params
+                  ...params,
+                  ...(byokKey ? { openai_api_key: byokKey } : {})
                 };
                 const requestConfig = (authToken) => ({
                   headers: {
                     'Content-Type': 'application/json',
-                    ...(authToken && { 'Authorization': `Bearer ${authToken}` })
+                    ...(authToken && { 'Authorization': `Bearer ${authToken}` }),
+                    ...(byokKey ? { 'x-openai-api-key': byokKey } : {})
                   },
                   timeout: aiHttpTimeoutMs
                 });
@@ -302,6 +305,7 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                 console.log(`[OpenAI-Client] Using fallback token (project/job IDs not available)`);
               }
               
+              const byokKey = context.openai_api_key || fallbackApiKey || null;
               const requestBody = {
                 project_id: projectId,
                 job_id: jobId,
@@ -310,12 +314,14 @@ export function createOpenAIClient(context = {}, fallbackApiKey = null) {
                 model: params.model || llmConfig.model || openaiOptions.model || 'gpt-5-mini',
                 temperature: params.temperature,
                 max_tokens: params.max_tokens,
-                ...params
+                ...params,
+                ...(byokKey ? { openai_api_key: byokKey } : {})
               };
               const requestConfig = (authToken) => ({
                 headers: {
                   'Content-Type': 'application/json',
-                  ...(authToken && { 'Authorization': `Bearer ${authToken}` })
+                  ...(authToken && { 'Authorization': `Bearer ${authToken}` }),
+                  ...(byokKey ? { 'x-openai-api-key': byokKey } : {})
                 },
                 timeout: aiHttpTimeoutMs
               });
