@@ -1,9 +1,7 @@
 name: Deploy Crawler
 
+# AionQA is shut down; deployments must be started manually.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 env:
